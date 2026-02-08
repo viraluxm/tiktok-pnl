@@ -50,8 +50,12 @@ export default function SignupPage() {
     return (
       <div className="w-full max-w-md">
         <div className="bg-tt-card border border-tt-border rounded-2xl p-6 backdrop-blur-xl text-center">
-          <div className="w-14 h-14 bg-gradient-to-br from-tt-cyan to-tt-magenta rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <span className="text-white font-extrabold text-2xl">T</span>
+          <div className="w-14 h-14 bg-gradient-to-br from-tt-cyan to-[#4F46E5] rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+              <path d="M2 12h20"/>
+            </svg>
           </div>
           <h2 className="text-xl font-bold text-tt-text mb-2">Check your email</h2>
           <p className="text-tt-muted text-sm">
@@ -69,11 +73,15 @@ export default function SignupPage() {
   return (
     <div className="w-full max-w-md">
       <div className="text-center mb-8">
-        <div className="w-14 h-14 bg-gradient-to-br from-tt-cyan to-tt-magenta rounded-2xl flex items-center justify-center mx-auto mb-4">
-          <span className="text-white font-extrabold text-2xl">T</span>
+        <div className="w-14 h-14 bg-gradient-to-br from-tt-cyan to-[#4F46E5] rounded-2xl flex items-center justify-center mx-auto mb-4">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+            <path d="M2 12h20"/>
+          </svg>
         </div>
         <h1 className="text-2xl font-bold text-tt-text">
-          TikTok Shop <span className="text-tt-cyan">P&L</span>
+          Lensed
         </h1>
         <p className="text-tt-muted text-sm mt-2">Create your account</p>
       </div>

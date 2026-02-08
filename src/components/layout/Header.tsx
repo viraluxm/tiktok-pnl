@@ -17,18 +17,22 @@ export default function Header({ onExportCSV, onImportCSV, onClearAll }: HeaderP
 
   async function handleSignOut() {
     await supabase.auth.signOut();
-    router.push('/login');
+    router.push('/');
     router.refresh();
   }
 
   return (
     <div className="flex items-center justify-between px-6 py-4 border-b border-tt-border bg-[rgba(15,15,15,0.95)] backdrop-blur-xl sticky top-0 z-50">
       <div className="flex items-center gap-3">
-        <div className="w-9 h-9 bg-gradient-to-br from-tt-cyan to-tt-magenta rounded-[10px] flex items-center justify-center font-extrabold text-lg text-white">
-          T
+        <div className="w-9 h-9 bg-gradient-to-br from-tt-cyan to-[#4F46E5] rounded-[10px] flex items-center justify-center">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+            <path d="M2 12h20"/>
+          </svg>
         </div>
         <h1 className="text-lg font-bold">
-          TikTok Shop <span className="text-tt-cyan">P&L</span>
+          Lensed
         </h1>
       </div>
       <div className="flex items-center gap-2">

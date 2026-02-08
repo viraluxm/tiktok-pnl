@@ -52,19 +52,7 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Logged in and on root
-  if (user && request.nextUrl.pathname === '/') {
-    const url = request.nextUrl.clone();
-    url.pathname = '/dashboard';
-    return NextResponse.redirect(url);
-  }
-
-  // Not logged in and on root
-  if (!user && request.nextUrl.pathname === '/') {
-    const url = request.nextUrl.clone();
-    url.pathname = '/login';
-    return NextResponse.redirect(url);
-  }
+  // Root path shows landing page for everyone (no redirect)
 
   return supabaseResponse;
 }

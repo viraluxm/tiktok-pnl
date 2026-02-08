@@ -3,8 +3,16 @@ import Providers from '@/providers/Providers';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'TikTok Shop P&L Calculator',
-  description: 'Track your TikTok Shop profit and loss across multiple products',
+  title: 'Lensed — TikTok Shop P&L Dashboard',
+  description: 'Track your TikTok Shop profit and loss, manage products, and visualize performance with Lensed.',
+  metadataBase: new URL('https://lensed.io'),
+  openGraph: {
+    title: 'Lensed — TikTok Shop P&L Dashboard',
+    description: 'Track your TikTok Shop profit and loss, manage products, and visualize performance.',
+    url: 'https://lensed.io',
+    siteName: 'Lensed',
+    type: 'website',
+  },
 };
 
 export default function RootLayout({

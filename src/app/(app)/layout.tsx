@@ -26,7 +26,7 @@ export default function AppLayout({
   if (!checked) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-tt-bg">
-        <div className="w-9 h-9 bg-gradient-to-br from-tt-cyan to-tt-magenta rounded-[10px] animate-pulse" />
+        <div className="w-9 h-9 bg-gradient-to-br from-tt-cyan to-[#4F46E5] rounded-[10px] animate-pulse" />
       </div>
     );
   }
