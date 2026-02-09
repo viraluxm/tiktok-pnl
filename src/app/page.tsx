@@ -46,7 +46,7 @@ export default function LandingPage() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#69C9D0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
             </svg>
-            Built for TikTok Shop Sellers
+            Built by Sellers, for Sellers
           </div>
 
           <h1 className="text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.1] mb-6 text-white">
@@ -66,7 +66,7 @@ export default function LandingPage() {
               href="/signup"
               className="px-8 py-3.5 text-base font-semibold text-black bg-white rounded-xl hover:bg-gray-200 transition-all shadow-lg shadow-white/10"
             >
-              Start Tracking Free
+              Start Tracking for Free
             </Link>
             <a
               href="#features"
@@ -168,14 +168,15 @@ export default function LandingPage() {
               {
                 icon: (
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                    <polyline points="14 2 14 8 20 8"/>
-                    <line x1="16" y1="13" x2="8" y2="13"/>
-                    <line x1="16" y1="17" x2="8" y2="17"/>
+                    <path d="M12 20V10"/>
+                    <path d="M18 20V4"/>
+                    <path d="M6 20v-4"/>
+                    <path d="M2 20h20"/>
+                    <circle cx="18" cy="4" r="1"/>
                   </svg>
                 ),
-                title: 'CSV Import & Export',
-                description: 'Bulk import your existing data and export reports with one click. Works with any spreadsheet format.',
+                title: 'AI-Powered Forecasting',
+                description: 'Predict future sales and optimize inventory with intelligent forecasting built for TikTok Shop sellers.',
               },
               {
                 icon: (
@@ -236,12 +237,12 @@ export default function LandingPage() {
               {
                 step: '1',
                 title: 'Create Your Account',
-                description: 'Sign up in seconds with Google or email. No credit card required.',
+                description: 'Sign up in seconds with Google or email.',
               },
               {
                 step: '2',
-                title: 'Add Your Products',
-                description: 'Add the TikTok Shop products you sell and start logging daily metrics.',
+                title: 'Connect Your TikTok Shop',
+                description: 'Link your seller account, input your cost per SKU and any additional expenses to get accurate profit numbers.',
               },
               {
                 step: '3',
