@@ -19,7 +19,11 @@ export function useProducts() {
         .select('*')
         .order('created_at', { ascending: true });
       if (error) throw error;
-      return data || [];
+      // Map the JSONB variants column to typed variants array
+      return (data || []).map((p) => ({
+        ...p,
+        variants: Array.isArray(p.variants) && p.variants.length > 0 ? p.variants : undefined,
+      }));
     },
   });
 

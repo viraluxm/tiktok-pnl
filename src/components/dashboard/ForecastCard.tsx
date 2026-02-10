@@ -24,21 +24,21 @@ export default function ForecastCard({ entries }: ForecastCardProps) {
 
   // Compute totals from last 30 days
   let last30Sales = 0;
-  let last30Orders = 0;
+  let last30Units = 0;
   let last30Videos = 0;
   let last30NetProfit = 0;
 
   last30DaysEntries.forEach((e) => {
     const c = calcEntry(e);
     last30Sales += Number(e.gmv) || 0;
-    last30Orders += 1;
+    last30Units += Number(e.units_sold) || 1; // Fallback to 1 unit per entry if no units_sold
     last30Videos += Number(e.videos_posted) || 0;
     last30NetProfit += c.totalNetProfit;
   });
 
   // Daily averages from the last 30 days
   const dailyAvgSales = last30Sales / 30;
-  const dailyAvgOrders = last30Orders / 30;
+  const dailyAvgUnits = last30Units / 30;
   const dailyAvgProfit = last30NetProfit / 30;
   const dailyAvgVideos = last30Videos / 30;
 
@@ -49,27 +49,25 @@ export default function ForecastCard({ entries }: ForecastCardProps) {
   });
 
   let actualMonthlySales = 0;
-  let actualMonthlyOrders = 0;
+  let actualMonthlyUnits = 0;
   let actualMonthlyVideos = 0;
   let actualMonthlyAdCost = 0;
   let actualMonthlyAffiliate = 0;
   let actualMonthlyProfit = 0;
-  let actualMonthlyUnits = 0;
 
   monthEntries.forEach((e) => {
     const c = calcEntry(e);
     actualMonthlySales += Number(e.gmv) || 0;
-    actualMonthlyOrders += 1;
+    actualMonthlyUnits += Number(e.units_sold) || 1; // Fallback to 1 unit per entry
     actualMonthlyVideos += Number(e.videos_posted) || 0;
     actualMonthlyAdCost += Number(e.ads) || 0;
     actualMonthlyAffiliate += Number(e.affiliate) || 0;
     actualMonthlyProfit += c.totalNetProfit;
-    actualMonthlyUnits += Number(e.units_sold) || 0;
   });
 
   // Forecast: actual this month so far + (daily avg from last 30 days × remaining days)
   const forecastedSales = actualMonthlySales + (dailyAvgSales * daysRemaining);
-  const forecastedOrders = Math.round(actualMonthlyOrders + (dailyAvgOrders * daysRemaining));
+  const forecastedUnits = Math.round(actualMonthlyUnits + (dailyAvgUnits * daysRemaining));
   const forecastedProfit = actualMonthlyProfit + (dailyAvgProfit * daysRemaining);
   const forecastedVideos = Math.round(actualMonthlyVideos + (dailyAvgVideos * daysRemaining));
   // Est. payout = forecasted sales minus platform fee (6%)
@@ -132,11 +130,11 @@ export default function ForecastCard({ entries }: ForecastCardProps) {
             <div className="text-2xl font-bold text-tt-text">{fmt(forecastedSales)}</div>
           </div>
 
-          {/* Orders / Units */}
+          {/* Units Sold */}
           <div>
-            <div className="text-xs text-tt-muted mb-1">Orders / Units</div>
+            <div className="text-xs text-tt-muted mb-1">Units Sold</div>
             <div className="text-lg font-bold text-tt-text">
-              {fmtInt(forecastedOrders)} / {fmtInt(actualMonthlyUnits)}
+              {fmtInt(forecastedUnits)}
             </div>
           </div>
 

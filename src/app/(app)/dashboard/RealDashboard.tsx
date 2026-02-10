@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
@@ -10,6 +10,7 @@ import ProductCostTable from '@/components/products/ProductCostTable';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useProducts } from '@/hooks/useProducts';
 import { useEntries } from '@/hooks/useEntries';
+import { useProductCosts } from '@/hooks/useProductCosts';
 import { useFilters } from '@/hooks/useFilters';
 import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
 import type { Entry } from '@/types';
@@ -61,8 +62,9 @@ export default function RealDashboard() {
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { products } = useProducts();
+  const { costsMap, upsertCost } = useProductCosts();
 
-  // All entries (no filter) for previous period comparison
+  // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
@@ -78,6 +80,10 @@ export default function RealDashboard() {
     () => (prevEntries.length > 0 ? computeDashboardMetrics(prevEntries) : null),
     [prevEntries],
   );
+
+  const handleCostChange = useCallback((productId: string, variantId: string | null, cost: number) => {
+    upsertCost.mutate({ productId, variantId, costPerUnit: cost });
+  }, [upsertCost]);
 
   function handleQuickFilter(days: number | 'all') {
     setActiveQuickFilter(days);
@@ -136,6 +142,8 @@ export default function RealDashboard() {
             productProfits={metrics.productProfits}
             chartData={chartData}
             entries={entries}
+            savedCosts={costsMap}
+            onCostChange={handleCostChange}
           />
         )}
       </div>

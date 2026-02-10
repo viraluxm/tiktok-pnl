@@ -146,6 +146,7 @@ export default function DemoDashboard() {
             productProfits={metrics.productProfits}
             chartData={chartData}
             entries={entries}
+            isDemo
           />
         )}
       </div>

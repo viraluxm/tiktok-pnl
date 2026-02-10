@@ -23,17 +23,46 @@ interface ProductCostTableProps {
   productProfits: Record<string, { profit: number; gmv: number; unitsSold: number }>;
   chartData: ChartData;
   entries: Entry[];
+  /** Persisted costs map: "productId" or "productId-variantId" -> cost_per_unit */
+  savedCosts?: Record<string, number>;
+  /** Called when a cost is changed — pass null for demo mode (local state only) */
+  onCostChange?: (productId: string, variantId: string | null, cost: number) => void;
+  isDemo?: boolean;
 }
 
-export default function ProductCostTable({ products, productProfits, chartData, entries }: ProductCostTableProps) {
-  const [costs, setCosts] = useState<Record<string, string>>({});
+export default function ProductCostTable({
+  products,
+  productProfits,
+  chartData,
+  entries,
+  savedCosts,
+  onCostChange,
+  isDemo,
+}: ProductCostTableProps) {
+  const [localCosts, setLocalCosts] = useState<Record<string, string>>({});
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(0);
   const chartScrollRef = useRef<HTMLDivElement>(null);
+  const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  const handleCostChange = useCallback((key: string, value: string) => {
-    setCosts((prev) => ({ ...prev, [key]: value }));
-  }, []);
+  const getCostValue = useCallback((key: string): string => {
+    if (localCosts[key] !== undefined) return localCosts[key];
+    if (savedCosts && savedCosts[key] !== undefined && savedCosts[key] > 0) return String(savedCosts[key]);
+    return '';
+  }, [localCosts, savedCosts]);
+
+  const handleCostInput = useCallback((key: string, value: string, productId: string, variantId: string | null) => {
+    setLocalCosts((prev) => ({ ...prev, [key]: value }));
+
+    // Debounce save to DB for real users
+    if (onCostChange && !isDemo) {
+      if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
+      debounceTimers.current[key] = setTimeout(() => {
+        const numVal = parseFloat(value) || 0;
+        onCostChange(productId, variantId, numVal);
+      }, 800);
+    }
+  }, [onCostChange, isDemo]);
 
   // Compute variant-level stats from entries
   const variantStats = useCallback((productId: string) => {
@@ -79,7 +108,6 @@ export default function ProductCostTable({ products, productProfits, chartData, 
     return products.slice(start, start + PRODUCTS_PER_PAGE);
   }, [products, currentPage]);
 
-  // Chart data — show max 5 visible, scroll for more
   const showSlider = chartData.productCompare.labels.length > 5;
 
   return (
@@ -202,9 +230,9 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                             <input
                               type="number"
                               step="0.01"
-                              value={costs[product.id] ?? ''}
+                              value={getCostValue(product.id)}
                               placeholder="0.00"
-                              onChange={(e) => handleCostChange(product.id, e.target.value)}
+                              onChange={(e) => handleCostInput(product.id, e.target.value, product.id, null)}
                               className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[90px] focus:outline-none focus:border-tt-cyan focus:bg-[rgba(105,201,208,0.08)] transition-all"
                             />
                           </div>
@@ -218,48 +246,51 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                       </td>
                     </tr>
                     {/* Variant rows */}
-                    {isExpanded && vStats.map((v, vi) => (
-                      <tr
-                        key={v.id}
-                        className="border-b border-tt-border bg-[rgba(105,201,208,0.03)] transition-colors hover:bg-[rgba(105,201,208,0.06)]"
-                      >
-                        <td className="px-4 py-2.5 pl-14">
-                          <div className="flex items-center gap-2">
-                            <div className="w-1.5 h-1.5 rounded-full bg-tt-cyan opacity-50" />
-                            <span className="text-[12px] text-tt-text">{v.name}</span>
-                            {v.sku && <span className="text-[10px] text-tt-muted font-mono">({v.sku})</span>}
-                          </div>
-                        </td>
-                        <td className="px-4 py-2.5 text-[12px] text-tt-muted font-mono">
-                          {v.id.slice(0, 16)}...
-                        </td>
-                        <td className="px-4 py-2.5 text-[12px] text-tt-muted tabular-nums">
-                          {fmtInt(v.unitsSold)}
-                        </td>
-                        <td className="px-4 py-2.5 text-[12px] text-tt-cyan tabular-nums">
-                          {fmt(v.gmv)}
-                        </td>
-                        <td className={`px-4 py-2.5 text-[12px] tabular-nums ${v.profit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>
-                          {fmt(v.profit)}
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <div className="flex items-center gap-1">
-                            <span className="text-tt-muted text-[12px]">$</span>
-                            <input
-                              type="number"
-                              step="0.01"
-                              value={costs[`${product.id}-${v.id}`] ?? ''}
-                              placeholder="0.00"
-                              onChange={(e) => handleCostChange(`${product.id}-${v.id}`, e.target.value)}
-                              className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1 rounded-md text-[12px] w-[80px] focus:outline-none focus:border-tt-cyan focus:bg-[rgba(105,201,208,0.08)] transition-all"
-                            />
-                          </div>
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <span className="text-[10px] text-tt-muted">Variant {vi + 1}</span>
-                        </td>
-                      </tr>
-                    ))}
+                    {isExpanded && vStats.map((v, vi) => {
+                      const vKey = `${product.id}-${v.id}`;
+                      return (
+                        <tr
+                          key={v.id}
+                          className="border-b border-tt-border bg-[rgba(105,201,208,0.03)] transition-colors hover:bg-[rgba(105,201,208,0.06)]"
+                        >
+                          <td className="px-4 py-2.5 pl-14">
+                            <div className="flex items-center gap-2">
+                              <div className="w-1.5 h-1.5 rounded-full bg-tt-cyan opacity-50" />
+                              <span className="text-[12px] text-tt-text">{v.name}</span>
+                              {v.sku && <span className="text-[10px] text-tt-muted font-mono">({v.sku})</span>}
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5 text-[12px] text-tt-muted font-mono">
+                            {v.id.slice(0, 16)}...
+                          </td>
+                          <td className="px-4 py-2.5 text-[12px] text-tt-muted tabular-nums">
+                            {fmtInt(v.unitsSold)}
+                          </td>
+                          <td className="px-4 py-2.5 text-[12px] text-tt-cyan tabular-nums">
+                            {fmt(v.gmv)}
+                          </td>
+                          <td className={`px-4 py-2.5 text-[12px] tabular-nums ${v.profit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>
+                            {fmt(v.profit)}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <div className="flex items-center gap-1">
+                              <span className="text-tt-muted text-[12px]">$</span>
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={getCostValue(vKey)}
+                                placeholder="0.00"
+                                onChange={(e) => handleCostInput(vKey, e.target.value, product.id, v.id)}
+                                className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1 rounded-md text-[12px] w-[80px] focus:outline-none focus:border-tt-cyan focus:bg-[rgba(105,201,208,0.08)] transition-all"
+                              />
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <span className="text-[10px] text-tt-muted">Variant {vi + 1}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </Fragment>
                 );
               })}
