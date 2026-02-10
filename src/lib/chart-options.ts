@@ -65,7 +65,38 @@ export function getDoughnutChartOptions(): ChartOptions<'doughnut'> {
     plugins: {
       legend: {
         position: 'right' as const,
-        labels: { color: '#888', font: { size: 11 }, padding: 12, usePointStyle: true },
+        labels: {
+          color: '#888',
+          font: { size: 11 },
+          padding: 12,
+          usePointStyle: true,
+          generateLabels: (chart) => {
+            const data = chart.data;
+            if (!data.labels || !data.datasets.length) return [];
+            const dataset = data.datasets[0];
+            const total = (dataset.data as number[]).reduce((a, b) => a + b, 0);
+            return (data.labels as string[]).map((label, i) => {
+              const value = (dataset.data as number[])[i] || 0;
+              const pct = total > 0 ? value.toFixed(1) : '0.0';
+              return {
+                text: `${label} (${pct}%)`,
+                fillStyle: Array.isArray(dataset.backgroundColor) ? (dataset.backgroundColor as string[])[i] : '#ccc',
+                strokeStyle: 'transparent',
+                hidden: false,
+                index: i,
+                pointStyle: 'circle' as const,
+              };
+            });
+          },
+        },
+      },
+      tooltip: {
+        callbacks: {
+          label: (context) => {
+            const value = context.parsed || 0;
+            return ` ${context.label}: ${value.toFixed(1)}%`;
+          },
+        },
       },
     },
     cutout: '65%',

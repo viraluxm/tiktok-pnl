@@ -46,11 +46,13 @@ export function computeDashboardMetrics(entries: Entry[]): DashboardMetrics {
   let totalAds = 0;
   let totalCogs = 0;
   let totalNetProfit = 0;
-  const productProfits: Record<string, { profit: number; gmv: number }> = {};
+  let totalUnitsSold = 0;
+  const productProfits: Record<string, { profit: number; gmv: number; unitsSold: number }> = {};
 
   entries.forEach((e) => {
     const c = calcEntry(e);
     const gmv = Number(e.gmv) || 0;
+    const units = Number(e.units_sold) || 0;
     totalGMV += gmv;
     totalVideos += Number(e.videos_posted) || 0;
     totalViews += Number(e.views) || 0;
@@ -59,13 +61,15 @@ export function computeDashboardMetrics(entries: Entry[]): DashboardMetrics {
     totalAds += Number(e.ads) || 0;
     totalCogs += c.cogs;
     totalNetProfit += c.totalNetProfit;
+    totalUnitsSold += units;
 
     const productName = e.product?.name || 'Unknown';
     if (!productProfits[productName]) {
-      productProfits[productName] = { profit: 0, gmv: 0 };
+      productProfits[productName] = { profit: 0, gmv: 0, unitsSold: 0 };
     }
     productProfits[productName].profit += c.totalNetProfit;
     productProfits[productName].gmv += gmv;
+    productProfits[productName].unitsSold += units;
   });
 
   const avgMargin = totalGMV > 0 ? (totalNetProfit / totalGMV) * 100 : 0;
@@ -90,6 +94,7 @@ export function computeDashboardMetrics(entries: Entry[]): DashboardMetrics {
     totalAds,
     totalAffiliate,
     totalShipping,
+    totalUnitsSold,
     entryCount: entries.length,
     avgViewsPerVideo,
     revenuePerVideo,
@@ -148,24 +153,27 @@ export function computeChartData(entries: Entry[]): ChartData {
     data: sortedDates.map((d) => profitByDateMap[d]),
   };
 
-  // Product compare
-  const prodNames = Object.keys(productProfits);
+  // Product compare — sorted ascending by GMV (best revenue first, descending)
+  const prodEntries = Object.entries(productProfits).sort((a, b) => b[1].gmv - a[1].gmv);
   const productCompare = {
-    labels: prodNames,
-    gmv: prodNames.map((p) => productProfits[p].gmv),
-    profit: prodNames.map((p) => productProfits[p].profit),
+    labels: prodEntries.map(([name]) => name),
+    gmv: prodEntries.map(([, data]) => data.gmv),
+    profit: prodEntries.map(([, data]) => data.profit),
   };
 
-  // Cost breakdown
+  // Cost breakdown — as percentages adding up to 100%
+  const totalCosts = totalCogs + totalShipping + totalAffiliate + totalAds + Math.max(0, totalProfit);
   const costBreakdown = {
     labels: ['Platform Fee (6%)', 'Shipping', 'Affiliate', 'Ads', 'Net Profit'],
-    data: [
-      Math.max(0, totalCogs),
-      Math.max(0, totalShipping),
-      Math.max(0, totalAffiliate),
-      Math.max(0, totalAds),
-      Math.max(0, totalProfit),
-    ],
+    data: totalCosts > 0
+      ? [
+          Math.max(0, totalCogs) / totalCosts * 100,
+          Math.max(0, totalShipping) / totalCosts * 100,
+          Math.max(0, totalAffiliate) / totalCosts * 100,
+          Math.max(0, totalAds) / totalCosts * 100,
+          Math.max(0, totalProfit) / totalCosts * 100,
+        ]
+      : [0, 0, 0, 0, 0],
     colors: ['#ff6384', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0'],
   };
 

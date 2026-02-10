@@ -18,6 +18,8 @@ export default function FiltersBar({
   activeQuickFilter,
 }: FiltersBarProps) {
   const quickFilters: Array<{ label: string; value: number | 'all' }> = [
+    { label: 'Today', value: 0 },
+    { label: 'Yesterday', value: 1 },
     { label: '7 Days', value: 7 },
     { label: '30 Days', value: 30 },
     { label: 'All Time', value: 'all' },
@@ -30,7 +32,7 @@ export default function FiltersBar({
         <div className="flex gap-1">
           {quickFilters.map((f) => (
             <button
-              key={f.value}
+              key={String(f.value)}
               onClick={() => onQuickFilter(f.value)}
               className={`px-3 py-1.5 rounded-full border text-xs cursor-pointer transition-all ${
                 activeQuickFilter === f.value

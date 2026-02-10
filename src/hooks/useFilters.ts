@@ -13,6 +13,16 @@ export function useFilters() {
   const setQuickFilter = useCallback((days: number | 'all') => {
     if (days === 'all') {
       setFilters((prev) => ({ ...prev, dateFrom: null, dateTo: null }));
+    } else if (days === 0) {
+      // Today
+      const today = new Date().toISOString().split('T')[0];
+      setFilters((prev) => ({ ...prev, dateFrom: today, dateTo: today }));
+    } else if (days === 1) {
+      // Yesterday
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yStr = yesterday.toISOString().split('T')[0];
+      setFilters((prev) => ({ ...prev, dateFrom: yStr, dateTo: yStr }));
     } else {
       const to = new Date();
       const from = new Date();

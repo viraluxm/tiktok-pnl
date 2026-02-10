@@ -6,7 +6,6 @@ import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import SummaryCards from '@/components/dashboard/SummaryCards';
 import ForecastCard from '@/components/dashboard/ForecastCard';
-import EntriesTable from '@/components/entries/EntriesTable';
 import ProductCostTable from '@/components/products/ProductCostTable';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useProducts } from '@/hooks/useProducts';
@@ -16,7 +15,7 @@ import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'table';
+type ViewTab = 'dashboard' | 'products';
 
 export default function RealDashboard() {
   const [activeView, setActiveView] = useState<ViewTab>('dashboard');
@@ -24,7 +23,7 @@ export default function RealDashboard() {
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { products } = useProducts();
-  const { entries, addEntry, updateEntry, deleteEntry } = useEntries(filters);
+  const { entries } = useEntries(filters);
 
   const metrics = useMemo(() => computeDashboardMetrics(entries), [entries]);
   const chartData = useMemo(() => computeChartData(entries), [entries]);
@@ -34,31 +33,9 @@ export default function RealDashboard() {
     setQuickFilter(days);
   }
 
-  function handleAddEntry(productId: string) {
-    addEntry.mutate({
-      product_id: productId,
-      date: new Date().toISOString().split('T')[0],
-      gmv: 0,
-      videos_posted: 0,
-      views: 0,
-      shipping: 0,
-      affiliate: 0,
-      ads: 0,
-    });
-    if (activeView !== 'table') setActiveView('table');
-  }
-
-  function handleUpdateEntry(id: string, field: string, value: unknown) {
-    updateEntry.mutate({ id, [field]: value });
-  }
-
-  function handleDeleteEntry(id: string) {
-    deleteEntry.mutate(id);
-  }
-
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
-    { label: 'Data Entry', value: 'table' },
+    { label: 'Products', value: 'products' },
   ];
 
   return (
@@ -101,22 +78,14 @@ export default function RealDashboard() {
           </>
         )}
 
-        {/* Data Entry View */}
-        {activeView === 'table' && (
-          <div className="space-y-6">
-            <ProductCostTable
-              products={products}
-              productProfits={metrics.productProfits}
-              chartData={chartData}
-            />
-            <EntriesTable
-              entries={entries}
-              products={products}
-              onAddEntry={handleAddEntry}
-              onUpdateEntry={handleUpdateEntry}
-              onDeleteEntry={handleDeleteEntry}
-            />
-          </div>
+        {/* Products View */}
+        {activeView === 'products' && (
+          <ProductCostTable
+            products={products}
+            productProfits={metrics.productProfits}
+            chartData={chartData}
+            entries={entries}
+          />
         )}
       </div>
     </div>

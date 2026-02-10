@@ -13,11 +13,20 @@ export const DEMO_USER_ID = 'demo-user-00000000-0000-0000-0000-000000000000';
 // Demo Products — realistic TikTok Shop products with SKUs & COGS
 // ============================================================
 
+export interface DemoProductVariant {
+  id: string;
+  name: string;
+  sku: string;
+  cogs: number;
+  avgPrice: number;
+}
+
 export interface DemoProduct extends Product {
   sku: string;
   cogs: number;       // Cost of goods sold per unit
   avgPrice: number;    // Average selling price
   category: string;
+  demoVariants?: DemoProductVariant[];
 }
 
 const productDefs: Array<{
@@ -26,8 +35,17 @@ const productDefs: Array<{
   cogs: number;
   avgPrice: number;
   category: string;
+  variants?: Array<{ name: string; sku: string; cogs: number; avgPrice: number }>;
 }> = [
-  { name: 'LED Ring Light 10"', sku: 'RL-10-001', cogs: 8.50, avgPrice: 29.99, category: 'Lighting' },
+  {
+    name: 'LED Ring Light 10"', sku: 'RL-10-001', cogs: 8.50, avgPrice: 29.99, category: 'Lighting',
+    variants: [
+      { name: '10" Warm White', sku: 'RL-10-WW', cogs: 8.50, avgPrice: 29.99 },
+      { name: '10" Cool White', sku: 'RL-10-CW', cogs: 8.50, avgPrice: 29.99 },
+      { name: '12" RGB', sku: 'RL-12-RGB', cogs: 12.00, avgPrice: 39.99 },
+      { name: '18" Pro', sku: 'RL-18-PRO', cogs: 18.00, avgPrice: 59.99 },
+    ],
+  },
   { name: 'Portable Phone Tripod', sku: 'PT-MINI-02', cogs: 5.20, avgPrice: 19.99, category: 'Accessories' },
   { name: 'Wireless Lavalier Mic', sku: 'WM-LAV-03', cogs: 12.00, avgPrice: 39.99, category: 'Audio' },
   { name: 'Backdrop Green Screen', sku: 'BG-GS-04', cogs: 15.00, avgPrice: 49.99, category: 'Backdrops' },
@@ -50,6 +68,18 @@ export const DEMO_PRODUCTS: DemoProduct[] = productDefs.map((p, i) => ({
   cogs: p.cogs,
   avgPrice: p.avgPrice,
   category: p.category,
+  variants: p.variants?.map((v, vi) => ({
+    id: `${makeProductId(i)}-var-${vi}`,
+    name: v.name,
+    sku: v.sku,
+  })),
+  demoVariants: p.variants?.map((v, vi) => ({
+    id: `${makeProductId(i)}-var-${vi}`,
+    name: v.name,
+    sku: v.sku,
+    cogs: v.cogs,
+    avgPrice: v.avgPrice,
+  })),
 }));
 
 // ============================================================
@@ -259,6 +289,14 @@ export function generateDemoEntries(): Entry[] {
     const viewsPerVideo = 500 + Math.floor(rand() * 15000);
     const views = videosPosted * viewsPerVideo;
 
+    // Calculate units sold from orders
+    const unitsSold = g.orders.reduce((sum, o) => sum + (o.status !== 'cancelled' ? o.quantity : 0), 0);
+
+    // Pick a variant if the product has variants
+    const variantId = g.product.demoVariants && g.product.demoVariants.length > 0
+      ? g.product.demoVariants[Math.floor(rand() * g.product.demoVariants.length)].id
+      : undefined;
+
     entries.push({
       id: `demo-entry-${String(entryIndex).padStart(5, '0')}`,
       user_id: DEMO_USER_ID,
@@ -270,6 +308,8 @@ export function generateDemoEntries(): Entry[] {
       shipping: Math.round(g.shipping * 100) / 100,
       affiliate: Math.round(g.affiliate * 100) / 100,
       ads: adSpend,
+      units_sold: unitsSold,
+      variant_id: variantId,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       source: 'tiktok',
@@ -278,6 +318,7 @@ export function generateDemoEntries(): Entry[] {
         user_id: DEMO_USER_ID,
         name: g.product.name,
         created_at: g.product.created_at,
+        variants: g.product.variants,
       },
     });
     entryIndex++;

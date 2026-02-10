@@ -1,8 +1,15 @@
+export interface ProductVariant {
+  id: string;
+  name: string;
+  sku?: string;
+}
+
 export interface Product {
   id: string;
   user_id: string;
   name: string;
   created_at: string;
+  variants?: ProductVariant[];
 }
 
 export interface Entry {
@@ -16,6 +23,8 @@ export interface Entry {
   shipping: number;
   affiliate: number;
   ads: number;
+  units_sold?: number;
+  variant_id?: string;
   created_at: string;
   updated_at: string;
   source?: 'manual' | 'tiktok';
@@ -39,13 +48,14 @@ export interface DashboardMetrics {
   totalAds: number;
   totalAffiliate: number;
   totalShipping: number;
+  totalUnitsSold: number;
   entryCount: number;
   avgViewsPerVideo: number;
   revenuePerVideo: number;
   profitPerVideo: number;
   roas: number | null;
   topProduct: { name: string; profit: number } | null;
-  productProfits: Record<string, { profit: number; gmv: number }>;
+  productProfits: Record<string, { profit: number; gmv: number; unitsSold: number }>;
 }
 
 export interface ChartData {
