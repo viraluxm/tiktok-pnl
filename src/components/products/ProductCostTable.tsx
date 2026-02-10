@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo, Fragment } from 'react';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -16,6 +16,8 @@ import { getBarChartOptions } from '@/lib/chart-options';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
+const PRODUCTS_PER_PAGE = 10;
+
 interface ProductCostTableProps {
   products: Product[];
   productProfits: Record<string, { profit: number; gmv: number; unitsSold: number }>;
@@ -26,6 +28,7 @@ interface ProductCostTableProps {
 export default function ProductCostTable({ products, productProfits, chartData, entries }: ProductCostTableProps) {
   const [costs, setCosts] = useState<Record<string, number>>({});
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(0);
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const chartScrollRef = useRef<HTMLDivElement>(null);
 
@@ -74,6 +77,13 @@ export default function ProductCostTable({ products, productProfits, chartData, 
       ...(stats[v.id] || { gmv: 0, profit: 0, unitsSold: 0 }),
     }));
   }, [products, entries]);
+
+  // Pagination
+  const totalPages = Math.ceil(products.length / PRODUCTS_PER_PAGE);
+  const paginatedProducts = useMemo(() => {
+    const start = currentPage * PRODUCTS_PER_PAGE;
+    return products.slice(start, start + PRODUCTS_PER_PAGE);
+  }, [products, currentPage]);
 
   // Chart data — show max 5 visible, scroll for more
   const showSlider = chartData.productCompare.labels.length > 5;
@@ -145,16 +155,15 @@ export default function ProductCostTable({ products, productProfits, chartData, 
               </tr>
             </thead>
             <tbody>
-              {products.map((product, idx) => {
+              {paginatedProducts.map((product, idx) => {
                 const stats = productProfits[product.name] || { profit: 0, gmv: 0, unitsSold: 0 };
                 const hasVariants = product.variants && product.variants.length > 0;
                 const isExpanded = expandedProduct === product.id;
                 const vStats = isExpanded ? variantStats(product.id) : [];
 
                 return (
-                  <>
+                  <Fragment key={product.id}>
                     <tr
-                      key={product.id}
                       className={`border-b border-tt-border transition-colors hover:bg-[rgba(255,255,255,0.03)] ${idx % 2 === 0 ? '' : 'bg-[rgba(255,255,255,0.015)]'} ${hasVariants ? 'cursor-pointer' : ''}`}
                       onClick={() => hasVariants && setExpandedProduct(isExpanded ? null : product.id)}
                     >
@@ -215,7 +224,7 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                     {isExpanded && vStats.map((v, vi) => (
                       <tr
                         key={v.id}
-                        className={`border-b border-tt-border bg-[rgba(105,201,208,0.03)] transition-colors hover:bg-[rgba(105,201,208,0.06)]`}
+                        className="border-b border-tt-border bg-[rgba(105,201,208,0.03)] transition-colors hover:bg-[rgba(105,201,208,0.06)]"
                       >
                         <td className="px-4 py-2.5 pl-14">
                           <div className="flex items-center gap-2">
@@ -254,7 +263,7 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                         </td>
                       </tr>
                     ))}
-                  </>
+                  </Fragment>
                 );
               })}
               {products.length === 0 && (
@@ -267,6 +276,44 @@ export default function ProductCostTable({ products, productProfits, chartData, 
             </tbody>
           </table>
         </div>
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between px-5 py-3 border-t border-tt-border">
+            <span className="text-xs text-tt-muted">
+              Showing {currentPage * PRODUCTS_PER_PAGE + 1}–{Math.min((currentPage + 1) * PRODUCTS_PER_PAGE, products.length)} of {products.length} products
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(0, p - 1))}
+                disabled={currentPage === 0}
+                className="px-3 py-1 rounded-md border border-tt-border text-xs text-tt-muted hover:text-tt-text hover:border-tt-cyan transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                ← Prev
+              </button>
+              {Array.from({ length: totalPages }, (_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setCurrentPage(i)}
+                  className={`w-7 h-7 rounded-md border text-xs transition-all ${
+                    currentPage === i
+                      ? 'bg-tt-cyan text-black border-tt-cyan font-semibold'
+                      : 'border-tt-border text-tt-muted hover:text-tt-text hover:border-tt-cyan'
+                  }`}
+                >
+                  {i + 1}
+                </button>
+              ))}
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={currentPage === totalPages - 1}
+                className="px-3 py-1 rounded-md border border-tt-border text-xs text-tt-muted hover:text-tt-text hover:border-tt-cyan transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

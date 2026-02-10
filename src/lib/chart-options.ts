@@ -58,7 +58,7 @@ export function getBarChartOptions(): ChartOptions<'bar'> {
   };
 }
 
-export function getDoughnutChartOptions(): ChartOptions<'doughnut'> {
+export function getDoughnutChartOptions(rawAmounts: number[]): ChartOptions<'doughnut'> {
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -66,9 +66,9 @@ export function getDoughnutChartOptions(): ChartOptions<'doughnut'> {
       legend: {
         position: 'right' as const,
         labels: {
-          color: '#888',
-          font: { size: 11 },
-          padding: 12,
+          color: '#ffffff',
+          font: { size: 12 },
+          padding: 14,
           usePointStyle: true,
           generateLabels: (chart) => {
             const data = chart.data;
@@ -93,8 +93,10 @@ export function getDoughnutChartOptions(): ChartOptions<'doughnut'> {
       tooltip: {
         callbacks: {
           label: (context) => {
-            const value = context.parsed || 0;
-            return ` ${context.label}: ${value.toFixed(1)}%`;
+            // Show the actual dollar amount on hover
+            const idx = context.dataIndex;
+            const amount = rawAmounts[idx] ?? 0;
+            return ` ${context.label}: $${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
           },
         },
       },

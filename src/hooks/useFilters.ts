@@ -4,10 +4,16 @@ import { useState, useCallback } from 'react';
 import type { FilterState } from '@/types';
 
 export function useFilters() {
-  const [filters, setFilters] = useState<FilterState>({
-    dateFrom: null,
-    dateTo: null,
-    productId: 'all',
+  // Default to 30-day view
+  const [filters, setFilters] = useState<FilterState>(() => {
+    const to = new Date();
+    const from = new Date();
+    from.setDate(from.getDate() - 30);
+    return {
+      dateFrom: from.toISOString().split('T')[0],
+      dateTo: to.toISOString().split('T')[0],
+      productId: 'all',
+    };
   });
 
   const setQuickFilter = useCallback((days: number | 'all') => {

@@ -40,10 +40,9 @@ const productDefs: Array<{
   {
     name: 'LED Ring Light 10"', sku: 'RL-10-001', cogs: 8.50, avgPrice: 29.99, category: 'Lighting',
     variants: [
-      { name: '10" Warm White', sku: 'RL-10-WW', cogs: 8.50, avgPrice: 29.99 },
-      { name: '10" Cool White', sku: 'RL-10-CW', cogs: 8.50, avgPrice: 29.99 },
-      { name: '12" RGB', sku: 'RL-12-RGB', cogs: 12.00, avgPrice: 39.99 },
-      { name: '18" Pro', sku: 'RL-18-PRO', cogs: 18.00, avgPrice: 59.99 },
+      { name: '1 Pack', sku: 'RL-10-1PK', cogs: 8.50, avgPrice: 29.99 },
+      { name: '2 Pack', sku: 'RL-10-2PK', cogs: 15.00, avgPrice: 54.99 },
+      { name: '3 Pack', sku: 'RL-10-3PK', cogs: 20.00, avgPrice: 74.99 },
     ],
   },
   { name: 'Portable Phone Tripod', sku: 'PT-MINI-02', cogs: 5.20, avgPrice: 19.99, category: 'Accessories' },

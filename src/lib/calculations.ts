@@ -162,19 +162,21 @@ export function computeChartData(entries: Entry[]): ChartData {
   };
 
   // Cost breakdown — as percentages adding up to 100%
-  const totalCosts = totalCogs + totalShipping + totalAffiliate + totalAds + Math.max(0, totalProfit);
+  const rawCostAmounts = [
+    Math.max(0, totalCogs),
+    Math.max(0, totalShipping),
+    Math.max(0, totalAffiliate),
+    Math.max(0, totalAds),
+    Math.max(0, totalProfit),
+  ];
+  const totalCosts = rawCostAmounts.reduce((a, b) => a + b, 0);
   const costBreakdown = {
     labels: ['Platform Fee (6%)', 'Shipping', 'Affiliate', 'Ads', 'Net Profit'],
     data: totalCosts > 0
-      ? [
-          Math.max(0, totalCogs) / totalCosts * 100,
-          Math.max(0, totalShipping) / totalCosts * 100,
-          Math.max(0, totalAffiliate) / totalCosts * 100,
-          Math.max(0, totalAds) / totalCosts * 100,
-          Math.max(0, totalProfit) / totalCosts * 100,
-        ]
+      ? rawCostAmounts.map((v) => (v / totalCosts) * 100)
       : [0, 0, 0, 0, 0],
     colors: ['#ff6384', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0'],
+    rawAmounts: rawCostAmounts,
   };
 
   // Margin by date

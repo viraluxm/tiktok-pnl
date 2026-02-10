@@ -176,7 +176,7 @@ export default function Charts({ chartData }: ChartsProps) {
                 borderWidth: 0,
               }],
             }}
-            options={getDoughnutChartOptions()}
+            options={getDoughnutChartOptions(chartData.costBreakdown.rawAmounts || [])}
           />
         </div>
       </div>

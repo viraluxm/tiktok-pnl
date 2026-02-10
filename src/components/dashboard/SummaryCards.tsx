@@ -13,12 +13,12 @@ function pctChange(current: number, previous: number): number | null {
   return ((current - previous) / Math.abs(previous)) * 100;
 }
 
-function ChangeIndicator({ change }: { change: number | null }) {
-  if (change == null) return null;
+function ChangeIndicator({ change, label }: { change: number | null; label?: string }) {
+  if (change == null) return label ? <span className="text-tt-muted text-[11px]">{label}</span> : null;
   const isPositive = change >= 0;
   return (
     <span className={`text-[11px] font-semibold ${isPositive ? 'text-tt-green' : 'text-tt-red'}`}>
-      {isPositive ? '↑' : '↓'} {Math.abs(change).toFixed(1)}%
+      {isPositive ? '↑' : '↓'} {Math.abs(change).toFixed(1)}% {label || ''}
     </span>
   );
 }
@@ -31,20 +31,18 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
   const gmvChange = prevMetrics ? pctChange(metrics.totalGMV, prevMetrics.totalGMV) : null;
   const profitChange = prevMetrics ? pctChange(metrics.totalNetProfit, prevMetrics.totalNetProfit) : null;
   const videosChange = prevMetrics ? pctChange(metrics.totalVideos, prevMetrics.totalVideos) : null;
-  const viewsChange = prevMetrics ? pctChange(metrics.totalViews, prevMetrics.totalViews) : null;
   const adsChange = prevMetrics ? pctChange(metrics.totalAds, prevMetrics.totalAds) : null;
   const affiliateChange = prevMetrics ? pctChange(metrics.totalAffiliate, prevMetrics.totalAffiliate) : null;
   const profitPerVideoChange = prevMetrics ? pctChange(metrics.profitPerVideo, prevMetrics.profitPerVideo) : null;
 
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 mb-6">
-      {/* 1. Total GMV */}
+      {/* 1. Total GMV — with % change */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in">
         <div className="text-xs text-tt-muted uppercase tracking-wide mb-2">Total GMV</div>
         <div className="text-[26px] font-bold text-tt-cyan">{fmt(metrics.totalGMV)}</div>
-        <div className="text-xs text-tt-muted mt-1 flex items-center gap-1.5">
-          <ChangeIndicator change={gmvChange} />
-          {gmvChange == null && <span>vs previous period</span>}
+        <div className="text-xs mt-1 flex items-center gap-1.5">
+          <ChangeIndicator change={gmvChange} label={gmvChange == null ? 'vs previous period' : 'vs prev period'} />
         </div>
       </div>
 
@@ -60,28 +58,18 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         </div>
       </div>
 
-      {/* 3. Videos Posted */}
+      {/* 3. Videos Posted — with total views underneath */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-2">
         <div className="text-xs text-tt-muted uppercase tracking-wide mb-2">Videos Posted</div>
         <div className="text-[26px] font-bold text-tt-cyan">{fmtInt(metrics.totalVideos)}</div>
         <div className="text-xs text-tt-muted mt-1 flex items-center gap-1.5">
-          <span>{metrics.entryCount} days tracked</span>
+          <span>{fmtInt(metrics.totalViews)} views</span>
           <ChangeIndicator change={videosChange} />
         </div>
       </div>
 
-      {/* 4. Total Views */}
+      {/* 4. Total Ad Spend */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-3">
-        <div className="text-xs text-tt-muted uppercase tracking-wide mb-2">Total Views</div>
-        <div className="text-[26px] font-bold text-tt-magenta">{fmtInt(metrics.totalViews)}</div>
-        <div className="text-xs text-tt-muted mt-1 flex items-center gap-1.5">
-          <span>avg {fmtInt(Math.round(metrics.avgViewsPerVideo))}/video</span>
-          <ChangeIndicator change={viewsChange} />
-        </div>
-      </div>
-
-      {/* 5. Total Ad Spend */}
-      <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-4">
         <div className="text-xs text-tt-muted uppercase tracking-wide mb-2">Total Ad Spend</div>
         <div className="text-[26px] font-bold text-tt-text">{fmt(metrics.totalAds)}</div>
         <div className="text-xs text-tt-muted mt-1 flex items-center gap-1.5">
@@ -90,8 +78,8 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         </div>
       </div>
 
-      {/* 6. Affiliate Commission Paid */}
-      <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-5">
+      {/* 5. Affiliate Commission Paid */}
+      <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-4">
         <div className="text-xs text-tt-muted uppercase tracking-wide mb-2">Affiliate Commission</div>
         <div className="text-[26px] font-bold text-tt-yellow">{fmt(metrics.totalAffiliate)}</div>
         <div className="text-xs text-tt-muted mt-1 flex items-center gap-1.5">
@@ -100,8 +88,8 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         </div>
       </div>
 
-      {/* 7. Profit Per Video — with revenue/video below */}
-      <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-6">
+      {/* 6. Profit Per Video — with revenue/video below */}
+      <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-5">
         <div className="text-xs text-tt-muted uppercase tracking-wide mb-2">Profit Per Video</div>
         <div className={`text-[26px] font-bold ${metrics.profitPerVideo >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>
           {fmt(metrics.profitPerVideo)}

@@ -22,7 +22,6 @@ export default function FiltersBar({
     { label: 'Yesterday', value: 1 },
     { label: '7 Days', value: 7 },
     { label: '30 Days', value: 30 },
-    { label: 'All Time', value: 'all' },
   ];
 
   return (
