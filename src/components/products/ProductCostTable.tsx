@@ -11,7 +11,7 @@ import {
 } from 'chart.js';
 import { Bar } from 'react-chartjs-2';
 import type { Product, Entry, ChartData } from '@/types';
-import { fmt, fmtInt, calcEntry } from '@/lib/calculations';
+import { fmt, fmtInt, calcEntry, type CostsMap } from '@/lib/calculations';
 import { getBarChartOptions } from '@/lib/chart-options';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
@@ -80,12 +80,12 @@ export default function ProductCostTable({
     productEntries.forEach((e) => {
       const variantId = e.variant_id || variants[0]?.id;
       if (variantId && stats[variantId]) {
-        const c = calcEntry(e);
+        const c = calcEntry(e, savedCosts);
         stats[variantId].gmv += Number(e.gmv) || 0;
         stats[variantId].profit += c.totalNetProfit;
         stats[variantId].unitsSold += Number(e.units_sold) || 0;
       } else if (variants.length > 0) {
-        const c = calcEntry(e);
+        const c = calcEntry(e, savedCosts);
         const perVariant = 1 / variants.length;
         variants.forEach((v) => {
           stats[v.id].gmv += (Number(e.gmv) || 0) * perVariant;

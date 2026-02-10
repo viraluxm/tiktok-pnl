@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import DemoBanner from '@/components/demo/DemoBanner';
 import Header from '@/components/layout/Header';
@@ -13,17 +13,13 @@ import { useDemoProducts } from '@/hooks/useDemoProducts';
 import { useDemoEntries } from '@/hooks/useDemoEntries';
 import { useFilters } from '@/hooks/useFilters';
 import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
+import type { CostsMap } from '@/lib/calculations';
 import type { Entry } from '@/types';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
 type ViewTab = 'dashboard' | 'products';
 
-/**
- * Given the current filter period, compute the equivalent previous period date range.
- * e.g. If viewing Today, previous period = Yesterday.
- * If viewing 7 Days, previous period = the 7 days before that.
- */
 function getPreviousPeriodEntries(
   allEntries: Entry[],
   activeQuickFilter: number | 'all',
@@ -37,17 +33,14 @@ function getPreviousPeriodEntries(
   let prevTo: string;
 
   if (activeQuickFilter === 0) {
-    // Today → previous = yesterday
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
     prevFrom = prevTo = yesterday.toISOString().split('T')[0];
   } else if (activeQuickFilter === 1) {
-    // Yesterday → previous = day before yesterday
     const dayBefore = new Date(now);
     dayBefore.setDate(dayBefore.getDate() - 2);
     prevFrom = prevTo = dayBefore.toISOString().split('T')[0];
   } else if (dateFrom && dateTo) {
-    // Compute the length of the current period and shift back
     const from = new Date(dateFrom);
     const to = new Date(dateTo);
     const daysSpan = Math.round((to.getTime() - from.getTime()) / 86400000) + 1;
@@ -67,16 +60,17 @@ function getPreviousPeriodEntries(
 export default function DemoDashboard() {
   const [activeView, setActiveView] = useState<ViewTab>('dashboard');
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>(30);
+  const [demoCosts, setDemoCosts] = useState<CostsMap>({});
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { products } = useDemoProducts();
 
-  // We need a "no-filter" version to compute previous period
   const { entries: allEntries } = useDemoEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useDemoEntries(filters);
 
-  const metrics = useMemo(() => computeDashboardMetrics(entries), [entries]);
-  const chartData = useMemo(() => computeChartData(entries), [entries]);
+  // Pass costs into all calculations so cost per unit affects net profit
+  const metrics = useMemo(() => computeDashboardMetrics(entries, demoCosts), [entries, demoCosts]);
+  const chartData = useMemo(() => computeChartData(entries, demoCosts), [entries, demoCosts]);
 
   // Previous period
   const prevEntries = useMemo(
@@ -84,9 +78,14 @@ export default function DemoDashboard() {
     [allEntries, activeQuickFilter, filters.dateFrom, filters.dateTo],
   );
   const prevMetrics = useMemo(
-    () => (prevEntries.length > 0 ? computeDashboardMetrics(prevEntries) : null),
-    [prevEntries],
+    () => (prevEntries.length > 0 ? computeDashboardMetrics(prevEntries, demoCosts) : null),
+    [prevEntries, demoCosts],
   );
+
+  const handleDemoCostChange = useCallback((productId: string, variantId: string | null, cost: number) => {
+    const key = variantId ? `${productId}-${variantId}` : productId;
+    setDemoCosts((prev) => ({ ...prev, [key]: cost }));
+  }, []);
 
   function handleQuickFilter(days: number | 'all') {
     setActiveQuickFilter(days);
@@ -134,7 +133,7 @@ export default function DemoDashboard() {
         {activeView === 'dashboard' && (
           <>
             <SummaryCards metrics={metrics} prevMetrics={prevMetrics} />
-            <ForecastCard entries={allEntries} />
+            <ForecastCard entries={allEntries} costsMap={demoCosts} />
             <Charts chartData={chartData} />
           </>
         )}
@@ -146,6 +145,8 @@ export default function DemoDashboard() {
             productProfits={metrics.productProfits}
             chartData={chartData}
             entries={entries}
+            savedCosts={demoCosts}
+            onCostChange={handleDemoCostChange}
             isDemo
           />
         )}

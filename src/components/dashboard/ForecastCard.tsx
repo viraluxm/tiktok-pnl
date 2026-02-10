@@ -2,12 +2,14 @@
 
 import type { Entry } from '@/types';
 import { calcEntry, fmt, fmtInt } from '@/lib/calculations';
+import type { CostsMap } from '@/lib/calculations';
 
 interface ForecastCardProps {
   entries: Entry[];
+  costsMap?: CostsMap;
 }
 
-export default function ForecastCard({ entries }: ForecastCardProps) {
+export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
   const now = new Date();
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
@@ -29,7 +31,7 @@ export default function ForecastCard({ entries }: ForecastCardProps) {
   let last30NetProfit = 0;
 
   last30DaysEntries.forEach((e) => {
-    const c = calcEntry(e);
+    const c = calcEntry(e, costsMap);
     last30Sales += Number(e.gmv) || 0;
     last30Units += Number(e.units_sold) || 1; // Fallback to 1 unit per entry if no units_sold
     last30Videos += Number(e.videos_posted) || 0;
@@ -56,7 +58,7 @@ export default function ForecastCard({ entries }: ForecastCardProps) {
   let actualMonthlyProfit = 0;
 
   monthEntries.forEach((e) => {
-    const c = calcEntry(e);
+    const c = calcEntry(e, costsMap);
     actualMonthlySales += Number(e.gmv) || 0;
     actualMonthlyUnits += Number(e.units_sold) || 1; // Fallback to 1 unit per entry
     actualMonthlyVideos += Number(e.videos_posted) || 0;
@@ -86,7 +88,7 @@ export default function ForecastCard({ entries }: ForecastCardProps) {
   let prevSales = 0;
   let prevProfit = 0;
   prevMonthEntries.forEach((e) => {
-    const c = calcEntry(e);
+    const c = calcEntry(e, costsMap);
     prevSales += Number(e.gmv) || 0;
     prevProfit += c.totalNetProfit;
   });

@@ -68,8 +68,9 @@ export default function RealDashboard() {
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
-  const metrics = useMemo(() => computeDashboardMetrics(entries), [entries]);
-  const chartData = useMemo(() => computeChartData(entries), [entries]);
+  // Pass costs into all calculations so cost per unit affects net profit
+  const metrics = useMemo(() => computeDashboardMetrics(entries, costsMap), [entries, costsMap]);
+  const chartData = useMemo(() => computeChartData(entries, costsMap), [entries, costsMap]);
 
   // Previous period
   const prevEntries = useMemo(
@@ -77,8 +78,8 @@ export default function RealDashboard() {
     [allEntries, activeQuickFilter, filters.dateFrom, filters.dateTo],
   );
   const prevMetrics = useMemo(
-    () => (prevEntries.length > 0 ? computeDashboardMetrics(prevEntries) : null),
-    [prevEntries],
+    () => (prevEntries.length > 0 ? computeDashboardMetrics(prevEntries, costsMap) : null),
+    [prevEntries, costsMap],
   );
 
   const handleCostChange = useCallback((productId: string, variantId: string | null, cost: number) => {
@@ -130,7 +131,7 @@ export default function RealDashboard() {
         {activeView === 'dashboard' && (
           <>
             <SummaryCards metrics={metrics} prevMetrics={prevMetrics} />
-            <ForecastCard entries={allEntries} />
+            <ForecastCard entries={allEntries} costsMap={costsMap} />
             <Charts chartData={chartData} />
           </>
         )}
