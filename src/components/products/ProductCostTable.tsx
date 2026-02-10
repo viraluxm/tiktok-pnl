@@ -54,13 +54,19 @@ export default function ProductCostTable({
   const handleCostInput = useCallback((key: string, value: string, productId: string, variantId: string | null) => {
     setLocalCosts((prev) => ({ ...prev, [key]: value }));
 
-    // Debounce save to DB for real users
-    if (onCostChange && !isDemo) {
-      if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
-      debounceTimers.current[key] = setTimeout(() => {
+    if (onCostChange) {
+      if (isDemo) {
+        // Demo mode: update parent state immediately so dashboard recalculates
         const numVal = parseFloat(value) || 0;
         onCostChange(productId, variantId, numVal);
-      }, 800);
+      } else {
+        // Real mode: debounce save to DB
+        if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
+        debounceTimers.current[key] = setTimeout(() => {
+          const numVal = parseFloat(value) || 0;
+          onCostChange(productId, variantId, numVal);
+        }, 800);
+      }
     }
   }, [onCostChange, isDemo]);
 
