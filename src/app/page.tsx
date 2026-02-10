@@ -337,6 +337,7 @@ export default function LandingPage() {
             </div>
             <p className="text-sm">&copy; {new Date().getFullYear()} Lensed. All rights reserved.</p>
             <div className="flex gap-6">
+              <Link href="/privacy" className="text-sm hover:text-white transition-colors">Privacy Policy</Link>
               <Link href="/login" className="text-sm hover:text-white transition-colors">Sign In</Link>
               <Link href="/signup" className="text-sm hover:text-white transition-colors">Get Started</Link>
             </div>
