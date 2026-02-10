@@ -87,41 +87,62 @@ export default function LandingPage() {
                 <span className="ml-3 text-xs text-gray-500">lensed.io/dashboard</span>
               </div>
               <div className="p-6 md:p-8">
-                {/* Mock Dashboard Cards */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                {/* Mock Dashboard Cards — 6 boxes, 3 per row */}
+                <div className="grid grid-cols-3 gap-3 mb-6">
                   {[
-                    { label: 'Total GMV', value: '$24,580', change: '+18.2%', up: true },
-                    { label: 'Net Profit', value: '$8,934', change: '+24.1%', up: true },
-                    { label: 'Profit Margin', value: '36.3%', change: '+2.8%', up: true },
-                    { label: 'Videos Posted', value: '142', change: '+31%', up: true },
+                    { label: 'Total GMV', value: '$2,469', change: '↑ 10.0%', color: 'text-[#69C9D0]', changeColor: 'text-[#00c853]' },
+                    { label: 'Total Net Profit', value: '$1,244', change: '↑ 18.9%', color: 'text-[#00c853]', changeColor: 'text-[#00c853]' },
+                    { label: 'Videos Posted', value: '59', change: '↑ 25.5%', color: 'text-[#69C9D0]', changeColor: 'text-[#00c853]' },
+                    { label: 'Total Ad Spend', value: '$706', change: '↓ 4.8%', color: 'text-white', changeColor: 'text-[#ff1744]' },
+                    { label: 'Affiliate Commission', value: '$124', change: '↓ 5.4%', color: 'text-[#ffcd56]', changeColor: 'text-[#ff1744]' },
+                    { label: 'Profit Per Video', value: '$21.09', change: '↓ 5.3%', color: 'text-[#00c853]', changeColor: 'text-[#ff1744]' },
                   ].map((card, i) => (
                     <div key={i} className="bg-[rgba(255,255,255,0.03)] rounded-xl p-4 border border-white/[0.06]">
-                      <p className="text-[11px] text-gray-500 uppercase tracking-wide mb-1">{card.label}</p>
-                      <p className="text-xl font-bold text-white">{card.value}</p>
-                      <p className={`text-xs mt-1 ${card.up ? 'text-[#00c853]' : 'text-[#ff1744]'}`}>{card.change}</p>
+                      <div className="flex items-center gap-2 mb-1">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">{card.label}</p>
+                        <span className={`text-[9px] font-semibold ${card.changeColor}`}>{card.change}</span>
+                      </div>
+                      <p className={`text-xl font-bold ${card.color}`}>{card.value}</p>
                     </div>
                   ))}
                 </div>
-                {/* Mock Chart Area */}
+                {/* Mock Chart Area — Profit & Sales */}
                 <div className="bg-[rgba(255,255,255,0.03)] rounded-xl p-6 border border-white/[0.06]">
                   <div className="flex items-center justify-between mb-4">
-                    <p className="text-sm font-medium text-gray-400">Profit Over Time</p>
-                    <div className="flex gap-2">
-                      <span className="px-2 py-1 text-[10px] rounded bg-[#69C9D0]/20 text-[#69C9D0]">7D</span>
-                      <span className="px-2 py-1 text-[10px] rounded bg-white/[0.04] text-gray-500">30D</span>
-                      <span className="px-2 py-1 text-[10px] rounded bg-white/[0.04] text-gray-500">ALL</span>
+                    <p className="text-sm font-medium text-gray-400">Performance Trend</p>
+                    <div className="flex gap-1">
+                      <span className="px-2.5 py-1 text-[10px] rounded-full bg-white/[0.04] text-gray-500">Daily Profit</span>
+                      <span className="px-2.5 py-1 text-[10px] rounded-full bg-white/[0.04] text-gray-500">Daily Sales</span>
+                      <span className="px-2.5 py-1 text-[10px] rounded-full bg-[#69C9D0]/20 text-[#69C9D0]">Both</span>
                     </div>
                   </div>
                   <svg viewBox="0 0 600 150" className="w-full h-auto">
                     <defs>
-                      <linearGradient id="chartGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#69C9D0" stopOpacity="0.3"/>
+                      <linearGradient id="chartGradProfit" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#69C9D0" stopOpacity="0.2"/>
                         <stop offset="100%" stopColor="#69C9D0" stopOpacity="0"/>
                       </linearGradient>
                     </defs>
-                    <path d="M0,120 Q50,110 100,95 T200,80 T300,50 T400,60 T500,30 T600,20 V150 H0Z" fill="url(#chartGrad)"/>
-                    <path d="M0,120 Q50,110 100,95 T200,80 T300,50 T400,60 T500,30 T600,20" fill="none" stroke="#69C9D0" strokeWidth="2.5"/>
+                    {/* Sales line (GMV) — red */}
+                    <path d="M0,90 Q50,85 100,70 T200,55 T300,40 T400,45 T500,25 T600,15" fill="none" stroke="#EE1D52" strokeWidth="2" opacity="0.7"/>
+                    {/* Profit line — cyan with fill */}
+                    <path d="M0,120 Q50,115 100,100 T200,85 T300,60 T400,65 T500,40 T600,30 V150 H0Z" fill="url(#chartGradProfit)"/>
+                    <path d="M0,120 Q50,115 100,100 T200,85 T300,60 T400,65 T500,40 T600,30" fill="none" stroke="#69C9D0" strokeWidth="2.5"/>
+                    {/* Dots on profit line */}
+                    <circle cx="100" cy="100" r="3" fill="#69C9D0"/>
+                    <circle cx="300" cy="60" r="3" fill="#69C9D0"/>
+                    <circle cx="500" cy="40" r="3" fill="#69C9D0"/>
                   </svg>
+                  <div className="flex items-center gap-4 mt-3">
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-3 h-0.5 rounded-full bg-[#69C9D0]" />
+                      <span className="text-[10px] text-gray-500">Net Profit</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-3 h-0.5 rounded-full bg-[#EE1D52]" />
+                      <span className="text-[10px] text-gray-500">Sales (GMV)</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

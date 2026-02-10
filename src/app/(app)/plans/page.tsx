@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import Header from '@/components/layout/Header';
 
 export default function PlansPage() {
-  const [yearly, setYearly] = useState(false);
+  const [yearly, setYearly] = useState(true);
   const router = useRouter();
 
   const monthlyPrice = 49;
@@ -24,7 +24,7 @@ export default function PlansPage() {
     <div className="min-h-screen bg-tt-bg">
       <Header />
 
-      <div className="p-6 max-w-3xl mx-auto">
+      <div className="p-6 max-w-xl mx-auto">
         {/* Back button */}
         <button
           onClick={() => router.push('/account')}
@@ -70,86 +70,84 @@ export default function PlansPage() {
           )}
         </div>
 
-        {/* Plans */}
-        <div className="grid md:grid-cols-2 gap-5 mb-8">
-          {/* Pro Plan */}
-          <div className={`rounded-xl border p-6 transition-all ${currentPlan === 'pro' ? 'border-tt-cyan/50 bg-tt-cyan/[0.03]' : 'border-tt-border bg-tt-card'}`}>
-            <div className="flex items-center justify-between mb-4">
-              <p className="text-sm font-semibold text-tt-cyan uppercase tracking-wide">Pro — 1 Shop</p>
-              {currentPlan === 'pro' && (
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-tt-cyan/15 text-tt-cyan">Current</span>
-              )}
-            </div>
-            <div className="mb-1">
-              <span className="text-4xl font-extrabold text-tt-text">${displayPrice}</span>
-              <span className="text-tt-muted ml-1 text-sm">{billingLabel}</span>
-            </div>
-            {yearly && (
-              <p className="text-xs text-tt-muted mb-4">${yearlyTotal}/year</p>
-            )}
-            {!yearly && <div className="mb-4" />}
-
-            <div className="bg-gradient-to-r from-[#EE1D52]/10 to-tt-cyan/10 border border-tt-cyan/20 rounded-lg p-2.5 mb-5">
-              <p className="text-[11px] text-tt-cyan font-semibold">Free 7-Day Trial</p>
-              <p className="text-[10px] text-tt-muted">Refer a friend — you both get 7 days free, no card needed.</p>
-            </div>
-
-            <ul className="space-y-2 mb-6">
-              {[
-                'Full P&L dashboard',
-                'TikTok Shop auto-sync',
-                'Unlimited products',
-                'Real-time analytics & charts',
-                'CSV import & export',
-                'Priority support',
-              ].map((item, i) => (
-                <li key={i} className="flex items-center gap-2 text-tt-text text-xs">
-                  <svg className="w-3.5 h-3.5 text-tt-cyan shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12"/>
-                  </svg>
-                  {item}
-                </li>
-              ))}
-            </ul>
-
-            {currentPlan === 'pro' ? (
-              <button disabled className="w-full py-2.5 rounded-lg text-xs font-semibold bg-tt-card border border-tt-border text-tt-muted cursor-default">
-                Current Plan
-              </button>
-            ) : (
-              <button className="w-full py-2.5 rounded-lg text-xs font-semibold bg-tt-cyan text-black hover:opacity-90 transition-opacity">
-                Switch to Pro
-              </button>
+        {/* Pro Plan */}
+        <div className={`rounded-xl border p-6 transition-all mb-5 ${currentPlan === 'pro' ? 'border-tt-cyan/50 bg-tt-cyan/[0.03]' : 'border-tt-border bg-tt-card'}`}>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-sm font-semibold text-tt-cyan uppercase tracking-wide">Pro — 1 Shop</p>
+            {currentPlan === 'pro' && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-tt-cyan/15 text-tt-cyan">Current</span>
             )}
           </div>
+          <div className="mb-1">
+            <span className="text-4xl font-extrabold text-tt-text">${displayPrice}</span>
+            <span className="text-tt-muted ml-1 text-sm">{billingLabel}</span>
+          </div>
+          {yearly && (
+            <p className="text-xs text-tt-muted mb-4">${yearlyTotal}/year</p>
+          )}
+          {!yearly && <div className="mb-4" />}
 
-          {/* Additional Shops */}
-          <div className="rounded-xl border border-tt-border bg-tt-card p-6">
-            <p className="text-sm font-semibold text-tt-muted uppercase tracking-wide mb-4">Add More Shops</p>
-            <div className="mb-1">
-              <span className="text-4xl font-extrabold text-tt-text">${extraShopPrice}</span>
-              <span className="text-tt-muted ml-1 text-sm">/shop/month</span>
+          <div className="bg-gradient-to-r from-[#EE1D52]/10 to-tt-cyan/10 border border-tt-cyan/20 rounded-lg p-2.5 mb-5">
+            <p className="text-[11px] text-tt-cyan font-semibold">Free 7-Day Trial</p>
+            <p className="text-[10px] text-tt-muted">Refer a friend — you both get 7 days free, no card needed.</p>
+          </div>
+
+          <ul className="space-y-2 mb-6">
+            {[
+              'Full P&L dashboard',
+              'TikTok Shop auto-sync',
+              'Unlimited products',
+              'Real-time analytics & charts',
+              'CSV import & export',
+              'Priority support',
+            ].map((item, i) => (
+              <li key={i} className="flex items-center gap-2 text-tt-text text-xs">
+                <svg className="w-3.5 h-3.5 text-tt-cyan shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+                {item}
+              </li>
+            ))}
+          </ul>
+
+          {currentPlan === 'pro' ? (
+            <button disabled className="w-full py-2.5 rounded-lg text-xs font-semibold bg-tt-card border border-tt-border text-tt-muted cursor-default">
+              Current Plan
+            </button>
+          ) : (
+            <button className="w-full py-2.5 rounded-lg text-xs font-semibold bg-tt-cyan text-black hover:opacity-90 transition-opacity">
+              Switch to Pro
+            </button>
+          )}
+
+          {/* Additional Shops — compact section below */}
+          <div className="mt-6 pt-6 border-t border-white/[0.08]">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <p className="text-xs font-semibold text-tt-muted uppercase tracking-wide">Additional Shops</p>
+                <p className="text-[11px] text-tt-muted/60 mt-0.5">Add as many shops as you need</p>
+              </div>
+              <div className="text-right">
+                <span className="text-2xl font-extrabold text-tt-text">${extraShopPrice}</span>
+                <span className="text-tt-muted text-xs ml-1">/shop/mo</span>
+              </div>
             </div>
-            <p className="text-xs text-tt-muted mb-5">Add to your Pro plan</p>
-
-            <ul className="space-y-2 mb-6">
+            <div className="grid grid-cols-2 gap-2 mb-4">
               {[
-                'Connect additional TikTok Shops',
                 'Separate P&L per shop',
                 'Same full feature set',
-                'Unified account management',
                 'Compare across shops',
+                'Consolidated reporting',
               ].map((item, i) => (
-                <li key={i} className="flex items-center gap-2 text-tt-text text-xs">
-                  <svg className="w-3.5 h-3.5 text-tt-muted shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <div key={i} className="flex items-center gap-2 text-tt-muted text-[11px]">
+                  <svg className="w-3 h-3 text-tt-muted shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="20 6 9 17 4 12"/>
                   </svg>
                   {item}
-                </li>
+                </div>
               ))}
-            </ul>
-
-            <button className="w-full py-2.5 rounded-lg text-xs font-semibold border border-tt-border text-tt-text hover:bg-tt-card-hover transition-all">
+            </div>
+            <button className="w-full py-2 rounded-lg text-xs font-semibold border border-tt-border text-tt-text hover:bg-tt-card-hover transition-all">
               Add a Shop — ${extraShopPrice}/mo
             </button>
           </div>
