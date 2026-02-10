@@ -26,17 +26,13 @@ interface ProductCostTableProps {
 }
 
 export default function ProductCostTable({ products, productProfits, chartData, entries }: ProductCostTableProps) {
-  const [costs, setCosts] = useState<Record<string, number>>({});
+  const [costs, setCosts] = useState<Record<string, string>>({});
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(0);
-  const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const chartScrollRef = useRef<HTMLDivElement>(null);
 
   const handleCostChange = useCallback((key: string, value: string) => {
-    if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
-    debounceTimers.current[key] = setTimeout(() => {
-      setCosts((prev) => ({ ...prev, [key]: parseFloat(value) || 0 }));
-    }, 400);
+    setCosts((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   // Compute variant-level stats from entries
@@ -49,7 +45,6 @@ export default function ProductCostTable({ products, productProfits, chartData, 
       stats[v.id] = { gmv: 0, profit: 0, unitsSold: 0 };
     });
 
-    // Distribute product entries across variants proportionally for demo
     const productEntries = entries.filter((e) => e.product_id === productId);
     const variants = product.variants;
 
@@ -61,7 +56,6 @@ export default function ProductCostTable({ products, productProfits, chartData, 
         stats[variantId].profit += c.totalNetProfit;
         stats[variantId].unitsSold += Number(e.units_sold) || 0;
       } else if (variants.length > 0) {
-        // Distribute evenly across variants
         const c = calcEntry(e);
         const perVariant = 1 / variants.length;
         variants.forEach((v) => {
@@ -164,23 +158,27 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                 return (
                   <Fragment key={product.id}>
                     <tr
-                      className={`border-b border-tt-border transition-colors hover:bg-[rgba(255,255,255,0.03)] ${idx % 2 === 0 ? '' : 'bg-[rgba(255,255,255,0.015)]'} ${hasVariants ? 'cursor-pointer' : ''}`}
-                      onClick={() => hasVariants && setExpandedProduct(isExpanded ? null : product.id)}
+                      className={`border-b border-tt-border transition-colors hover:bg-[rgba(255,255,255,0.03)] ${idx % 2 === 0 ? '' : 'bg-[rgba(255,255,255,0.015)]'}`}
                     >
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <div className="w-8 h-8 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center text-tt-cyan text-xs font-bold">
                             {product.name.charAt(0).toUpperCase()}
                           </div>
-                          <div className="flex flex-col">
-                            <span className="text-[13px] font-medium text-tt-text">{product.name}</span>
-                            {hasVariants && (
-                              <span className="text-[10px] text-tt-muted flex items-center gap-1">
-                                <span className={`transition-transform inline-block ${isExpanded ? 'rotate-90' : ''}`}>▸</span>
-                                {product.variants!.length} variants
-                              </span>
-                            )}
-                          </div>
+                          <span className="text-[13px] font-medium text-tt-text">{product.name}</span>
+                          {hasVariants && (
+                            <button
+                              onClick={() => setExpandedProduct(isExpanded ? null : product.id)}
+                              className={`ml-1 flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium cursor-pointer transition-all ${
+                                isExpanded
+                                  ? 'border-tt-cyan bg-[rgba(105,201,208,0.1)] text-tt-cyan'
+                                  : 'border-tt-border text-tt-muted hover:border-tt-cyan hover:text-tt-cyan'
+                              }`}
+                            >
+                              <span>{product.variants!.length} variants</span>
+                              <span className={`transition-transform inline-block text-[10px] ${isExpanded ? 'rotate-180' : ''}`}>▼</span>
+                            </button>
+                          )}
                         </div>
                       </td>
                       <td className="px-4 py-3 text-[13px] text-tt-muted font-mono">
@@ -197,16 +195,15 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                       </td>
                       <td className="px-4 py-3">
                         {hasVariants ? (
-                          <span className="text-[11px] text-tt-muted italic">See variants ▾</span>
+                          <span className="text-[11px] text-tt-muted italic">—</span>
                         ) : (
                           <div className="flex items-center gap-1">
                             <span className="text-tt-muted text-[13px]">$</span>
                             <input
                               type="number"
                               step="0.01"
-                              defaultValue={costs[product.id] || ''}
+                              value={costs[product.id] ?? ''}
                               placeholder="0.00"
-                              onClick={(e) => e.stopPropagation()}
                               onChange={(e) => handleCostChange(product.id, e.target.value)}
                               className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[90px] focus:outline-none focus:border-tt-cyan focus:bg-[rgba(105,201,208,0.08)] transition-all"
                             />
@@ -229,11 +226,12 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                         <td className="px-4 py-2.5 pl-14">
                           <div className="flex items-center gap-2">
                             <div className="w-1.5 h-1.5 rounded-full bg-tt-cyan opacity-50" />
-                            <span className="text-[12px] text-tt-muted">{v.name}</span>
+                            <span className="text-[12px] text-tt-text">{v.name}</span>
+                            {v.sku && <span className="text-[10px] text-tt-muted font-mono">({v.sku})</span>}
                           </div>
                         </td>
                         <td className="px-4 py-2.5 text-[12px] text-tt-muted font-mono">
-                          {v.sku || v.id.slice(0, 12)}
+                          {v.id.slice(0, 16)}...
                         </td>
                         <td className="px-4 py-2.5 text-[12px] text-tt-muted tabular-nums">
                           {fmtInt(v.unitsSold)}
@@ -250,9 +248,8 @@ export default function ProductCostTable({ products, productProfits, chartData, 
                             <input
                               type="number"
                               step="0.01"
-                              defaultValue={costs[`${product.id}-${v.id}`] || ''}
+                              value={costs[`${product.id}-${v.id}`] ?? ''}
                               placeholder="0.00"
-                              onClick={(e) => e.stopPropagation()}
                               onChange={(e) => handleCostChange(`${product.id}-${v.id}`, e.target.value)}
                               className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1 rounded-md text-[12px] w-[80px] focus:outline-none focus:border-tt-cyan focus:bg-[rgba(105,201,208,0.08)] transition-all"
                             />

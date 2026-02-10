@@ -36,7 +36,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
   const profitPerVideoChange = prevMetrics ? pctChange(metrics.profitPerVideo, prevMetrics.profitPerVideo) : null;
 
   return (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 mb-6">
+    <div className="grid grid-cols-3 gap-4 mb-6">
       {/* 1. Total GMV — with % change */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in">
         <div className="text-xs text-tt-muted uppercase tracking-wide mb-2">Total GMV</div>

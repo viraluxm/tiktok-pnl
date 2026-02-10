@@ -81,6 +81,7 @@ export function getDoughnutChartOptions(rawAmounts: number[]): ChartOptions<'dou
               return {
                 text: `${label} (${pct}%)`,
                 fillStyle: Array.isArray(dataset.backgroundColor) ? (dataset.backgroundColor as string[])[i] : '#ccc',
+                fontColor: '#ffffff',
                 strokeStyle: 'transparent',
                 hidden: false,
                 index: i,

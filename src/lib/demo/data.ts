@@ -42,7 +42,6 @@ const productDefs: Array<{
     variants: [
       { name: '1 Pack', sku: 'RL-10-1PK', cogs: 8.50, avgPrice: 29.99 },
       { name: '2 Pack', sku: 'RL-10-2PK', cogs: 15.00, avgPrice: 54.99 },
-      { name: '3 Pack', sku: 'RL-10-3PK', cogs: 20.00, avgPrice: 74.99 },
     ],
   },
   { name: 'Portable Phone Tripod', sku: 'PT-MINI-02', cogs: 5.20, avgPrice: 19.99, category: 'Accessories' },
