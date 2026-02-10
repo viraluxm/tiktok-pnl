@@ -60,6 +60,7 @@ export interface DashboardMetrics {
 
 export interface ChartData {
   profitByDate: { labels: string[]; data: number[] };
+  gmvByDate: { labels: string[]; data: number[] };
   productCompare: { labels: string[]; gmv: number[]; profit: number[] };
   costBreakdown: { labels: string[]; data: number[]; colors: string[]; rawAmounts: number[] };
   marginByDate: { labels: string[]; data: number[] };

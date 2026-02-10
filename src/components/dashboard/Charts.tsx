@@ -26,14 +26,14 @@ interface ChartsProps {
   chartData: ChartData;
 }
 
-type ChartView = 'profit' | 'margin' | 'both';
+type ChartView = 'profit' | 'sales' | 'both';
 
 export default function Charts({ chartData }: ChartsProps) {
   const [chartView, setChartView] = useState<ChartView>('both');
 
   const viewOptions: Array<{ label: string; value: ChartView }> = [
     { label: 'Daily Profit', value: 'profit' },
-    { label: 'Daily Margin', value: 'margin' },
+    { label: 'Daily Sales', value: 'sales' },
     { label: 'Both', value: 'both' },
   ];
 
@@ -54,13 +54,13 @@ export default function Charts({ chartData }: ChartsProps) {
       yAxisID: 'y',
     });
   }
-  if (chartView === 'margin' || chartView === 'both') {
+  if (chartView === 'sales' || chartView === 'both') {
     datasets.push({
-      label: 'Profit Margin %',
-      data: chartData.marginByDate.data,
+      label: 'Sales (GMV)',
+      data: chartData.gmvByDate.data,
       borderColor: '#EE1D52',
       backgroundColor: 'rgba(238, 29, 82, 0.1)',
-      fill: chartView === 'margin',
+      fill: chartView === 'sales',
       tension: 0.4,
       pointRadius: 4,
       pointBackgroundColor: '#EE1D52',
@@ -71,13 +71,13 @@ export default function Charts({ chartData }: ChartsProps) {
   }
 
   // Use the longest label set (they should be the same dates)
-  const labels = chartData.profitByDate.labels.length >= chartData.marginByDate.labels.length
+  const labels = chartData.profitByDate.labels.length >= chartData.gmvByDate.labels.length
     ? chartData.profitByDate.labels
-    : chartData.marginByDate.labels;
+    : chartData.gmvByDate.labels;
 
   // Build chart options based on view
   const getOptions = () => {
-    const baseOptions = getLineChartOptions(chartView === 'margin' ? '%' : '$');
+    const baseOptions = getLineChartOptions('$');
     if (chartView === 'both') {
       return {
         ...baseOptions,
@@ -105,14 +105,14 @@ export default function Charts({ chartData }: ChartsProps) {
             position: 'right' as const,
             title: {
               display: true,
-              text: 'Margin (%)',
+              text: 'Sales / GMV ($)',
               color: '#EE1D52',
               font: { size: 11 },
             },
             ticks: {
               color: 'rgba(255,255,255,0.5)',
               font: { size: 11 },
-              callback: (value: unknown) => value + '%',
+              callback: (value: unknown) => '$' + value,
             },
             grid: {
               drawOnChartArea: false,
@@ -135,7 +135,7 @@ export default function Charts({ chartData }: ChartsProps) {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-      {/* Combined Profit & Margin Chart */}
+      {/* Combined Profit & Sales Chart */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl lg:col-span-1">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold text-tt-muted">Performance Trend</h3>

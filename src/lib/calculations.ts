@@ -238,6 +238,13 @@ export function computeChartData(entries: Entry[], costsMap?: CostsMap): ChartDa
     rawAmounts: rawCostAmounts,
   };
 
+  // GMV (Sales) by date
+  const gmvDates = Object.keys(gmvByDateMap).sort();
+  const gmvByDate = {
+    labels: gmvDates,
+    data: gmvDates.map((d) => gmvByDateMap[d]),
+  };
+
   // Margin by date
   const marginDates = Object.keys(gmvByDateMap).sort();
   const marginByDate = {
@@ -247,5 +254,5 @@ export function computeChartData(entries: Entry[], costsMap?: CostsMap): ChartDa
     ),
   };
 
-  return { profitByDate, productCompare, costBreakdown, marginByDate };
+  return { profitByDate, gmvByDate, productCompare, costBreakdown, marginByDate };
 }
