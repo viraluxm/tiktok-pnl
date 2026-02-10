@@ -44,9 +44,22 @@ export default function SummaryCards({ metrics }: SummaryCardsProps) {
       sub: `ROAS: ${roasDisplay}`, delay: 'animate-fade-in-5',
     },
     {
+      label: 'Affiliate Commission Paid', value: fmt(metrics.totalAffiliate), color: 'text-tt-yellow',
+      sub: metrics.totalGMV > 0 ? `${((metrics.totalAffiliate / metrics.totalGMV) * 100).toFixed(1)}% of GMV` : 'no sales yet',
+      delay: 'animate-fade-in-6',
+    },
+    {
+      label: 'Revenue Per Video', value: fmt(metrics.revenuePerVideo), color: 'text-tt-cyan',
+      sub: `${fmtInt(metrics.totalVideos)} videos total`, delay: 'animate-fade-in-7',
+    },
+    {
+      label: 'Profit Per Video', value: fmt(metrics.profitPerVideo), color: metrics.profitPerVideo >= 0 ? 'text-tt-green' : 'text-tt-red',
+      sub: metrics.profitPerVideo >= 0 ? 'per video avg' : 'net loss per video', delay: 'animate-fade-in-8',
+    },
+    {
       label: 'Top Product', value: metrics.topProduct?.name || '--', color: 'text-tt-cyan',
       sub: metrics.topProduct ? `${fmt(metrics.topProduct.profit)} net profit` : 'by net profit',
-      delay: 'animate-fade-in-6', smallValue: true,
+      delay: 'animate-fade-in-9', smallValue: true,
     },
   ];
 

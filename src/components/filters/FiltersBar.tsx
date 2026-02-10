@@ -1,24 +1,20 @@
 'use client';
 
-import type { FilterState, Product } from '@/types';
+import type { FilterState } from '@/types';
 
 interface FiltersBarProps {
   filters: FilterState;
-  products: Product[];
   onQuickFilter: (days: number | 'all') => void;
   onDateFromChange: (date: string | null) => void;
   onDateToChange: (date: string | null) => void;
-  onProductChange: (productId: string) => void;
   activeQuickFilter: number | 'all';
 }
 
 export default function FiltersBar({
   filters,
-  products,
   onQuickFilter,
   onDateFromChange,
   onDateToChange,
-  onProductChange,
   activeQuickFilter,
 }: FiltersBarProps) {
   const quickFilters: Array<{ label: string; value: number | 'all' }> = [
@@ -64,19 +60,6 @@ export default function FiltersBar({
           onChange={(e) => onDateToChange(e.target.value || null)}
           className="bg-tt-input-bg border border-tt-input-border text-tt-text px-2.5 py-1.5 rounded-lg text-[13px] focus:outline-none focus:border-tt-cyan"
         />
-      </div>
-      <div className="flex items-center gap-2">
-        <label className="text-[13px] text-tt-muted font-medium">Product:</label>
-        <select
-          value={filters.productId}
-          onChange={(e) => onProductChange(e.target.value)}
-          className="bg-tt-input-bg border border-tt-input-border text-tt-text px-3 py-1.5 rounded-lg text-[13px] focus:outline-none focus:border-tt-cyan"
-        >
-          <option value="all">All Products</option>
-          {products.map((p) => (
-            <option key={p.id} value={p.id}>{p.name}</option>
-          ))}
-        </select>
       </div>
     </div>
   );

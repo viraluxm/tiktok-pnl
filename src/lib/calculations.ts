@@ -70,6 +70,8 @@ export function computeDashboardMetrics(entries: Entry[]): DashboardMetrics {
 
   const avgMargin = totalGMV > 0 ? (totalNetProfit / totalGMV) * 100 : 0;
   const avgViewsPerVideo = totalVideos > 0 ? totalViews / totalVideos : 0;
+  const revenuePerVideo = totalVideos > 0 ? totalGMV / totalVideos : 0;
+  const profitPerVideo = totalVideos > 0 ? totalNetProfit / totalVideos : 0;
   const roas = totalAds > 0 ? totalGMV / totalAds : null;
 
   let topProduct: { name: string; profit: number } | null = null;
@@ -86,8 +88,12 @@ export function computeDashboardMetrics(entries: Entry[]): DashboardMetrics {
     totalVideos,
     totalViews,
     totalAds,
+    totalAffiliate,
+    totalShipping,
     entryCount: entries.length,
     avgViewsPerVideo,
+    revenuePerVideo,
+    profitPerVideo,
     roas,
     topProduct,
     productProfits,

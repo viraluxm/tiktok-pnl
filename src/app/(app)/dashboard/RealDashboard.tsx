@@ -5,28 +5,26 @@ import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import SummaryCards from '@/components/dashboard/SummaryCards';
+import ForecastCard from '@/components/dashboard/ForecastCard';
 import EntriesTable from '@/components/entries/EntriesTable';
-import ImportModal from '@/components/entries/ImportModal';
-import ProductManager from '@/components/products/ProductManager';
+import ProductCostTable from '@/components/products/ProductCostTable';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useProducts } from '@/hooks/useProducts';
 import { useEntries } from '@/hooks/useEntries';
 import { useFilters } from '@/hooks/useFilters';
 import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
-import { exportCSV, parseCSVData } from '@/lib/csv';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'table' | 'products';
+type ViewTab = 'dashboard' | 'table';
 
 export default function RealDashboard() {
   const [activeView, setActiveView] = useState<ViewTab>('dashboard');
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
-  const [importModalOpen, setImportModalOpen] = useState(false);
 
-  const { filters, setQuickFilter, setDateFrom, setDateTo, setProductId } = useFilters();
-  const { products, addProduct, removeProduct } = useProducts();
-  const { entries, addEntry, updateEntry, deleteEntry, bulkInsert } = useEntries(filters);
+  const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
+  const { products } = useProducts();
+  const { entries, addEntry, updateEntry, deleteEntry } = useEntries(filters);
 
   const metrics = useMemo(() => computeDashboardMetrics(entries), [entries]);
   const chartData = useMemo(() => computeChartData(entries), [entries]);
@@ -34,15 +32,6 @@ export default function RealDashboard() {
   function handleQuickFilter(days: number | 'all') {
     setActiveQuickFilter(days);
     setQuickFilter(days);
-  }
-
-  function handleExportCSV() {
-    exportCSV(entries);
-  }
-
-  function handleClearAll() {
-    if (!confirm('Are you sure you want to clear all entries? This cannot be undone.')) return;
-    entries.forEach((e) => deleteEntry.mutate(e.id));
   }
 
   function handleAddEntry(productId: string) {
@@ -67,56 +56,9 @@ export default function RealDashboard() {
     deleteEntry.mutate(id);
   }
 
-  async function handleImport(text: string) {
-    const parsed = parseCSVData(text);
-    if (parsed.length === 0) return;
-
-    // Find or create products
-    const existingNames = new Set(products.map((p) => p.name.toLowerCase()));
-    const newProductNames = [...new Set(parsed.map((r) => r.productName))].filter(
-      (name) => !existingNames.has(name.toLowerCase())
-    );
-
-    // Create missing products
-    for (const name of newProductNames) {
-      await addProduct.mutateAsync(name);
-    }
-
-    // We need to wait a moment for the products query to update
-    // For simplicity, refetch products from supabase inline
-    const { createClient } = await import('@/lib/supabase/client');
-    const supabase = createClient();
-    const { data: allProducts } = await supabase
-      .from('products')
-      .select('*')
-      .order('created_at');
-
-    if (!allProducts) return;
-
-    const productMap = new Map(allProducts.map((p: { name: string; id: string }) => [p.name.toLowerCase(), p.id]));
-
-    const entriesToInsert = parsed
-      .map((r) => ({
-        product_id: productMap.get(r.productName.toLowerCase()) || '',
-        date: r.date,
-        gmv: r.gmv,
-        videos_posted: r.videosPosted,
-        views: r.views,
-        shipping: r.shipping,
-        affiliate: r.affiliate,
-        ads: r.ads,
-      }))
-      .filter((e) => e.product_id);
-
-    if (entriesToInsert.length > 0) {
-      bulkInsert.mutate(entriesToInsert);
-    }
-  }
-
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
     { label: 'Data Entry', value: 'table' },
-    { label: 'Products', value: 'products' },
   ];
 
   return (
@@ -127,11 +69,9 @@ export default function RealDashboard() {
         <TikTokConnect />
         <FiltersBar
           filters={filters}
-          products={products}
           onQuickFilter={handleQuickFilter}
           onDateFromChange={setDateFrom}
           onDateToChange={setDateTo}
-          onProductChange={setProductId}
           activeQuickFilter={activeQuickFilter}
         />
 
@@ -156,40 +96,29 @@ export default function RealDashboard() {
         {activeView === 'dashboard' && (
           <>
             <SummaryCards metrics={metrics} />
+            <ForecastCard entries={entries} />
             <Charts chartData={chartData} />
           </>
         )}
 
         {/* Data Entry View */}
         {activeView === 'table' && (
-          <EntriesTable
-            entries={entries}
-            products={products}
-            onAddEntry={handleAddEntry}
-            onUpdateEntry={handleUpdateEntry}
-            onDeleteEntry={handleDeleteEntry}
-          />
-        )}
-
-        {/* Products View */}
-        {activeView === 'products' && (
-          <ProductManager
-            products={products}
-            onAddProduct={(name) => addProduct.mutate(name)}
-            onRemoveProduct={(id) => {
-              if (products.length <= 1) return;
-              if (!confirm('Delete this product and all its entries?')) return;
-              removeProduct.mutate(id);
-            }}
-          />
+          <div className="space-y-6">
+            <ProductCostTable
+              products={products}
+              productProfits={metrics.productProfits}
+              chartData={chartData}
+            />
+            <EntriesTable
+              entries={entries}
+              products={products}
+              onAddEntry={handleAddEntry}
+              onUpdateEntry={handleUpdateEntry}
+              onDeleteEntry={handleDeleteEntry}
+            />
+          </div>
         )}
       </div>
-
-      <ImportModal
-        isOpen={importModalOpen}
-        onClose={() => setImportModalOpen(false)}
-        onImport={handleImport}
-      />
     </div>
   );
 }

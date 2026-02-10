@@ -37,8 +37,12 @@ export interface DashboardMetrics {
   totalVideos: number;
   totalViews: number;
   totalAds: number;
+  totalAffiliate: number;
+  totalShipping: number;
   entryCount: number;
   avgViewsPerVideo: number;
+  revenuePerVideo: number;
+  profitPerVideo: number;
   roas: number | null;
   topProduct: { name: string; profit: number } | null;
   productProfits: Record<string, { profit: number; gmv: number }>;
