@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { useDemo } from '@/lib/demo/context';
+import { DEMO_USER_EMAIL } from '@/lib/demo/data';
 
 export default function AppLayout({
   children,
@@ -11,6 +13,7 @@ export default function AppLayout({
 }) {
   const [checked, setChecked] = useState(false);
   const router = useRouter();
+  const { isDemo, enterDemo } = useDemo();
 
   useEffect(() => {
     const supabase = createClient();
@@ -18,10 +21,14 @@ export default function AppLayout({
       if (!user) {
         router.replace('/login');
       } else {
+        // Auto-detect demo account on page load / refresh
+        if (user.email?.toLowerCase() === DEMO_USER_EMAIL.toLowerCase() && !isDemo) {
+          enterDemo();
+        }
         setChecked(true);
       }
     });
-  }, [router]);
+  }, [router, isDemo, enterDemo]);
 
   if (!checked) {
     return (

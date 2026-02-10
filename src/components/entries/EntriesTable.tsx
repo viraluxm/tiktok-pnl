@@ -82,7 +82,16 @@ export default function EntriesTable({ entries, products, onAddEntry, onUpdateEn
                   className={`border-b border-tt-border transition-colors hover:bg-[rgba(255,255,255,0.03)] ${idx % 2 === 0 ? '' : 'bg-[rgba(255,255,255,0.015)]'}`}
                 >
                   <td className="px-3.5 py-2.5">
-                    <input type="date" defaultValue={e.date} onChange={(ev) => handleChange(e.id, 'date', ev.target.value)} className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[140px] focus:outline-none focus:border-tt-cyan focus:bg-[rgba(105,201,208,0.08)] transition-all" />
+                    <div className="flex items-center gap-1.5">
+                      <input type="date" defaultValue={e.date} onChange={(ev) => handleChange(e.id, 'date', ev.target.value)} className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[140px] focus:outline-none focus:border-tt-cyan focus:bg-[rgba(105,201,208,0.08)] transition-all" />
+                      {e.source === 'tiktok' && (
+                        <span title="Synced from TikTok" className="flex-shrink-0 w-4 h-4 rounded bg-[rgba(105,201,208,0.15)] flex items-center justify-center">
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="#69C9D0">
+                            <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.88-2.89 2.89 2.89 0 0 1 2.88-2.89c.28 0 .56.04.82.1v-3.5a6.37 6.37 0 0 0-.82-.05A6.34 6.34 0 0 0 3.15 15.2a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V8.87a8.16 8.16 0 0 0 4.76 1.52v-3.4a4.85 4.85 0 0 1-1-.3z" />
+                          </svg>
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3.5 py-2.5">
                     <select defaultValue={e.product_id} onChange={(ev) => handleChange(e.id, 'product_id', ev.target.value)} className="bg-tt-input-bg border border-transparent text-tt-text px-2 py-1.5 rounded-md text-[13px] focus:outline-none focus:border-tt-cyan transition-all">

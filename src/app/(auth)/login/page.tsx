@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { createClient } from '@/lib/supabase/client';
+import { useDemo } from '@/lib/demo/context';
+import { DEMO_USER_EMAIL } from '@/lib/demo/data';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -13,18 +15,23 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const supabase = createClient();
+  const { enterDemo } = useDemo();
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
     if (error) {
       setError(error.message);
       setLoading(false);
     } else {
+      // Auto-detect demo account by email
+      if (data.user?.email?.toLowerCase() === DEMO_USER_EMAIL.toLowerCase()) {
+        enterDemo();
+      }
       router.push('/dashboard');
       router.refresh();
     }

@@ -18,6 +18,7 @@ export interface Entry {
   ads: number;
   created_at: string;
   updated_at: string;
+  source?: 'manual' | 'tiktok';
   product?: Product;
 }
 

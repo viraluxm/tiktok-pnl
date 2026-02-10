@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import Image from 'next/image';
+import PricingSection from '@/components/pricing/PricingSection';
 
 export default function LandingPage() {
   return (
@@ -66,7 +67,7 @@ export default function LandingPage() {
               href="/signup"
               className="px-8 py-3.5 text-base font-semibold text-black bg-white rounded-xl hover:bg-gray-200 transition-all shadow-lg shadow-white/10"
             >
-              Start Tracking for Free
+              Start Free Trial
             </Link>
             <a
               href="#features"
@@ -264,49 +265,7 @@ export default function LandingPage() {
 
       {/* Pricing Section */}
       <section id="pricing" className="py-24 bg-[#0a0a0a]">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="text-center mb-16">
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/[0.06] border border-white/[0.08] text-[#69C9D0] text-sm font-medium mb-4">
-              Pricing
-            </div>
-            <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight mb-4 text-white">
-              Simple, Transparent Pricing
-            </h2>
-          </div>
-
-          <div className="max-w-md mx-auto">
-            <div className="rounded-2xl border border-[#69C9D0]/40 bg-white/[0.03] p-8 text-center shadow-xl shadow-[#69C9D0]/5">
-              <p className="text-sm font-semibold text-[#69C9D0] uppercase tracking-wide mb-2">Free Forever</p>
-              <div className="mb-6">
-                <span className="text-5xl font-extrabold text-white">$0</span>
-                <span className="text-gray-500 ml-1">/month</span>
-              </div>
-              <ul className="text-left space-y-3 mb-8">
-                {[
-                  'Unlimited products',
-                  'Real-time analytics dashboard',
-                  'CSV import & export',
-                  'Expense tracking',
-                  'Interactive charts',
-                  'Secure cloud storage',
-                ].map((item, i) => (
-                  <li key={i} className="flex items-center gap-3 text-gray-300">
-                    <svg className="w-5 h-5 text-[#69C9D0] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12"/>
-                    </svg>
-                    {item}
-                  </li>
-                ))}
-              </ul>
-              <Link
-                href="/signup"
-                className="block w-full px-8 py-3.5 text-base font-semibold text-black bg-white rounded-xl hover:bg-gray-200 transition-all"
-              >
-                Get Started Free
-              </Link>
-            </div>
-          </div>
-        </div>
+        <PricingSection />
       </section>
 
       {/* CTA Section */}
@@ -322,7 +281,7 @@ export default function LandingPage() {
             href="/signup"
             className="inline-flex px-8 py-3.5 text-base font-semibold bg-white text-black rounded-xl hover:bg-gray-200 transition-all shadow-lg shadow-white/10"
           >
-            Start Tracking for Free
+            Start Your Free Trial
           </Link>
         </div>
       </section>
