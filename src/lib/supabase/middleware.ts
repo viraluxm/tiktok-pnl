@@ -33,11 +33,17 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  const isDemoAuth = request.nextUrl.pathname.startsWith('/demo-auth');
+
   const isAuthPage =
     request.nextUrl.pathname.startsWith('/login') ||
     request.nextUrl.pathname.startsWith('/signup') ||
-    request.nextUrl.pathname.startsWith('/auth') ||
-    request.nextUrl.pathname.startsWith('/demo-auth');
+    request.nextUrl.pathname.startsWith('/auth');
+
+  // Demo auth page is always accessible (temp: for video recording)
+  if (isDemoAuth) {
+    return supabaseResponse;
+  }
 
   // Not logged in and trying to access protected route
   if (!user && !isAuthPage && request.nextUrl.pathname !== '/') {
