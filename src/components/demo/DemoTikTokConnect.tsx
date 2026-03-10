@@ -116,7 +116,7 @@ export default function DemoTikTokConnect() {
 
               {/* Add store */}
               <a
-                href="/api/tiktok/auth"
+                href="/demo-auth"
                 className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[12px] text-tt-cyan hover:bg-[rgba(105,201,208,0.05)] transition-colors"
               >
                 <div className="w-7 h-7 rounded-lg border border-dashed border-tt-cyan/40 flex items-center justify-center">
