@@ -25,9 +25,8 @@ interface ProductCostTableProps {
   entries: Entry[];
   /** Persisted costs map: "productId" or "productId-variantId" -> cost_per_unit */
   savedCosts?: Record<string, number>;
-  /** Called when a cost is changed — pass null for demo mode (local state only) */
+  /** Called when a cost is changed */
   onCostChange?: (productId: string, variantId: string | null, cost: number) => void;
-  isDemo?: boolean;
 }
 
 export default function ProductCostTable({
@@ -37,7 +36,6 @@ export default function ProductCostTable({
   entries,
   savedCosts,
   onCostChange,
-  isDemo,
 }: ProductCostTableProps) {
   const [localCosts, setLocalCosts] = useState<Record<string, string>>({});
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
@@ -55,20 +53,13 @@ export default function ProductCostTable({
     setLocalCosts((prev) => ({ ...prev, [key]: value }));
 
     if (onCostChange) {
-      if (isDemo) {
-        // Demo mode: update parent state immediately so dashboard recalculates
+      if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
+      debounceTimers.current[key] = setTimeout(() => {
         const numVal = parseFloat(value) || 0;
         onCostChange(productId, variantId, numVal);
-      } else {
-        // Real mode: debounce save to DB
-        if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
-        debounceTimers.current[key] = setTimeout(() => {
-          const numVal = parseFloat(value) || 0;
-          onCostChange(productId, variantId, numVal);
-        }, 800);
-      }
+      }, 800);
     }
-  }, [onCostChange, isDemo]);
+  }, [onCostChange]);
 
   // Compute variant-level stats from entries
   const variantStats = useCallback((productId: string) => {

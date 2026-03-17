@@ -5,8 +5,6 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { createClient } from '@/lib/supabase/client';
-import { useDemo } from '@/lib/demo/context';
-import { DEMO_USER_EMAIL } from '@/lib/demo/data';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -14,8 +12,7 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
-  const supabase = createClient(); // still needed for Google OAuth
-  const { enterDemo } = useDemo();
+  const supabase = createClient();
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -39,10 +36,6 @@ export default function LoginPage() {
         return;
       }
 
-      // Auto-detect demo account by email
-      if (data.user?.email?.toLowerCase() === DEMO_USER_EMAIL.toLowerCase()) {
-        enterDemo();
-      }
       router.push('/dashboard');
       router.refresh();
     } catch {

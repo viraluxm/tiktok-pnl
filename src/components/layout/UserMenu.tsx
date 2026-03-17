@@ -4,7 +4,6 @@ import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { useUser } from '@/hooks/useUser';
-import { useDemo } from '@/lib/demo/context';
 
 export default function UserMenu() {
   const [open, setOpen] = useState(false);
@@ -12,7 +11,6 @@ export default function UserMenu() {
   const router = useRouter();
   const supabase = createClient();
   const { user } = useUser();
-  const { isDemo, exitDemo } = useDemo();
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -26,7 +24,6 @@ export default function UserMenu() {
   }, []);
 
   async function handleSignOut() {
-    if (isDemo) exitDemo();
     await supabase.auth.signOut();
     router.push('/login');
     router.refresh();
