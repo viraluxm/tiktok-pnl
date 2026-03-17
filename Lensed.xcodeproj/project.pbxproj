@@ -1,0 +1,851 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 63;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		04256E48EB6B1F03C2EDA7EF /* DateRangePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BA3E8FFEB6098629E7B842A /* DateRangePickerView.swift */; };
+		07C01692DDB0A998AE281367 /* TikTokProductListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9B749170CA603D1B1A9F922 /* TikTokProductListView.swift */; };
+		15FF6C0282A2FC704990F01A /* WhatnotSummaryCardsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A2101F3EF57A2521A327343 /* WhatnotSummaryCardsView.swift */; };
+		18FA32EDAC01DF9D2A304A11 /* WhatnotDashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34FB29E94D03733E72460A64 /* WhatnotDashboardViewModel.swift */; };
+		1A3252E70B45B18D6529C195 /* LensedApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2893BD66D07550E762E4EE8 /* LensedApp.swift */; };
+		1E0B7AF3F735DEC2832888D2 /* TikTokConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA14D8DF9A30A0F6E8CA26CA /* TikTokConnection.swift */; };
+		21266F0D730E336B72CDA25D /* WhatnotLivestreamListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8112554D15ABE14A3DC806ED /* WhatnotLivestreamListView.swift */; };
+		2371FF140AE78987F5888E3E /* QuickFilterBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7D29CAE1631FEFF5D3B7EF9 /* QuickFilterBar.swift */; };
+		295736A134BBEF82EB62DDEC /* WhatnotCalculations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9205861A030CE01B86150A1 /* WhatnotCalculations.swift */; };
+		2D2194F29D9B7F3D221E7796 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = 1CF8A7EDA9F5A1E07F75BFCC /* Auth */; };
+		2E55B4626B19075EE9F2348E /* AccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E6334D09035133F109EAC7A /* AccountView.swift */; };
+		32B27BCA42A495B8918502D9 /* AccountViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99CD2A2392E972574B909104 /* AccountViewModel.swift */; };
+		337B87906418E4D7F3DA338B /* AuthViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAABB0EFAA7DB07FB6373B32 /* AuthViewModel.swift */; };
+		45A028B81FFA9E583D9B5164 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 88C8372CD3E3E8903B7CF4D0 /* Assets.xcassets */; };
+		46AF1626BE8867DC02019E86 /* Formatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91AB6B2CE47B1B039A01339F /* Formatting.swift */; };
+		50FF44C7257ADCB1439352AA /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98FB35E9C703280E4CBC16FD /* LoginView.swift */; };
+		5511C1EF9CA82EF494A4B894 /* Double+Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46D94EE6F9DCD3A9DB67E489 /* Double+Extensions.swift */; };
+		62E766401F16D1C4C51CC7FB /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA29A99B630F2A6457B31DBE /* AuthService.swift */; };
+		6C1C9F39411CC098BD8BD5D6 /* Profile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 687598B42442C9C2ED47F7DA /* Profile.swift */; };
+		6DB83AF163B3F936A5D9E71C /* TikTokDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AE13E9CF18E9FB23BD1ADB3 /* TikTokDashboardView.swift */; };
+		6FCBA12CA5858E80AB3D37E8 /* WhatnotSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6808B3F51440BD1B42AEDA7A /* WhatnotSyncService.swift */; };
+		7174EC45BF251F676B605D00 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 851D734FA15ADFA39E453BF0 /* ContentView.swift */; };
+		77B53E57997497EC818E194D /* EmptyStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A32A3C24FD1FE5D921D49B0D /* EmptyStateView.swift */; };
+		7942A875D17E30F36FC2D87C /* WhatnotDataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B090169A429E84A84B5D982 /* WhatnotDataService.swift */; };
+		7C4E49730B6CB3B2C73E116E /* WhatnotDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2894BB1AE82A75219BE587A4 /* WhatnotDashboardView.swift */; };
+		850EBB21123BDD7479D77F5A /* MetricCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C34CE6B7DF18D4CE4969B5D7 /* MetricCardView.swift */; };
+		879F03EE4809D5A2C182AF6D /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89D84EEED304821FFE070284 /* MainTabView.swift */; };
+		8DB7EF6ECBD3955A1DD6227F /* ConnectionStatusCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4643843C286FAFABE70A2314 /* ConnectionStatusCard.swift */; };
+		8FFBD3A781B80145573CA3A9 /* WhatnotChartsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53DA7F1B2E4B2AA53734B7BF /* WhatnotChartsView.swift */; };
+		9503987E249E49275270DB03 /* SharedModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 975D27A95FA45DA9F4C9C4DE /* SharedModels.swift */; };
+		99689CCD297D5267485381F8 /* TikTokCalculations.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFD5E4EA3FFB6AB9BC9F9A8E /* TikTokCalculations.swift */; };
+		AACB83E69C20D9096C2CA22F /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1B3B913FDF4862848D7444 /* SupabaseService.swift */; };
+		AB003CD4E9B1CDDD121C34AE /* TikTokEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91C9BC3FF0715F48AC867435 /* TikTokEntry.swift */; };
+		AEC3A8A7444A6709CD3CC17E /* TikTokChartsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF0118DE6DF961F9CB1794EB /* TikTokChartsView.swift */; };
+		AFA12BA3562DC391BC3F7705 /* WhatnotProductListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7CA0A92B4314E9AE6BFFE62 /* WhatnotProductListView.swift */; };
+		B221ECDE2FBDC2067DD84E30 /* Date+Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 236F1C248E406D62C4FC1CAC /* Date+Extensions.swift */; };
+		B63572F5B49F1CC9C5D1F78E /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 15072BA2189387FD02D5356B /* Supabase */; };
+		C55C3AA3AFF8BDA7AEE2A003 /* LensedTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F5E7B7DF5588864727611EB /* LensedTheme.swift */; };
+		C7D57D075DDED9E299880654 /* WhatnotModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E274739A6EB7F7C2AC143C8 /* WhatnotModels.swift */; };
+		CB3E30D8748FAFE59927C6DA /* Color+Lensed.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB055A2E17973D1C6D3CB48F /* Color+Lensed.swift */; };
+		D2D69B6088A25236660E4212 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E57426E36A7432F2AA989DF /* AppConfiguration.swift */; };
+		D418C739D082A1F3181963C9 /* TikTokDashboardViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2D02FC2ED63FD13623C6463 /* TikTokDashboardViewModel.swift */; };
+		E1D8AE3792810E98EACC4E69 /* ProductsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81696756440FCACD94C57207 /* ProductsView.swift */; };
+		E889FA9173C371512D4A0E9B /* TikTokSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 264DA62BF6C6BAF7D177B7E0 /* TikTokSyncService.swift */; };
+		EA534C7576BD92087E4D7924 /* TikTokDataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8E0C828F5471ACF4C6F883F /* TikTokDataService.swift */; };
+		EAC1205690E929CC92F830BF /* TikTokSummaryCardsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BF1879D0739B2BF9469235 /* TikTokSummaryCardsView.swift */; };
+		WIDGET001A1B2C3D4E5F6A7B8C9D /* WidgetDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = WIDGET002B2C3D4E5F6A7B8C9D0E /* WidgetDataStore.swift */; };
+		WIDGET003C3D4E5F6A7B8C9D0E1F /* LensedWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = WIDGET004D4E5F6A7B8C9D0E1F2A /* LensedWidgetsBundle.swift */; };
+		WIDGET005E5F6A7B8C9D0E1F2A3B /* LensedWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = WIDGET006F6A7B8C9D0E1F2A3B4C /* LensedWidgets.swift */; };
+		WIDGET00EMBED1A2B3C4D5E6F7A8B9C /* LensedWidgetsExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = WIDGET007A7B8C9D0E1F2A3B4C5D /* LensedWidgetsExtension.appex */; };
+		WIDGET00RES1B2C3D4E5F6A7B8C9D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = WIDGET00RES2C3D4E5F6A7B8C9D0E /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		WIDGET00PROXY5F6A7B8C9D0E1F2A3B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA05BBA1BF205F8C362002DE /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = WIDGET00A0E1F2A3B4C5D6E7F8A;
+			remoteInfo = LensedWidgetsExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		WIDGET00EMBED3D4E5F6A7B8C9D0E1F /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				WIDGET00EMBED1A2B3C4D5E6F7A8B9C /* LensedWidgetsExtension.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0A2101F3EF57A2521A327343 /* WhatnotSummaryCardsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotSummaryCardsView.swift; sourceTree = "<group>"; };
+		128DF05FDF9C3605C11FA7C4 /* Lensed.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Lensed.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1E6334D09035133F109EAC7A /* AccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountView.swift; sourceTree = "<group>"; };
+		236F1C248E406D62C4FC1CAC /* Date+Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Date+Extensions.swift"; sourceTree = "<group>"; };
+		264DA62BF6C6BAF7D177B7E0 /* TikTokSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokSyncService.swift; sourceTree = "<group>"; };
+		2894BB1AE82A75219BE587A4 /* WhatnotDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotDashboardView.swift; sourceTree = "<group>"; };
+		34FB29E94D03733E72460A64 /* WhatnotDashboardViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotDashboardViewModel.swift; sourceTree = "<group>"; };
+		4643843C286FAFABE70A2314 /* ConnectionStatusCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatusCard.swift; sourceTree = "<group>"; };
+		46D94EE6F9DCD3A9DB67E489 /* Double+Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Double+Extensions.swift"; sourceTree = "<group>"; };
+		4AE13E9CF18E9FB23BD1ADB3 /* TikTokDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokDashboardView.swift; sourceTree = "<group>"; };
+		4B090169A429E84A84B5D982 /* WhatnotDataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotDataService.swift; sourceTree = "<group>"; };
+		4F5E7B7DF5588864727611EB /* LensedTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensedTheme.swift; sourceTree = "<group>"; };
+		53DA7F1B2E4B2AA53734B7BF /* WhatnotChartsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotChartsView.swift; sourceTree = "<group>"; };
+		6808B3F51440BD1B42AEDA7A /* WhatnotSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotSyncService.swift; sourceTree = "<group>"; };
+		687598B42442C9C2ED47F7DA /* Profile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Profile.swift; sourceTree = "<group>"; };
+		6BA3E8FFEB6098629E7B842A /* DateRangePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DateRangePickerView.swift; sourceTree = "<group>"; };
+		6E274739A6EB7F7C2AC143C8 /* WhatnotModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotModels.swift; sourceTree = "<group>"; };
+		7D1B3B913FDF4862848D7444 /* SupabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseService.swift; sourceTree = "<group>"; };
+		8112554D15ABE14A3DC806ED /* WhatnotLivestreamListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotLivestreamListView.swift; sourceTree = "<group>"; };
+		81696756440FCACD94C57207 /* ProductsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductsView.swift; sourceTree = "<group>"; };
+		851D734FA15ADFA39E453BF0 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		88C8372CD3E3E8903B7CF4D0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		89D84EEED304821FFE070284 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		8E57426E36A7432F2AA989DF /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		91AB6B2CE47B1B039A01339F /* Formatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Formatting.swift; sourceTree = "<group>"; };
+		91C9BC3FF0715F48AC867435 /* TikTokEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokEntry.swift; sourceTree = "<group>"; };
+		975D27A95FA45DA9F4C9C4DE /* SharedModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedModels.swift; sourceTree = "<group>"; };
+		98FB35E9C703280E4CBC16FD /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		99CD2A2392E972574B909104 /* AccountViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountViewModel.swift; sourceTree = "<group>"; };
+		A32A3C24FD1FE5D921D49B0D /* EmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateView.swift; sourceTree = "<group>"; };
+		A9205861A030CE01B86150A1 /* WhatnotCalculations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotCalculations.swift; sourceTree = "<group>"; };
+		B8E0C828F5471ACF4C6F883F /* TikTokDataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokDataService.swift; sourceTree = "<group>"; };
+		B9B749170CA603D1B1A9F922 /* TikTokProductListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokProductListView.swift; sourceTree = "<group>"; };
+		BFD5E4EA3FFB6AB9BC9F9A8E /* TikTokCalculations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokCalculations.swift; sourceTree = "<group>"; };
+		C34CE6B7DF18D4CE4969B5D7 /* MetricCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricCardView.swift; sourceTree = "<group>"; };
+		CA14D8DF9A30A0F6E8CA26CA /* TikTokConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokConnection.swift; sourceTree = "<group>"; };
+		CA29A99B630F2A6457B31DBE /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
+		CF0118DE6DF961F9CB1794EB /* TikTokChartsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokChartsView.swift; sourceTree = "<group>"; };
+		D7D29CAE1631FEFF5D3B7EF9 /* QuickFilterBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickFilterBar.swift; sourceTree = "<group>"; };
+		DB055A2E17973D1C6D3CB48F /* Color+Lensed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Color+Lensed.swift"; sourceTree = "<group>"; };
+		E7BF1879D0739B2BF9469235 /* TikTokSummaryCardsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokSummaryCardsView.swift; sourceTree = "<group>"; };
+		E7CA0A92B4314E9AE6BFFE62 /* WhatnotProductListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatnotProductListView.swift; sourceTree = "<group>"; };
+		F2893BD66D07550E762E4EE8 /* LensedApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensedApp.swift; sourceTree = "<group>"; };
+		F2D02FC2ED63FD13623C6463 /* TikTokDashboardViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokDashboardViewModel.swift; sourceTree = "<group>"; };
+		FAABB0EFAA7DB07FB6373B32 /* AuthViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthViewModel.swift; sourceTree = "<group>"; };
+		WIDGET002B2C3D4E5F6A7B8C9D0E /* WidgetDataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetDataStore.swift; sourceTree = "<group>"; };
+		WIDGET004D4E5F6A7B8C9D0E1F2A /* LensedWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensedWidgetsBundle.swift; sourceTree = "<group>"; };
+		WIDGET006F6A7B8C9D0E1F2A3B4C /* LensedWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensedWidgets.swift; sourceTree = "<group>"; };
+		WIDGET007A7B8C9D0E1F2A3B4C5D /* LensedWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LensedWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		WIDGET00RES2C3D4E5F6A7B8C9D0E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1AF35E9E9E940F6AF1DDDBA8 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B63572F5B49F1CC9C5D1F78E /* Supabase in Frameworks */,
+				2D2194F29D9B7F3D221E7796 /* Auth in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		076A2A84DB8AAD1345991D54 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B2346E8AE8DBF801AD052322 /* Account */,
+				72A458CAFDAD236945C1E13E /* App */,
+				09F33C3C58F47A38EA39A5F6 /* Auth */,
+				E7C7C11C21AE08D62646D40F /* Shared */,
+				57922A0BFF754C40722DEA3E /* TikTok */,
+				4B2DEBFE7CDF1EC2E71E8354 /* Whatnot */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		08F55FDCC7DB42C848D1A51D /* Theme */ = {
+			isa = PBXGroup;
+			children = (
+				4F5E7B7DF5588864727611EB /* LensedTheme.swift */,
+			);
+			path = Theme;
+			sourceTree = "<group>";
+		};
+		09F33C3C58F47A38EA39A5F6 /* Auth */ = {
+			isa = PBXGroup;
+			children = (
+				98FB35E9C703280E4CBC16FD /* LoginView.swift */,
+			);
+			path = Auth;
+			sourceTree = "<group>";
+		};
+		18D429B40DB2E883701166BC /* Configuration */ = {
+			isa = PBXGroup;
+			children = (
+				8E57426E36A7432F2AA989DF /* AppConfiguration.swift */,
+			);
+			path = Configuration;
+			sourceTree = "<group>";
+		};
+		1AFD41CBE11AB0AAE466FDD3 /* TikTok */ = {
+			isa = PBXGroup;
+			children = (
+				B8E0C828F5471ACF4C6F883F /* TikTokDataService.swift */,
+				264DA62BF6C6BAF7D177B7E0 /* TikTokSyncService.swift */,
+			);
+			path = TikTok;
+			sourceTree = "<group>";
+		};
+		4102DA00E3DE3A94F60CBAD6 /* Extensions */ = {
+			isa = PBXGroup;
+			children = (
+				DB055A2E17973D1C6D3CB48F /* Color+Lensed.swift */,
+				236F1C248E406D62C4FC1CAC /* Date+Extensions.swift */,
+				46D94EE6F9DCD3A9DB67E489 /* Double+Extensions.swift */,
+			);
+			path = Extensions;
+			sourceTree = "<group>";
+		};
+		41DAE1FD4B07879469BD1F10 /* Calculations */ = {
+			isa = PBXGroup;
+			children = (
+				91AB6B2CE47B1B039A01339F /* Formatting.swift */,
+				BFD5E4EA3FFB6AB9BC9F9A8E /* TikTokCalculations.swift */,
+				A9205861A030CE01B86150A1 /* WhatnotCalculations.swift */,
+			);
+			path = Calculations;
+			sourceTree = "<group>";
+		};
+		431883AD3374656916CE7486 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				128DF05FDF9C3605C11FA7C4 /* Lensed.app */,
+				WIDGET007A7B8C9D0E1F2A3B4C5D /* LensedWidgetsExtension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4B2DEBFE7CDF1EC2E71E8354 /* Whatnot */ = {
+			isa = PBXGroup;
+			children = (
+				53DA7F1B2E4B2AA53734B7BF /* WhatnotChartsView.swift */,
+				2894BB1AE82A75219BE587A4 /* WhatnotDashboardView.swift */,
+				8112554D15ABE14A3DC806ED /* WhatnotLivestreamListView.swift */,
+				E7CA0A92B4314E9AE6BFFE62 /* WhatnotProductListView.swift */,
+				0A2101F3EF57A2521A327343 /* WhatnotSummaryCardsView.swift */,
+			);
+			path = Whatnot;
+			sourceTree = "<group>";
+		};
+		4CA92A787E85B2B80D28E976 = {
+			isa = PBXGroup;
+			children = (
+				C4FC27BBF9C2D693B1B8CFDE /* Lensed */,
+				WIDGET008B8C9D0E1F2A3B4C5D6E /* LensedWidgets */,
+				431883AD3374656916CE7486 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		57922A0BFF754C40722DEA3E /* TikTok */ = {
+			isa = PBXGroup;
+			children = (
+				81696756440FCACD94C57207 /* ProductsView.swift */,
+				CF0118DE6DF961F9CB1794EB /* TikTokChartsView.swift */,
+				4AE13E9CF18E9FB23BD1ADB3 /* TikTokDashboardView.swift */,
+				B9B749170CA603D1B1A9F922 /* TikTokProductListView.swift */,
+				E7BF1879D0739B2BF9469235 /* TikTokSummaryCardsView.swift */,
+			);
+			path = TikTok;
+			sourceTree = "<group>";
+		};
+		65D5062CB36857567758B577 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				99CD2A2392E972574B909104 /* AccountViewModel.swift */,
+				FAABB0EFAA7DB07FB6373B32 /* AuthViewModel.swift */,
+				FA697D2AF3DBDC384EBC8494 /* TikTok */,
+				DCD0E2C1F3066ADA169497C3 /* Whatnot */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		664889A750CC31AD4D2D84F9 /* TikTok */ = {
+			isa = PBXGroup;
+			children = (
+				CA14D8DF9A30A0F6E8CA26CA /* TikTokConnection.swift */,
+				91C9BC3FF0715F48AC867435 /* TikTokEntry.swift */,
+			);
+			path = TikTok;
+			sourceTree = "<group>";
+		};
+		6E0B44D6CECCC157B38C0F7B /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				CA29A99B630F2A6457B31DBE /* AuthService.swift */,
+				7D1B3B913FDF4862848D7444 /* SupabaseService.swift */,
+				1AFD41CBE11AB0AAE466FDD3 /* TikTok */,
+				BAAC46CC8889A3A7802427C5 /* Whatnot */,
+				WIDGET002B2C3D4E5F6A7B8C9D0E /* WidgetDataStore.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		72A458CAFDAD236945C1E13E /* App */ = {
+			isa = PBXGroup;
+			children = (
+				851D734FA15ADFA39E453BF0 /* ContentView.swift */,
+				89D84EEED304821FFE070284 /* MainTabView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		9F7647CDB5DAE2D841D3A696 /* Whatnot */ = {
+			isa = PBXGroup;
+			children = (
+				6E274739A6EB7F7C2AC143C8 /* WhatnotModels.swift */,
+			);
+			path = Whatnot;
+			sourceTree = "<group>";
+		};
+		A2F5841BA2E41647CCAC6A70 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				687598B42442C9C2ED47F7DA /* Profile.swift */,
+				A8B011FE89048F8603CD6E19 /* Shared */,
+				664889A750CC31AD4D2D84F9 /* TikTok */,
+				9F7647CDB5DAE2D841D3A696 /* Whatnot */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		A8B011FE89048F8603CD6E19 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				975D27A95FA45DA9F4C9C4DE /* SharedModels.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		B2346E8AE8DBF801AD052322 /* Account */ = {
+			isa = PBXGroup;
+			children = (
+				1E6334D09035133F109EAC7A /* AccountView.swift */,
+				4643843C286FAFABE70A2314 /* ConnectionStatusCard.swift */,
+			);
+			path = Account;
+			sourceTree = "<group>";
+		};
+		BAAC46CC8889A3A7802427C5 /* Whatnot */ = {
+			isa = PBXGroup;
+			children = (
+				4B090169A429E84A84B5D982 /* WhatnotDataService.swift */,
+				6808B3F51440BD1B42AEDA7A /* WhatnotSyncService.swift */,
+			);
+			path = Whatnot;
+			sourceTree = "<group>";
+		};
+		C4FC27BBF9C2D693B1B8CFDE /* Lensed */ = {
+			isa = PBXGroup;
+			children = (
+				88C8372CD3E3E8903B7CF4D0 /* Assets.xcassets */,
+				F2893BD66D07550E762E4EE8 /* LensedApp.swift */,
+				41DAE1FD4B07879469BD1F10 /* Calculations */,
+				18D429B40DB2E883701166BC /* Configuration */,
+				4102DA00E3DE3A94F60CBAD6 /* Extensions */,
+				A2F5841BA2E41647CCAC6A70 /* Models */,
+				6E0B44D6CECCC157B38C0F7B /* Services */,
+				08F55FDCC7DB42C848D1A51D /* Theme */,
+				65D5062CB36857567758B577 /* ViewModels */,
+				076A2A84DB8AAD1345991D54 /* Views */,
+			);
+			path = Lensed;
+			sourceTree = "<group>";
+		};
+		DCD0E2C1F3066ADA169497C3 /* Whatnot */ = {
+			isa = PBXGroup;
+			children = (
+				34FB29E94D03733E72460A64 /* WhatnotDashboardViewModel.swift */,
+			);
+			path = Whatnot;
+			sourceTree = "<group>";
+		};
+		E7C7C11C21AE08D62646D40F /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				6BA3E8FFEB6098629E7B842A /* DateRangePickerView.swift */,
+				A32A3C24FD1FE5D921D49B0D /* EmptyStateView.swift */,
+				C34CE6B7DF18D4CE4969B5D7 /* MetricCardView.swift */,
+				D7D29CAE1631FEFF5D3B7EF9 /* QuickFilterBar.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		FA697D2AF3DBDC384EBC8494 /* TikTok */ = {
+			isa = PBXGroup;
+			children = (
+				F2D02FC2ED63FD13623C6463 /* TikTokDashboardViewModel.swift */,
+			);
+			path = TikTok;
+			sourceTree = "<group>";
+		};
+		WIDGET008B8C9D0E1F2A3B4C5D6E /* LensedWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				WIDGET004D4E5F6A7B8C9D0E1F2A /* LensedWidgetsBundle.swift */,
+				WIDGET006F6A7B8C9D0E1F2A3B4C /* LensedWidgets.swift */,
+				WIDGET00RES2C3D4E5F6A7B8C9D0E /* Assets.xcassets */,
+			);
+			path = LensedWidgets;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1B65306BF4C1E68B74F23485 /* Lensed */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6858BD1322CF55618AE2B206 /* Build configuration list for PBXNativeTarget "Lensed" */;
+			buildPhases = (
+				B3AE01F41C8EBB352B9720D7 /* Sources */,
+				B01BEEC1C951CE85428D4AF5 /* Resources */,
+				1AF35E9E9E940F6AF1DDDBA8 /* Frameworks */,
+				WIDGET00EMBED3D4E5F6A7B8C9D0E1F /* Embed App Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				WIDGET00DEP4E5F6A7B8C9D0E1F2A /* PBXTargetDependency */,
+			);
+			name = Lensed;
+			packageProductDependencies = (
+				15072BA2189387FD02D5356B /* Supabase */,
+				1CF8A7EDA9F5A1E07F75BFCC /* Auth */,
+			);
+			productName = Lensed;
+			productReference = 128DF05FDF9C3605C11FA7C4 /* Lensed.app */;
+			productType = "com.apple.product-type.application";
+		};
+		WIDGET00A0E1F2A3B4C5D6E7F8A /* LensedWidgetsExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = WIDGET00B1F2A3B4C5D6E7F8A9B /* Build configuration list for PBXNativeTarget "LensedWidgetsExtension" */;
+			buildPhases = (
+				WIDGET00C2A3B4C5D6E7F8A9B0C /* Sources */,
+				WIDGET00D3B4C5D6E7F8A9B0C1D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = LensedWidgetsExtension;
+			productName = LensedWidgetsExtension;
+			productReference = WIDGET007A7B8C9D0E1F2A3B4C5D /* LensedWidgetsExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AA05BBA1BF205F8C362002DE /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					1B65306BF4C1E68B74F23485 = {
+						DevelopmentTeam = 439C75857B;
+					};
+					WIDGET00A0E1F2A3B4C5D6E7F8A = {
+						DevelopmentTeam = 439C75857B;
+					};
+				};
+			};
+			buildConfigurationList = 3656DB03DD4613A0AAB1D043 /* Build configuration list for PBXProject "Lensed" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 4CA92A787E85B2B80D28E976;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				7CD41A96EDE217D4E8B16ACC /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1B65306BF4C1E68B74F23485 /* Lensed */,
+				WIDGET00A0E1F2A3B4C5D6E7F8A /* LensedWidgetsExtension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B01BEEC1C951CE85428D4AF5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				45A028B81FFA9E583D9B5164 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		WIDGET00D3B4C5D6E7F8A9B0C1D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				WIDGET00RES1B2C3D4E5F6A7B8C9D /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B3AE01F41C8EBB352B9720D7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2E55B4626B19075EE9F2348E /* AccountView.swift in Sources */,
+				32B27BCA42A495B8918502D9 /* AccountViewModel.swift in Sources */,
+				D2D69B6088A25236660E4212 /* AppConfiguration.swift in Sources */,
+				62E766401F16D1C4C51CC7FB /* AuthService.swift in Sources */,
+				337B87906418E4D7F3DA338B /* AuthViewModel.swift in Sources */,
+				CB3E30D8748FAFE59927C6DA /* Color+Lensed.swift in Sources */,
+				8DB7EF6ECBD3955A1DD6227F /* ConnectionStatusCard.swift in Sources */,
+				7174EC45BF251F676B605D00 /* ContentView.swift in Sources */,
+				B221ECDE2FBDC2067DD84E30 /* Date+Extensions.swift in Sources */,
+				04256E48EB6B1F03C2EDA7EF /* DateRangePickerView.swift in Sources */,
+				5511C1EF9CA82EF494A4B894 /* Double+Extensions.swift in Sources */,
+				77B53E57997497EC818E194D /* EmptyStateView.swift in Sources */,
+				46AF1626BE8867DC02019E86 /* Formatting.swift in Sources */,
+				1A3252E70B45B18D6529C195 /* LensedApp.swift in Sources */,
+				C55C3AA3AFF8BDA7AEE2A003 /* LensedTheme.swift in Sources */,
+				50FF44C7257ADCB1439352AA /* LoginView.swift in Sources */,
+				879F03EE4809D5A2C182AF6D /* MainTabView.swift in Sources */,
+				850EBB21123BDD7479D77F5A /* MetricCardView.swift in Sources */,
+				E1D8AE3792810E98EACC4E69 /* ProductsView.swift in Sources */,
+				6C1C9F39411CC098BD8BD5D6 /* Profile.swift in Sources */,
+				2371FF140AE78987F5888E3E /* QuickFilterBar.swift in Sources */,
+				9503987E249E49275270DB03 /* SharedModels.swift in Sources */,
+				AACB83E69C20D9096C2CA22F /* SupabaseService.swift in Sources */,
+				99689CCD297D5267485381F8 /* TikTokCalculations.swift in Sources */,
+				AEC3A8A7444A6709CD3CC17E /* TikTokChartsView.swift in Sources */,
+				1E0B7AF3F735DEC2832888D2 /* TikTokConnection.swift in Sources */,
+				6DB83AF163B3F936A5D9E71C /* TikTokDashboardView.swift in Sources */,
+				D418C739D082A1F3181963C9 /* TikTokDashboardViewModel.swift in Sources */,
+				EA534C7576BD92087E4D7924 /* TikTokDataService.swift in Sources */,
+				AB003CD4E9B1CDDD121C34AE /* TikTokEntry.swift in Sources */,
+				07C01692DDB0A998AE281367 /* TikTokProductListView.swift in Sources */,
+				EAC1205690E929CC92F830BF /* TikTokSummaryCardsView.swift in Sources */,
+				E889FA9173C371512D4A0E9B /* TikTokSyncService.swift in Sources */,
+				295736A134BBEF82EB62DDEC /* WhatnotCalculations.swift in Sources */,
+				8FFBD3A781B80145573CA3A9 /* WhatnotChartsView.swift in Sources */,
+				7C4E49730B6CB3B2C73E116E /* WhatnotDashboardView.swift in Sources */,
+				18FA32EDAC01DF9D2A304A11 /* WhatnotDashboardViewModel.swift in Sources */,
+				7942A875D17E30F36FC2D87C /* WhatnotDataService.swift in Sources */,
+				21266F0D730E336B72CDA25D /* WhatnotLivestreamListView.swift in Sources */,
+				C7D57D075DDED9E299880654 /* WhatnotModels.swift in Sources */,
+				AFA12BA3562DC391BC3F7705 /* WhatnotProductListView.swift in Sources */,
+				15FF6C0282A2FC704990F01A /* WhatnotSummaryCardsView.swift in Sources */,
+				6FCBA12CA5858E80AB3D37E8 /* WhatnotSyncService.swift in Sources */,
+				WIDGET001A1B2C3D4E5F6A7B8C9D /* WidgetDataStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		WIDGET00C2A3B4C5D6E7F8A9B0C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				WIDGET003C3D4E5F6A7B8C9D0E1F /* LensedWidgetsBundle.swift in Sources */,
+				WIDGET005E5F6A7B8C9D0E1F2A3B /* LensedWidgets.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		WIDGET00DEP4E5F6A7B8C9D0E1F2A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = WIDGET00A0E1F2A3B4C5D6E7F8A /* LensedWidgetsExtension */;
+			targetProxy = WIDGET00PROXY5F6A7B8C9D0E1F2A3B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		225CAB0BA74CD4A13953DDBE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Lensed/Lensed.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 439C75857B;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Lensed;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lensed.Lensed;
+				SDKROOT = iphoneos;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		7ADFEF07CBFD5657B734F072 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		B66FC1E7FF963184B3A23A5E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Lensed/Lensed.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 439C75857B;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Lensed;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lensed.Lensed;
+				SDKROOT = iphoneos;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C4C935BDD287DA6EBF2463B7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		WIDGET00F5D6E7F8A9B0C1D2E3F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LensedWidgets/LensedWidgetsExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 439C75857B;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LensedWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lensed.Lensed.LensedWidgetsExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		WIDGET0106E7F8A9B0C1D2E3F4A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = LensedWidgets/LensedWidgetsExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 439C75857B;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = LensedWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lensed.Lensed.LensedWidgetsExtension;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		3656DB03DD4613A0AAB1D043 /* Build configuration list for PBXProject "Lensed" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C4C935BDD287DA6EBF2463B7 /* Debug */,
+				7ADFEF07CBFD5657B734F072 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6858BD1322CF55618AE2B206 /* Build configuration list for PBXNativeTarget "Lensed" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				225CAB0BA74CD4A13953DDBE /* Debug */,
+				B66FC1E7FF963184B3A23A5E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		WIDGET00B1F2A3B4C5D6E7F8A9B /* Build configuration list for PBXNativeTarget "LensedWidgetsExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				WIDGET00F5D6E7F8A9B0C1D2E3F /* Debug */,
+				WIDGET0106E7F8A9B0C1D2E3F4A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		7CD41A96EDE217D4E8B16ACC /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.39.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		15072BA2189387FD02D5356B /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 7CD41A96EDE217D4E8B16ACC /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+		1CF8A7EDA9F5A1E07F75BFCC /* Auth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 7CD41A96EDE217D4E8B16ACC /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Auth;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = AA05BBA1BF205F8C362002DE /* Project object */;
+}

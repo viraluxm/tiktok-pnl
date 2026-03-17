@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { exchangeCodeForToken, getAuthorizedShops } from '@/lib/tiktok/client';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { encrypt } from '@/lib/crypto';
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
@@ -59,8 +60,8 @@ export async function GET(request: Request) {
       .from('tiktok_connections')
       .upsert({
         user_id: userId,
-        access_token: tokenData.access_token,
-        refresh_token: tokenData.refresh_token,
+        access_token: encrypt(tokenData.access_token),
+        refresh_token: encrypt(tokenData.refresh_token),
         token_expires_at: tokenExpiresAt,
         shop_cipher: shopCipher,
         shop_name: shopName || tokenData.seller_name || 'TikTok Shop',

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getShopOrders, getDateRange } from '@/lib/tiktok/client';
+import { syncLimiter } from '@/lib/rate-limit';
+import { decryptOrFallback } from '@/lib/crypto';
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -9,6 +11,17 @@ export async function POST(request: Request) {
 
   if (authError || !user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const { success, retryAfterMs } = syncLimiter.check(`sync:${user.id}`);
+  if (!success) {
+    return NextResponse.json(
+      { error: 'Too many sync requests. Please try again later.' },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil((retryAfterMs || 0) / 1000)) },
+      },
+    );
   }
 
   // Parse optional date range from request body
@@ -32,6 +45,9 @@ export async function POST(request: Request) {
   if (connError || !connection) {
     return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
   }
+
+  // Decrypt token (handles pre-encryption plaintext rows gracefully)
+  const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
   // Create sync log
   const { data: syncLog } = await admin
@@ -58,7 +74,7 @@ export async function POST(request: Request) {
     if (connection.shop_cipher) {
       try {
         const orderData = await getShopOrders(
-          connection.access_token,
+          accessToken,
           connection.shop_cipher,
           startDate,
           endDate
@@ -78,9 +94,8 @@ export async function POST(request: Request) {
           else if (result === 'updated') totalUpdated++;
         }
       } catch (shopError) {
-        const msg = `Shop order sync failed: ${shopError}`;
-        console.error(msg);
-        errors.push(msg);
+        console.error('Shop order sync failed:', shopError);
+        errors.push('Shop order sync failed');
       }
     }
 
@@ -127,7 +142,7 @@ export async function POST(request: Request) {
     }
 
     console.error('Sync failed:', error);
-    return NextResponse.json({ error: 'Sync failed', details: String(error) }, { status: 500 });
+    return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 });
   }
 }
 

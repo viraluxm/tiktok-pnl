@@ -20,19 +20,27 @@ export default function SignupPage() {
     setError('');
     setLoading(true);
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      },
-    });
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, origin: window.location.origin }),
+      });
 
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-    } else {
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(res.status === 429
+          ? 'Too many signup attempts. Please try again later.'
+          : data.error || 'Signup failed');
+        setLoading(false);
+        return;
+      }
+
       setSuccess(true);
+      setLoading(false);
+    } catch {
+      setError('Something went wrong. Please try again.');
       setLoading(false);
     }
   }

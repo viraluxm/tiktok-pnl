@@ -14,7 +14,7 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
-  const supabase = createClient();
+  const supabase = createClient(); // still needed for Google OAuth
   const { enterDemo } = useDemo();
 
   async function handleLogin(e: React.FormEvent) {
@@ -22,18 +22,32 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
 
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
 
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-    } else {
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(res.status === 429
+          ? 'Too many login attempts. Please try again later.'
+          : data.error || 'Login failed');
+        setLoading(false);
+        return;
+      }
+
       // Auto-detect demo account by email
       if (data.user?.email?.toLowerCase() === DEMO_USER_EMAIL.toLowerCase()) {
         enterDemo();
       }
       router.push('/dashboard');
       router.refresh();
+    } catch {
+      setError('Something went wrong. Please try again.');
+      setLoading(false);
     }
   }
 

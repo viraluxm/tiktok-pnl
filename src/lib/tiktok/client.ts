@@ -2,6 +2,7 @@
 // Handles OAuth and Shop Open API (orders, products, finance)
 
 import crypto from 'crypto';
+import { TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET } from '@/lib/env';
 
 // TikTok Shop OAuth & API endpoints
 const TIKTOK_SHOP_AUTH_URL = 'https://services.us.tiktokshop.com/open/authorize';
@@ -9,20 +10,8 @@ const TIKTOK_SHOP_TOKEN_URL = 'https://auth.tiktok-shops.com/api/v2/token/get';
 const TIKTOK_SHOP_REFRESH_URL = 'https://auth.tiktok-shops.com/api/v2/token/refresh';
 const TIKTOK_SHOP_BASE = 'https://open-api.tiktokglobalshop.com';
 
-function getAppKey() {
-  return (process.env.TIKTOK_SHOP_APP_KEY || '').trim();
-}
-
-function getAppSecret() {
-  return (process.env.TIKTOK_SHOP_APP_SECRET || '').trim();
-}
-
 function getServiceId() {
   return (process.env.TIKTOK_SHOP_SERVICE_ID || '').trim();
-}
-
-function getRedirectUri() {
-  return (process.env.TIKTOK_REDIRECT_URI || '').trim();
 }
 
 // ==================== OAUTH ====================
@@ -47,44 +36,49 @@ export interface TikTokShopTokenResponse {
 }
 
 export async function exchangeCodeForToken(code: string): Promise<TikTokShopTokenResponse> {
-  const params = new URLSearchParams({
-    app_key: getAppKey(),
-    app_secret: getAppSecret(),
+  // POST with form-encoded body to keep app_secret out of URLs
+  // (URL query params are logged by proxies, CDNs, and access logs)
+  const body = new URLSearchParams({
+    app_key: TIKTOK_SHOP_APP_KEY,
+    app_secret: TIKTOK_SHOP_APP_SECRET,
     auth_code: code,
     grant_type: 'authorized_code',
   });
 
-  const res = await fetch(`${TIKTOK_SHOP_TOKEN_URL}?${params.toString()}`, {
-    method: 'GET',
-    headers: { 'Content-Type': 'application/json' },
+  const res = await fetch(TIKTOK_SHOP_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
   });
 
   const json = await res.json();
 
   if (json.code !== 0) {
-    throw new Error(`TikTok Shop token exchange failed: ${json.message || JSON.stringify(json)}`);
+    throw new Error(`TikTok Shop token exchange failed: ${json.message || 'unknown error'}`);
   }
 
   return json.data as TikTokShopTokenResponse;
 }
 
 export async function refreshAccessToken(refreshToken: string): Promise<TikTokShopTokenResponse> {
-  const params = new URLSearchParams({
-    app_key: getAppKey(),
-    app_secret: getAppSecret(),
+  // POST with form-encoded body to keep app_secret out of URLs
+  const body = new URLSearchParams({
+    app_key: TIKTOK_SHOP_APP_KEY,
+    app_secret: TIKTOK_SHOP_APP_SECRET,
     refresh_token: refreshToken,
     grant_type: 'refresh_token',
   });
 
-  const res = await fetch(`${TIKTOK_SHOP_REFRESH_URL}?${params.toString()}`, {
-    method: 'GET',
-    headers: { 'Content-Type': 'application/json' },
+  const res = await fetch(TIKTOK_SHOP_REFRESH_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
   });
 
   const json = await res.json();
 
   if (json.code !== 0) {
-    throw new Error(`TikTok Shop token refresh failed: ${json.message || JSON.stringify(json)}`);
+    throw new Error(`TikTok Shop token refresh failed: ${json.message || 'unknown error'}`);
   }
 
   return json.data as TikTokShopTokenResponse;
@@ -93,7 +87,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<TikTokSh
 // ==================== SHOP API (HMAC SIGNED) ====================
 
 function generateShopSignature(path: string, params: Record<string, string>, body?: string): string {
-  const secret = getAppSecret();
+  const secret = TIKTOK_SHOP_APP_SECRET;
 
   // Sort params by key (exclude sign and access_token)
   const sortedKeys = Object.keys(params)
@@ -109,7 +103,7 @@ function generateShopSignature(path: string, params: Record<string, string>, bod
 
 async function shopGet(path: string, accessToken: string, extraParams: Record<string, string> = {}) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const appKey = getAppKey();
+  const appKey = TIKTOK_SHOP_APP_KEY;
 
   const params: Record<string, string> = {
     app_key: appKey,
@@ -133,8 +127,8 @@ async function shopGet(path: string, accessToken: string, extraParams: Record<st
   const json = await res.json();
 
   if (json.code !== 0) {
-    console.error('TikTok Shop API error:', JSON.stringify(json));
-    throw new Error(`TikTok Shop API error: ${json.message || JSON.stringify(json)}`);
+    console.error('TikTok Shop API error:', json.code, json.message || 'unknown error');
+    throw new Error(`TikTok Shop API error: ${json.message || 'unknown error'}`);
   }
 
   return json.data;
@@ -142,7 +136,7 @@ async function shopGet(path: string, accessToken: string, extraParams: Record<st
 
 async function shopPost(path: string, accessToken: string, body: Record<string, unknown>, extraParams: Record<string, string> = {}) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const appKey = getAppKey();
+  const appKey = TIKTOK_SHOP_APP_KEY;
   const bodyString = JSON.stringify(body);
 
   const params: Record<string, string> = {
@@ -167,8 +161,8 @@ async function shopPost(path: string, accessToken: string, body: Record<string, 
   const json = await res.json();
 
   if (json.code !== 0) {
-    console.error('TikTok Shop API error:', JSON.stringify(json));
-    throw new Error(`TikTok Shop API error: ${json.message || JSON.stringify(json)}`);
+    console.error('TikTok Shop API error:', json.code, json.message || 'unknown error');
+    throw new Error(`TikTok Shop API error: ${json.message || 'unknown error'}`);
   }
 
   return json.data;
