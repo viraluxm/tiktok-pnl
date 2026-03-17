@@ -53,7 +53,7 @@ export default function TikTokConnect() {
             </div>
           </div>
           <a
-            href="/demo-auth"
+            href="/api/tiktok/auth"
             className="px-4 py-2 rounded-lg bg-gradient-to-r from-[#69C9D0] to-[#EE1D52] text-white text-[13px] font-semibold hover:opacity-90 transition-opacity flex items-center gap-2"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -173,7 +173,7 @@ export default function TikTokConnect() {
 
               {/* Add store */}
               <a
-                href="/demo-auth"
+                href="/api/tiktok/auth"
                 className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[12px] text-tt-cyan hover:bg-[rgba(105,201,208,0.05)] transition-colors"
               >
                 <div className="w-7 h-7 rounded-lg border border-dashed border-tt-cyan/40 flex items-center justify-center">
