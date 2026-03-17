@@ -19,28 +19,14 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
 
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-      });
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(res.status === 429
-          ? 'Too many login attempts. Please try again later.'
-          : data.error || 'Login failed');
-        setLoading(false);
-        return;
-      }
-
+    if (error) {
+      setError(error.message);
+      setLoading(false);
+    } else {
       router.push('/dashboard');
       router.refresh();
-    } catch {
-      setError('Something went wrong. Please try again.');
-      setLoading(false);
     }
   }
 
