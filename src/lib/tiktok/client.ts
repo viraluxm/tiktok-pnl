@@ -195,18 +195,14 @@ export interface ShopInfo {
 }
 
 export async function getAuthorizedShops(accessToken: string): Promise<ShopInfo[]> {
-  try {
-    const data = await shopGet('/authorization/202309/shops', accessToken);
-    if (!data?.shops) return [];
-    return data.shops.map((s: Record<string, string>) => ({
-      shop_cipher: s.cipher,
-      shop_name: s.name,
-      region: s.region,
-    }));
-  } catch (error) {
-    console.error('Failed to get authorized shops:', error);
-    return [];
-  }
+  const data = await shopGet('/authorization/202309/shops', accessToken);
+  console.log('[TikTok getAuthorizedShops] raw data:', JSON.stringify(data));
+  if (!data?.shops) return [];
+  return data.shops.map((s: Record<string, string>) => ({
+    shop_cipher: s.cipher,
+    shop_name: s.name,
+    region: s.region,
+  }));
 }
 
 export interface ShopOrderSummary {

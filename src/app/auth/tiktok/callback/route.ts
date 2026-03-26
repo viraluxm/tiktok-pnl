@@ -38,17 +38,17 @@ export async function GET(request: Request) {
     // Exchange code for access token via TikTok Shop API
     const tokenData = await exchangeCodeForToken(code);
 
-    // Get authorized shops
+    // Get authorized shops — shop_cipher is required for all Shop API calls
     let shopCipher: string | null = null;
     let shopName: string | null = null;
-    try {
-      const shops = await getAuthorizedShops(tokenData.access_token);
-      if (shops.length > 0) {
-        shopCipher = shops[0].shop_cipher;
-        shopName = shops[0].shop_name;
-      }
-    } catch (shopError) {
-      console.warn('Could not fetch shops:', shopError);
+    const shops = await getAuthorizedShops(tokenData.access_token);
+    console.log('[TikTok callback] getAuthorizedShops returned:', JSON.stringify(shops));
+    if (shops.length > 0) {
+      shopCipher = shops[0].shop_cipher;
+      shopName = shops[0].shop_name;
+      console.log('[TikTok callback] Using shop:', shopName, 'cipher:', shopCipher);
+    } else {
+      console.error('[TikTok callback] No authorized shops found — sync will not work');
     }
 
     // Store connection in database using admin client (bypasses RLS)
