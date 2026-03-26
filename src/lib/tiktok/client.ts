@@ -254,6 +254,60 @@ export async function fetchOrdersPage(
   };
 }
 
+// ==================== FINANCE PER-ORDER ====================
+
+export interface OrderFinanceData {
+  order_id: string;
+  affiliate_commission: number;
+  platform_fee: number;
+  shipping_fee_subsidy: number;
+}
+
+export async function fetchOrderFinancePage(
+  accessToken: string,
+  shopCipher: string,
+  startTs: number,
+  endTs: number,
+): Promise<Record<string, unknown>> {
+  // Try GET /finance/202309/orders for per-order finance breakdowns
+  try {
+    const data = await shopGet('/finance/202309/orders', accessToken, {
+      shop_cipher: shopCipher,
+      create_time_ge: String(startTs),
+      create_time_lt: String(endTs),
+      page_size: '50',
+    });
+    return data || {};
+  } catch (error) {
+    console.warn('[TikTok fetchOrderFinancePage] GET /finance/202309/orders failed:', error);
+    return {};
+  }
+}
+
+export async function fetchSettlementsPage(
+  accessToken: string,
+  shopCipher: string,
+  startTs: number,
+  endTs: number,
+): Promise<Record<string, unknown>> {
+  // POST /finance/202309/settlements/search
+  try {
+    const body = {
+      create_time_ge: startTs,
+      create_time_lt: endTs,
+    };
+    const queryParams: Record<string, string> = {
+      shop_cipher: shopCipher,
+      page_size: '50',
+    };
+    const data = await shopPost('/finance/202309/settlements/search', accessToken, body, queryParams);
+    return data || {};
+  } catch (error) {
+    console.warn('[TikTok fetchSettlementsPage] settlements/search failed:', error);
+    return {};
+  }
+}
+
 // ==================== FINANCE ENDPOINTS ====================
 
 export interface FinanceSettlement {

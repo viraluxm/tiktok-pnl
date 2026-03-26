@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchOrdersPage } from '@/lib/tiktok/client';
+import { fetchOrdersPage, fetchOrderFinancePage, fetchSettlementsPage } from '@/lib/tiktok/client';
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
@@ -149,6 +149,45 @@ export async function POST(request: Request) {
     }
 
     console.log(`[Sync] Aggregated into ${Object.keys(dailyMap).length} days:`, Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)} ship=$${v.shipping.toFixed(2)} aff=$${v.affiliate.toFixed(2)} plat=$${v.platformFee.toFixed(2)}`).join(' | '));
+
+    // On the last page of a chunk, fetch finance data for commission breakdown
+    if (!nextCursor) {
+      try {
+        const financeData = await fetchOrderFinancePage(accessToken, connection.shop_cipher, startTs, endTs);
+        if (financeData && Object.keys(financeData).length > 0) {
+          console.log('[Sync] FINANCE orders response:', JSON.stringify(financeData).slice(0, 3000));
+
+          // Extract per-order finance and aggregate by date
+          const finOrders = (financeData.order_settlements || financeData.orders || financeData.order_finances || []) as Record<string, unknown>[];
+          for (const fo of finOrders) {
+            const orderId = fo.order_id as string;
+            const settleTime = fo.create_time || fo.settle_time || fo.order_create_time;
+            if (!settleTime) continue;
+            const date = new Date((settleTime as number) * 1000).toISOString().split('T')[0];
+            if (dailyMap[date]) {
+              const affComm = toNum(fo.affiliate_commission) || toNum(fo.creator_commission) || toNum(fo.referral_fee) || 0;
+              const platFee = toNum(fo.platform_fee) || toNum(fo.platform_commission) || toNum(fo.transaction_fee) || 0;
+              const shipSubsidy = toNum(fo.shipping_fee_subsidy) || toNum(fo.platform_shipping_fee_discount) || 0;
+              if (affComm > 0) dailyMap[date].affiliate += affComm;
+              if (platFee > 0) dailyMap[date].platformFee += platFee;
+              if (shipSubsidy > 0) dailyMap[date].shipping -= shipSubsidy;
+              console.log(`[Sync] Finance for order ${orderId}: aff=$${affComm} plat=$${platFee} shipSub=$${shipSubsidy}`);
+            }
+          }
+        }
+      } catch (finErr) {
+        console.warn('[Sync] Finance orders fetch failed (non-fatal):', finErr);
+      }
+
+      try {
+        const settleData = await fetchSettlementsPage(accessToken, connection.shop_cipher, startTs, endTs);
+        if (settleData && Object.keys(settleData).length > 0) {
+          console.log('[Sync] SETTLEMENTS response:', JSON.stringify(settleData).slice(0, 3000));
+        }
+      } catch (settleErr) {
+        console.warn('[Sync] Settlements fetch failed (non-fatal):', settleErr);
+      }
+    }
 
     // Add this page's amounts to existing DB rows (accumulate across pages)
     for (const [date, agg] of Object.entries(dailyMap)) {
