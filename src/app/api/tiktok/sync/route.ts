@@ -52,17 +52,14 @@ export async function POST(request: Request) {
   backfillStart.setUTCDate(backfillStart.getUTCDate() - BACKFILL_DAYS);
   const backfillStartStr = backfillStart.toISOString().split('T')[0];
 
-  // sync_cursor = date chunk start (YYYY-MM-DD), sync_page_cursor = TikTok pagination token
   const syncCursor: string | null = connection.sync_cursor || null;
   const syncPageCursor: string | null = connection.sync_page_cursor || null;
 
-  // Determine which chunk + page to fetch
   let chunkStart: string;
   let pageCursor: string | null = syncPageCursor;
   let isCaughtUp = false;
 
   if (syncPageCursor && syncCursor) {
-    // Resuming pagination within a chunk
     chunkStart = syncCursor;
     pageCursor = syncPageCursor;
   } else if (!syncCursor || syncCursor < backfillStartStr) {
@@ -97,7 +94,7 @@ export async function POST(request: Request) {
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
 
-    // Single API call — one page of up to 50 orders
+    // Fetch one page of orders
     const { orders, nextCursor } = await fetchOrdersPage(
       accessToken,
       connection.shop_cipher,
@@ -108,72 +105,82 @@ export async function POST(request: Request) {
 
     console.log(`[Sync] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
 
-    // Log full first order for field discovery
     if (orders.length > 0) {
       console.log('[Sync] SAMPLE ORDER:', JSON.stringify(orders[0], null, 2).slice(0, 3000));
     }
 
-    // Aggregate this page's orders by date
-    let totalCreated = 0;
-    let totalUpdated = 0;
+    // Extract order IDs from this page
+    const orderIds = orders.map(o => String((o as Record<string, unknown>).id || '')).filter(Boolean);
 
+    // Check which order IDs already exist in the DB
+    const { data: existingRows } = await admin
+      .from('synced_order_ids')
+      .select('order_id')
+      .eq('user_id', user.id)
+      .in('order_id', orderIds.length > 0 ? orderIds : ['__none__']);
+
+    const existingIds = new Set((existingRows || []).map(r => r.order_id));
+    const newOrders = orders.filter(o => !existingIds.has(String((o as Record<string, unknown>).id || '')));
+    const duplicateCount = orders.length - newOrders.length;
+
+    console.log(`[Sync] Deduped: ${newOrders.length} new orders, ${duplicateCount} already existed`);
+
+    // Aggregate only NEW orders by date
     const dailyMap: Record<string, { gmv: number; shipping: number; affiliate: number; platformFee: number; orderCount: number }> = {};
-    for (const order of orders) {
-      const createTime = order.create_time as number;
+
+    for (const order of newOrders) {
+      const o = order as Record<string, unknown>;
+      const orderId = String(o.id || '');
+      const createTime = o.create_time as number;
       const date = new Date(createTime * 1000).toISOString().split('T')[0];
+
       if (!dailyMap[date]) {
         dailyMap[date] = { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, orderCount: 0 };
       }
 
-      // Extract from payment object
-      const payment = (order.payment || {}) as Record<string, unknown>;
-      dailyMap[date].gmv += toNum(payment.total_amount) || toNum(payment.product_total_amount) || toNum(payment.original_total_product_price) || 0;
-      dailyMap[date].shipping += toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || toNum(payment.actual_shipping_fee_amount) || 0;
-      dailyMap[date].platformFee += toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
-      dailyMap[date].affiliate += toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || toNum(payment.affiliate_partner_commission) || 0;
+      const payment = (o.payment || {}) as Record<string, unknown>;
+      const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || toNum(payment.original_total_product_price) || 0;
+      const shipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || toNum(payment.actual_shipping_fee_amount) || 0;
+      const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
+      let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || toNum(payment.affiliate_partner_commission) || 0;
 
-      dailyMap[date].orderCount++;
-
-      // Also check line items for per-item commissions
-      const lineItems = (order.line_items || order.order_line_list || []) as Record<string, unknown>[];
-      for (const item of lineItems) {
-        // Only add line-item affiliate if we didn't already get it from payment
-        if (!toNum(payment.affiliate_commission) && !toNum(payment.creator_commission) && !toNum(payment.referral_fee) && !toNum(payment.affiliate_partner_commission)) {
-          dailyMap[date].affiliate += toNum(item.platform_commission) || toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
-        }
-        // Platform fee from line items if not in payment
-        if (!toNum(payment.platform_commission) && !toNum(payment.platform_fee) && !toNum(payment.transaction_fee)) {
-          dailyMap[date].platformFee += toNum(item.platform_discount) || 0;
+      // Check line items if no payment-level affiliate
+      if (affiliate === 0) {
+        const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
+        for (const item of lineItems) {
+          affiliate += toNum(item.platform_commission) || toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
         }
       }
+
+      dailyMap[date].gmv += gmv;
+      dailyMap[date].shipping += shipping;
+      dailyMap[date].platformFee += platformFee;
+      dailyMap[date].affiliate += affiliate;
+      dailyMap[date].orderCount++;
+
+      // Store this order ID with its amounts
+      await admin
+        .from('synced_order_ids')
+        .upsert({
+          user_id: user.id,
+          order_id: orderId,
+          order_date: date,
+          gmv,
+          shipping,
+          affiliate,
+          platform_fee: platformFee,
+        }, { onConflict: 'user_id,order_id' });
     }
 
-    console.log(`[Sync] Aggregated into ${Object.keys(dailyMap).length} days:`, Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)} ship=$${v.shipping.toFixed(2)} aff=$${v.affiliate.toFixed(2)} plat=$${v.platformFee.toFixed(2)}`).join(' | '));
+    console.log(`[Sync] Aggregated ${newOrders.length} new orders into ${Object.keys(dailyMap).length} days:`,
+      Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)}`).join(' | '));
 
-    // On the last page of a chunk, fetch finance data for commission breakdown
+    // On the last page of a chunk, fetch finance data
     if (!nextCursor) {
       try {
         const financeData = await fetchOrderFinancePage(accessToken, connection.shop_cipher, startTs, endTs);
         if (financeData && Object.keys(financeData).length > 0) {
           console.log('[Sync] FINANCE orders response:', JSON.stringify(financeData).slice(0, 3000));
-
-          // Extract per-order finance and aggregate by date
-          const finOrders = (financeData.order_settlements || financeData.orders || financeData.order_finances || []) as Record<string, unknown>[];
-          for (const fo of finOrders) {
-            const orderId = fo.order_id as string;
-            const settleTime = fo.create_time || fo.settle_time || fo.order_create_time;
-            if (!settleTime) continue;
-            const date = new Date((settleTime as number) * 1000).toISOString().split('T')[0];
-            if (dailyMap[date]) {
-              const affComm = toNum(fo.affiliate_commission) || toNum(fo.creator_commission) || toNum(fo.referral_fee) || 0;
-              const platFee = toNum(fo.platform_fee) || toNum(fo.platform_commission) || toNum(fo.transaction_fee) || 0;
-              const shipSubsidy = toNum(fo.shipping_fee_subsidy) || toNum(fo.platform_shipping_fee_discount) || 0;
-              if (affComm > 0) dailyMap[date].affiliate += affComm;
-              if (platFee > 0) dailyMap[date].platformFee += platFee;
-              if (shipSubsidy > 0) dailyMap[date].shipping -= shipSubsidy;
-              console.log(`[Sync] Finance for order ${orderId}: aff=$${affComm} plat=$${platFee} shipSub=$${shipSubsidy}`);
-            }
-          }
         }
       } catch (finErr) {
         console.warn('[Sync] Finance orders fetch failed (non-fatal):', finErr);
@@ -189,18 +196,35 @@ export async function POST(request: Request) {
       }
     }
 
-    // Add this page's amounts to existing DB rows (accumulate across pages)
-    for (const [date, agg] of Object.entries(dailyMap)) {
-      const result = await accumulateEntry(admin, {
+    // Rebuild daily totals from ALL synced orders for affected dates
+    let totalCreated = 0;
+    let totalUpdated = 0;
+
+    const affectedDates = Object.keys(dailyMap);
+    for (const date of affectedDates) {
+      // Sum all synced orders for this date from the DB (single source of truth)
+      const { data: dayOrders } = await admin
+        .from('synced_order_ids')
+        .select('gmv, shipping, affiliate, platform_fee')
+        .eq('user_id', user.id)
+        .eq('order_date', date);
+
+      const totals = (dayOrders || []).reduce((acc, row) => ({
+        gmv: acc.gmv + Number(row.gmv),
+        shipping: acc.shipping + Number(row.shipping),
+        affiliate: acc.affiliate + Number(row.affiliate),
+        platformFee: acc.platformFee + Number(row.platform_fee),
+      }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0 });
+
+      const result = await setEntry(admin, {
         user_id: user.id,
         product_id: product.id,
         date,
-        gmv: agg.gmv,
-        shipping: agg.shipping,
-        affiliate: agg.affiliate,
-        ads: agg.platformFee,
+        gmv: totals.gmv,
+        shipping: totals.shipping,
+        affiliate: totals.affiliate,
+        ads: totals.platformFee,
         source: 'tiktok',
-        isFirstPageOfChunk: !pageCursor,
       });
       if (result === 'created') totalCreated++;
       else if (result === 'updated') totalUpdated++;
@@ -211,11 +235,9 @@ export async function POST(request: Request) {
     let newPageCursor: string | null = null;
 
     if (nextCursor) {
-      // More pages in this chunk — stay on same chunk, save page cursor
       newSyncCursor = chunkStart;
       newPageCursor = nextCursor;
     } else {
-      // Chunk exhausted — advance to next chunk
       const nextChunkDate = new Date(chunkEnd + 'T00:00:00Z');
       nextChunkDate.setUTCDate(nextChunkDate.getUTCDate() + 1);
       newSyncCursor = nextChunkDate.toISOString().split('T')[0];
@@ -236,13 +258,21 @@ export async function POST(request: Request) {
       })
       .eq('user_id', user.id);
 
+    // Get total unique orders count for this user
+    const { count: totalUniqueOrders } = await admin
+      .from('synced_order_ids')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', user.id);
+
     return NextResponse.json({
       success: true,
       summary: {
         dateRange: { startDate: chunkStart, endDate: chunkEnd },
         entriesCreated: totalCreated,
         entriesUpdated: totalUpdated,
-        ordersFetched: orders.length,
+        ordersFetched: newOrders.length,
+        ordersSkipped: duplicateCount,
+        totalUniqueOrders: totalUniqueOrders || 0,
         isCaughtUp,
         hasMorePages: !!nextCursor,
       },
@@ -279,7 +309,6 @@ async function getOrCreateProduct(
   return created;
 }
 
-// Helper to safely parse a number from various TikTok response formats
 function toNum(val: unknown): number {
   if (val === null || val === undefined) return 0;
   if (typeof val === 'number') return val;
@@ -287,10 +316,8 @@ function toNum(val: unknown): number {
   return 0;
 }
 
-// Accumulate order data into daily entries.
-// On the first page of a chunk, replace the row (fresh data for this chunk).
-// On subsequent pages, ADD to the existing row (same chunk, more orders).
-async function accumulateEntry(
+// Set daily entry to exact totals (rebuilt from synced_order_ids)
+async function setEntry(
   admin: ReturnType<typeof createAdminClient>,
   entry: {
     user_id: string;
@@ -301,12 +328,11 @@ async function accumulateEntry(
     affiliate: number;
     ads: number;
     source: string;
-    isFirstPageOfChunk: boolean;
   }
 ): Promise<'created' | 'updated'> {
   const { data: existing } = await admin
     .from('entries')
-    .select('id, gmv, shipping, affiliate, ads')
+    .select('id')
     .eq('user_id', entry.user_id)
     .eq('product_id', entry.product_id)
     .eq('date', entry.date)
@@ -314,34 +340,16 @@ async function accumulateEntry(
     .single();
 
   if (existing) {
-    let newGmv: number;
-    let newShipping: number;
-    let newAffiliate: number;
-    let newAds: number;
-
-    if (entry.isFirstPageOfChunk) {
-      newGmv = entry.gmv;
-      newShipping = entry.shipping;
-      newAffiliate = entry.affiliate;
-      newAds = entry.ads;
-    } else {
-      newGmv = Number(existing.gmv) + entry.gmv;
-      newShipping = Number(existing.shipping) + entry.shipping;
-      newAffiliate = Number(existing.affiliate) + entry.affiliate;
-      newAds = Number(existing.ads) + entry.ads;
-    }
-
     await admin
       .from('entries')
       .update({
-        gmv: newGmv,
-        shipping: newShipping,
-        affiliate: newAffiliate,
-        ads: newAds,
+        gmv: entry.gmv,
+        shipping: entry.shipping,
+        affiliate: entry.affiliate,
+        ads: entry.ads,
         updated_at: new Date().toISOString(),
       })
       .eq('id', existing.id);
-
     return 'updated';
   } else {
     await admin
@@ -358,7 +366,6 @@ async function accumulateEntry(
         views: 0,
         source: entry.source,
       });
-
     return 'created';
   }
 }

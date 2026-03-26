@@ -24,6 +24,8 @@ interface SyncSummary {
   entriesCreated: number;
   entriesUpdated: number;
   ordersFetched: number;
+  ordersSkipped: number;
+  totalUniqueOrders: number;
   isCaughtUp: boolean;
   hasMorePages: boolean;
   errors?: string[];
@@ -142,7 +144,7 @@ export function useTikTok() {
         }
 
         const s = result.summary;
-        totalOrders += s.ordersFetched;
+        totalOrders = s.totalUniqueOrders;
 
         if (isInitialBackfill) {
           setBackfillProgress({

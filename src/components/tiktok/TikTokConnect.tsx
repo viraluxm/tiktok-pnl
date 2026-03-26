@@ -105,7 +105,8 @@ export default function TikTokConnect() {
         {/* Sync Result / Error */}
         {lastSyncResult && !isSyncing && !isAutoSyncing && (
           <span className="text-xs text-tt-muted">
-            {lastSyncResult.dateRange.startDate} &rarr; {lastSyncResult.dateRange.endDate}: {lastSyncResult.ordersFetched} orders, {lastSyncResult.entriesCreated + lastSyncResult.entriesUpdated} entries
+            {lastSyncResult.totalUniqueOrders.toLocaleString()} orders synced
+            {lastSyncResult.ordersSkipped > 0 && ` (${lastSyncResult.ordersSkipped} dupes skipped)`}
             {(!lastSyncResult.isCaughtUp || lastSyncResult.hasMorePages) && ' · click Sync for more'}
           </span>
         )}
