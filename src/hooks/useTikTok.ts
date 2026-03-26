@@ -40,12 +40,21 @@ interface BackfillProgress {
   isComplete: boolean;
 }
 
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+class RateLimitError extends Error {
+  constructor() { super('rate_limited'); }
+}
+
 async function doSyncCall(): Promise<SyncResponse> {
   const res = await fetch('/api/tiktok/sync', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
   });
+  if (res.status === 429) {
+    throw new RateLimitError();
+  }
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.error || 'Sync failed');
@@ -100,48 +109,59 @@ export function useTikTok() {
   });
 
   // Backfill loop — runs on first connection (needsBackfill=true)
-  const runBackfill = useCallback(async () => {
-    setIsBackfilling(true);
+  // Also used for returning users to auto-catch-up
+  const runSyncLoop = useCallback(async (isInitialBackfill: boolean) => {
+    if (isInitialBackfill) {
+      setIsBackfilling(true);
+    } else {
+      setIsAutoSyncing(true);
+    }
     backfillAbortRef.current = false;
     let totalOrders = 0;
+    let consecutiveErrors = 0;
 
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
         if (backfillAbortRef.current) break;
 
-        const result = await doSyncCall();
+        let result: SyncResponse;
+        try {
+          result = await doSyncCall();
+          consecutiveErrors = 0;
+        } catch (err) {
+          if (err instanceof RateLimitError) {
+            // Wait 10s on rate limit, then retry same call
+            await sleep(10_000);
+            continue;
+          }
+          consecutiveErrors++;
+          if (consecutiveErrors >= 3) break; // Give up after 3 consecutive non-429 errors
+          await sleep(2_000);
+          continue;
+        }
+
         const s = result.summary;
         totalOrders += s.ordersFetched;
 
-        setBackfillProgress({
-          totalOrders,
-          currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
-          isComplete: s.isCaughtUp && !s.hasMorePages,
-        });
+        if (isInitialBackfill) {
+          setBackfillProgress({
+            totalOrders,
+            currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
+            isComplete: s.isCaughtUp && !s.hasMorePages,
+          });
+        }
 
         if (s.isCaughtUp && !s.hasMorePages) break;
+
+        // 2s delay between calls to avoid rate limits
+        await sleep(2_000);
       }
-    } catch {
-      // Stop on error — user can manually retry
     } finally {
       setIsBackfilling(false);
-      queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
-      queryClient.invalidateQueries({ queryKey: ['entries'] });
-    }
-  }, [queryClient]);
-
-  // Auto-sync on page load — single chunk for returning users
-  const runAutoSync = useCallback(async () => {
-    setIsAutoSyncing(true);
-    try {
-      await doSyncCall();
-      queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
-      queryClient.invalidateQueries({ queryKey: ['entries'] });
-    } catch {
-      // Silent fail for background auto-sync
-    } finally {
       setIsAutoSyncing(false);
+      queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
+      queryClient.invalidateQueries({ queryKey: ['entries'] });
     }
   }, [queryClient]);
 
@@ -153,12 +173,10 @@ export function useTikTok() {
 
     autoSyncRanRef.current = true;
 
-    if (conn.needsBackfill) {
-      runBackfill();
-    } else {
-      runAutoSync();
-    }
-  }, [connectionQuery.data, runBackfill, runAutoSync]);
+    // Both paths use the same loop — initial backfill shows onboarding UI,
+    // returning users get a subtle "Updating..." indicator
+    runSyncLoop(conn.needsBackfill);
+  }, [connectionQuery.data, runSyncLoop]);
 
   const isConnected = connectionQuery.data?.connected ?? false;
   const connection = connectionQuery.data?.connection ?? null;
