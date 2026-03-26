@@ -108,28 +108,47 @@ export async function POST(request: Request) {
 
     console.log(`[Sync] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
 
+    // Log full first order for field discovery
+    if (orders.length > 0) {
+      console.log('[Sync] SAMPLE ORDER:', JSON.stringify(orders[0], null, 2).slice(0, 3000));
+    }
+
     // Aggregate this page's orders by date
     let totalCreated = 0;
     let totalUpdated = 0;
 
-    const dailyMap: Record<string, { gmv: number; shipping: number; affiliate: number; orderCount: number }> = {};
+    const dailyMap: Record<string, { gmv: number; shipping: number; affiliate: number; platformFee: number; orderCount: number }> = {};
     for (const order of orders) {
       const createTime = order.create_time as number;
       const date = new Date(createTime * 1000).toISOString().split('T')[0];
       if (!dailyMap[date]) {
-        dailyMap[date] = { gmv: 0, shipping: 0, affiliate: 0, orderCount: 0 };
+        dailyMap[date] = { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, orderCount: 0 };
       }
-      const payment = (order.payment || {}) as Record<string, string>;
-      dailyMap[date].gmv += parseFloat(payment.total_amount || '0');
-      dailyMap[date].shipping += parseFloat(payment.shipping_fee || '0');
+
+      // Extract from payment object
+      const payment = (order.payment || {}) as Record<string, unknown>;
+      dailyMap[date].gmv += toNum(payment.total_amount) || toNum(payment.product_total_amount) || toNum(payment.original_total_product_price) || 0;
+      dailyMap[date].shipping += toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || toNum(payment.actual_shipping_fee_amount) || 0;
+      dailyMap[date].platformFee += toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
+      dailyMap[date].affiliate += toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || toNum(payment.affiliate_partner_commission) || 0;
+
       dailyMap[date].orderCount++;
-      const lineItems = (order.line_items || []) as Record<string, string>[];
+
+      // Also check line items for per-item commissions
+      const lineItems = (order.line_items || order.order_line_list || []) as Record<string, unknown>[];
       for (const item of lineItems) {
-        dailyMap[date].affiliate += parseFloat(item.platform_commission || '0');
+        // Only add line-item affiliate if we didn't already get it from payment
+        if (!toNum(payment.affiliate_commission) && !toNum(payment.creator_commission) && !toNum(payment.referral_fee) && !toNum(payment.affiliate_partner_commission)) {
+          dailyMap[date].affiliate += toNum(item.platform_commission) || toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
+        }
+        // Platform fee from line items if not in payment
+        if (!toNum(payment.platform_commission) && !toNum(payment.platform_fee) && !toNum(payment.transaction_fee)) {
+          dailyMap[date].platformFee += toNum(item.platform_discount) || 0;
+        }
       }
     }
 
-    console.log(`[Sync] Aggregated into ${Object.keys(dailyMap).length} days:`, Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders/$${v.gmv.toFixed(2)}`).join(', '));
+    console.log(`[Sync] Aggregated into ${Object.keys(dailyMap).length} days:`, Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)} ship=$${v.shipping.toFixed(2)} aff=$${v.affiliate.toFixed(2)} plat=$${v.platformFee.toFixed(2)}`).join(' | '));
 
     // Add this page's amounts to existing DB rows (accumulate across pages)
     for (const [date, agg] of Object.entries(dailyMap)) {
@@ -140,6 +159,7 @@ export async function POST(request: Request) {
         gmv: agg.gmv,
         shipping: agg.shipping,
         affiliate: agg.affiliate,
+        ads: agg.platformFee,
         source: 'tiktok',
         isFirstPageOfChunk: !pageCursor,
       });
@@ -220,6 +240,14 @@ async function getOrCreateProduct(
   return created;
 }
 
+// Helper to safely parse a number from various TikTok response formats
+function toNum(val: unknown): number {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') return parseFloat(val) || 0;
+  return 0;
+}
+
 // Accumulate order data into daily entries.
 // On the first page of a chunk, replace the row (fresh data for this chunk).
 // On subsequent pages, ADD to the existing row (same chunk, more orders).
@@ -232,13 +260,14 @@ async function accumulateEntry(
     gmv: number;
     shipping: number;
     affiliate: number;
+    ads: number;
     source: string;
     isFirstPageOfChunk: boolean;
   }
 ): Promise<'created' | 'updated'> {
   const { data: existing } = await admin
     .from('entries')
-    .select('id, gmv, shipping, affiliate')
+    .select('id, gmv, shipping, affiliate, ads')
     .eq('user_id', entry.user_id)
     .eq('product_id', entry.product_id)
     .eq('date', entry.date)
@@ -249,17 +278,18 @@ async function accumulateEntry(
     let newGmv: number;
     let newShipping: number;
     let newAffiliate: number;
+    let newAds: number;
 
     if (entry.isFirstPageOfChunk) {
-      // First page of chunk: replace with fresh data
       newGmv = entry.gmv;
       newShipping = entry.shipping;
       newAffiliate = entry.affiliate;
+      newAds = entry.ads;
     } else {
-      // Subsequent page: add to existing totals
       newGmv = Number(existing.gmv) + entry.gmv;
       newShipping = Number(existing.shipping) + entry.shipping;
       newAffiliate = Number(existing.affiliate) + entry.affiliate;
+      newAds = Number(existing.ads) + entry.ads;
     }
 
     await admin
@@ -268,6 +298,7 @@ async function accumulateEntry(
         gmv: newGmv,
         shipping: newShipping,
         affiliate: newAffiliate,
+        ads: newAds,
         updated_at: new Date().toISOString(),
       })
       .eq('id', existing.id);
@@ -281,7 +312,7 @@ async function accumulateEntry(
         product_id: entry.product_id,
         date: entry.date,
         gmv: entry.gmv,
-        ads: 0,
+        ads: entry.ads,
         shipping: entry.shipping,
         affiliate: entry.affiliate,
         videos_posted: 0,
