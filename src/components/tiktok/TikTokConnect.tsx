@@ -84,7 +84,7 @@ export default function TikTokConnect() {
 
         {/* Sync button */}
         <button
-          onClick={() => sync(30)}
+          onClick={() => sync(90)}
           disabled={isSyncing}
           className="px-2.5 py-1.5 rounded-lg border border-tt-border text-tt-muted text-[11px] font-medium hover:border-tt-cyan hover:text-tt-cyan transition-all disabled:opacity-50 flex items-center gap-1.5"
         >

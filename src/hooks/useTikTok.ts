@@ -45,7 +45,7 @@ export function useTikTok() {
   });
 
   const syncMutation = useMutation<SyncResponse, Error, { days?: number }>({
-    mutationFn: async ({ days = 30 }) => {
+    mutationFn: async ({ days = 90 }) => {
       const res = await fetch('/api/tiktok/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

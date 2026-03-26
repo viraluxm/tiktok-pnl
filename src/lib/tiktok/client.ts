@@ -225,36 +225,50 @@ export async function getShopOrders(
   try {
     const path = '/order/202309/orders/search';
     const allOrders: Record<string, unknown>[] = [];
-    let cursor = '';
-    let hasMore = true;
 
-    while (hasMore) {
-      const body: Record<string, unknown> = {
-        create_time_ge: Math.floor(new Date(startDate).getTime() / 1000),
-        create_time_lt: Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000),
-      };
+    // Break into 7-day chunks to avoid TikTok date range limits
+    const chunks = getDateChunks(startDate, endDate, 7);
+    console.log(`[TikTok getShopOrders] Fetching ${chunks.length} chunks from ${startDate} to ${endDate}`);
 
-      const queryParams: Record<string, string> = {
-        shop_cipher: shopCipher,
-        page_size: '50',
-        sort_field: 'create_time',
-        sort_order: 'DESC',
-      };
-      if (cursor) {
-        queryParams.cursor = cursor;
+    for (const chunk of chunks) {
+      const chunkStartTs = Math.floor(new Date(chunk.start + 'T00:00:00Z').getTime() / 1000);
+      const chunkEndTs = Math.floor(new Date(chunk.end + 'T23:59:59Z').getTime() / 1000);
+
+      console.log(`[TikTok getShopOrders] Chunk ${chunk.start} to ${chunk.end}: create_time_ge=${chunkStartTs}, create_time_lt=${chunkEndTs}`);
+
+      let cursor = '';
+      let hasMore = true;
+      let pageNum = 0;
+
+      while (hasMore) {
+        pageNum++;
+        const body: Record<string, unknown> = {
+          create_time_ge: chunkStartTs,
+          create_time_lt: chunkEndTs,
+        };
+
+        const queryParams: Record<string, string> = {
+          shop_cipher: shopCipher,
+          page_size: '50',
+          sort_field: 'create_time',
+          sort_order: 'DESC',
+        };
+        if (cursor) {
+          queryParams.cursor = cursor;
+        }
+
+        const data = await shopPost(path, accessToken, body, queryParams);
+        const orders = data?.orders || [];
+        allOrders.push(...orders);
+
+        cursor = data?.next_cursor || data?.next_page_token || '';
+        const totalCount = data?.total_count;
+        hasMore = !!cursor && orders.length === 50;
+        console.log(`[TikTok getShopOrders] Chunk ${chunk.start} page ${pageNum}: ${orders.length} orders (total so far: ${allOrders.length}, total_count: ${totalCount ?? 'n/a'}, cursor: ${cursor || 'none'})`);
       }
-
-      console.log('[TikTok getShopOrders] Query params:', JSON.stringify(queryParams));
-      console.log('[TikTok getShopOrders] Body:', JSON.stringify(body));
-
-      const data = await shopPost(path, accessToken, body, queryParams);
-      const orders = data?.orders || [];
-      allOrders.push(...orders);
-
-      cursor = data?.next_cursor || '';
-      hasMore = !!cursor && orders.length === 50;
-      console.log(`[TikTok getShopOrders] Got ${orders.length} orders, next_cursor: ${cursor || 'none'}`);
     }
+
+    console.log(`[TikTok getShopOrders] Total orders fetched: ${allOrders.length}`);
 
     // Aggregate orders by date
     const dailyMap: Record<string, ShopOrderSummary> = {};
@@ -290,6 +304,28 @@ export async function getShopOrders(
     console.error('Failed to get shop orders:', error);
     return [];
   }
+}
+
+function getDateChunks(startDate: string, endDate: string, chunkDays: number): { start: string; end: string }[] {
+  const chunks: { start: string; end: string }[] = [];
+  const end = new Date(endDate + 'T00:00:00Z');
+  let current = new Date(startDate + 'T00:00:00Z');
+
+  while (current <= end) {
+    const chunkEnd = new Date(current);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + chunkDays - 1);
+    if (chunkEnd > end) chunkEnd.setTime(end.getTime());
+
+    chunks.push({
+      start: current.toISOString().split('T')[0],
+      end: chunkEnd.toISOString().split('T')[0],
+    });
+
+    current = new Date(chunkEnd);
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+
+  return chunks;
 }
 
 // ==================== FINANCE ENDPOINTS ====================
@@ -371,7 +407,7 @@ export async function getProducts(
 }
 
 // Helper to get date range strings
-export function getDateRange(days: number = 30): { startDate: string; endDate: string } {
+export function getDateRange(days: number = 90): { startDate: string; endDate: string } {
   const end = new Date();
   const start = new Date();
   start.setDate(start.getDate() - days);

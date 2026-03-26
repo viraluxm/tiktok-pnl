@@ -25,7 +25,7 @@ export async function POST(request: Request) {
   }
 
   // Parse optional date range from request body
-  let syncDays = 30;
+  let syncDays = 90;
   try {
     const body = await request.json();
     if (body.days) syncDays = Math.min(body.days, 365);
