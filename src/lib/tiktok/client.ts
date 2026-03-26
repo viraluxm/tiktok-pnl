@@ -237,13 +237,16 @@ export async function fetchOrdersPage(
     queryParams.cursor = pageCursor;
   }
 
-  console.log(`[TikTok fetchOrdersPage] ts=${startTs}..${endTs} cursor=${pageCursor || 'none'}`);
+  console.log(`[TikTok fetchOrdersPage] ts=${startTs}..${endTs} sentCursor=${pageCursor || 'none'}`);
 
   const data = await shopPost(path, accessToken, body, queryParams);
   const orders = data?.orders || [];
   const nextCursor = data?.next_cursor || data?.next_page_token || '';
 
-  console.log(`[TikTok fetchOrdersPage] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
+  // Log cursor tracking and first order ID for dedup debugging
+  const firstOrderId = orders.length > 0 ? (orders[0] as Record<string, unknown>).id || 'unknown' : 'none';
+  const lastOrderId = orders.length > 0 ? (orders[orders.length - 1] as Record<string, unknown>).id || 'unknown' : 'none';
+  console.log(`[TikTok fetchOrdersPage] Got ${orders.length} orders, firstId=${firstOrderId}, lastId=${lastOrderId}, receivedCursor=${nextCursor || 'none'}, hasMore=${!!(nextCursor && orders.length === 50)}`);
 
   return {
     orders,

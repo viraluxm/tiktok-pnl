@@ -108,28 +108,32 @@ export async function POST(request: Request) {
 
     console.log(`[Sync] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
 
-    // Upsert orders into entries (aggregated by date)
+    // Aggregate this page's orders by date
     let totalCreated = 0;
     let totalUpdated = 0;
 
-    const dailyMap: Record<string, { gmv: number; shipping: number; affiliate: number }> = {};
+    const dailyMap: Record<string, { gmv: number; shipping: number; affiliate: number; orderCount: number }> = {};
     for (const order of orders) {
       const createTime = order.create_time as number;
       const date = new Date(createTime * 1000).toISOString().split('T')[0];
       if (!dailyMap[date]) {
-        dailyMap[date] = { gmv: 0, shipping: 0, affiliate: 0 };
+        dailyMap[date] = { gmv: 0, shipping: 0, affiliate: 0, orderCount: 0 };
       }
       const payment = (order.payment || {}) as Record<string, string>;
       dailyMap[date].gmv += parseFloat(payment.total_amount || '0');
       dailyMap[date].shipping += parseFloat(payment.shipping_fee || '0');
+      dailyMap[date].orderCount++;
       const lineItems = (order.line_items || []) as Record<string, string>[];
       for (const item of lineItems) {
         dailyMap[date].affiliate += parseFloat(item.platform_commission || '0');
       }
     }
 
+    console.log(`[Sync] Aggregated into ${Object.keys(dailyMap).length} days:`, Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders/$${v.gmv.toFixed(2)}`).join(', '));
+
+    // Add this page's amounts to existing DB rows (accumulate across pages)
     for (const [date, agg] of Object.entries(dailyMap)) {
-      const result = await upsertEntry(admin, {
+      const result = await accumulateEntry(admin, {
         user_id: user.id,
         product_id: product.id,
         date,
@@ -137,6 +141,7 @@ export async function POST(request: Request) {
         shipping: agg.shipping,
         affiliate: agg.affiliate,
         source: 'tiktok',
+        isFirstPageOfChunk: !pageCursor,
       });
       if (result === 'created') totalCreated++;
       else if (result === 'updated') totalUpdated++;
@@ -215,22 +220,25 @@ async function getOrCreateProduct(
   return created;
 }
 
-async function upsertEntry(
+// Accumulate order data into daily entries.
+// On the first page of a chunk, replace the row (fresh data for this chunk).
+// On subsequent pages, ADD to the existing row (same chunk, more orders).
+async function accumulateEntry(
   admin: ReturnType<typeof createAdminClient>,
   entry: {
     user_id: string;
     product_id: string;
     date: string;
-    gmv?: number;
-    ads?: number;
-    shipping?: number;
-    affiliate?: number;
+    gmv: number;
+    shipping: number;
+    affiliate: number;
     source: string;
+    isFirstPageOfChunk: boolean;
   }
-): Promise<'created' | 'updated' | 'unchanged'> {
+): Promise<'created' | 'updated'> {
   const { data: existing } = await admin
     .from('entries')
-    .select('id, gmv, ads, shipping, affiliate')
+    .select('id, gmv, shipping, affiliate')
     .eq('user_id', entry.user_id)
     .eq('product_id', entry.product_id)
     .eq('date', entry.date)
@@ -238,34 +246,30 @@ async function upsertEntry(
     .single();
 
   if (existing) {
-    const updates: Record<string, unknown> = {
-      updated_at: new Date().toISOString(),
-    };
+    let newGmv: number;
+    let newShipping: number;
+    let newAffiliate: number;
 
-    let hasChanges = false;
-
-    if (entry.gmv !== undefined && entry.gmv !== Number(existing.gmv)) {
-      updates.gmv = entry.gmv;
-      hasChanges = true;
+    if (entry.isFirstPageOfChunk) {
+      // First page of chunk: replace with fresh data
+      newGmv = entry.gmv;
+      newShipping = entry.shipping;
+      newAffiliate = entry.affiliate;
+    } else {
+      // Subsequent page: add to existing totals
+      newGmv = Number(existing.gmv) + entry.gmv;
+      newShipping = Number(existing.shipping) + entry.shipping;
+      newAffiliate = Number(existing.affiliate) + entry.affiliate;
     }
-    if (entry.ads !== undefined && entry.ads !== Number(existing.ads)) {
-      updates.ads = entry.ads;
-      hasChanges = true;
-    }
-    if (entry.shipping !== undefined && entry.shipping !== Number(existing.shipping)) {
-      updates.shipping = entry.shipping;
-      hasChanges = true;
-    }
-    if (entry.affiliate !== undefined && entry.affiliate !== Number(existing.affiliate)) {
-      updates.affiliate = entry.affiliate;
-      hasChanges = true;
-    }
-
-    if (!hasChanges) return 'unchanged';
 
     await admin
       .from('entries')
-      .update(updates)
+      .update({
+        gmv: newGmv,
+        shipping: newShipping,
+        affiliate: newAffiliate,
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', existing.id);
 
     return 'updated';
@@ -276,10 +280,10 @@ async function upsertEntry(
         user_id: entry.user_id,
         product_id: entry.product_id,
         date: entry.date,
-        gmv: entry.gmv || 0,
-        ads: entry.ads || 0,
-        shipping: entry.shipping || 0,
-        affiliate: entry.affiliate || 0,
+        gmv: entry.gmv,
+        ads: 0,
+        shipping: entry.shipping,
+        affiliate: entry.affiliate,
         videos_posted: 0,
         views: 0,
         source: entry.source,
