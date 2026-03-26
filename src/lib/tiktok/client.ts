@@ -8,7 +8,7 @@ import { TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET } from '@/lib/env';
 const TIKTOK_SHOP_AUTH_URL = 'https://services.us.tiktokshop.com/open/authorize';
 const TIKTOK_SHOP_TOKEN_URL = 'https://auth.tiktok-shops.com/api/v2/token/get';
 const TIKTOK_SHOP_REFRESH_URL = 'https://auth.tiktok-shops.com/api/v2/token/refresh';
-const TIKTOK_SHOP_BASE = 'https://open-api.tiktokglobalshop.com';
+const TIKTOK_SHOP_BASE = 'https://open-api.tiktokshop.com';
 
 function getServiceId() {
   return (process.env.TIKTOK_SHOP_SERVICE_ID || '').trim();
@@ -119,22 +119,27 @@ async function shopGet(path: string, accessToken: string, extraParams: Record<st
 
   const sign = generateShopSignature(path, params);
   params.sign = sign;
-  params.access_token = accessToken;
 
   const url = new URL(`${TIKTOK_SHOP_BASE}${path}`);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
+  console.log(`[TikTok shopGet] ${path}`, { params: Object.keys(params) });
+
   const res = await fetch(url.toString(), {
     headers: {
       'Content-Type': 'application/json',
+      'x-tts-access-token': accessToken,
     },
   });
 
-  const json = await res.json();
+  const rawText = await res.text();
+  console.log(`[TikTok shopGet] ${path} HTTP ${res.status}:`, rawText.slice(0, 1000));
+
+  const json = JSON.parse(rawText);
 
   if (json.code !== 0) {
-    console.error('TikTok Shop API error:', json.code, json.message || 'unknown error');
-    throw new Error(`TikTok Shop API error: ${json.message || 'unknown error'}`);
+    console.error(`[TikTok shopGet] ${path} error:`, JSON.stringify(json, null, 2));
+    throw new Error(`TikTok Shop API error: ${json.message || 'unknown error'} (code: ${json.code})`);
   }
 
   return json.data;
@@ -153,22 +158,29 @@ async function shopPost(path: string, accessToken: string, body: Record<string, 
 
   const sign = generateShopSignature(path, params, bodyString);
   params.sign = sign;
-  params.access_token = accessToken;
 
   const url = new URL(`${TIKTOK_SHOP_BASE}${path}`);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
+  console.log(`[TikTok shopPost] ${path}`, { params: Object.keys(params), body });
+
   const res = await fetch(url.toString(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-tts-access-token': accessToken,
+    },
     body: bodyString,
   });
 
-  const json = await res.json();
+  const rawText = await res.text();
+  console.log(`[TikTok shopPost] ${path} HTTP ${res.status}:`, rawText.slice(0, 1000));
+
+  const json = JSON.parse(rawText);
 
   if (json.code !== 0) {
-    console.error('TikTok Shop API error:', json.code, json.message || 'unknown error');
-    throw new Error(`TikTok Shop API error: ${json.message || 'unknown error'}`);
+    console.error(`[TikTok shopPost] ${path} error:`, JSON.stringify(json, null, 2));
+    throw new Error(`TikTok Shop API error: ${json.message || 'unknown error'} (code: ${json.code})`);
   }
 
   return json.data;

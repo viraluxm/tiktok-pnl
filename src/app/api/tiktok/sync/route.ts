@@ -71,6 +71,10 @@ export async function POST(request: Request) {
     let product = await getOrCreateProduct(admin, user.id, shopName);
 
     // ======= SYNC ORDERS FROM SHOP API =======
+    console.log('[Sync] shop_cipher:', connection.shop_cipher || 'MISSING');
+    console.log('[Sync] accessToken length:', accessToken?.length || 0);
+    console.log('[Sync] date range:', startDate, 'to', endDate);
+
     if (connection.shop_cipher) {
       try {
         const orderData = await getShopOrders(
@@ -79,6 +83,8 @@ export async function POST(request: Request) {
           startDate,
           endDate
         );
+
+        console.log('[Sync] orderData returned:', orderData.length, 'days');
 
         for (const day of orderData) {
           const result = await upsertEntry(admin, {
