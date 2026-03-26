@@ -222,20 +222,36 @@ export async function getShopOrders(
 ): Promise<ShopOrderSummary[]> {
   try {
     const path = '/order/202309/orders/search';
-    const body = {
-      create_time_ge: Math.floor(new Date(startDate).getTime() / 1000),
-      create_time_lt: Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000),
-      page_size: 100,
-    };
+    const allOrders: Record<string, unknown>[] = [];
+    let cursor = '';
+    let hasMore = true;
 
-    const data = await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
-    const orders = data?.orders || [];
+    while (hasMore) {
+      const body: Record<string, unknown> = {
+        create_time_ge: Math.floor(new Date(startDate).getTime() / 1000),
+        create_time_lt: Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000),
+        page_size: 50,
+      };
+      if (cursor) {
+        body.cursor = cursor;
+      }
+
+      console.log('[TikTok getShopOrders] Request body:', JSON.stringify(body));
+
+      const data = await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
+      const orders = data?.orders || [];
+      allOrders.push(...orders);
+
+      cursor = data?.next_cursor || '';
+      hasMore = !!cursor && orders.length === 50;
+      console.log(`[TikTok getShopOrders] Got ${orders.length} orders, next_cursor: ${cursor || 'none'}`);
+    }
 
     // Aggregate orders by date
     const dailyMap: Record<string, ShopOrderSummary> = {};
 
-    for (const order of orders) {
-      const createTime = order.create_time;
+    for (const order of allOrders) {
+      const createTime = order.create_time as number;
       const date = new Date(createTime * 1000).toISOString().split('T')[0];
 
       if (!dailyMap[date]) {
@@ -248,13 +264,13 @@ export async function getShopOrders(
         };
       }
 
-      const payment = order.payment || {};
+      const payment = (order.payment || {}) as Record<string, string>;
       dailyMap[date].total_amount += parseFloat(payment.total_amount || '0');
       dailyMap[date].order_count += 1;
       dailyMap[date].shipping_fee += parseFloat(payment.shipping_fee || '0');
 
       // Affiliate commission from line items
-      const lineItems = order.line_items || [];
+      const lineItems = (order.line_items || []) as Record<string, string>[];
       for (const item of lineItems) {
         dailyMap[date].affiliate_commission += parseFloat(item.platform_commission || '0');
       }
@@ -319,7 +335,7 @@ export async function getProducts(
   try {
     const path = '/product/202309/products/search';
     const body = {
-      page_size: 100,
+      page_size: 50,
     };
 
     const data = await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
