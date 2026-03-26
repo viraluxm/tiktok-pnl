@@ -8,7 +8,7 @@ import { TIKTOK_SHOP_APP_KEY, TIKTOK_SHOP_APP_SECRET } from '@/lib/env';
 const TIKTOK_SHOP_AUTH_URL = 'https://services.us.tiktokshop.com/open/authorize';
 const TIKTOK_SHOP_TOKEN_URL = 'https://auth.tiktok-shops.com/api/v2/token/get';
 const TIKTOK_SHOP_REFRESH_URL = 'https://auth.tiktok-shops.com/api/v2/token/refresh';
-const TIKTOK_SHOP_BASE = 'https://open-api.tiktokshop.com';
+const TIKTOK_SHOP_BASE = 'https://open-api.tiktokglobalshop.com';
 
 function getServiceId() {
   return (process.env.TIKTOK_SHOP_SERVICE_ID || '').trim();
