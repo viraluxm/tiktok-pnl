@@ -54,7 +54,10 @@ export async function exchangeCodeForToken(code: string): Promise<TikTokShopToke
   const json = await res.json();
 
   if (json.code !== 0) {
-    throw new Error(`TikTok Shop token exchange failed: ${json.message || 'unknown error'}`);
+    console.error('[TikTok token exchange] HTTP status:', res.status);
+    console.error('[TikTok token exchange] Full response:', JSON.stringify(json, null, 2));
+    console.error('[TikTok token exchange] Request params: app_key=%s, auth_code=%s, grant_type=authorized_code', TIKTOK_SHOP_APP_KEY, code);
+    throw new Error(`TikTok Shop token exchange failed: ${json.message || 'unknown error'} (code: ${json.code})`);
   }
 
   return json.data as TikTokShopTokenResponse;
