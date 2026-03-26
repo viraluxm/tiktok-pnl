@@ -231,6 +231,8 @@ export async function getShopOrders(
         create_time_ge: Math.floor(new Date(startDate).getTime() / 1000),
         create_time_lt: Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000),
         page_size: 50,
+        sort_field: 'create_time',
+        sort_order: 'DESC',
       };
       if (cursor) {
         body.cursor = cursor;
