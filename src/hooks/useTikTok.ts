@@ -21,6 +21,7 @@ interface SyncSummary {
   dateRange: { startDate: string; endDate: string };
   entriesCreated: number;
   entriesUpdated: number;
+  isCaughtUp: boolean;
   errors?: string[];
 }
 
@@ -44,12 +45,12 @@ export function useTikTok() {
     staleTime: 30_000, // 30 seconds
   });
 
-  const syncMutation = useMutation<SyncResponse, Error, { days?: number }>({
-    mutationFn: async ({ days = 90 }) => {
+  const syncMutation = useMutation<SyncResponse, Error, void>({
+    mutationFn: async () => {
       const res = await fetch('/api/tiktok/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days }),
+        body: JSON.stringify({}),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -85,7 +86,7 @@ export function useTikTok() {
     isSyncing: syncMutation.isPending,
     lastSyncResult: syncMutation.data?.summary ?? null,
     syncError: syncMutation.error?.message ?? null,
-    sync: (days?: number) => syncMutation.mutate({ days }),
+    sync: () => syncMutation.mutate(),
     disconnect: () => disconnectMutation.mutate(),
     isDisconnecting: disconnectMutation.isPending,
   };

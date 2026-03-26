@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { getShopOrders, getDateRange } from '@/lib/tiktok/client';
+import { getShopOrders } from '@/lib/tiktok/client';
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
+
+const CHUNK_DAYS = 7;
+const BACKFILL_DAYS = 90;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -24,15 +27,6 @@ export async function POST(request: Request) {
     );
   }
 
-  // Parse optional date range from request body
-  let syncDays = 90;
-  try {
-    const body = await request.json();
-    if (body.days) syncDays = Math.min(body.days, 365);
-  } catch {
-    // Use default 30 days
-  }
-
   const admin = createAdminClient();
 
   // Get TikTok connection
@@ -46,80 +40,119 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
   }
 
-  // Decrypt token (handles pre-encryption plaintext rows gracefully)
+  if (!connection.shop_cipher) {
+    return NextResponse.json({ error: 'No shop_cipher — reconnect TikTok' }, { status: 400 });
+  }
+
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
+
+  // Determine the chunk to sync
+  const today = new Date();
+  const todayStr = today.toISOString().split('T')[0];
+
+  const backfillStart = new Date(today);
+  backfillStart.setUTCDate(backfillStart.getUTCDate() - BACKFILL_DAYS);
+  const backfillStartStr = backfillStart.toISOString().split('T')[0];
+
+  // sync_cursor stores where we left off (YYYY-MM-DD), null means never synced
+  const syncCursor: string | null = connection.sync_cursor || null;
+
+  let chunkStart: string;
+  let chunkEnd: string;
+  let isCaughtUp = false;
+
+  if (!syncCursor || syncCursor < backfillStartStr) {
+    // First sync or cursor is older than backfill window — start from backfill start
+    chunkStart = backfillStartStr;
+  } else if (syncCursor >= todayStr) {
+    // Already caught up — re-sync the last 7 days for fresh data
+    const weekAgo = new Date(today);
+    weekAgo.setUTCDate(weekAgo.getUTCDate() - CHUNK_DAYS);
+    chunkStart = weekAgo.toISOString().split('T')[0];
+    isCaughtUp = true;
+  } else {
+    // Resume from where we left off
+    chunkStart = syncCursor;
+  }
+
+  // Chunk end is chunkStart + CHUNK_DAYS, capped at today
+  const chunkEndDate = new Date(chunkStart + 'T00:00:00Z');
+  chunkEndDate.setUTCDate(chunkEndDate.getUTCDate() + CHUNK_DAYS - 1);
+  if (chunkEndDate > today) {
+    chunkEnd = todayStr;
+    isCaughtUp = true;
+  } else {
+    chunkEnd = chunkEndDate.toISOString().split('T')[0];
+  }
+
+  // If chunk end reaches today, we're caught up
+  if (chunkEnd >= todayStr) {
+    isCaughtUp = true;
+  }
+
+  console.log(`[Sync] Chunk: ${chunkStart} to ${chunkEnd} (cursor was: ${syncCursor || 'none'}, caught_up: ${isCaughtUp})`);
 
   // Create sync log
   const { data: syncLog } = await admin
     .from('sync_logs')
     .insert({
       user_id: user.id,
-      sync_type: 'full',
+      sync_type: 'incremental',
       status: 'running',
     })
     .select()
     .single();
 
-  const { startDate, endDate } = getDateRange(syncDays);
   let totalCreated = 0;
   let totalUpdated = 0;
-  const errors: string[] = [];
 
   try {
-    // Get or create product for this shop
     const shopName = connection.shop_name || 'TikTok Shop';
-    let product = await getOrCreateProduct(admin, user.id, shopName);
+    const product = await getOrCreateProduct(admin, user.id, shopName);
 
-    // ======= SYNC ORDERS FROM SHOP API =======
-    console.log('[Sync] shop_cipher:', connection.shop_cipher || 'MISSING');
-    console.log('[Sync] accessToken length:', accessToken?.length || 0);
-    console.log('[Sync] date range:', startDate, 'to', endDate);
+    const orderData = await getShopOrders(
+      accessToken,
+      connection.shop_cipher,
+      chunkStart,
+      chunkEnd,
+    );
 
-    if (connection.shop_cipher) {
-      try {
-        const orderData = await getShopOrders(
-          accessToken,
-          connection.shop_cipher,
-          startDate,
-          endDate
-        );
+    console.log(`[Sync] orderData returned: ${orderData.length} days of aggregated data`);
 
-        console.log('[Sync] orderData returned:', orderData.length, 'days');
-
-        for (const day of orderData) {
-          const result = await upsertEntry(admin, {
-            user_id: user.id,
-            product_id: product.id,
-            date: day.date,
-            gmv: day.total_amount,
-            shipping: day.shipping_fee,
-            affiliate: day.affiliate_commission,
-            source: 'tiktok',
-          });
-          if (result === 'created') totalCreated++;
-          else if (result === 'updated') totalUpdated++;
-        }
-      } catch (shopError) {
-        console.error('Shop order sync failed:', shopError);
-        errors.push('Shop order sync failed');
-      }
+    for (const day of orderData) {
+      const result = await upsertEntry(admin, {
+        user_id: user.id,
+        product_id: product.id,
+        date: day.date,
+        gmv: day.total_amount,
+        shipping: day.shipping_fee,
+        affiliate: day.affiliate_commission,
+        source: 'tiktok',
+      });
+      if (result === 'created') totalCreated++;
+      else if (result === 'updated') totalUpdated++;
     }
 
-    // Update last synced timestamp
+    // Advance the cursor to the day after chunk end
+    const nextCursorDate = new Date(chunkEnd + 'T00:00:00Z');
+    nextCursorDate.setUTCDate(nextCursorDate.getUTCDate() + 1);
+    const nextCursor = nextCursorDate.toISOString().split('T')[0];
+
     await admin
       .from('tiktok_connections')
-      .update({ last_synced_at: new Date().toISOString() })
+      .update({
+        last_synced_at: new Date().toISOString(),
+        sync_cursor: isCaughtUp ? todayStr : nextCursor,
+      })
       .eq('user_id', user.id);
 
-    // Update sync log
     if (syncLog) {
       await admin
         .from('sync_logs')
         .update({
-          status: errors.length > 0 ? 'partial' : 'completed',
+          status: 'completed',
           entries_created: totalCreated,
           entries_updated: totalUpdated,
-          error_message: errors.length > 0 ? errors.join('; ') : null,
           completed_at: new Date().toISOString(),
         })
         .eq('id', syncLog.id);
@@ -128,14 +161,13 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       summary: {
-        dateRange: { startDate, endDate },
+        dateRange: { startDate: chunkStart, endDate: chunkEnd },
         entriesCreated: totalCreated,
         entriesUpdated: totalUpdated,
-        errors: errors.length > 0 ? errors : undefined,
+        isCaughtUp,
       },
     });
   } catch (error) {
-    // Update sync log with failure
     if (syncLog) {
       await admin
         .from('sync_logs')
@@ -159,7 +191,6 @@ async function getOrCreateProduct(
   userId: string,
   shopName: string
 ) {
-  // Check if product already exists
   const { data: existing } = await admin
     .from('products')
     .select('*')
@@ -169,7 +200,6 @@ async function getOrCreateProduct(
 
   if (existing) return existing;
 
-  // Create new product
   const { data: created, error } = await admin
     .from('products')
     .insert({ user_id: userId, name: shopName })
@@ -193,7 +223,6 @@ async function upsertEntry(
     source: string;
   }
 ): Promise<'created' | 'updated' | 'unchanged'> {
-  // Check if entry exists for this date/product/source
   const { data: existing } = await admin
     .from('entries')
     .select('id, gmv, ads, shipping, affiliate')
@@ -204,7 +233,6 @@ async function upsertEntry(
     .single();
 
   if (existing) {
-    // Merge: only update fields that have new values (don't overwrite with 0)
     const updates: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
     };
@@ -237,7 +265,6 @@ async function upsertEntry(
 
     return 'updated';
   } else {
-    // Insert new entry
     await admin
       .from('entries')
       .insert({

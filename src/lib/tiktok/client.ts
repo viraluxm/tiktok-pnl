@@ -222,110 +222,75 @@ export async function getShopOrders(
   startDate: string,
   endDate: string,
 ): Promise<ShopOrderSummary[]> {
-  try {
-    const path = '/order/202309/orders/search';
-    const allOrders: Record<string, unknown>[] = [];
+  const path = '/order/202309/orders/search';
+  const allOrders: Record<string, unknown>[] = [];
 
-    // Break into 7-day chunks to avoid TikTok date range limits
-    const chunks = getDateChunks(startDate, endDate, 7);
-    console.log(`[TikTok getShopOrders] Fetching ${chunks.length} chunks from ${startDate} to ${endDate}`);
+  const startTs = Math.floor(new Date(startDate + 'T00:00:00Z').getTime() / 1000);
+  const endTs = Math.floor(new Date(endDate + 'T23:59:59Z').getTime() / 1000);
 
-    for (const chunk of chunks) {
-      const chunkStartTs = Math.floor(new Date(chunk.start + 'T00:00:00Z').getTime() / 1000);
-      const chunkEndTs = Math.floor(new Date(chunk.end + 'T23:59:59Z').getTime() / 1000);
+  console.log(`[TikTok getShopOrders] ${startDate} to ${endDate} (ts: ${startTs} - ${endTs})`);
 
-      console.log(`[TikTok getShopOrders] Chunk ${chunk.start} to ${chunk.end}: create_time_ge=${chunkStartTs}, create_time_lt=${chunkEndTs}`);
+  let cursor = '';
+  let hasMore = true;
+  let pageNum = 0;
 
-      let cursor = '';
-      let hasMore = true;
-      let pageNum = 0;
+  while (hasMore) {
+    pageNum++;
+    const body: Record<string, unknown> = {
+      create_time_ge: startTs,
+      create_time_lt: endTs,
+    };
 
-      while (hasMore) {
-        pageNum++;
-        const body: Record<string, unknown> = {
-          create_time_ge: chunkStartTs,
-          create_time_lt: chunkEndTs,
-        };
-
-        const queryParams: Record<string, string> = {
-          shop_cipher: shopCipher,
-          page_size: '50',
-          sort_field: 'create_time',
-          sort_order: 'DESC',
-        };
-        if (cursor) {
-          queryParams.cursor = cursor;
-        }
-
-        const data = await shopPost(path, accessToken, body, queryParams);
-        const orders = data?.orders || [];
-        allOrders.push(...orders);
-
-        cursor = data?.next_cursor || data?.next_page_token || '';
-        const totalCount = data?.total_count;
-        hasMore = !!cursor && orders.length === 50;
-        console.log(`[TikTok getShopOrders] Chunk ${chunk.start} page ${pageNum}: ${orders.length} orders (total so far: ${allOrders.length}, total_count: ${totalCount ?? 'n/a'}, cursor: ${cursor || 'none'})`);
-      }
+    const queryParams: Record<string, string> = {
+      shop_cipher: shopCipher,
+      page_size: '50',
+      sort_field: 'create_time',
+      sort_order: 'DESC',
+    };
+    if (cursor) {
+      queryParams.cursor = cursor;
     }
 
-    console.log(`[TikTok getShopOrders] Total orders fetched: ${allOrders.length}`);
+    const data = await shopPost(path, accessToken, body, queryParams);
+    const orders = data?.orders || [];
+    allOrders.push(...orders);
 
-    // Aggregate orders by date
-    const dailyMap: Record<string, ShopOrderSummary> = {};
+    cursor = data?.next_cursor || data?.next_page_token || '';
+    hasMore = !!cursor && orders.length === 50;
+    console.log(`[TikTok getShopOrders] Page ${pageNum}: ${orders.length} orders (total: ${allOrders.length}, cursor: ${cursor || 'none'})`);
+  }
 
-    for (const order of allOrders) {
-      const createTime = order.create_time as number;
-      const date = new Date(createTime * 1000).toISOString().split('T')[0];
+  console.log(`[TikTok getShopOrders] Total orders fetched: ${allOrders.length}`);
 
-      if (!dailyMap[date]) {
-        dailyMap[date] = {
-          date,
-          total_amount: 0,
-          order_count: 0,
-          shipping_fee: 0,
-          affiliate_commission: 0,
-        };
-      }
+  // Aggregate orders by date
+  const dailyMap: Record<string, ShopOrderSummary> = {};
 
-      const payment = (order.payment || {}) as Record<string, string>;
-      dailyMap[date].total_amount += parseFloat(payment.total_amount || '0');
-      dailyMap[date].order_count += 1;
-      dailyMap[date].shipping_fee += parseFloat(payment.shipping_fee || '0');
+  for (const order of allOrders) {
+    const createTime = order.create_time as number;
+    const date = new Date(createTime * 1000).toISOString().split('T')[0];
 
-      // Affiliate commission from line items
-      const lineItems = (order.line_items || []) as Record<string, string>[];
-      for (const item of lineItems) {
-        dailyMap[date].affiliate_commission += parseFloat(item.platform_commission || '0');
-      }
+    if (!dailyMap[date]) {
+      dailyMap[date] = {
+        date,
+        total_amount: 0,
+        order_count: 0,
+        shipping_fee: 0,
+        affiliate_commission: 0,
+      };
     }
 
-    return Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
-  } catch (error) {
-    console.error('Failed to get shop orders:', error);
-    return [];
-  }
-}
+    const payment = (order.payment || {}) as Record<string, string>;
+    dailyMap[date].total_amount += parseFloat(payment.total_amount || '0');
+    dailyMap[date].order_count += 1;
+    dailyMap[date].shipping_fee += parseFloat(payment.shipping_fee || '0');
 
-function getDateChunks(startDate: string, endDate: string, chunkDays: number): { start: string; end: string }[] {
-  const chunks: { start: string; end: string }[] = [];
-  const end = new Date(endDate + 'T00:00:00Z');
-  let current = new Date(startDate + 'T00:00:00Z');
-
-  while (current <= end) {
-    const chunkEnd = new Date(current);
-    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + chunkDays - 1);
-    if (chunkEnd > end) chunkEnd.setTime(end.getTime());
-
-    chunks.push({
-      start: current.toISOString().split('T')[0],
-      end: chunkEnd.toISOString().split('T')[0],
-    });
-
-    current = new Date(chunkEnd);
-    current.setUTCDate(current.getUTCDate() + 1);
+    const lineItems = (order.line_items || []) as Record<string, string>[];
+    for (const item of lineItems) {
+      dailyMap[date].affiliate_commission += parseFloat(item.platform_commission || '0');
+    }
   }
 
-  return chunks;
+  return Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 // ==================== FINANCE ENDPOINTS ====================

@@ -75,7 +75,8 @@ export default function TikTokConnect() {
         {/* Sync Result / Error */}
         {lastSyncResult && !isSyncing && (
           <span className="text-xs text-tt-muted">
-            {lastSyncResult.entriesCreated + lastSyncResult.entriesUpdated} entries synced
+            {lastSyncResult.dateRange.startDate} → {lastSyncResult.dateRange.endDate}: {lastSyncResult.entriesCreated + lastSyncResult.entriesUpdated} entries
+            {!lastSyncResult.isCaughtUp && ' · click Sync for more'}
           </span>
         )}
         {syncError && !isSyncing && (
@@ -84,7 +85,7 @@ export default function TikTokConnect() {
 
         {/* Sync button */}
         <button
-          onClick={() => sync(90)}
+          onClick={() => sync()}
           disabled={isSyncing}
           className="px-2.5 py-1.5 rounded-lg border border-tt-border text-tt-muted text-[11px] font-medium hover:border-tt-cyan hover:text-tt-cyan transition-all disabled:opacity-50 flex items-center gap-1.5"
         >
