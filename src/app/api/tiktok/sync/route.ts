@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { getShopOrders } from '@/lib/tiktok/client';
+import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
@@ -29,7 +29,6 @@ export async function POST(request: Request) {
 
   const admin = createAdminClient();
 
-  // Get TikTok connection
   const { data: connection, error: connError } = await admin
     .from('tiktok_connections')
     .select('*')
@@ -46,7 +45,6 @@ export async function POST(request: Request) {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
-  // Determine the chunk to sync
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
 
@@ -54,109 +52,125 @@ export async function POST(request: Request) {
   backfillStart.setUTCDate(backfillStart.getUTCDate() - BACKFILL_DAYS);
   const backfillStartStr = backfillStart.toISOString().split('T')[0];
 
-  // sync_cursor stores where we left off (YYYY-MM-DD), null means never synced
+  // sync_cursor = date chunk start (YYYY-MM-DD), sync_page_cursor = TikTok pagination token
   const syncCursor: string | null = connection.sync_cursor || null;
+  const syncPageCursor: string | null = connection.sync_page_cursor || null;
 
+  // Determine which chunk + page to fetch
   let chunkStart: string;
-  let chunkEnd: string;
+  let pageCursor: string | null = syncPageCursor;
   let isCaughtUp = false;
 
-  if (!syncCursor || syncCursor < backfillStartStr) {
-    // First sync or cursor is older than backfill window — start from backfill start
+  if (syncPageCursor && syncCursor) {
+    // Resuming pagination within a chunk
+    chunkStart = syncCursor;
+    pageCursor = syncPageCursor;
+  } else if (!syncCursor || syncCursor < backfillStartStr) {
     chunkStart = backfillStartStr;
+    pageCursor = null;
   } else if (syncCursor >= todayStr) {
-    // Already caught up — re-sync the last 7 days for fresh data
     const weekAgo = new Date(today);
     weekAgo.setUTCDate(weekAgo.getUTCDate() - CHUNK_DAYS);
     chunkStart = weekAgo.toISOString().split('T')[0];
+    pageCursor = null;
     isCaughtUp = true;
   } else {
-    // Resume from where we left off
     chunkStart = syncCursor;
+    pageCursor = null;
   }
 
-  // Chunk end is chunkStart + CHUNK_DAYS, capped at today
   const chunkEndDate = new Date(chunkStart + 'T00:00:00Z');
   chunkEndDate.setUTCDate(chunkEndDate.getUTCDate() + CHUNK_DAYS - 1);
+  let chunkEnd: string;
   if (chunkEndDate > today) {
     chunkEnd = todayStr;
-    isCaughtUp = true;
   } else {
     chunkEnd = chunkEndDate.toISOString().split('T')[0];
   }
 
-  // If chunk end reaches today, we're caught up
-  if (chunkEnd >= todayStr) {
-    isCaughtUp = true;
-  }
+  const startTs = Math.floor(new Date(chunkStart + 'T00:00:00Z').getTime() / 1000);
+  const endTs = Math.floor(new Date(chunkEnd + 'T23:59:59Z').getTime() / 1000);
 
-  console.log(`[Sync] Chunk: ${chunkStart} to ${chunkEnd} (cursor was: ${syncCursor || 'none'}, caught_up: ${isCaughtUp})`);
-
-  // Create sync log
-  const { data: syncLog } = await admin
-    .from('sync_logs')
-    .insert({
-      user_id: user.id,
-      sync_type: 'incremental',
-      status: 'running',
-    })
-    .select()
-    .single();
-
-  let totalCreated = 0;
-  let totalUpdated = 0;
+  console.log(`[Sync] chunk=${chunkStart}..${chunkEnd} ts=${startTs}..${endTs} pageCursor=${pageCursor || 'none'}`);
 
   try {
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
 
-    const orderData = await getShopOrders(
+    // Single API call — one page of up to 50 orders
+    const { orders, nextCursor } = await fetchOrdersPage(
       accessToken,
       connection.shop_cipher,
-      chunkStart,
-      chunkEnd,
+      startTs,
+      endTs,
+      pageCursor,
     );
 
-    console.log(`[Sync] orderData returned: ${orderData.length} days of aggregated data`);
+    console.log(`[Sync] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
 
-    for (const day of orderData) {
+    // Upsert orders into entries (aggregated by date)
+    let totalCreated = 0;
+    let totalUpdated = 0;
+
+    const dailyMap: Record<string, { gmv: number; shipping: number; affiliate: number }> = {};
+    for (const order of orders) {
+      const createTime = order.create_time as number;
+      const date = new Date(createTime * 1000).toISOString().split('T')[0];
+      if (!dailyMap[date]) {
+        dailyMap[date] = { gmv: 0, shipping: 0, affiliate: 0 };
+      }
+      const payment = (order.payment || {}) as Record<string, string>;
+      dailyMap[date].gmv += parseFloat(payment.total_amount || '0');
+      dailyMap[date].shipping += parseFloat(payment.shipping_fee || '0');
+      const lineItems = (order.line_items || []) as Record<string, string>[];
+      for (const item of lineItems) {
+        dailyMap[date].affiliate += parseFloat(item.platform_commission || '0');
+      }
+    }
+
+    for (const [date, agg] of Object.entries(dailyMap)) {
       const result = await upsertEntry(admin, {
         user_id: user.id,
         product_id: product.id,
-        date: day.date,
-        gmv: day.total_amount,
-        shipping: day.shipping_fee,
-        affiliate: day.affiliate_commission,
+        date,
+        gmv: agg.gmv,
+        shipping: agg.shipping,
+        affiliate: agg.affiliate,
         source: 'tiktok',
       });
       if (result === 'created') totalCreated++;
       else if (result === 'updated') totalUpdated++;
     }
 
-    // Advance the cursor to the day after chunk end
-    const nextCursorDate = new Date(chunkEnd + 'T00:00:00Z');
-    nextCursorDate.setUTCDate(nextCursorDate.getUTCDate() + 1);
-    const nextCursor = nextCursorDate.toISOString().split('T')[0];
+    // Decide next state
+    let newSyncCursor: string;
+    let newPageCursor: string | null = null;
+
+    if (nextCursor) {
+      // More pages in this chunk — stay on same chunk, save page cursor
+      newSyncCursor = chunkStart;
+      newPageCursor = nextCursor;
+    } else {
+      // Chunk exhausted — advance to next chunk
+      const nextChunkDate = new Date(chunkEnd + 'T00:00:00Z');
+      nextChunkDate.setUTCDate(nextChunkDate.getUTCDate() + 1);
+      newSyncCursor = nextChunkDate.toISOString().split('T')[0];
+      newPageCursor = null;
+
+      if (chunkEnd >= todayStr) {
+        isCaughtUp = true;
+        newSyncCursor = todayStr;
+      }
+    }
 
     await admin
       .from('tiktok_connections')
       .update({
         last_synced_at: new Date().toISOString(),
-        sync_cursor: isCaughtUp ? todayStr : nextCursor,
+        sync_cursor: newSyncCursor,
+        sync_page_cursor: newPageCursor,
       })
       .eq('user_id', user.id);
-
-    if (syncLog) {
-      await admin
-        .from('sync_logs')
-        .update({
-          status: 'completed',
-          entries_created: totalCreated,
-          entries_updated: totalUpdated,
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', syncLog.id);
-    }
 
     return NextResponse.json({
       success: true,
@@ -164,21 +178,12 @@ export async function POST(request: Request) {
         dateRange: { startDate: chunkStart, endDate: chunkEnd },
         entriesCreated: totalCreated,
         entriesUpdated: totalUpdated,
+        ordersFetched: orders.length,
         isCaughtUp,
+        hasMorePages: !!nextCursor,
       },
     });
   } catch (error) {
-    if (syncLog) {
-      await admin
-        .from('sync_logs')
-        .update({
-          status: 'failed',
-          error_message: String(error),
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', syncLog.id);
-    }
-
     console.error('Sync failed:', error);
     return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 });
   }

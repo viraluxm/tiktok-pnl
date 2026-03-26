@@ -75,8 +75,8 @@ export default function TikTokConnect() {
         {/* Sync Result / Error */}
         {lastSyncResult && !isSyncing && (
           <span className="text-xs text-tt-muted">
-            {lastSyncResult.dateRange.startDate} → {lastSyncResult.dateRange.endDate}: {lastSyncResult.entriesCreated + lastSyncResult.entriesUpdated} entries
-            {!lastSyncResult.isCaughtUp && ' · click Sync for more'}
+            {lastSyncResult.dateRange.startDate} → {lastSyncResult.dateRange.endDate}: {lastSyncResult.ordersFetched} orders, {lastSyncResult.entriesCreated + lastSyncResult.entriesUpdated} entries
+            {(!lastSyncResult.isCaughtUp || lastSyncResult.hasMorePages) && ' · click Sync for more'}
           </span>
         )}
         {syncError && !isSyncing && (

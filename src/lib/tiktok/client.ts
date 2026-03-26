@@ -208,89 +208,47 @@ export async function getAuthorizedShops(accessToken: string): Promise<ShopInfo[
   }));
 }
 
-export interface ShopOrderSummary {
-  date: string;
-  total_amount: number;
-  order_count: number;
-  shipping_fee: number;
-  affiliate_commission: number;
+export interface FetchOrdersPageResult {
+  orders: Record<string, unknown>[];
+  nextCursor: string | null;
 }
 
-export async function getShopOrders(
+export async function fetchOrdersPage(
   accessToken: string,
   shopCipher: string,
-  startDate: string,
-  endDate: string,
-): Promise<ShopOrderSummary[]> {
+  startTs: number,
+  endTs: number,
+  pageCursor: string | null,
+): Promise<FetchOrdersPageResult> {
   const path = '/order/202309/orders/search';
-  const allOrders: Record<string, unknown>[] = [];
 
-  const startTs = Math.floor(new Date(startDate + 'T00:00:00Z').getTime() / 1000);
-  const endTs = Math.floor(new Date(endDate + 'T23:59:59Z').getTime() / 1000);
+  const body: Record<string, unknown> = {
+    create_time_ge: startTs,
+    create_time_lt: endTs,
+  };
 
-  console.log(`[TikTok getShopOrders] ${startDate} to ${endDate} (ts: ${startTs} - ${endTs})`);
-
-  let cursor = '';
-  let hasMore = true;
-  let pageNum = 0;
-
-  while (hasMore) {
-    pageNum++;
-    const body: Record<string, unknown> = {
-      create_time_ge: startTs,
-      create_time_lt: endTs,
-    };
-
-    const queryParams: Record<string, string> = {
-      shop_cipher: shopCipher,
-      page_size: '50',
-      sort_field: 'create_time',
-      sort_order: 'DESC',
-    };
-    if (cursor) {
-      queryParams.cursor = cursor;
-    }
-
-    const data = await shopPost(path, accessToken, body, queryParams);
-    const orders = data?.orders || [];
-    allOrders.push(...orders);
-
-    cursor = data?.next_cursor || data?.next_page_token || '';
-    hasMore = !!cursor && orders.length === 50;
-    console.log(`[TikTok getShopOrders] Page ${pageNum}: ${orders.length} orders (total: ${allOrders.length}, cursor: ${cursor || 'none'})`);
+  const queryParams: Record<string, string> = {
+    shop_cipher: shopCipher,
+    page_size: '50',
+    sort_field: 'create_time',
+    sort_order: 'DESC',
+  };
+  if (pageCursor) {
+    queryParams.cursor = pageCursor;
   }
 
-  console.log(`[TikTok getShopOrders] Total orders fetched: ${allOrders.length}`);
+  console.log(`[TikTok fetchOrdersPage] ts=${startTs}..${endTs} cursor=${pageCursor || 'none'}`);
 
-  // Aggregate orders by date
-  const dailyMap: Record<string, ShopOrderSummary> = {};
+  const data = await shopPost(path, accessToken, body, queryParams);
+  const orders = data?.orders || [];
+  const nextCursor = data?.next_cursor || data?.next_page_token || '';
 
-  for (const order of allOrders) {
-    const createTime = order.create_time as number;
-    const date = new Date(createTime * 1000).toISOString().split('T')[0];
+  console.log(`[TikTok fetchOrdersPage] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
 
-    if (!dailyMap[date]) {
-      dailyMap[date] = {
-        date,
-        total_amount: 0,
-        order_count: 0,
-        shipping_fee: 0,
-        affiliate_commission: 0,
-      };
-    }
-
-    const payment = (order.payment || {}) as Record<string, string>;
-    dailyMap[date].total_amount += parseFloat(payment.total_amount || '0');
-    dailyMap[date].order_count += 1;
-    dailyMap[date].shipping_fee += parseFloat(payment.shipping_fee || '0');
-
-    const lineItems = (order.line_items || []) as Record<string, string>[];
-    for (const item of lineItems) {
-      dailyMap[date].affiliate_commission += parseFloat(item.platform_commission || '0');
-    }
-  }
-
-  return Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+  return {
+    orders,
+    nextCursor: nextCursor && orders.length === 50 ? nextCursor : null,
+  };
 }
 
 // ==================== FINANCE ENDPOINTS ====================

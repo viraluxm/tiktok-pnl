@@ -21,7 +21,9 @@ interface SyncSummary {
   dateRange: { startDate: string; endDate: string };
   entriesCreated: number;
   entriesUpdated: number;
+  ordersFetched: number;
   isCaughtUp: boolean;
+  hasMorePages: boolean;
   errors?: string[];
 }
 
