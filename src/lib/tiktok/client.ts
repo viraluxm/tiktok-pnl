@@ -162,8 +162,10 @@ async function shopPost(path: string, accessToken: string, body: Record<string, 
   const qs = new URLSearchParams(params).toString();
   const fullUrl = `${TIKTOK_SHOP_BASE}${path}?${qs}`;
 
-  console.log(`[TikTok shopPost] Fetching: ${fullUrl}`);
-  console.log(`[TikTok shopPost] Body:`, bodyString);
+  console.log(`[TikTok shopPost] URL: ${fullUrl}`);
+  console.log(`[TikTok shopPost] Body string (${bodyString.length} bytes): ${bodyString}`);
+  console.log(`[TikTok shopPost] Body keys: ${Object.keys(body).join(', ')}`);
+  console.log(`[TikTok shopPost] access_token length: ${accessToken?.length || 0}`);
 
   const res = await fetch(fullUrl, {
     method: 'POST',
@@ -175,7 +177,7 @@ async function shopPost(path: string, accessToken: string, body: Record<string, 
   });
 
   const rawText = await res.text();
-  console.log(`[TikTok shopPost] ${path} HTTP ${res.status}:`, rawText.slice(0, 1000));
+  console.log(`[TikTok shopPost] ${path} HTTP ${res.status} Response: ${rawText.slice(0, 1500)}`);
 
   const json = JSON.parse(rawText);
 
