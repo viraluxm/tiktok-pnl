@@ -120,12 +120,12 @@ async function shopGet(path: string, accessToken: string, extraParams: Record<st
   const sign = generateShopSignature(path, params);
   params.sign = sign;
 
-  const url = new URL(`${TIKTOK_SHOP_BASE}${path}`);
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const qs = new URLSearchParams(params).toString();
+  const fullUrl = `${TIKTOK_SHOP_BASE}${path}?${qs}`;
 
-  console.log(`[TikTok shopGet] ${path}`, { params: Object.keys(params) });
+  console.log(`[TikTok shopGet] Fetching: ${fullUrl}`);
 
-  const res = await fetch(url.toString(), {
+  const res = await fetch(fullUrl, {
     headers: {
       'Content-Type': 'application/json',
       'x-tts-access-token': accessToken,
@@ -159,12 +159,13 @@ async function shopPost(path: string, accessToken: string, body: Record<string, 
   const sign = generateShopSignature(path, params, bodyString);
   params.sign = sign;
 
-  const url = new URL(`${TIKTOK_SHOP_BASE}${path}`);
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const qs = new URLSearchParams(params).toString();
+  const fullUrl = `${TIKTOK_SHOP_BASE}${path}?${qs}`;
 
-  console.log(`[TikTok shopPost] ${path}`, { params: Object.keys(params), body });
+  console.log(`[TikTok shopPost] Fetching: ${fullUrl}`);
+  console.log(`[TikTok shopPost] Body:`, bodyString);
 
-  const res = await fetch(url.toString(), {
+  const res = await fetch(fullUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
