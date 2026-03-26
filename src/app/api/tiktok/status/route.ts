@@ -11,7 +11,7 @@ export async function GET() {
 
   const { data: connection, error } = await supabase
     .from('tiktok_connections')
-    .select('id, shop_name, shop_cipher, advertiser_ids, connected_at, last_synced_at')
+    .select('id, shop_name, shop_cipher, advertiser_ids, connected_at, last_synced_at, sync_cursor')
     .eq('user_id', user.id)
     .single();
 
@@ -37,6 +37,7 @@ export async function GET() {
       advertiserCount: (connection.advertiser_ids as string[] || []).length,
       connectedAt: connection.connected_at,
       lastSyncedAt: connection.last_synced_at,
+      needsBackfill: !connection.sync_cursor,
     },
   });
 }

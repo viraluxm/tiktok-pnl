@@ -330,7 +330,7 @@ export async function getProducts(
 }
 
 // Helper to get date range strings
-export function getDateRange(days: number = 90): { startDate: string; endDate: string } {
+export function getDateRange(days: number = 30): { startDate: string; endDate: string } {
   const end = new Date();
   const start = new Date();
   start.setDate(start.getDate() - days);

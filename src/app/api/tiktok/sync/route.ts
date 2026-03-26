@@ -6,7 +6,7 @@ import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const CHUNK_DAYS = 7;
-const BACKFILL_DAYS = 90;
+const BACKFILL_DAYS = 30;
 
 export async function POST(request: Request) {
   const supabase = await createClient();

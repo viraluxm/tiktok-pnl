@@ -9,6 +9,9 @@ export default function TikTokConnect() {
     connection,
     isLoading,
     isSyncing,
+    isAutoSyncing,
+    isBackfilling,
+    backfillProgress,
     lastSyncResult,
     syncError,
     sync,
@@ -19,7 +22,6 @@ export default function TikTokConnect() {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
@@ -67,15 +69,43 @@ export default function TikTokConnect() {
     );
   }
 
+  // First-time backfill onboarding screen
+  if (isBackfilling && backfillProgress) {
+    return (
+      <div className="mb-4 p-6 rounded-xl border border-tt-border bg-tt-card">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <div className="w-10 h-10 border-3 border-tt-cyan border-t-transparent rounded-full animate-spin" />
+          <div>
+            <h3 className="text-sm font-semibold text-tt-text mb-1">Setting up your dashboard...</h3>
+            <p className="text-xs text-tt-muted">
+              Syncing orders from {backfillProgress.currentRange}
+            </p>
+            <p className="text-xs text-tt-cyan mt-1 font-medium">
+              {backfillProgress.totalOrders.toLocaleString()} orders imported
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const shopName = connection?.shopName || 'TikTok Shop';
 
   return (
     <div className="mb-4 flex items-center justify-end">
       <div className="flex items-center gap-2">
+        {/* Auto-sync indicator */}
+        {isAutoSyncing && (
+          <span className="flex items-center gap-1.5 text-xs text-tt-muted">
+            <div className="w-2.5 h-2.5 border-[1.5px] border-tt-cyan border-t-transparent rounded-full animate-spin" />
+            Updating...
+          </span>
+        )}
+
         {/* Sync Result / Error */}
-        {lastSyncResult && !isSyncing && (
+        {lastSyncResult && !isSyncing && !isAutoSyncing && (
           <span className="text-xs text-tt-muted">
-            {lastSyncResult.dateRange.startDate} → {lastSyncResult.dateRange.endDate}: {lastSyncResult.ordersFetched} orders, {lastSyncResult.entriesCreated + lastSyncResult.entriesUpdated} entries
+            {lastSyncResult.dateRange.startDate} &rarr; {lastSyncResult.dateRange.endDate}: {lastSyncResult.ordersFetched} orders, {lastSyncResult.entriesCreated + lastSyncResult.entriesUpdated} entries
             {(!lastSyncResult.isCaughtUp || lastSyncResult.hasMorePages) && ' · click Sync for more'}
           </span>
         )}
@@ -86,7 +116,7 @@ export default function TikTokConnect() {
         {/* Sync button */}
         <button
           onClick={() => sync()}
-          disabled={isSyncing}
+          disabled={isSyncing || isAutoSyncing}
           className="px-2.5 py-1.5 rounded-lg border border-tt-border text-tt-muted text-[11px] font-medium hover:border-tt-cyan hover:text-tt-cyan transition-all disabled:opacity-50 flex items-center gap-1.5"
         >
           {isSyncing ? (
@@ -150,10 +180,8 @@ export default function TikTokConnect() {
             </svg>
           </button>
 
-          {/* Dropdown menu */}
           {isOpen && (
             <div className="absolute right-0 top-full mt-1 w-56 bg-tt-card border border-tt-border rounded-xl shadow-2xl z-50 overflow-hidden">
-              {/* Current shop */}
               <div className="py-1">
                 <button
                   onClick={() => setIsOpen(false)}
@@ -169,10 +197,8 @@ export default function TikTokConnect() {
                 </button>
               </div>
 
-              {/* Divider */}
               <div className="border-t border-tt-border" />
 
-              {/* Add store */}
               <a
                 href="/api/tiktok/auth"
                 className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[12px] text-tt-cyan hover:bg-[rgba(105,201,208,0.05)] transition-colors"
@@ -204,19 +230,4 @@ function TikTokIcon({ connected = false }: { connected?: boolean }) {
       </svg>
     </div>
   );
-}
-
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
 }
