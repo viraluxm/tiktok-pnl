@@ -232,17 +232,22 @@ export async function getShopOrders(
       const body: Record<string, unknown> = {
         create_time_ge: Math.floor(new Date(startDate).getTime() / 1000),
         create_time_lt: Math.floor(new Date(endDate + 'T23:59:59').getTime() / 1000),
-        page_size: 50,
+      };
+
+      const queryParams: Record<string, string> = {
+        shop_cipher: shopCipher,
+        page_size: '50',
         sort_field: 'create_time',
         sort_order: 'DESC',
       };
       if (cursor) {
-        body.cursor = cursor;
+        queryParams.cursor = cursor;
       }
 
-      console.log('[TikTok getShopOrders] Request body:', JSON.stringify(body));
+      console.log('[TikTok getShopOrders] Query params:', JSON.stringify(queryParams));
+      console.log('[TikTok getShopOrders] Body:', JSON.stringify(body));
 
-      const data = await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
+      const data = await shopPost(path, accessToken, body, queryParams);
       const orders = data?.orders || [];
       allOrders.push(...orders);
 
@@ -302,13 +307,15 @@ export async function getFinanceOverview(
 ): Promise<FinanceSettlement[]> {
   try {
     const path = '/finance/202309/settlements/search';
-    const body = {
-      page_size: 20,
+    const body = {};
+    const queryParams: Record<string, string> = {
+      shop_cipher: shopCipher,
+      page_size: '20',
       sort_field: 'create_time',
       sort_order: 'DESC',
     };
 
-    const data = await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
+    const data = await shopPost(path, accessToken, body, queryParams);
     const settlements = data?.settlements || [];
 
     return settlements.map((s: Record<string, unknown>) => ({
@@ -338,11 +345,13 @@ export async function getProducts(
 ): Promise<ShopProduct[]> {
   try {
     const path = '/product/202309/products/search';
-    const body = {
-      page_size: 50,
+    const body = {};
+    const queryParams: Record<string, string> = {
+      shop_cipher: shopCipher,
+      page_size: '50',
     };
 
-    const data = await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
+    const data = await shopPost(path, accessToken, body, queryParams);
     const products = data?.products || [];
 
     return products.map((p: Record<string, unknown>) => ({
