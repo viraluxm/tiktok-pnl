@@ -33,10 +33,15 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  // OAuth callbacks under /auth must reach their route handlers
+  const isOAuthCallback = request.nextUrl.pathname.startsWith('/auth/tiktok/callback');
+
   const isAuthPage =
-    request.nextUrl.pathname.startsWith('/login') ||
-    request.nextUrl.pathname.startsWith('/signup') ||
-    request.nextUrl.pathname.startsWith('/auth');
+    !isOAuthCallback && (
+      request.nextUrl.pathname.startsWith('/login') ||
+      request.nextUrl.pathname.startsWith('/signup') ||
+      request.nextUrl.pathname.startsWith('/auth')
+    );
 
   // Not logged in and trying to access protected route
   if (!user && !isAuthPage && request.nextUrl.pathname !== '/') {
