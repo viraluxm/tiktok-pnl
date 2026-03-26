@@ -36,27 +36,30 @@ export interface TikTokShopTokenResponse {
 }
 
 export async function exchangeCodeForToken(code: string): Promise<TikTokShopTokenResponse> {
-  // POST with form-encoded body to keep app_secret out of URLs
-  // (URL query params are logged by proxies, CDNs, and access logs)
-  const body = new URLSearchParams({
+  const params = new URLSearchParams({
     app_key: TIKTOK_SHOP_APP_KEY,
     app_secret: TIKTOK_SHOP_APP_SECRET,
     auth_code: code,
     grant_type: 'authorized_code',
   });
 
-  const res = await fetch(TIKTOK_SHOP_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+  const url = `${TIKTOK_SHOP_TOKEN_URL}?${params.toString()}`;
 
-  const json = await res.json();
+  const res = await fetch(url, { method: 'GET' });
+  const rawText = await res.text();
+
+  console.log('[TikTok token exchange] HTTP status:', res.status);
+  console.log('[TikTok token exchange] Raw response:', rawText);
+
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(rawText);
+  } catch {
+    throw new Error(`TikTok token response is not JSON (HTTP ${res.status}): ${rawText.slice(0, 500)}`);
+  }
 
   if (json.code !== 0) {
-    console.error('[TikTok token exchange] HTTP status:', res.status);
-    console.error('[TikTok token exchange] Full response:', JSON.stringify(json, null, 2));
-    console.error('[TikTok token exchange] Request params: app_key=%s, auth_code=%s, grant_type=authorized_code', TIKTOK_SHOP_APP_KEY, code);
+    console.error('[TikTok token exchange] Error response:', JSON.stringify(json, null, 2));
     throw new Error(`TikTok Shop token exchange failed: ${json.message || 'unknown error'} (code: ${json.code})`);
   }
 
