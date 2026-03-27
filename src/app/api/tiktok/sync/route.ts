@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchOrdersPage, fetchStatements } from '@/lib/tiktok/client';
+import { fetchOrdersPage, fetchStatements, fetchUnsettledOrders } from '@/lib/tiktok/client';
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
@@ -152,19 +152,23 @@ export async function POST(request: Request) {
       const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
       let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || toNum(payment.affiliate_partner_commission) || 0;
 
-      // Check line items if no payment-level affiliate
-      if (affiliate === 0) {
-        const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
-        for (const item of lineItems) {
+      // Count units from line items
+      const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
+      let units = 0;
+      for (const item of lineItems) {
+        units += Number(item.quantity) || 1;
+        // Check line items for affiliate if not in payment
+        if (affiliate === 0) {
           affiliate += toNum(item.platform_commission) || toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
         }
       }
+      if (units === 0) units = 1; // At least 1 unit per order
 
       dailyMap[date].gmv += gmv;
       dailyMap[date].shipping += shipping;
       dailyMap[date].platformFee += platformFee;
       dailyMap[date].affiliate += affiliate;
-      dailyMap[date].orderCount++;
+      dailyMap[date].orderCount += units;
 
       // Store this order ID with its amounts
       await admin
@@ -177,6 +181,7 @@ export async function POST(request: Request) {
           shipping,
           affiliate,
           platform_fee: platformFee,
+          units,
         }, { onConflict: 'user_id,order_id' });
     }
 
@@ -204,6 +209,15 @@ export async function POST(request: Request) {
       } catch (finErr) {
         console.warn('[Sync] Finance statements fetch failed (non-fatal):', (finErr as Error).message);
       }
+
+      // On the very first chunk (no prior cursor), also probe unsettled orders endpoint
+      if (!syncCursor) {
+        try {
+          await fetchUnsettledOrders(accessToken, connection.shop_cipher);
+        } catch (unsettledErr) {
+          console.warn('[Sync] Unsettled orders fetch failed (non-fatal):', (unsettledErr as Error).message);
+        }
+      }
     }
 
     // Rebuild daily totals from ALL synced orders for affected dates
@@ -216,7 +230,7 @@ export async function POST(request: Request) {
       // Sum all synced orders for this date from the DB (single source of truth)
       const { data: dayOrders } = await admin
         .from('synced_order_ids')
-        .select('gmv, shipping, affiliate, platform_fee')
+        .select('gmv, shipping, affiliate, platform_fee, units')
         .eq('user_id', user.id)
         .eq('order_date', date);
 
@@ -225,7 +239,8 @@ export async function POST(request: Request) {
         shipping: acc.shipping + Number(row.shipping),
         affiliate: acc.affiliate + Number(row.affiliate),
         platformFee: acc.platformFee + Number(row.platform_fee),
-      }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0 });
+        units: acc.units + (Number(row.units) || 1),
+      }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
 
       // Use settlement data for platform_fee and shipping if available (more accurate)
       const stmtData = statementsByDate[date];
@@ -240,6 +255,7 @@ export async function POST(request: Request) {
         shipping: finalShipping,
         affiliate: orderTotals.affiliate,
         platform_fee: finalPlatformFee,
+        units_sold: orderTotals.units,
         source: 'tiktok',
       });
       if (result === 'created') totalCreated++;
@@ -343,6 +359,7 @@ async function setEntry(
     shipping: number;
     affiliate: number;
     platform_fee: number;
+    units_sold: number;
     source: string;
   }
 ): Promise<'created' | 'updated'> {
@@ -363,6 +380,7 @@ async function setEntry(
         shipping: entry.shipping,
         affiliate: entry.affiliate,
         platform_fee: entry.platform_fee,
+        units_sold: entry.units_sold,
         ads: 0,
         updated_at: new Date().toISOString(),
       })
@@ -380,6 +398,7 @@ async function setEntry(
         shipping: entry.shipping,
         affiliate: entry.affiliate,
         platform_fee: entry.platform_fee,
+        units_sold: entry.units_sold,
         videos_posted: 0,
         views: 0,
         source: entry.source,

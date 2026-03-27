@@ -299,6 +299,21 @@ export async function fetchStatements(
   });
 }
 
+export async function fetchUnsettledOrders(
+  accessToken: string,
+  shopCipher: string,
+): Promise<Record<string, unknown>> {
+  const path = '/finance/202309/orders/unsettled';
+
+  const data = await shopGet(path, accessToken, {
+    shop_cipher: shopCipher,
+    page_size: '10',
+  });
+
+  console.log('[TikTok fetchUnsettledOrders] Response:', JSON.stringify(data).slice(0, 3000));
+  return data || {};
+}
+
 function toFloat(val: unknown): number {
   if (val === null || val === undefined) return 0;
   if (typeof val === 'number') return val;

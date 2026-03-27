@@ -121,11 +121,16 @@ export function useTikTok() {
     backfillAbortRef.current = false;
     let totalOrders = 0;
     let consecutiveErrors = 0;
+    let iteration = 0;
 
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        if (backfillAbortRef.current) break;
+        iteration++;
+        if (backfillAbortRef.current) {
+          console.log(`[SyncLoop] Aborted at iteration ${iteration}`);
+          break;
+        }
 
         let result: SyncResponse;
         try {
@@ -133,14 +138,14 @@ export function useTikTok() {
           consecutiveErrors = 0;
         } catch (err) {
           if (err instanceof RateLimitError) {
-            console.log('[SyncLoop] Rate limited, waiting 10s...');
+            console.log(`[SyncLoop] Iteration ${iteration}: Rate limited, waiting 10s...`);
             await sleep(10_000);
             continue;
           }
           consecutiveErrors++;
-          console.log(`[SyncLoop] Error (${consecutiveErrors}/5):`, (err as Error).message);
+          console.log(`[SyncLoop] Iteration ${iteration}: Error (${consecutiveErrors}/5):`, (err as Error).message);
           if (consecutiveErrors >= 5) {
-            console.log('[SyncLoop] Giving up after 5 consecutive errors');
+            console.log(`[SyncLoop] Giving up after 5 consecutive errors at iteration ${iteration}`);
             break;
           }
           await sleep(2_000);
@@ -150,6 +155,8 @@ export function useTikTok() {
         const s = result.summary;
         totalOrders = s.totalUniqueOrders;
 
+        console.log(`[SyncLoop] Iteration ${iteration}: caught_up=${s.isCaughtUp}, more_pages=${s.hasMorePages}, orders=${s.ordersFetched}, skipped=${s.ordersSkipped}, total=${s.totalUniqueOrders}, range=${s.dateRange.startDate}..${s.dateRange.endDate}`);
+
         if (isInitialBackfill) {
           setBackfillProgress({
             totalOrders,
@@ -158,10 +165,8 @@ export function useTikTok() {
           });
         }
 
-        console.log(`[SyncLoop] isCaughtUp=${s.isCaughtUp} hasMorePages=${s.hasMorePages} ordersFetched=${s.ordersFetched} totalUnique=${s.totalUniqueOrders}`);
-
         if (s.isCaughtUp && !s.hasMorePages) {
-          console.log('[SyncLoop] Fully caught up, stopping');
+          console.log(`[SyncLoop] Fully caught up at iteration ${iteration}, stopping`);
           break;
         }
 
