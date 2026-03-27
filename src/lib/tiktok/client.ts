@@ -256,12 +256,13 @@ export async function fetchOrdersPage(
 
 // ==================== FINANCE ENDPOINTS ====================
 
-export interface FinanceStatement {
-  statement_id: string;
-  statement_time: number;
-  payment_status: string;
-  // Raw data — structure varies, logged for discovery
-  raw: Record<string, unknown>;
+export interface ParsedStatement {
+  date: string;
+  revenue: number;
+  platformFee: number;
+  shippingCost: number;
+  settlement: number;
+  netSales: number;
 }
 
 export async function fetchStatements(
@@ -269,7 +270,7 @@ export async function fetchStatements(
   shopCipher: string,
   startTs: number,
   endTs: number,
-): Promise<{ statements: FinanceStatement[]; rawResponse: Record<string, unknown> }> {
+): Promise<ParsedStatement[]> {
   const path = '/finance/202309/statements';
 
   const data = await shopGet(path, accessToken, {
@@ -280,17 +281,29 @@ export async function fetchStatements(
     sort_field: 'statement_time',
   });
 
-  console.log('[TikTok fetchStatements] Full response:', JSON.stringify(data).slice(0, 3000));
+  console.log('[TikTok fetchStatements] Response:', JSON.stringify(data).slice(0, 3000));
 
   const rawStatements = (data?.statements || data?.statement_transactions || []) as Record<string, unknown>[];
-  const statements: FinanceStatement[] = rawStatements.map(s => ({
-    statement_id: String(s.statement_id || s.id || ''),
-    statement_time: Number(s.statement_time || 0),
-    payment_status: String(s.payment_status || s.status || ''),
-    raw: s,
-  }));
 
-  return { statements, rawResponse: data || {} };
+  return rawStatements.map(s => {
+    const stmtTime = Number(s.statement_time || 0);
+    const date = stmtTime ? new Date(stmtTime * 1000).toISOString().split('T')[0] : '';
+    return {
+      date,
+      revenue: toFloat(s.revenue_amount),
+      platformFee: Math.abs(toFloat(s.fee_amount)),
+      shippingCost: Math.abs(toFloat(s.shipping_cost_amount)),
+      settlement: toFloat(s.settlement_amount),
+      netSales: toFloat(s.net_sales_amount),
+    };
+  });
+}
+
+function toFloat(val: unknown): number {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') return parseFloat(val) || 0;
+  return 0;
 }
 
 // ==================== PRODUCT ENDPOINTS ====================

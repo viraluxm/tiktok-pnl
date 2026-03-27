@@ -184,14 +184,22 @@ export async function POST(request: Request) {
       Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)}`).join(' | '));
 
     // Fetch finance statements on the last page of a chunk (1 extra API call)
+    // Statements have actual platform fees and shipping costs from settlements
+    const statementsByDate: Record<string, { platformFee: number; shippingCost: number }> = {};
     if (!nextCursor) {
       try {
-        const { statements, rawResponse } = await fetchStatements(
+        const statements = await fetchStatements(
           accessToken, connection.shop_cipher, startTs, endTs,
         );
         console.log(`[Sync] Finance: ${statements.length} statements for chunk`);
-        if (statements.length > 0) {
-          console.log('[Sync] SAMPLE STATEMENT:', JSON.stringify(statements[0].raw, null, 2).slice(0, 2000));
+        for (const stmt of statements) {
+          if (!stmt.date) continue;
+          if (!statementsByDate[stmt.date]) {
+            statementsByDate[stmt.date] = { platformFee: 0, shippingCost: 0 };
+          }
+          statementsByDate[stmt.date].platformFee += stmt.platformFee;
+          statementsByDate[stmt.date].shippingCost += stmt.shippingCost;
+          console.log(`[Sync] Statement ${stmt.date}: platformFee=$${stmt.platformFee.toFixed(2)} shipping=$${stmt.shippingCost.toFixed(2)} revenue=$${stmt.revenue.toFixed(2)} settlement=$${stmt.settlement.toFixed(2)}`);
         }
       } catch (finErr) {
         console.warn('[Sync] Finance statements fetch failed (non-fatal):', (finErr as Error).message);
@@ -202,8 +210,9 @@ export async function POST(request: Request) {
     let totalCreated = 0;
     let totalUpdated = 0;
 
-    const affectedDates = Object.keys(dailyMap);
-    for (const date of affectedDates) {
+    // Include dates from both orders and statements
+    const allDates = new Set([...Object.keys(dailyMap), ...Object.keys(statementsByDate)]);
+    for (const date of allDates) {
       // Sum all synced orders for this date from the DB (single source of truth)
       const { data: dayOrders } = await admin
         .from('synced_order_ids')
@@ -211,21 +220,26 @@ export async function POST(request: Request) {
         .eq('user_id', user.id)
         .eq('order_date', date);
 
-      const totals = (dayOrders || []).reduce((acc, row) => ({
+      const orderTotals = (dayOrders || []).reduce((acc, row) => ({
         gmv: acc.gmv + Number(row.gmv),
         shipping: acc.shipping + Number(row.shipping),
         affiliate: acc.affiliate + Number(row.affiliate),
         platformFee: acc.platformFee + Number(row.platform_fee),
       }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0 });
 
+      // Use settlement data for platform_fee and shipping if available (more accurate)
+      const stmtData = statementsByDate[date];
+      const finalPlatformFee = stmtData ? stmtData.platformFee : orderTotals.platformFee;
+      const finalShipping = stmtData ? stmtData.shippingCost : orderTotals.shipping;
+
       const result = await setEntry(admin, {
         user_id: user.id,
         product_id: product.id,
         date,
-        gmv: totals.gmv,
-        shipping: totals.shipping,
-        affiliate: totals.affiliate,
-        platform_fee: totals.platformFee,
+        gmv: orderTotals.gmv,
+        shipping: finalShipping,
+        affiliate: orderTotals.affiliate,
+        platform_fee: finalPlatformFee,
         source: 'tiktok',
       });
       if (result === 'created') totalCreated++;
