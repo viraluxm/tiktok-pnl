@@ -138,9 +138,9 @@ export function useTikTok() {
             continue;
           }
           consecutiveErrors++;
-          console.log(`[SyncLoop] Error (${consecutiveErrors}/3):`, (err as Error).message);
-          if (consecutiveErrors >= 3) {
-            console.log('[SyncLoop] Giving up after 3 consecutive errors');
+          console.log(`[SyncLoop] Error (${consecutiveErrors}/5):`, (err as Error).message);
+          if (consecutiveErrors >= 5) {
+            console.log('[SyncLoop] Giving up after 5 consecutive errors');
             break;
           }
           await sleep(2_000);
@@ -158,7 +158,12 @@ export function useTikTok() {
           });
         }
 
-        if (s.isCaughtUp && !s.hasMorePages) break;
+        console.log(`[SyncLoop] isCaughtUp=${s.isCaughtUp} hasMorePages=${s.hasMorePages} ordersFetched=${s.ordersFetched} totalUnique=${s.totalUniqueOrders}`);
+
+        if (s.isCaughtUp && !s.hasMorePages) {
+          console.log('[SyncLoop] Fully caught up, stopping');
+          break;
+        }
 
         // 2s delay between calls to avoid rate limits
         await sleep(2_000);

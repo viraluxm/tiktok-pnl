@@ -161,7 +161,7 @@ export function computeChartData(entries: Entry[], costsMap?: CostsMap): ChartDa
       }
     }
     const userCogs = costPerUnit * unitsSold;
-    const platformFee = gmv * 0.06;
+    const platformFee = Number(e.platform_fee) || (gmv * 0.06);
 
     // Profit by date
     if (!profitByDateMap[e.date]) profitByDateMap[e.date] = 0;

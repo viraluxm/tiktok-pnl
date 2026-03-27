@@ -23,6 +23,7 @@ export interface Entry {
   shipping: number;
   affiliate: number;
   ads: number;
+  platform_fee?: number;
   units_sold?: number;
   variant_id?: string;
   created_at: string;

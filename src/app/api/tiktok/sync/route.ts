@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchOrdersPage } from '@/lib/tiktok/client';
+import { fetchOrdersPage, fetchStatements } from '@/lib/tiktok/client';
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
@@ -182,6 +182,21 @@ export async function POST(request: Request) {
 
     console.log(`[Sync] Aggregated ${newOrders.length} new orders into ${Object.keys(dailyMap).length} days:`,
       Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)}`).join(' | '));
+
+    // Fetch finance statements on the last page of a chunk (1 extra API call)
+    if (!nextCursor) {
+      try {
+        const { statements, rawResponse } = await fetchStatements(
+          accessToken, connection.shop_cipher, startTs, endTs,
+        );
+        console.log(`[Sync] Finance: ${statements.length} statements for chunk`);
+        if (statements.length > 0) {
+          console.log('[Sync] SAMPLE STATEMENT:', JSON.stringify(statements[0].raw, null, 2).slice(0, 2000));
+        }
+      } catch (finErr) {
+        console.warn('[Sync] Finance statements fetch failed (non-fatal):', (finErr as Error).message);
+      }
+    }
 
     // Rebuild daily totals from ALL synced orders for affected dates
     let totalCreated = 0;

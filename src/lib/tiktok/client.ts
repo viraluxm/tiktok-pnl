@@ -255,44 +255,42 @@ export async function fetchOrdersPage(
 }
 
 // ==================== FINANCE ENDPOINTS ====================
-// NOTE: Finance API endpoints (/finance/202309/*) return 403 "no schema found".
-// Correct endpoints TBD via TikTok API Testing Tool. Do not add finance calls
-// until the correct path is confirmed.
 
-export interface FinanceSettlement {
-  date: string;
-  revenue: number;
-  fees: number;
-  net_amount: number;
+export interface FinanceStatement {
+  statement_id: string;
+  statement_time: number;
+  payment_status: string;
+  // Raw data — structure varies, logged for discovery
+  raw: Record<string, unknown>;
 }
 
-export async function getFinanceOverview(
+export async function fetchStatements(
   accessToken: string,
   shopCipher: string,
-): Promise<FinanceSettlement[]> {
-  try {
-    const path = '/finance/202309/settlements/search';
-    const body = {};
-    const queryParams: Record<string, string> = {
-      shop_cipher: shopCipher,
-      page_size: '20',
-      sort_field: 'create_time',
-      sort_order: 'DESC',
-    };
+  startTs: number,
+  endTs: number,
+): Promise<{ statements: FinanceStatement[]; rawResponse: Record<string, unknown> }> {
+  const path = '/finance/202309/statements';
 
-    const data = await shopPost(path, accessToken, body, queryParams);
-    const settlements = data?.settlements || [];
+  const data = await shopGet(path, accessToken, {
+    shop_cipher: shopCipher,
+    statement_time_ge: String(startTs),
+    statement_time_lt: String(endTs),
+    page_size: '10',
+    sort_field: 'statement_time',
+  });
 
-    return settlements.map((s: Record<string, unknown>) => ({
-      date: s.settlement_time ? new Date((s.settlement_time as number) * 1000).toISOString().split('T')[0] : '',
-      revenue: parseFloat((s.revenue as string) || '0'),
-      fees: parseFloat((s.fees as string) || '0'),
-      net_amount: parseFloat((s.net_amount as string) || '0'),
-    }));
-  } catch (error) {
-    console.error('Failed to get finance overview:', error);
-    return [];
-  }
+  console.log('[TikTok fetchStatements] Full response:', JSON.stringify(data).slice(0, 3000));
+
+  const rawStatements = (data?.statements || data?.statement_transactions || []) as Record<string, unknown>[];
+  const statements: FinanceStatement[] = rawStatements.map(s => ({
+    statement_id: String(s.statement_id || s.id || ''),
+    statement_time: Number(s.statement_time || 0),
+    payment_status: String(s.payment_status || s.status || ''),
+    raw: s,
+  }));
+
+  return { statements, rawResponse: data || {} };
 }
 
 // ==================== PRODUCT ENDPOINTS ====================
