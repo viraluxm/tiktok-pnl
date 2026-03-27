@@ -18,6 +18,7 @@ export default function TikTokConnect() {
   } = useTikTok();
 
   const [isOpen, setIsOpen] = useState(false);
+  const [showDisconnectModal, setShowDisconnectModal] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -122,16 +123,41 @@ export default function TikTokConnect() {
 
           {/* Disconnect button */}
           <button
-            onClick={() => {
-              if (confirm('Disconnect TikTok? All synced data will be deleted.')) {
-                disconnect();
-              }
-            }}
+            onClick={() => setShowDisconnectModal(true)}
             disabled={isDisconnecting}
             className="px-2.5 py-1.5 rounded-lg border border-tt-border text-tt-muted text-[11px] font-medium hover:border-tt-red hover:text-tt-red transition-all disabled:opacity-50"
           >
             Disconnect
           </button>
+
+          {/* Disconnect confirmation modal */}
+          {showDisconnectModal && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+              <div className="bg-tt-card border border-tt-border rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+                <h3 className="text-sm font-semibold text-tt-text mb-2">Disconnect TikTok Shop?</h3>
+                <p className="text-xs text-tt-muted mb-5 leading-relaxed">
+                  You are about to disconnect this shop and delete all synced data. This cannot be undone.
+                </p>
+                <div className="flex gap-3 justify-end">
+                  <button
+                    onClick={() => setShowDisconnectModal(false)}
+                    className="px-4 py-2 rounded-lg border border-tt-border text-tt-muted text-[12px] font-medium hover:border-tt-text hover:text-tt-text transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowDisconnectModal(false);
+                      disconnect();
+                    }}
+                    className="px-4 py-2 rounded-lg bg-tt-red text-white text-[12px] font-semibold hover:opacity-90 transition-opacity"
+                  >
+                    Delete &amp; Disconnect
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Store dropdown */}
           <div ref={dropdownRef} className="relative">
