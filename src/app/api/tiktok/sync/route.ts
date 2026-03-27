@@ -5,10 +5,40 @@ import { fetchOrdersPage, fetchStatements, fetchUnsettledOrders } from '@/lib/ti
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
-const CHUNK_DAYS = 7;
 const BACKFILL_DAYS = 365;
 
 export const maxDuration = 60;
+
+// sync_cursor = current day (YYYY-MM-DD)
+// sync_page_cursor = JSON: {"day":"2025-05-01","splits":4,"index":2}
+//   splits=1 means whole day, splits=2 means 12hr halves, etc.
+//   index=which window (0-based)
+
+interface WindowState {
+  day: string;
+  splits: number;
+  index: number;
+}
+
+function parseWindowState(raw: string | null, fallbackDay: string): WindowState {
+  if (!raw) return { day: fallbackDay, splits: 1, index: 0 };
+  try {
+    const parsed = JSON.parse(raw);
+    return { day: parsed.day, splits: parsed.splits || 1, index: parsed.index || 0 };
+  } catch {
+    return { day: fallbackDay, splits: 1, index: 0 };
+  }
+}
+
+function getWindowTimestamps(day: string, splits: number, index: number): { startTs: number; endTs: number } {
+  const dayStart = Math.floor(new Date(day + 'T00:00:00Z').getTime() / 1000);
+  const dayEnd = dayStart + 86400; // next day 00:00:00
+  const windowSize = (dayEnd - dayStart) / splits;
+  return {
+    startTs: Math.floor(dayStart + windowSize * index),
+    endTs: Math.floor(dayStart + windowSize * (index + 1)),
+  };
+}
 
 export async function POST() {
   const supabase = await createClient();
@@ -49,66 +79,89 @@ export async function POST() {
   backfillStart.setUTCDate(backfillStart.getUTCDate() - BACKFILL_DAYS);
   const backfillStartStr = backfillStart.toISOString().split('T')[0];
 
-  // Read cursors from DB
   const dbSyncCursor: string | null = connection.sync_cursor || null;
   const dbPageCursor: string | null = connection.sync_page_cursor || null;
   let isCaughtUp = false;
 
-  // Determine chunk start and page cursor
-  let chunkStart: string;
-  let pageCursor: string | null;
-
-  if (dbPageCursor && dbSyncCursor) {
-    // Resuming pagination within a chunk
-    chunkStart = dbSyncCursor;
-    pageCursor = dbPageCursor;
-  } else if (!dbSyncCursor || dbSyncCursor < backfillStartStr) {
-    chunkStart = backfillStartStr;
-    pageCursor = null;
+  // Determine current day
+  let currentDay: string;
+  if (!dbSyncCursor || dbSyncCursor < backfillStartStr) {
+    currentDay = backfillStartStr;
   } else if (dbSyncCursor >= todayStr) {
-    const weekAgo = new Date(today);
-    weekAgo.setUTCDate(weekAgo.getUTCDate() - CHUNK_DAYS);
-    chunkStart = weekAgo.toISOString().split('T')[0];
-    pageCursor = null;
+    // Already caught up — re-sync today
+    currentDay = todayStr;
     isCaughtUp = true;
   } else {
-    chunkStart = dbSyncCursor;
-    pageCursor = null;
+    currentDay = dbSyncCursor;
   }
 
-  // Chunk end
-  const chunkEndDate = new Date(chunkStart + 'T00:00:00Z');
-  chunkEndDate.setUTCDate(chunkEndDate.getUTCDate() + CHUNK_DAYS - 1);
-  const chunkEnd = chunkEndDate > today ? todayStr : chunkEndDate.toISOString().split('T')[0];
+  // Parse window state
+  const win = parseWindowState(dbPageCursor, currentDay);
+  // If the window state day doesn't match current day, reset
+  if (win.day !== currentDay) {
+    win.day = currentDay;
+    win.splits = 1;
+    win.index = 0;
+  }
 
-  const nextChunkDate = new Date(chunkEnd + 'T00:00:00Z');
-  nextChunkDate.setUTCDate(nextChunkDate.getUTCDate() + 1);
-  const nextChunkStr = nextChunkDate.toISOString().split('T')[0];
+  const { startTs, endTs } = getWindowTimestamps(win.day, win.splits, win.index);
 
-  const startTs = Math.floor(new Date(chunkStart + 'T00:00:00Z').getTime() / 1000);
-  const endTs = Math.floor(new Date(chunkEnd + 'T23:59:59Z').getTime() / 1000);
-
-  console.log(`[Sync] chunk=${chunkStart}..${chunkEnd} dbPageCursor=${dbPageCursor || 'null'} pageCursor=${pageCursor || 'null'}`);
+  console.log(`[Sync] day=${win.day} splits=${win.splits} index=${win.index}/${win.splits} ts=${startTs}..${endTs}`);
 
   try {
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
 
-    // ===== FETCH ONE PAGE =====
+    // ===== FETCH ONE WINDOW =====
     let orders: Record<string, unknown>[] = [];
-    let rawNextCursor: string | null = null;
+    let hasMorePages = false;
 
     try {
-      console.log(`[Sync] Fetching page with cursor: ${pageCursor || 'null'}`);
-      const result = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageCursor);
+      const result = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, null);
       orders = result.orders;
-      rawNextCursor = result.nextCursor;
-      console.log(`[Sync] Got ${orders.length} orders, rawNextCursor=${rawNextCursor || 'null'}`);
+      hasMorePages = !!result.nextCursor;
+      console.log(`[Sync] Fetched ${orders.length} orders, hasMore=${hasMorePages}`);
     } catch (orderErr) {
-      console.warn(`[Sync] Orders fetch failed for chunk ${chunkStart}..${chunkEnd}:`, (orderErr as Error).message);
+      console.warn(`[Sync] Fetch failed for ${win.day} window ${win.index}:`, (orderErr as Error).message);
+      // Skip this window on error
     }
 
-    // ===== DEDUP =====
+    // If this window returned 100 orders AND has more pages, we need to split smaller
+    if (hasMorePages && orders.length >= 100 && win.splits < 48) {
+      // Don't process these orders — split the window and retry
+      const newSplits = win.splits * 2;
+      const newIndex = win.index * 2; // first half of current window
+      const newState: WindowState = { day: win.day, splits: newSplits, index: newIndex };
+
+      console.log(`[Sync] Window too large (${orders.length}+ orders) — splitting ${win.splits}→${newSplits}, starting at index ${newIndex}`);
+
+      await admin.from('tiktok_connections').update({
+        sync_cursor: currentDay,
+        sync_page_cursor: JSON.stringify(newState),
+        last_synced_at: new Date().toISOString(),
+      }).eq('user_id', user.id);
+
+      const { count: totalUniqueOrders } = await admin
+        .from('synced_order_ids')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', user.id);
+
+      return NextResponse.json({
+        success: true,
+        summary: {
+          dateRange: { startDate: win.day, endDate: win.day },
+          entriesCreated: 0, entriesUpdated: 0,
+          ordersFetched: 0, ordersSkipped: 0,
+          totalUniqueOrders: totalUniqueOrders || 0,
+          isCaughtUp: false, hasMorePages: true,
+          windowInfo: `split ${win.splits}→${newSplits}`,
+          currentChunk: `${win.day} w${newIndex}/${newSplits}`,
+          nextChunk: `${win.day} w${newIndex}/${newSplits}`,
+        },
+      });
+    }
+
+    // ===== DEDUP & INSERT =====
     const orderIds = orders.map(o => String((o as Record<string, unknown>).id || '')).filter(Boolean);
     const { data: existingRows } = await admin
       .from('synced_order_ids')
@@ -122,7 +175,6 @@ export async function POST() {
 
     console.log(`[Sync] Deduped: ${newOrders.length} new, ${skippedCount} dupes`);
 
-    // ===== INSERT NEW ORDERS =====
     const newOrderDates: string[] = [];
 
     for (const order of newOrders) {
@@ -155,39 +207,39 @@ export async function POST() {
       newOrderDates.push(date);
     }
 
-    // ===== DECIDE NEXT CURSOR =====
-    // Simple: if TikTok gave us a cursor → save it, more pages in this chunk
-    //         if no cursor → chunk done, advance to next chunk
+    // ===== ADVANCE WINDOW / DAY =====
     let newSyncCursor: string;
-    let newPageCursor: string | null;
-    const allDuplicates = orders.length > 0 && newOrders.length === 0;
+    let newPageCursor: string | null = null;
 
-    if (rawNextCursor && !allDuplicates) {
-      // More pages in this chunk
-      newSyncCursor = chunkStart;
-      newPageCursor = rawNextCursor;
+    const nextWindowIndex = win.index + 1;
+    if (nextWindowIndex < win.splits) {
+      // More windows in this day
+      newSyncCursor = currentDay;
+      newPageCursor = JSON.stringify({ day: win.day, splits: win.splits, index: nextWindowIndex });
     } else {
-      // Chunk done (no cursor, or all dupes) → advance
-      newSyncCursor = nextChunkStr;
-      newPageCursor = null;
-      if (chunkEnd >= todayStr) {
+      // Day complete — advance to next day
+      const nextDay = new Date(currentDay + 'T00:00:00Z');
+      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+      const nextDayStr = nextDay.toISOString().split('T')[0];
+
+      if (nextDayStr > todayStr) {
         isCaughtUp = true;
         newSyncCursor = todayStr;
+      } else {
+        newSyncCursor = nextDayStr;
       }
-      if (allDuplicates) {
-        console.log(`[Sync] All ${orders.length} orders were dupes — advancing to next chunk`);
-      }
+      newPageCursor = null;
     }
 
     // ===== SAVE CURSOR =====
-    console.log(`[Sync] Saving cursor: sync_cursor=${newSyncCursor}, sync_page_cursor=${newPageCursor || 'null'}`);
+    console.log(`[Sync] Saving: sync_cursor=${newSyncCursor}, sync_page_cursor=${newPageCursor || 'null'}`);
     await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
       sync_cursor: newSyncCursor,
       sync_page_cursor: newPageCursor,
     }).eq('user_id', user.id);
 
-    // ===== REBUILD ENTRIES FOR AFFECTED DATES ONLY =====
+    // ===== REBUILD AFFECTED DATES =====
     let totalCreated = 0;
     let totalUpdated = 0;
     const affectedDates = [...new Set(newOrderDates)];
@@ -219,11 +271,13 @@ export async function POST() {
       console.log(`[Sync] Rebuilt ${affectedDates.length} daily entries`);
     }
 
-    // ===== FETCH FINANCE (only when chunk fully done) =====
+    // ===== FINANCE (when a full day completes) =====
     if (!newPageCursor && !isCaughtUp) {
+      const dayStartTs = Math.floor(new Date(currentDay + 'T00:00:00Z').getTime() / 1000);
+      const dayEndTs = dayStartTs + 86400;
       try {
-        const statements = await fetchStatements(accessToken, connection.shop_cipher, startTs, endTs);
-        console.log(`[Sync] Finance: ${statements.length} statements`);
+        const statements = await fetchStatements(accessToken, connection.shop_cipher, dayStartTs, dayEndTs);
+        console.log(`[Sync] Finance for ${currentDay}: ${statements.length} statements`);
       } catch { /* non-fatal */ }
 
       if (!dbSyncCursor) {
@@ -239,7 +293,7 @@ export async function POST() {
     return NextResponse.json({
       success: true,
       summary: {
-        dateRange: { startDate: chunkStart, endDate: chunkEnd },
+        dateRange: { startDate: win.day, endDate: win.day },
         entriesCreated: totalCreated,
         entriesUpdated: totalUpdated,
         ordersFetched: newOrders.length,
@@ -247,10 +301,9 @@ export async function POST() {
         totalUniqueOrders: totalUniqueOrders || 0,
         isCaughtUp,
         hasMorePages: !!newPageCursor,
-        currentChunk: `${chunkStart}..${chunkEnd}`,
-        nextChunk: newPageCursor ? `${chunkStart} (page)` : nextChunkStr,
-        rawNextCursor: rawNextCursor || null,
-        savedPageCursor: newPageCursor || null,
+        windowInfo: `w${win.index}/${win.splits}`,
+        currentChunk: `${win.day} w${win.index}/${win.splits}`,
+        nextChunk: newPageCursor ? `${win.day} w${nextWindowIndex}/${win.splits}` : newSyncCursor,
       },
     });
   } catch (error) {
