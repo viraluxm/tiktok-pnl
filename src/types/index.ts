@@ -10,6 +10,9 @@ export interface Product {
   name: string;
   created_at: string;
   variants?: ProductVariant[];
+  tiktok_product_id?: string;
+  image_url?: string;
+  sku?: string;
 }
 
 export interface Entry {

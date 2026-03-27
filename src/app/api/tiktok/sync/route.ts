@@ -175,7 +175,10 @@ export async function POST() {
 
     console.log(`[Sync] Deduped: ${newOrders.length} new, ${skippedCount} dupes`);
 
-    const newOrderDates: string[] = [];
+    // Track affected dates+products for rebuild
+    const affectedKeys = new Set<string>(); // "date|productUuid"
+    // Cache: tiktok_product_id → products.id (uuid)
+    const productCache: Record<string, string> = {};
 
     for (const order of newOrders) {
       const o = order as Record<string, unknown>;
@@ -184,27 +187,51 @@ export async function POST() {
       const date = new Date(createTime * 1000).toISOString().split('T')[0];
 
       const payment = (o.payment || {}) as Record<string, unknown>;
-      const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
-      const shipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || 0;
-      const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
-      let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || 0;
+      const orderGmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
+      const orderShipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || 0;
+      const orderPlatformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
+      let orderAffiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || 0;
 
       const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
       let units = 0;
+
+      // Extract product info from first line item
+      let tikTokProductId: string | null = null;
       for (const item of lineItems) {
         units += Number(item.quantity) || 1;
-        if (affiliate === 0) {
-          affiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
+        if (orderAffiliate === 0) {
+          orderAffiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
+        }
+        // Get product info from first item that has a product_id
+        if (!tikTokProductId) {
+          tikTokProductId = String(item.product_id || '') || null;
+          const productName = String(item.product_name || item.sku_name || '') || null;
+          const skuImage = String(item.sku_image || item.product_image || '') || null;
+          const skuId = String(item.sku_id || '') || null;
+
+          // Upsert product if we have a TikTok product_id
+          if (tikTokProductId && productName) {
+            if (!productCache[tikTokProductId]) {
+              const productUuid = await getOrCreateTikTokProduct(admin, user.id, tikTokProductId, productName, skuImage, skuId);
+              productCache[tikTokProductId] = productUuid;
+            }
+          }
         }
       }
       if (units === 0) units = 1;
 
+      // Resolve product UUID (fall back to shop-level product)
+      const productUuid = (tikTokProductId && productCache[tikTokProductId])
+        ? productCache[tikTokProductId]
+        : product.id;
+
       await admin.from('synced_order_ids').upsert({
         user_id: user.id, order_id: orderId, order_date: date,
-        gmv, shipping, affiliate, platform_fee: platformFee, units,
+        gmv: orderGmv, shipping: orderShipping, affiliate: orderAffiliate,
+        platform_fee: orderPlatformFee, units, tiktok_product_id: tikTokProductId,
       }, { onConflict: 'user_id,order_id' });
 
-      newOrderDates.push(date);
+      affectedKeys.add(`${date}|${productUuid}`);
     }
 
     // ===== ADVANCE WINDOW / DAY =====
@@ -239,18 +266,32 @@ export async function POST() {
       sync_page_cursor: newPageCursor,
     }).eq('user_id', user.id);
 
-    // ===== REBUILD AFFECTED DATES =====
+    // ===== REBUILD AFFECTED DATE+PRODUCT ENTRIES =====
     let totalCreated = 0;
     let totalUpdated = 0;
-    const affectedDates = [...new Set(newOrderDates)];
 
-    if (affectedDates.length > 0) {
-      for (const date of affectedDates) {
-        const { data: dayOrders } = await admin
-          .from('synced_order_ids')
+    if (affectedKeys.size > 0) {
+      for (const key of affectedKeys) {
+        const [date, productUuid] = key.split('|');
+
+        // Find which tiktok_product_ids map to this product UUID
+        const { data: productRow } = await admin.from('products').select('tiktok_product_id').eq('id', productUuid).single();
+        const tikTokPid = productRow?.tiktok_product_id;
+
+        // Query synced_order_ids for this date + product
+        let q = admin.from('synced_order_ids')
           .select('gmv, shipping, affiliate, platform_fee, units')
           .eq('user_id', user.id)
           .eq('order_date', date);
+
+        if (tikTokPid) {
+          q = q.eq('tiktok_product_id', tikTokPid);
+        } else {
+          // Fallback shop product — orders with no tiktok_product_id
+          q = q.is('tiktok_product_id', null);
+        }
+
+        const { data: dayOrders } = await q;
 
         const t = (dayOrders || []).reduce((acc, row) => ({
           gmv: acc.gmv + Number(row.gmv),
@@ -261,14 +302,14 @@ export async function POST() {
         }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
 
         const result = await setEntry(admin, {
-          user_id: user.id, product_id: product.id, date,
+          user_id: user.id, product_id: productUuid, date,
           gmv: t.gmv, shipping: t.shipping, affiliate: t.affiliate,
           platform_fee: t.platformFee, units_sold: t.units, source: 'tiktok',
         });
         if (result === 'created') totalCreated++;
         else if (result === 'updated') totalUpdated++;
       }
-      console.log(`[Sync] Rebuilt ${affectedDates.length} daily entries`);
+      console.log(`[Sync] Rebuilt ${affectedKeys.size} date+product entries`);
     }
 
     // ===== FINANCE (when a full day completes) =====
@@ -320,6 +361,57 @@ async function getOrCreateProduct(admin: ReturnType<typeof createAdminClient>, u
   const { data: created, error } = await admin.from('products').insert({ user_id: userId, name: shopName }).select().single();
   if (error) throw new Error(`Failed to create product: ${error.message}`);
   return created;
+}
+
+async function getOrCreateTikTokProduct(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string,
+  tikTokProductId: string,
+  name: string,
+  imageUrl: string | null,
+  sku: string | null,
+): Promise<string> {
+  // Check if product already exists by tiktok_product_id
+  const { data: existing } = await admin.from('products')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('tiktok_product_id', tikTokProductId)
+    .single();
+
+  if (existing) {
+    // Update image/sku if we have new data
+    if (imageUrl || sku) {
+      await admin.from('products').update({
+        ...(imageUrl ? { image_url: imageUrl } : {}),
+        ...(sku ? { sku } : {}),
+      }).eq('id', existing.id);
+    }
+    return existing.id;
+  }
+
+  // Create new product
+  const { data: created, error } = await admin.from('products').insert({
+    user_id: userId,
+    name: name || `Product ${tikTokProductId.slice(-6)}`,
+    tiktok_product_id: tikTokProductId,
+    image_url: imageUrl,
+    sku,
+  }).select('id').single();
+
+  if (error) {
+    // If unique constraint on (user_id, name) fails, try with a suffix
+    const { data: retry, error: retryErr } = await admin.from('products').insert({
+      user_id: userId,
+      name: `${name} (${tikTokProductId.slice(-6)})`,
+      tiktok_product_id: tikTokProductId,
+      image_url: imageUrl,
+      sku,
+    }).select('id').single();
+    if (retryErr) throw new Error(`Failed to create product: ${retryErr.message}`);
+    return retry.id;
+  }
+
+  return created.id;
 }
 
 function toNum(val: unknown): number {
