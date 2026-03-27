@@ -6,7 +6,7 @@ import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const CHUNK_DAYS = 7;
-const BACKFILL_DAYS = 30;
+const BACKFILL_DAYS = 365;
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -66,6 +66,7 @@ export async function POST(request: Request) {
     chunkStart = backfillStartStr;
     pageCursor = null;
   } else if (syncCursor >= todayStr) {
+    // Already caught up — re-sync latest chunk
     const weekAgo = new Date(today);
     weekAgo.setUTCDate(weekAgo.getUTCDate() - CHUNK_DAYS);
     chunkStart = weekAgo.toISOString().split('T')[0];
@@ -85,6 +86,11 @@ export async function POST(request: Request) {
     chunkEnd = chunkEndDate.toISOString().split('T')[0];
   }
 
+  // Compute next chunk for the response
+  const nextChunkDate = new Date(chunkEnd + 'T00:00:00Z');
+  nextChunkDate.setUTCDate(nextChunkDate.getUTCDate() + 1);
+  const nextChunkStr = nextChunkDate.toISOString().split('T')[0];
+
   const startTs = Math.floor(new Date(chunkStart + 'T00:00:00Z').getTime() / 1000);
   const endTs = Math.floor(new Date(chunkEnd + 'T23:59:59Z').getTime() / 1000);
 
@@ -95,27 +101,27 @@ export async function POST(request: Request) {
     const product = await getOrCreateProduct(admin, user.id, shopName);
 
     // Fetch one page of orders
-    const { orders, nextCursor } = await fetchOrdersPage(
-      accessToken,
-      connection.shop_cipher,
-      startTs,
-      endTs,
-      pageCursor,
-    );
+    let orders: Record<string, unknown>[] = [];
+    let nextCursor: string | null = null;
+
+    try {
+      const result = await fetchOrdersPage(
+        accessToken,
+        connection.shop_cipher,
+        startTs,
+        endTs,
+        pageCursor,
+      );
+      orders = result.orders;
+      nextCursor = result.nextCursor;
+    } catch (orderErr) {
+      // If TikTok rejects old date ranges, skip to next chunk
+      console.warn(`[Sync] Orders fetch failed for chunk ${chunkStart}..${chunkEnd}:`, (orderErr as Error).message);
+      orders = [];
+      nextCursor = null;
+    }
 
     console.log(`[Sync] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
-
-    if (orders.length > 0) {
-      const sample = orders[0] as Record<string, unknown>;
-      console.log('[Sync] SAMPLE ORDER keys:', Object.keys(sample).join(', '));
-      console.log('[Sync] SAMPLE ORDER payment:', JSON.stringify(sample.payment, null, 2));
-      const sampleItems = (sample.line_items || sample.order_line_list || sample.item_list || []) as Record<string, unknown>[];
-      if (sampleItems.length > 0) {
-        console.log('[Sync] SAMPLE LINE ITEM keys:', Object.keys(sampleItems[0]).join(', '));
-        console.log('[Sync] SAMPLE LINE ITEM:', JSON.stringify(sampleItems[0], null, 2).slice(0, 2000));
-      }
-      console.log('[Sync] SAMPLE ORDER full:', JSON.stringify(sample, null, 2).slice(0, 3000));
-    }
 
     // Extract order IDs from this page
     const orderIds = orders.map(o => String((o as Record<string, unknown>).id || '')).filter(Boolean);
@@ -152,17 +158,15 @@ export async function POST(request: Request) {
       const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
       let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || toNum(payment.affiliate_partner_commission) || 0;
 
-      // Count units from line items
       const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
       let units = 0;
       for (const item of lineItems) {
         units += Number(item.quantity) || 1;
-        // Check line items for affiliate if not in payment
         if (affiliate === 0) {
           affiliate += toNum(item.platform_commission) || toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
         }
       }
-      if (units === 0) units = 1; // At least 1 unit per order
+      if (units === 0) units = 1;
 
       dailyMap[date].gmv += gmv;
       dailyMap[date].shipping += shipping;
@@ -170,7 +174,6 @@ export async function POST(request: Request) {
       dailyMap[date].affiliate += affiliate;
       dailyMap[date].orderCount += units;
 
-      // Store this order ID with its amounts
       await admin
         .from('synced_order_ids')
         .upsert({
@@ -185,18 +188,34 @@ export async function POST(request: Request) {
         }, { onConflict: 'user_id,order_id' });
     }
 
-    console.log(`[Sync] Aggregated ${newOrders.length} new orders into ${Object.keys(dailyMap).length} days:`,
-      Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)}`).join(' | '));
+    // Decide next cursor BEFORE finance calls (to stay under timeout)
+    const allDuplicates = orders.length > 0 && newOrders.length === 0;
+    let newSyncCursor: string;
+    let newPageCursor: string | null = null;
 
-    // Fetch finance statements on the last page of a chunk (1 extra API call)
-    // Statements have actual platform fees and shipping costs from settlements
+    if (nextCursor && !allDuplicates) {
+      newSyncCursor = chunkStart;
+      newPageCursor = nextCursor;
+    } else {
+      // Chunk done — advance
+      newSyncCursor = nextChunkStr;
+      newPageCursor = null;
+
+      if (chunkEnd >= todayStr) {
+        isCaughtUp = true;
+        newSyncCursor = todayStr;
+      }
+
+      if (allDuplicates) {
+        console.log(`[Sync] All ${orders.length} orders were duplicates — skipping to next chunk`);
+      }
+    }
+
+    // Fetch finance statements on last page of chunk (no more order pages)
     const statementsByDate: Record<string, { platformFee: number; shippingCost: number }> = {};
-    if (!nextCursor) {
+    if (!newPageCursor) {
       try {
-        const statements = await fetchStatements(
-          accessToken, connection.shop_cipher, startTs, endTs,
-        );
-        console.log(`[Sync] Finance: ${statements.length} statements for chunk`);
+        const statements = await fetchStatements(accessToken, connection.shop_cipher, startTs, endTs);
         for (const stmt of statements) {
           if (!stmt.date) continue;
           if (!statementsByDate[stmt.date]) {
@@ -204,30 +223,24 @@ export async function POST(request: Request) {
           }
           statementsByDate[stmt.date].platformFee += stmt.platformFee;
           statementsByDate[stmt.date].shippingCost += stmt.shippingCost;
-          console.log(`[Sync] Statement ${stmt.date}: platformFee=$${stmt.platformFee.toFixed(2)} shipping=$${stmt.shippingCost.toFixed(2)} revenue=$${stmt.revenue.toFixed(2)} settlement=$${stmt.settlement.toFixed(2)}`);
         }
+        console.log(`[Sync] Finance: ${statements.length} statements for chunk`);
       } catch (finErr) {
-        console.warn('[Sync] Finance statements fetch failed (non-fatal):', (finErr as Error).message);
+        console.warn('[Sync] Finance fetch failed (non-fatal):', (finErr as Error).message);
       }
 
-      // On the very first chunk (no prior cursor), also probe unsettled orders endpoint
+      // Probe unsettled orders on first-ever sync
       if (!syncCursor) {
-        try {
-          await fetchUnsettledOrders(accessToken, connection.shop_cipher);
-        } catch (unsettledErr) {
-          console.warn('[Sync] Unsettled orders fetch failed (non-fatal):', (unsettledErr as Error).message);
-        }
+        try { await fetchUnsettledOrders(accessToken, connection.shop_cipher); } catch { /* non-fatal */ }
       }
     }
 
-    // Rebuild daily totals from ALL synced orders for affected dates
+    // Rebuild daily entries for affected dates
     let totalCreated = 0;
     let totalUpdated = 0;
-
-    // Include dates from both orders and statements
     const allDates = new Set([...Object.keys(dailyMap), ...Object.keys(statementsByDate)]);
+
     for (const date of allDates) {
-      // Sum all synced orders for this date from the DB (single source of truth)
       const { data: dayOrders } = await admin
         .from('synced_order_ids')
         .select('gmv, shipping, affiliate, platform_fee, units')
@@ -242,7 +255,6 @@ export async function POST(request: Request) {
         units: acc.units + (Number(row.units) || 1),
       }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
 
-      // Use settlement data for platform_fee and shipping if available (more accurate)
       const stmtData = statementsByDate[date];
       const finalPlatformFee = stmtData ? stmtData.platformFee : orderTotals.platformFee;
       const finalShipping = stmtData ? stmtData.shippingCost : orderTotals.shipping;
@@ -262,33 +274,7 @@ export async function POST(request: Request) {
       else if (result === 'updated') totalUpdated++;
     }
 
-    // Decide next state
-    // If ALL orders on this page were duplicates, skip remaining pages and advance to next chunk
-    const allDuplicates = orders.length > 0 && newOrders.length === 0;
-    let newSyncCursor: string;
-    let newPageCursor: string | null = null;
-
-    if (nextCursor && !allDuplicates) {
-      // More pages with new data — stay on same chunk
-      newSyncCursor = chunkStart;
-      newPageCursor = nextCursor;
-    } else {
-      // Chunk done (no more pages, or all remaining are duplicates) — advance
-      const nextChunkDate = new Date(chunkEnd + 'T00:00:00Z');
-      nextChunkDate.setUTCDate(nextChunkDate.getUTCDate() + 1);
-      newSyncCursor = nextChunkDate.toISOString().split('T')[0];
-      newPageCursor = null;
-
-      if (chunkEnd >= todayStr) {
-        isCaughtUp = true;
-        newSyncCursor = todayStr;
-      }
-
-      if (allDuplicates) {
-        console.log(`[Sync] All ${orders.length} orders were duplicates — skipping to next chunk`);
-      }
-    }
-
+    // Save cursor
     await admin
       .from('tiktok_connections')
       .update({
@@ -298,7 +284,6 @@ export async function POST(request: Request) {
       })
       .eq('user_id', user.id);
 
-    // Get total unique orders count for this user
     const { count: totalUniqueOrders } = await admin
       .from('synced_order_ids')
       .select('*', { count: 'exact', head: true })
@@ -315,6 +300,8 @@ export async function POST(request: Request) {
         totalUniqueOrders: totalUniqueOrders || 0,
         isCaughtUp,
         hasMorePages: !!newPageCursor,
+        currentChunk: `${chunkStart}..${chunkEnd}`,
+        nextChunk: newPageCursor ? `${chunkStart} (page)` : nextChunkStr,
       },
     });
   } catch (error) {
@@ -356,7 +343,6 @@ function toNum(val: unknown): number {
   return 0;
 }
 
-// Set daily entry to exact totals (rebuilt from synced_order_ids)
 async function setEntry(
   admin: ReturnType<typeof createAdminClient>,
   entry: {

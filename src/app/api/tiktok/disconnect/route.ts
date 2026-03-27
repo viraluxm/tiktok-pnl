@@ -10,41 +10,40 @@ export async function POST() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // Use admin client for all deletes to bypass RLS
   const admin = createAdminClient();
 
-  // 1. Delete synced order IDs
-  const { error: orderIdsErr } = await admin
+  // 1. Delete all synced order IDs
+  const { count: orderCount } = await admin
     .from('synced_order_ids')
-    .delete()
+    .delete({ count: 'exact' })
     .eq('user_id', user.id);
-  if (orderIdsErr) console.error('Error deleting synced_order_ids:', orderIdsErr);
+  console.log(`[Disconnect] Deleted ${orderCount ?? 0} synced_order_ids`);
 
-  // 2. Delete TikTok-sourced entries
-  const { error: entriesErr } = await admin
+  // 2. Delete all entries for this user
+  const { count: entryCount } = await admin
     .from('entries')
-    .delete()
-    .eq('user_id', user.id)
-    .eq('source', 'tiktok');
-  if (entriesErr) console.error('Error deleting tiktok entries:', entriesErr);
+    .delete({ count: 'exact' })
+    .eq('user_id', user.id);
+  console.log(`[Disconnect] Deleted ${entryCount ?? 0} entries`);
 
   // 3. Delete sync logs
-  const { error: logsErr } = await admin
+  const { count: logCount } = await admin
     .from('sync_logs')
-    .delete()
+    .delete({ count: 'exact' })
     .eq('user_id', user.id);
-  if (logsErr) console.error('Error deleting sync_logs:', logsErr);
+  console.log(`[Disconnect] Deleted ${logCount ?? 0} sync_logs`);
 
-  // 4. Delete the connection (this also removes sync_cursor/sync_page_cursor)
+  // 4. Delete the connection
   const { error: connErr } = await admin
     .from('tiktok_connections')
     .delete()
     .eq('user_id', user.id);
+
   if (connErr) {
-    console.error('Error deleting tiktok_connections:', connErr);
+    console.error('[Disconnect] Error deleting tiktok_connections:', connErr);
     return NextResponse.json({ error: 'Failed to disconnect' }, { status: 500 });
   }
 
-  console.log(`[Disconnect] Cleared all TikTok data for user ${user.id}`);
+  console.log(`[Disconnect] Fully cleared all data for user ${user.id}`);
   return NextResponse.json({ success: true });
 }

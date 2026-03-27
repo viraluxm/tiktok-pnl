@@ -28,7 +28,8 @@ interface SyncSummary {
   totalUniqueOrders: number;
   isCaughtUp: boolean;
   hasMorePages: boolean;
-  errors?: string[];
+  currentChunk: string;
+  nextChunk: string;
 }
 
 interface SyncResponse {
@@ -36,10 +37,10 @@ interface SyncResponse {
   summary: SyncSummary;
 }
 
-interface BackfillProgress {
+interface SyncProgress {
   totalOrders: number;
   currentRange: string;
-  isComplete: boolean;
+  isSyncing: boolean;
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -68,14 +69,9 @@ export function useTikTok() {
   const { user } = useUser();
   const queryClient = useQueryClient();
 
-  // Backfill state
-  const [isBackfilling, setIsBackfilling] = useState(false);
-  const [backfillProgress, setBackfillProgress] = useState<BackfillProgress | null>(null);
-  const backfillAbortRef = useRef(false);
-
-  // Auto-sync state
-  const [isAutoSyncing, setIsAutoSyncing] = useState(false);
-  const autoSyncRanRef = useRef(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  const abortRef = useRef(false);
+  const loopRanRef = useRef(false);
 
   const connectionQuery = useQuery<TikTokStatusResponse>({
     queryKey: ['tiktok-status', user?.id],
@@ -103,31 +99,27 @@ export function useTikTok() {
       return res.json();
     },
     onSuccess: () => {
-      backfillAbortRef.current = true;
-      setIsBackfilling(false);
-      setBackfillProgress(null);
+      abortRef.current = true;
+      setSyncProgress(null);
+      loopRanRef.current = false;
       queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
+      queryClient.invalidateQueries({ queryKey: ['entries'] });
     },
   });
 
-  // Backfill loop — runs on first connection (needsBackfill=true)
-  // Also used for returning users to auto-catch-up
-  const runSyncLoop = useCallback(async (isInitialBackfill: boolean) => {
-    if (isInitialBackfill) {
-      setIsBackfilling(true);
-    } else {
-      setIsAutoSyncing(true);
-    }
-    backfillAbortRef.current = false;
-    let totalOrders = 0;
+  const runSyncLoop = useCallback(async () => {
+    abortRef.current = false;
     let consecutiveErrors = 0;
     let iteration = 0;
+
+    setSyncProgress({ totalOrders: 0, currentRange: '', isSyncing: true });
 
     try {
       // eslint-disable-next-line no-constant-condition
       while (true) {
         iteration++;
-        if (backfillAbortRef.current) {
+
+        if (abortRef.current) {
           console.log(`[SyncLoop] Aborted at iteration ${iteration}`);
           break;
         }
@@ -153,45 +145,42 @@ export function useTikTok() {
         }
 
         const s = result.summary;
-        totalOrders = s.totalUniqueOrders;
 
-        console.log(`[SyncLoop] Iteration ${iteration}: caught_up=${s.isCaughtUp}, more_pages=${s.hasMorePages}, orders=${s.ordersFetched}, skipped=${s.ordersSkipped}, total=${s.totalUniqueOrders}, range=${s.dateRange.startDate}..${s.dateRange.endDate}`);
+        console.log(`[SyncLoop] Iteration ${iteration}: caught_up=${s.isCaughtUp}, more_pages=${s.hasMorePages}, new=${s.ordersFetched}, skipped=${s.ordersSkipped}, total=${s.totalUniqueOrders}, chunk=${s.currentChunk}, next=${s.nextChunk}`);
 
-        if (isInitialBackfill) {
-          setBackfillProgress({
-            totalOrders,
-            currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
-            isComplete: s.isCaughtUp && !s.hasMorePages,
-          });
-        }
+        // Update progress banner
+        setSyncProgress({
+          totalOrders: s.totalUniqueOrders,
+          currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
+          isSyncing: true,
+        });
 
+        // Refresh dashboard data after every call
+        queryClient.invalidateQueries({ queryKey: ['entries'] });
+
+        // ONLY stop when fully caught up
         if (s.isCaughtUp && !s.hasMorePages) {
-          console.log(`[SyncLoop] Fully caught up at iteration ${iteration}, stopping`);
+          console.log(`[SyncLoop] Fully caught up at iteration ${iteration}`);
           break;
         }
 
-        // 2s delay between calls to avoid rate limits
         await sleep(2_000);
       }
     } finally {
-      setIsBackfilling(false);
-      setIsAutoSyncing(false);
+      setSyncProgress(prev => prev ? { ...prev, isSyncing: false } : null);
       queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
       queryClient.invalidateQueries({ queryKey: ['entries'] });
     }
   }, [queryClient]);
 
-  // Trigger backfill or auto-sync when connection status is known
+  // Auto-start sync loop when connected
   useEffect(() => {
     const conn = connectionQuery.data?.connection;
     if (!conn || !connectionQuery.data?.connected) return;
-    if (autoSyncRanRef.current) return;
+    if (loopRanRef.current) return;
 
-    autoSyncRanRef.current = true;
-
-    // Both paths use the same loop — initial backfill shows onboarding UI,
-    // returning users get a subtle "Updating..." indicator
-    runSyncLoop(conn.needsBackfill);
+    loopRanRef.current = true;
+    runSyncLoop();
   }, [connectionQuery.data, runSyncLoop]);
 
   const isConnected = connectionQuery.data?.connected ?? false;
@@ -202,9 +191,7 @@ export function useTikTok() {
     connection,
     isLoading: connectionQuery.isLoading,
     isSyncing: syncMutation.isPending,
-    isAutoSyncing,
-    isBackfilling,
-    backfillProgress,
+    syncProgress,
     lastSyncResult: syncMutation.data?.summary ?? null,
     syncError: syncMutation.error?.message ?? null,
     sync: () => syncMutation.mutate(),
