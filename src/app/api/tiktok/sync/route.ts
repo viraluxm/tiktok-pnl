@@ -106,7 +106,15 @@ export async function POST(request: Request) {
     console.log(`[Sync] Got ${orders.length} orders, nextCursor=${nextCursor || 'none'}`);
 
     if (orders.length > 0) {
-      console.log('[Sync] SAMPLE ORDER:', JSON.stringify(orders[0], null, 2).slice(0, 3000));
+      const sample = orders[0] as Record<string, unknown>;
+      console.log('[Sync] SAMPLE ORDER keys:', Object.keys(sample).join(', '));
+      console.log('[Sync] SAMPLE ORDER payment:', JSON.stringify(sample.payment, null, 2));
+      const sampleItems = (sample.line_items || sample.order_line_list || sample.item_list || []) as Record<string, unknown>[];
+      if (sampleItems.length > 0) {
+        console.log('[Sync] SAMPLE LINE ITEM keys:', Object.keys(sampleItems[0]).join(', '));
+        console.log('[Sync] SAMPLE LINE ITEM:', JSON.stringify(sampleItems[0], null, 2).slice(0, 2000));
+      }
+      console.log('[Sync] SAMPLE ORDER full:', JSON.stringify(sample, null, 2).slice(0, 3000));
     }
 
     // Extract order IDs from this page

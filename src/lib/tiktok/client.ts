@@ -256,12 +256,21 @@ export async function fetchOrdersPage(
 
 // ==================== FINANCE PER-ORDER ====================
 
-export interface OrderFinanceData {
-  order_id: string;
-  affiliate_commission: number;
-  platform_fee: number;
-  shipping_fee_subsidy: number;
-}
+// Try multiple finance endpoint paths — TikTok docs vary by version
+const FINANCE_ORDER_PATHS = [
+  '/finance/202309/order_settlements',
+  '/finance/202312/order_settlements',
+  '/finance/202309/orders',
+  '/finance/202312/orders',
+  '/finance/202309/order_settlements/search',
+];
+
+const FINANCE_SETTLEMENT_PATHS = [
+  '/finance/202309/settlements/search',
+  '/finance/202312/settlements/search',
+  '/finance/202309/settlements',
+  '/finance/202312/settlements',
+];
 
 export async function fetchOrderFinancePage(
   accessToken: string,
@@ -269,19 +278,42 @@ export async function fetchOrderFinancePage(
   startTs: number,
   endTs: number,
 ): Promise<Record<string, unknown>> {
-  // Try GET /finance/202309/orders for per-order finance breakdowns
-  try {
-    const data = await shopGet('/finance/202309/orders', accessToken, {
-      shop_cipher: shopCipher,
-      create_time_ge: String(startTs),
-      create_time_lt: String(endTs),
-      page_size: '50',
-    });
-    return data || {};
-  } catch (error) {
-    console.warn('[TikTok fetchOrderFinancePage] GET /finance/202309/orders failed:', error);
-    return {};
+  // Try GET endpoints first
+  for (const path of FINANCE_ORDER_PATHS) {
+    try {
+      console.log(`[TikTok finance] Trying GET ${path}`);
+      const data = await shopGet(path, accessToken, {
+        shop_cipher: shopCipher,
+        create_time_ge: String(startTs),
+        create_time_lt: String(endTs),
+        page_size: '50',
+      });
+      console.log(`[TikTok finance] GET ${path} SUCCESS:`, JSON.stringify(data).slice(0, 3000));
+      return data || {};
+    } catch (error) {
+      console.warn(`[TikTok finance] GET ${path} failed:`, (error as Error).message);
+    }
   }
+
+  // Also try as POST with body
+  for (const path of FINANCE_ORDER_PATHS) {
+    try {
+      console.log(`[TikTok finance] Trying POST ${path}`);
+      const data = await shopPost(path, accessToken, {
+        create_time_ge: startTs,
+        create_time_lt: endTs,
+      }, {
+        shop_cipher: shopCipher,
+        page_size: '50',
+      });
+      console.log(`[TikTok finance] POST ${path} SUCCESS:`, JSON.stringify(data).slice(0, 3000));
+      return data || {};
+    } catch (error) {
+      console.warn(`[TikTok finance] POST ${path} failed:`, (error as Error).message);
+    }
+  }
+
+  return {};
 }
 
 export async function fetchSettlementsPage(
@@ -290,22 +322,40 @@ export async function fetchSettlementsPage(
   startTs: number,
   endTs: number,
 ): Promise<Record<string, unknown>> {
-  // POST /finance/202309/settlements/search
-  try {
-    const body = {
-      create_time_ge: startTs,
-      create_time_lt: endTs,
-    };
-    const queryParams: Record<string, string> = {
-      shop_cipher: shopCipher,
-      page_size: '50',
-    };
-    const data = await shopPost('/finance/202309/settlements/search', accessToken, body, queryParams);
-    return data || {};
-  } catch (error) {
-    console.warn('[TikTok fetchSettlementsPage] settlements/search failed:', error);
-    return {};
+  for (const path of FINANCE_SETTLEMENT_PATHS) {
+    // Try as POST
+    try {
+      console.log(`[TikTok settlements] Trying POST ${path}`);
+      const data = await shopPost(path, accessToken, {
+        create_time_ge: startTs,
+        create_time_lt: endTs,
+      }, {
+        shop_cipher: shopCipher,
+        page_size: '50',
+      });
+      console.log(`[TikTok settlements] POST ${path} SUCCESS:`, JSON.stringify(data).slice(0, 3000));
+      return data || {};
+    } catch (error) {
+      console.warn(`[TikTok settlements] POST ${path} failed:`, (error as Error).message);
+    }
+
+    // Try as GET
+    try {
+      console.log(`[TikTok settlements] Trying GET ${path}`);
+      const data = await shopGet(path, accessToken, {
+        shop_cipher: shopCipher,
+        create_time_ge: String(startTs),
+        create_time_lt: String(endTs),
+        page_size: '50',
+      });
+      console.log(`[TikTok settlements] GET ${path} SUCCESS:`, JSON.stringify(data).slice(0, 3000));
+      return data || {};
+    } catch (error) {
+      console.warn(`[TikTok settlements] GET ${path} failed:`, (error as Error).message);
+    }
   }
+
+  return {};
 }
 
 // ==================== FINANCE ENDPOINTS ====================
