@@ -7,7 +7,9 @@ import { decryptOrFallback } from '@/lib/crypto';
 
 const CHUNK_DAYS = 7;
 const BACKFILL_DAYS = 365;
-const MAX_FETCH_MS = 7000; // 7s for fetching, leaves 3s for DB writes
+const MAX_FETCH_MS = 50_000; // 50s for fetching, leaves 10s for DB writes (Vercel Pro = 60s)
+
+export const maxDuration = 60;
 
 export async function POST() {
   const supabase = await createClient();
@@ -89,13 +91,14 @@ export async function POST() {
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
 
-    // ===== MULTI-PAGE FETCH LOOP (up to 7s) =====
+    // ===== MULTI-PAGE FETCH LOOP (up to 50s) =====
     const fetchStart = Date.now();
     let totalNewOrders = 0;
     let totalSkipped = 0;
     let pagesThisCall = 0;
     let chunkExhausted = false;
     let consecutiveDupPages = 0;
+    const newOrderDates: string[] = [];
 
     while (Date.now() - fetchStart < MAX_FETCH_MS) {
       let orders: Record<string, unknown>[] = [];
@@ -158,6 +161,8 @@ export async function POST() {
           user_id: user.id, order_id: orderId, order_date: date,
           gmv, shipping, affiliate, platform_fee: platformFee, units,
         }, { onConflict: 'user_id,order_id' });
+
+        newOrderDates.push(date);
       }
 
       // Check if chunk is done
@@ -227,22 +232,17 @@ export async function POST() {
       sync_page_cursor: newPageCursor,
     }).eq('user_id', user.id);
 
-    // ===== REBUILD ALL DAILY ENTRIES FROM synced_order_ids =====
-    const { data: dailyAgg } = await admin.rpc('aggregate_daily_orders', { p_user_id: user.id }).select('*');
-
+    // ===== REBUILD ENTRIES ONLY FOR DATES WITH NEW ORDERS =====
     let totalCreated = 0;
     let totalUpdated = 0;
 
-    // Fallback if RPC doesn't exist — query manually
-    if (!dailyAgg) {
-      const { data: allDays } = await admin
-        .from('synced_order_ids')
-        .select('order_date')
-        .eq('user_id', user.id);
+    // Collect unique dates that had new orders inserted this call
+    const affectedDates = [...new Set(
+      newOrderDates.length > 0 ? newOrderDates : []
+    )];
 
-      const uniqueDates = [...new Set((allDays || []).map(r => r.order_date))];
-
-      for (const date of uniqueDates) {
+    if (affectedDates.length > 0) {
+      for (const date of affectedDates) {
         const { data: dayOrders } = await admin
           .from('synced_order_ids')
           .select('gmv, shipping, affiliate, platform_fee, units')
@@ -265,6 +265,7 @@ export async function POST() {
         if (result === 'created') totalCreated++;
         else if (result === 'updated') totalUpdated++;
       }
+      console.log(`[Sync] Rebuilt ${affectedDates.length} daily entries`);
     }
 
     const { count: totalUniqueOrders } = await admin
