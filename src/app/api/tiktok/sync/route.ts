@@ -263,13 +263,17 @@ export async function POST(request: Request) {
     }
 
     // Decide next state
+    // If ALL orders on this page were duplicates, skip remaining pages and advance to next chunk
+    const allDuplicates = orders.length > 0 && newOrders.length === 0;
     let newSyncCursor: string;
     let newPageCursor: string | null = null;
 
-    if (nextCursor) {
+    if (nextCursor && !allDuplicates) {
+      // More pages with new data — stay on same chunk
       newSyncCursor = chunkStart;
       newPageCursor = nextCursor;
     } else {
+      // Chunk done (no more pages, or all remaining are duplicates) — advance
       const nextChunkDate = new Date(chunkEnd + 'T00:00:00Z');
       nextChunkDate.setUTCDate(nextChunkDate.getUTCDate() + 1);
       newSyncCursor = nextChunkDate.toISOString().split('T')[0];
@@ -278,6 +282,10 @@ export async function POST(request: Request) {
       if (chunkEnd >= todayStr) {
         isCaughtUp = true;
         newSyncCursor = todayStr;
+      }
+
+      if (allDuplicates) {
+        console.log(`[Sync] All ${orders.length} orders were duplicates — skipping to next chunk`);
       }
     }
 
@@ -306,7 +314,7 @@ export async function POST(request: Request) {
         ordersSkipped: duplicateCount,
         totalUniqueOrders: totalUniqueOrders || 0,
         isCaughtUp,
-        hasMorePages: !!nextCursor,
+        hasMorePages: !!newPageCursor,
       },
     });
   } catch (error) {

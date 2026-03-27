@@ -303,7 +303,7 @@ export async function fetchUnsettledOrders(
   accessToken: string,
   shopCipher: string,
 ): Promise<Record<string, unknown>> {
-  const path = '/finance/202309/orders/unsettled';
+  const path = '/finance/202507/orders/unsettled';
 
   const data = await shopGet(path, accessToken, {
     shop_cipher: shopCipher,
