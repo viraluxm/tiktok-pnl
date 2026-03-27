@@ -133,12 +133,16 @@ export function useTikTok() {
           consecutiveErrors = 0;
         } catch (err) {
           if (err instanceof RateLimitError) {
-            // Wait 10s on rate limit, then retry same call
+            console.log('[SyncLoop] Rate limited, waiting 10s...');
             await sleep(10_000);
             continue;
           }
           consecutiveErrors++;
-          if (consecutiveErrors >= 3) break; // Give up after 3 consecutive non-429 errors
+          console.log(`[SyncLoop] Error (${consecutiveErrors}/3):`, (err as Error).message);
+          if (consecutiveErrors >= 3) {
+            console.log('[SyncLoop] Giving up after 3 consecutive errors');
+            break;
+          }
           await sleep(2_000);
           continue;
         }

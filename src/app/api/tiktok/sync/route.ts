@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchOrdersPage, fetchOrderFinancePage, fetchSettlementsPage } from '@/lib/tiktok/client';
+import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
@@ -183,27 +183,6 @@ export async function POST(request: Request) {
     console.log(`[Sync] Aggregated ${newOrders.length} new orders into ${Object.keys(dailyMap).length} days:`,
       Object.entries(dailyMap).map(([d, v]) => `${d}=${v.orderCount}orders gmv=$${v.gmv.toFixed(2)}`).join(' | '));
 
-    // On the last page of a chunk, fetch finance data
-    if (!nextCursor) {
-      try {
-        const financeData = await fetchOrderFinancePage(accessToken, connection.shop_cipher, startTs, endTs);
-        if (financeData && Object.keys(financeData).length > 0) {
-          console.log('[Sync] FINANCE orders response:', JSON.stringify(financeData).slice(0, 3000));
-        }
-      } catch (finErr) {
-        console.warn('[Sync] Finance orders fetch failed (non-fatal):', finErr);
-      }
-
-      try {
-        const settleData = await fetchSettlementsPage(accessToken, connection.shop_cipher, startTs, endTs);
-        if (settleData && Object.keys(settleData).length > 0) {
-          console.log('[Sync] SETTLEMENTS response:', JSON.stringify(settleData).slice(0, 3000));
-        }
-      } catch (settleErr) {
-        console.warn('[Sync] Settlements fetch failed (non-fatal):', settleErr);
-      }
-    }
-
     // Rebuild daily totals from ALL synced orders for affected dates
     let totalCreated = 0;
     let totalUpdated = 0;
@@ -231,7 +210,7 @@ export async function POST(request: Request) {
         gmv: totals.gmv,
         shipping: totals.shipping,
         affiliate: totals.affiliate,
-        ads: totals.platformFee,
+        platform_fee: totals.platformFee,
         source: 'tiktok',
       });
       if (result === 'created') totalCreated++;
@@ -334,7 +313,7 @@ async function setEntry(
     gmv: number;
     shipping: number;
     affiliate: number;
-    ads: number;
+    platform_fee: number;
     source: string;
   }
 ): Promise<'created' | 'updated'> {
@@ -354,7 +333,8 @@ async function setEntry(
         gmv: entry.gmv,
         shipping: entry.shipping,
         affiliate: entry.affiliate,
-        ads: entry.ads,
+        platform_fee: entry.platform_fee,
+        ads: 0,
         updated_at: new Date().toISOString(),
       })
       .eq('id', existing.id);
@@ -367,9 +347,10 @@ async function setEntry(
         product_id: entry.product_id,
         date: entry.date,
         gmv: entry.gmv,
-        ads: entry.ads,
+        ads: 0,
         shipping: entry.shipping,
         affiliate: entry.affiliate,
+        platform_fee: entry.platform_fee,
         videos_posted: 0,
         views: 0,
         source: entry.source,
