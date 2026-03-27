@@ -229,7 +229,7 @@ export async function fetchOrdersPage(
 
   const queryParams: Record<string, string> = {
     shop_cipher: shopCipher,
-    page_size: '50',
+    page_size: '100',
     sort_field: 'create_time',
     sort_order: 'DESC',
   };

@@ -56,8 +56,8 @@ export const authLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
 });
 
-// TikTok sync: 30 syncs per user per minute (auto-loop fires every ~2s)
+// TikTok sync: 120 syncs per user per minute (auto-loop fires every ~500ms)
 export const syncLimiter = createRateLimiter({
-  limit: 30,
+  limit: 120,
   windowMs: 60 * 1000,
 });

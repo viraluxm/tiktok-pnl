@@ -140,7 +140,7 @@ export function useTikTok() {
             console.log(`[SyncLoop] Giving up after 5 consecutive errors at iteration ${iteration}`);
             break;
           }
-          await sleep(2_000);
+          await sleep(500);
           continue;
         }
 
@@ -164,7 +164,7 @@ export function useTikTok() {
           break;
         }
 
-        await sleep(2_000);
+        await sleep(500);
       }
     } finally {
       setSyncProgress(prev => prev ? { ...prev, isSyncing: false } : null);

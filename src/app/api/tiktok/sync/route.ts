@@ -7,7 +7,6 @@ import { decryptOrFallback } from '@/lib/crypto';
 
 const CHUNK_DAYS = 7;
 const BACKFILL_DAYS = 365;
-const MAX_FETCH_MS = 50_000; // 50s for fetching, leaves 10s for DB writes (Vercel Pro = 60s)
 
 export const maxDuration = 60;
 
@@ -50,26 +49,30 @@ export async function POST() {
   backfillStart.setUTCDate(backfillStart.getUTCDate() - BACKFILL_DAYS);
   const backfillStartStr = backfillStart.toISOString().split('T')[0];
 
-  const syncCursor: string | null = connection.sync_cursor || null;
-  let pageCursor: string | null = connection.sync_page_cursor || null;
+  // Read cursors from DB
+  const dbSyncCursor: string | null = connection.sync_cursor || null;
+  const dbPageCursor: string | null = connection.sync_page_cursor || null;
   let isCaughtUp = false;
 
-  // Determine chunk start
+  // Determine chunk start and page cursor
   let chunkStart: string;
-  if (pageCursor && syncCursor) {
+  let pageCursor: string | null;
+
+  if (dbPageCursor && dbSyncCursor) {
     // Resuming pagination within a chunk
-    chunkStart = syncCursor;
-  } else if (!syncCursor || syncCursor < backfillStartStr) {
+    chunkStart = dbSyncCursor;
+    pageCursor = dbPageCursor;
+  } else if (!dbSyncCursor || dbSyncCursor < backfillStartStr) {
     chunkStart = backfillStartStr;
     pageCursor = null;
-  } else if (syncCursor >= todayStr) {
+  } else if (dbSyncCursor >= todayStr) {
     const weekAgo = new Date(today);
     weekAgo.setUTCDate(weekAgo.getUTCDate() - CHUNK_DAYS);
     chunkStart = weekAgo.toISOString().split('T')[0];
     pageCursor = null;
     isCaughtUp = true;
   } else {
-    chunkStart = syncCursor;
+    chunkStart = dbSyncCursor;
     pageCursor = null;
   }
 
@@ -85,161 +88,109 @@ export async function POST() {
   const startTs = Math.floor(new Date(chunkStart + 'T00:00:00Z').getTime() / 1000);
   const endTs = Math.floor(new Date(chunkEnd + 'T23:59:59Z').getTime() / 1000);
 
-  console.log(`[Sync] chunk=${chunkStart}..${chunkEnd} pageCursor=${pageCursor || 'none'}`);
+  console.log(`[Sync] chunk=${chunkStart}..${chunkEnd} dbPageCursor=${dbPageCursor || 'null'} pageCursor=${pageCursor || 'null'}`);
 
   try {
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
 
-    // ===== MULTI-PAGE FETCH LOOP (up to 50s) =====
-    const fetchStart = Date.now();
-    let totalNewOrders = 0;
-    let totalSkipped = 0;
-    let pagesThisCall = 0;
-    let chunkExhausted = false;
-    let consecutiveDupPages = 0;
-    const newOrderDates: string[] = [];
+    // ===== FETCH ONE PAGE =====
+    let orders: Record<string, unknown>[] = [];
+    let rawNextCursor: string | null = null;
 
-    while (Date.now() - fetchStart < MAX_FETCH_MS) {
-      let orders: Record<string, unknown>[] = [];
-      let nextCursor: string | null = null;
-
-      console.log(`[Sync] Inner loop fetch cursor: ${pageCursor || 'null'}`);
-
-      try {
-        const result = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageCursor);
-        orders = result.orders;
-        nextCursor = result.nextCursor;
-        console.log(`[Sync] Inner loop response: ${orders.length} orders, nextCursor=${nextCursor || 'null'}`);
-      } catch (orderErr) {
-        console.warn(`[Sync] Orders fetch failed:`, (orderErr as Error).message);
-        chunkExhausted = true;
-        break;
-      }
-
-      pagesThisCall++;
-
-      // Dedup against DB
-      const orderIds = orders.map(o => String((o as Record<string, unknown>).id || '')).filter(Boolean);
-      const { data: existingRows } = await admin
-        .from('synced_order_ids')
-        .select('order_id')
-        .eq('user_id', user.id)
-        .in('order_id', orderIds.length > 0 ? orderIds : ['__none__']);
-
-      const existingIds = new Set((existingRows || []).map(r => r.order_id));
-      const newOrders = orders.filter(o => !existingIds.has(String((o as Record<string, unknown>).id || '')));
-      totalNewOrders += newOrders.length;
-      totalSkipped += orders.length - newOrders.length;
-
-      console.log(`[Sync] Page ${pagesThisCall}: ${newOrders.length} new, ${orders.length - newOrders.length} dupes, cursor=${nextCursor ? 'yes' : 'none'}`);
-
-      // Insert new orders
-      for (const order of newOrders) {
-        const o = order as Record<string, unknown>;
-        const orderId = String(o.id || '');
-        const createTime = o.create_time as number;
-        const date = new Date(createTime * 1000).toISOString().split('T')[0];
-
-        const payment = (o.payment || {}) as Record<string, unknown>;
-        const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
-        const shipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || 0;
-        const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
-        let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || 0;
-
-        const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
-        let units = 0;
-        for (const item of lineItems) {
-          units += Number(item.quantity) || 1;
-          if (affiliate === 0) {
-            affiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
-          }
-        }
-        if (units === 0) units = 1;
-
-        await admin.from('synced_order_ids').upsert({
-          user_id: user.id, order_id: orderId, order_date: date,
-          gmv, shipping, affiliate, platform_fee: platformFee, units,
-        }, { onConflict: 'user_id,order_id' });
-
-        newOrderDates.push(date);
-      }
-
-      // Check if chunk is done
-      if (orders.length > 0 && newOrders.length === 0) {
-        consecutiveDupPages++;
-        if (consecutiveDupPages >= 3) {
-          console.log(`[Sync] 3 consecutive all-duplicate pages — skipping rest of chunk`);
-          chunkExhausted = true;
-          pageCursor = null;
-          break;
-        }
-      } else {
-        consecutiveDupPages = 0;
-      }
-
-      if (!nextCursor) {
-        chunkExhausted = true;
-        pageCursor = null;
-        break;
-      }
-
-      pageCursor = nextCursor;
+    try {
+      console.log(`[Sync] Fetching page with cursor: ${pageCursor || 'null'}`);
+      const result = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageCursor);
+      orders = result.orders;
+      rawNextCursor = result.nextCursor;
+      console.log(`[Sync] Got ${orders.length} orders, rawNextCursor=${rawNextCursor || 'null'}`);
+    } catch (orderErr) {
+      console.warn(`[Sync] Orders fetch failed for chunk ${chunkStart}..${chunkEnd}:`, (orderErr as Error).message);
     }
 
-    console.log(`[Sync] Fetched ${pagesThisCall} pages: ${totalNewOrders} new, ${totalSkipped} skipped in ${Date.now() - fetchStart}ms`);
+    // ===== DEDUP =====
+    const orderIds = orders.map(o => String((o as Record<string, unknown>).id || '')).filter(Boolean);
+    const { data: existingRows } = await admin
+      .from('synced_order_ids')
+      .select('order_id')
+      .eq('user_id', user.id)
+      .in('order_id', orderIds.length > 0 ? orderIds : ['__none__']);
+
+    const existingIds = new Set((existingRows || []).map(r => r.order_id));
+    const newOrders = orders.filter(o => !existingIds.has(String((o as Record<string, unknown>).id || '')));
+    const skippedCount = orders.length - newOrders.length;
+
+    console.log(`[Sync] Deduped: ${newOrders.length} new, ${skippedCount} dupes`);
+
+    // ===== INSERT NEW ORDERS =====
+    const newOrderDates: string[] = [];
+
+    for (const order of newOrders) {
+      const o = order as Record<string, unknown>;
+      const orderId = String(o.id || '');
+      const createTime = o.create_time as number;
+      const date = new Date(createTime * 1000).toISOString().split('T')[0];
+
+      const payment = (o.payment || {}) as Record<string, unknown>;
+      const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
+      const shipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || 0;
+      const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
+      let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || 0;
+
+      const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
+      let units = 0;
+      for (const item of lineItems) {
+        units += Number(item.quantity) || 1;
+        if (affiliate === 0) {
+          affiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
+        }
+      }
+      if (units === 0) units = 1;
+
+      await admin.from('synced_order_ids').upsert({
+        user_id: user.id, order_id: orderId, order_date: date,
+        gmv, shipping, affiliate, platform_fee: platformFee, units,
+      }, { onConflict: 'user_id,order_id' });
+
+      newOrderDates.push(date);
+    }
 
     // ===== DECIDE NEXT CURSOR =====
+    // Simple: if TikTok gave us a cursor → save it, more pages in this chunk
+    //         if no cursor → chunk done, advance to next chunk
     let newSyncCursor: string;
-    let newPageCursor: string | null = null;
+    let newPageCursor: string | null;
+    const allDuplicates = orders.length > 0 && newOrders.length === 0;
 
-    if (chunkExhausted) {
-      // Advance to next chunk
+    if (rawNextCursor && !allDuplicates) {
+      // More pages in this chunk
+      newSyncCursor = chunkStart;
+      newPageCursor = rawNextCursor;
+    } else {
+      // Chunk done (no cursor, or all dupes) → advance
       newSyncCursor = nextChunkStr;
       newPageCursor = null;
       if (chunkEnd >= todayStr) {
         isCaughtUp = true;
         newSyncCursor = todayStr;
       }
-    } else {
-      // More pages in this chunk — save page cursor
-      newSyncCursor = chunkStart;
-      newPageCursor = pageCursor;
-    }
-
-    // ===== FETCH FINANCE (only when chunk is done) =====
-    if (chunkExhausted && !isCaughtUp) {
-      try {
-        const statements = await fetchStatements(accessToken, connection.shop_cipher, startTs, endTs);
-        // Store statement data alongside orders — update platform_fee on affected dates
-        for (const stmt of statements) {
-          if (!stmt.date) continue;
-          // We'll pick this up in the rebuild below via synced_order_ids platform_fee
-          // For now just log — real integration comes from the daily rebuild
-        }
-        console.log(`[Sync] Finance: ${statements.length} statements`);
-      } catch { /* non-fatal */ }
-
-      if (!syncCursor) {
-        try { await fetchUnsettledOrders(accessToken, connection.shop_cipher); } catch { /* non-fatal */ }
+      if (allDuplicates) {
+        console.log(`[Sync] All ${orders.length} orders were dupes — advancing to next chunk`);
       }
     }
 
-    // ===== SAVE CURSOR FIRST (so next call picks up correctly) =====
+    // ===== SAVE CURSOR =====
+    console.log(`[Sync] Saving cursor: sync_cursor=${newSyncCursor}, sync_page_cursor=${newPageCursor || 'null'}`);
     await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
       sync_cursor: newSyncCursor,
       sync_page_cursor: newPageCursor,
     }).eq('user_id', user.id);
 
-    // ===== REBUILD ENTRIES ONLY FOR DATES WITH NEW ORDERS =====
+    // ===== REBUILD ENTRIES FOR AFFECTED DATES ONLY =====
     let totalCreated = 0;
     let totalUpdated = 0;
-
-    // Collect unique dates that had new orders inserted this call
-    const affectedDates = [...new Set(
-      newOrderDates.length > 0 ? newOrderDates : []
-    )];
+    const affectedDates = [...new Set(newOrderDates)];
 
     if (affectedDates.length > 0) {
       for (const date of affectedDates) {
@@ -268,6 +219,18 @@ export async function POST() {
       console.log(`[Sync] Rebuilt ${affectedDates.length} daily entries`);
     }
 
+    // ===== FETCH FINANCE (only when chunk fully done) =====
+    if (!newPageCursor && !isCaughtUp) {
+      try {
+        const statements = await fetchStatements(accessToken, connection.shop_cipher, startTs, endTs);
+        console.log(`[Sync] Finance: ${statements.length} statements`);
+      } catch { /* non-fatal */ }
+
+      if (!dbSyncCursor) {
+        try { await fetchUnsettledOrders(accessToken, connection.shop_cipher); } catch { /* non-fatal */ }
+      }
+    }
+
     const { count: totalUniqueOrders } = await admin
       .from('synced_order_ids')
       .select('*', { count: 'exact', head: true })
@@ -279,14 +242,15 @@ export async function POST() {
         dateRange: { startDate: chunkStart, endDate: chunkEnd },
         entriesCreated: totalCreated,
         entriesUpdated: totalUpdated,
-        ordersFetched: totalNewOrders,
-        ordersSkipped: totalSkipped,
+        ordersFetched: newOrders.length,
+        ordersSkipped: skippedCount,
         totalUniqueOrders: totalUniqueOrders || 0,
         isCaughtUp,
         hasMorePages: !!newPageCursor,
         currentChunk: `${chunkStart}..${chunkEnd}`,
         nextChunk: newPageCursor ? `${chunkStart} (page)` : nextChunkStr,
-        pagesThisCall,
+        rawNextCursor: rawNextCursor || null,
+        savedPageCursor: newPageCursor || null,
       },
     });
   } catch (error) {
