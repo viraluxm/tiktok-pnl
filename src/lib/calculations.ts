@@ -19,8 +19,8 @@ export function calcEntry(entry: Entry, costsMap?: CostsMap): EntryCalculations 
   const ads = Number(entry.ads) || 0;
   const unitsSold = Number(entry.units_sold) || 0;
 
-  // Platform fee is always 6%
-  const platformFee = gmv * 0.06;
+  // Use actual platform fee from DB (settlements), fall back to 6% estimate
+  const platformFee = Number(entry.platform_fee) || (gmv * 0.06);
 
   // Look up user-entered cost per unit
   let costPerUnit = 0;
