@@ -187,9 +187,13 @@ export default function ProductCostTable({
                     >
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center text-tt-cyan text-xs font-bold">
-                            {product.name.charAt(0).toUpperCase()}
-                          </div>
+                          {product.image_url ? (
+                            <img src={product.image_url} alt="" className="w-8 h-8 rounded-lg object-cover border border-tt-border" />
+                          ) : (
+                            <div className="w-8 h-8 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center text-tt-cyan text-xs font-bold">
+                              {product.name.charAt(0).toUpperCase()}
+                            </div>
+                          )}
                           <span className="text-[13px] font-medium text-tt-text">{product.name}</span>
                           {hasVariants && (
                             <button
@@ -207,7 +211,7 @@ export default function ProductCostTable({
                         </div>
                       </td>
                       <td className="px-4 py-3 text-[13px] text-tt-muted font-mono">
-                        {product.id.slice(0, 8)}...
+                        {product.sku || product.tiktok_product_id?.slice(-8) || product.id.slice(0, 8)}
                       </td>
                       <td className="px-4 py-3 text-[13px] font-semibold text-tt-text tabular-nums">
                         {fmtInt(stats.unitsSold)}

@@ -118,7 +118,7 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
         </div>
 
         {/* Main grid */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
           {/* Sales */}
           <div className="col-span-2 md:col-span-1">
             <div className="flex items-center gap-2 mb-1">
@@ -138,12 +138,6 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
             <div className="text-lg font-bold text-tt-text">
               {fmtInt(forecastedUnits)}
             </div>
-          </div>
-
-          {/* Videos Posted */}
-          <div>
-            <div className="text-xs text-tt-muted mb-1">Videos Posted</div>
-            <div className="text-lg font-bold text-tt-cyan">{fmtInt(forecastedVideos)}</div>
           </div>
 
           {/* Affiliate Commission */}

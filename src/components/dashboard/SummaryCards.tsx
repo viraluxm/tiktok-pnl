@@ -60,15 +60,14 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         </div>
       </div>
 
-      {/* 3. Videos Posted */}
+      {/* 3. Units Sold */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-2">
         <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Videos Posted</span>
-          <ChangeIndicator change={videosChange} />
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Units Sold</span>
         </div>
-        <div className="text-[26px] font-bold text-tt-cyan">{fmtInt(metrics.totalVideos)}</div>
+        <div className="text-[26px] font-bold text-tt-cyan">{fmtInt(metrics.totalUnitsSold)}</div>
         <div className="text-xs text-tt-muted mt-1">
-          {fmtInt(metrics.totalViews)} views
+          {metrics.entryCount} active days
         </div>
       </div>
 
@@ -76,11 +75,10 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-3">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Total Ad Spend</span>
-          <ChangeIndicator change={adsChange} />
         </div>
         <div className="text-[26px] font-bold text-tt-text">{fmt(metrics.totalAds)}</div>
         <div className="text-xs text-tt-muted mt-1">
-          ROAS: {roasDisplay}
+          {metrics.totalAds > 0 ? `ROAS: ${roasDisplay}` : 'TikTok Ads API coming soon'}
         </div>
       </div>
 
@@ -88,25 +86,30 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-4">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Affiliate Commission</span>
-          <ChangeIndicator change={affiliateChange} />
         </div>
-        <div className="text-[26px] font-bold text-tt-yellow">{fmt(metrics.totalAffiliate)}</div>
-        <div className="text-xs text-tt-muted mt-1">
-          {metrics.totalGMV > 0 ? ((metrics.totalAffiliate / metrics.totalGMV) * 100).toFixed(1) : '0.0'}% of GMV
-        </div>
+        {metrics.totalAffiliate > 0 ? (
+          <>
+            <div className="text-[26px] font-bold text-tt-yellow">{fmt(metrics.totalAffiliate)}</div>
+            <div className="text-xs text-tt-muted mt-1">
+              {((metrics.totalAffiliate / metrics.totalGMV) * 100).toFixed(1)}% of GMV
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="text-[20px] font-bold text-tt-muted">Coming Soon</div>
+            <div className="text-xs text-tt-muted mt-1">Requires Affiliate API scope</div>
+          </>
+        )}
       </div>
 
-      {/* 6. Profit Per Video */}
+      {/* 6. Shipping Cost */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-5">
         <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Profit Per Video</span>
-          <ChangeIndicator change={profitPerVideoChange} />
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Total Shipping</span>
         </div>
-        <div className={`text-[26px] font-bold ${metrics.profitPerVideo >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>
-          {fmt(metrics.profitPerVideo)}
-        </div>
+        <div className="text-[26px] font-bold text-tt-text">{fmt(metrics.totalShipping)}</div>
         <div className="text-xs text-tt-muted mt-1">
-          {fmt(metrics.revenuePerVideo)} rev/video
+          {metrics.totalGMV > 0 ? ((metrics.totalShipping / metrics.totalGMV) * 100).toFixed(1) : '0.0'}% of GMV
         </div>
       </div>
     </div>

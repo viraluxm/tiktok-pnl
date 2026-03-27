@@ -220,6 +220,8 @@ export async function POST() {
       let units = 0;
 
       let tikTokProductId: string | null = null;
+      let skuId: string | null = null;
+      let skuName: string | null = null;
       for (const item of lineItems) {
         units += Number(item.quantity) || 1;
         if (orderAffiliate === 0) {
@@ -227,9 +229,10 @@ export async function POST() {
         }
         if (!tikTokProductId) {
           tikTokProductId = String(item.product_id || '') || null;
+          skuId = String(item.sku_id || '') || null;
+          skuName = String(item.sku_name || '') || null;
           const productName = String(item.product_name || item.sku_name || '') || null;
           const skuImage = String(item.sku_image || item.product_image || '') || null;
-          const skuId = String(item.sku_id || '') || null;
 
           if (tikTokProductId && productName) {
             if (!productCache[tikTokProductId]) {
@@ -249,7 +252,7 @@ export async function POST() {
         user_id: user.id, order_id: orderId, order_date: date,
         gmv: orderGmv, shipping: orderShipping, affiliate: orderAffiliate,
         platform_fee: orderPlatformFee, units, tiktok_product_id: tikTokProductId,
-        status,
+        sku_id: skuId, sku_name: skuName, status,
       }, { onConflict: 'user_id,order_id' });
 
       affectedKeys.add(`${date}|${productUuid}`);
