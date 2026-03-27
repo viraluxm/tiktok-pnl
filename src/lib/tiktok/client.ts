@@ -243,14 +243,14 @@ export async function fetchOrdersPage(
   const orders = data?.orders || [];
   const nextCursor = data?.next_cursor || data?.next_page_token || '';
 
-  // Log cursor tracking and first order ID for dedup debugging
   const firstOrderId = orders.length > 0 ? (orders[0] as Record<string, unknown>).id || 'unknown' : 'none';
   const lastOrderId = orders.length > 0 ? (orders[orders.length - 1] as Record<string, unknown>).id || 'unknown' : 'none';
-  console.log(`[TikTok fetchOrdersPage] Got ${orders.length} orders, firstId=${firstOrderId}, lastId=${lastOrderId}, receivedCursor=${nextCursor || 'none'}, hasMore=${!!(nextCursor && orders.length === 50)}`);
+  console.log(`[TikTok fetchOrdersPage] Got ${orders.length} orders, firstId=${firstOrderId}, lastId=${lastOrderId}, receivedCursor=${nextCursor || 'none'}`);
 
   return {
     orders,
-    nextCursor: nextCursor && orders.length === 50 ? nextCursor : null,
+    // Trust TikTok's cursor — if they provide one, there are more pages
+    nextCursor: nextCursor || null,
   };
 }
 

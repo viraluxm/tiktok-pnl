@@ -101,10 +101,13 @@ export async function POST() {
       let orders: Record<string, unknown>[] = [];
       let nextCursor: string | null = null;
 
+      console.log(`[Sync] Inner loop fetch cursor: ${pageCursor || 'null'}`);
+
       try {
         const result = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageCursor);
         orders = result.orders;
         nextCursor = result.nextCursor;
+        console.log(`[Sync] Inner loop response: ${orders.length} orders, nextCursor=${nextCursor || 'null'}`);
       } catch (orderErr) {
         console.warn(`[Sync] Orders fetch failed:`, (orderErr as Error).message);
         chunkExhausted = true;
