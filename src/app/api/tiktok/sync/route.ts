@@ -161,30 +161,54 @@ export async function POST() {
       });
     }
 
-    // ===== DEDUP & INSERT =====
+    // ===== DEDUP & STATUS UPDATE =====
     const orderIds = orders.map(o => String((o as Record<string, unknown>).id || '')).filter(Boolean);
     const { data: existingRows } = await admin
       .from('synced_order_ids')
-      .select('order_id')
+      .select('order_id, status')
       .eq('user_id', user.id)
       .in('order_id', orderIds.length > 0 ? orderIds : ['__none__']);
 
-    const existingIds = new Set((existingRows || []).map(r => r.order_id));
-    const newOrders = orders.filter(o => !existingIds.has(String((o as Record<string, unknown>).id || '')));
+    const existingMap = new Map((existingRows || []).map(r => [r.order_id, r.status]));
+    const newOrders = orders.filter(o => !existingMap.has(String((o as Record<string, unknown>).id || '')));
     const skippedCount = orders.length - newOrders.length;
 
     console.log(`[Sync] Deduped: ${newOrders.length} new, ${skippedCount} dupes`);
 
     // Track affected dates+products for rebuild
     const affectedKeys = new Set<string>(); // "date|productUuid"
-    // Cache: tiktok_product_id → products.id (uuid)
     const productCache: Record<string, string> = {};
 
+    // Update status on EXISTING orders (retroactive fix for cancelled/refunded)
+    for (const order of orders) {
+      const o = order as Record<string, unknown>;
+      const orderId = String(o.id || '');
+      const newStatus = String(o.status || '').toUpperCase();
+      const oldStatus = existingMap.get(orderId);
+
+      if (oldStatus !== undefined && oldStatus !== newStatus && newStatus) {
+        await admin.from('synced_order_ids')
+          .update({ status: newStatus })
+          .eq('user_id', user.id)
+          .eq('order_id', orderId);
+
+        // Mark this order's date for rebuild since status changed
+        const createTime = o.create_time as number;
+        if (createTime) {
+          const date = new Date(createTime * 1000).toISOString().split('T')[0];
+          // We need the product UUID — look it up or use fallback
+          affectedKeys.add(`${date}|${product.id}`);
+        }
+      }
+    }
+
+    // Insert NEW orders
     for (const order of newOrders) {
       const o = order as Record<string, unknown>;
       const orderId = String(o.id || '');
       const createTime = o.create_time as number;
       const date = new Date(createTime * 1000).toISOString().split('T')[0];
+      const status = String(o.status || '').toUpperCase();
 
       const payment = (o.payment || {}) as Record<string, unknown>;
       const orderGmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
@@ -195,21 +219,18 @@ export async function POST() {
       const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
       let units = 0;
 
-      // Extract product info from first line item
       let tikTokProductId: string | null = null;
       for (const item of lineItems) {
         units += Number(item.quantity) || 1;
         if (orderAffiliate === 0) {
           orderAffiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
         }
-        // Get product info from first item that has a product_id
         if (!tikTokProductId) {
           tikTokProductId = String(item.product_id || '') || null;
           const productName = String(item.product_name || item.sku_name || '') || null;
           const skuImage = String(item.sku_image || item.product_image || '') || null;
           const skuId = String(item.sku_id || '') || null;
 
-          // Upsert product if we have a TikTok product_id
           if (tikTokProductId && productName) {
             if (!productCache[tikTokProductId]) {
               const productUuid = await getOrCreateTikTokProduct(admin, user.id, tikTokProductId, productName, skuImage, skuId);
@@ -220,7 +241,6 @@ export async function POST() {
       }
       if (units === 0) units = 1;
 
-      // Resolve product UUID (fall back to shop-level product)
       const productUuid = (tikTokProductId && productCache[tikTokProductId])
         ? productCache[tikTokProductId]
         : product.id;
@@ -229,6 +249,7 @@ export async function POST() {
         user_id: user.id, order_id: orderId, order_date: date,
         gmv: orderGmv, shipping: orderShipping, affiliate: orderAffiliate,
         platform_fee: orderPlatformFee, units, tiktok_product_id: tikTokProductId,
+        status,
       }, { onConflict: 'user_id,order_id' });
 
       affectedKeys.add(`${date}|${productUuid}`);
@@ -278,22 +299,24 @@ export async function POST() {
         const { data: productRow } = await admin.from('products').select('tiktok_product_id').eq('id', productUuid).single();
         const tikTokPid = productRow?.tiktok_product_id;
 
-        // Query synced_order_ids for this date + product
+        // Query synced_order_ids for this date + product, excluding cancelled/refunded
         let q = admin.from('synced_order_ids')
-          .select('gmv, shipping, affiliate, platform_fee, units')
+          .select('gmv, shipping, affiliate, platform_fee, units, status')
           .eq('user_id', user.id)
           .eq('order_date', date);
 
         if (tikTokPid) {
           q = q.eq('tiktok_product_id', tikTokPid);
         } else {
-          // Fallback shop product — orders with no tiktok_product_id
           q = q.is('tiktok_product_id', null);
         }
 
         const { data: dayOrders } = await q;
 
-        const t = (dayOrders || []).reduce((acc, row) => ({
+        // Filter out cancelled/refunded orders
+        const activeOrders = (dayOrders || []).filter(row => !isOrderExcluded(row.status));
+
+        const t = activeOrders.reduce((acc, row) => ({
           gmv: acc.gmv + Number(row.gmv),
           shipping: acc.shipping + Number(row.shipping),
           affiliate: acc.affiliate + Number(row.affiliate),
@@ -412,6 +435,12 @@ async function getOrCreateTikTokProduct(
   }
 
   return created.id;
+}
+
+function isOrderExcluded(status: string | null | undefined): boolean {
+  if (!status) return false;
+  const s = status.toUpperCase();
+  return s === 'CANCELLED' || s.includes('CANCEL') || s.includes('REFUND');
 }
 
 function toNum(val: unknown): number {
