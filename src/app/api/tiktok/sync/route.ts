@@ -6,41 +6,107 @@ import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
-const TIME_BUDGET_MS = 280_000; // 280s for work, 20s buffer before 300s timeout
+const TIME_BUDGET_MS = 280_000;
 const DEFAULT_WINDOW_DAYS = 7;
 const PARALLEL_FETCHES = 5;
+const UPSERT_BATCH_SIZE = 500; // Rows per bulk upsert
 
 export const maxDuration = 300;
-
-// Window: a time range to fetch. Stored as JSON in sync_page_cursor.
-// { windows: [{ startTs, endTs }], cursor: index-into-windows }
-// Between calls: sync_cursor = next start date, sync_page_cursor = pending sub-windows (from splits)
 
 type AdminClient = ReturnType<typeof createAdminClient>;
 type OrderRow = { gmv: number; shipping: number; affiliate: number; platform_fee: number; units: number; status: string };
 
-interface PendingWindow {
-  startTs: number;
-  endTs: number;
-}
+interface PendingWindow { startTs: number; endTs: number }
 
 function dayToTs(day: string): number {
   return Math.floor(new Date(day + 'T00:00:00Z').getTime() / 1000);
 }
-
 function advanceDays(day: string, n: number): string {
   const d = new Date(day + 'T00:00:00Z');
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().split('T')[0];
 }
-
-// Split a window into two halves
 function splitWindow(w: PendingWindow): PendingWindow[] {
   const mid = Math.floor((w.startTs + w.endTs) / 2);
-  return [
-    { startTs: w.startTs, endTs: mid },
-    { startTs: mid, endTs: w.endTs },
-  ];
+  return [{ startTs: w.startTs, endTs: mid }, { startTs: mid, endTs: w.endTs }];
+}
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+function toNum(val: unknown): number {
+  if (val === null || val === undefined) return 0;
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string') return parseFloat(val) || 0;
+  return 0;
+}
+function isOrderExcluded(status: string | null | undefined): boolean {
+  if (!status) return false;
+  const s = status.toUpperCase();
+  return s === 'CANCELLED' || s.includes('CANCEL') || s.includes('REFUND');
+}
+
+// Parse order into a flat row for bulk upsert
+function parseOrder(userId: string, o: Record<string, unknown>) {
+  const orderId = String(o.id || '');
+  const createTime = o.create_time as number;
+  const date = createTime ? new Date(createTime * 1000).toISOString().split('T')[0] : '';
+  const status = String(o.status || '').toUpperCase();
+  const payment = (o.payment || {}) as Record<string, unknown>;
+  const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
+  const shipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || 0;
+  const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
+  let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || 0;
+
+  const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
+  let units = 0;
+  let tikTokProductId: string | null = null;
+  let skuId: string | null = null;
+  let skuName: string | null = null;
+  let productName: string | null = null;
+  let skuImage: string | null = null;
+
+  for (const item of lineItems) {
+    units += Number(item.quantity) || 1;
+    if (affiliate === 0) affiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
+    if (!tikTokProductId) {
+      tikTokProductId = String(item.product_id || '') || null;
+      skuId = String(item.sku_id || '') || null;
+      skuName = String(item.sku_name || '') || null;
+      productName = String(item.product_name || item.sku_name || '') || null;
+      skuImage = String(item.sku_image || item.product_image || '') || null;
+    }
+  }
+  if (units === 0) units = 1;
+
+  return {
+    row: {
+      user_id: userId, order_id: orderId, order_date: date,
+      gmv, shipping, affiliate, platform_fee: platformFee, units,
+      tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName, status,
+    },
+    date,
+    productInfo: tikTokProductId && productName ? { tikTokProductId, productName, skuImage, skuId } : null,
+  };
+}
+
+function parsePendingWindows(raw: string | null): PendingWindow[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed.day && parsed.splits) {
+      const windows: PendingWindow[] = [];
+      const dayStart = dayToTs(parsed.day);
+      const ws = 86400 / parsed.splits;
+      for (let i = parsed.index || 0; i < parsed.splits; i++) {
+        windows.push({ startTs: Math.floor(dayStart + ws * i), endTs: Math.floor(dayStart + ws * (i + 1)) });
+      }
+      return windows;
+    }
+    return [];
+  } catch { return []; }
 }
 
 export async function POST() {
@@ -50,65 +116,43 @@ export async function POST() {
   if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { success, retryAfterMs } = syncLimiter.check(`sync:${user.id}`);
-  if (!success) {
-    return NextResponse.json(
-      { error: 'Too many sync requests. Please try again later.' },
-      { status: 429, headers: { 'Retry-After': String(Math.ceil((retryAfterMs || 0) / 1000)) } },
-    );
-  }
+  if (!success) return NextResponse.json({ error: 'Rate limited' }, { status: 429, headers: { 'Retry-After': String(Math.ceil((retryAfterMs || 0) / 1000)) } });
 
   const admin = createAdminClient();
   const { data: connection, error: connError } = await admin.from('tiktok_connections').select('*').eq('user_id', user.id).single();
   if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
-  if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher — reconnect TikTok' }, { status: 400 });
+  if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher' }, { status: 400 });
 
-  // Mark sync as in progress (for status endpoint to report)
-  await admin.from('tiktok_connections').update({
-    sync_started_at: new Date().toISOString(),
-    sync_progress_orders: 0,
-    sync_progress_day: null,
-  }).eq('user_id', user.id);
+  // Mark sync start
+  await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString(), sync_progress_orders: 0, sync_progress_day: null }).eq('user_id', user.id);
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
   const todayTs = dayToTs(todayStr) + 86400;
-
   const backfillStartStr = advanceDays(todayStr, -BACKFILL_DAYS);
 
-  const dbSyncCursor: string | null = connection.sync_cursor || null;
-  const dbPendingWindows: PendingWindow[] = parsePendingWindows(connection.sync_page_cursor);
-  let isCaughtUp = false;
-
   let currentDay: string;
-  if (!dbSyncCursor || dbSyncCursor < backfillStartStr) {
-    currentDay = backfillStartStr;
-  } else if (dbSyncCursor >= todayStr) {
-    currentDay = todayStr;
-    isCaughtUp = true;
-  } else {
-    currentDay = dbSyncCursor;
-  }
+  let isCaughtUp = false;
+  const dbSyncCursor = connection.sync_cursor || null;
+
+  if (!dbSyncCursor || dbSyncCursor < backfillStartStr) currentDay = backfillStartStr;
+  else if (dbSyncCursor >= todayStr) { currentDay = todayStr; isCaughtUp = true; }
+  else currentDay = dbSyncCursor;
 
   try {
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
-    const productCache: Record<string, string> = {};
     const rebuildDates = new Set<string>();
-
-    let totalNewOrders = 0;
-    let totalSkipped = 0;
+    let totalProcessed = 0;
     let apiCalls = 0;
-    let lastProgressSave = 0;
-    let lastProgressOrders = 0;
     const startDay = currentDay;
+    let windowQueue: PendingWindow[] = [...parsePendingWindows(connection.sync_page_cursor)];
+    let lastProgressSave = 0;
 
-    // Queue of windows to process. Start with any pending sub-windows from last call.
-    let windowQueue: PendingWindow[] = [...dbPendingWindows];
-
-    // ===== MAIN BATCH LOOP =====
+    // ===== MAIN LOOP: fetch in parallel, bulk insert =====
     while (Date.now() - batchStart < TIME_BUDGET_MS && !isCaughtUp) {
-      // If queue is empty, generate next batch of 7-day windows
+      // Fill queue with 7-day windows
       if (windowQueue.length === 0) {
         for (let i = 0; i < PARALLEL_FETCHES; i++) {
           if (currentDay >= todayStr) { isCaughtUp = true; break; }
@@ -120,151 +164,86 @@ export async function POST() {
         if (windowQueue.length === 0) { isCaughtUp = true; break; }
       }
 
-      // Take up to PARALLEL_FETCHES windows from the queue
+      // Fetch batch in parallel
       const batch = windowQueue.splice(0, PARALLEL_FETCHES);
-
-      // Fetch all windows in parallel
-      const results = await Promise.all(
-        batch.map(async (w) => {
-          try {
-            const result = await fetchOrdersPage(accessToken, connection.shop_cipher, w.startTs, w.endTs, null);
-            return { window: w, orders: result.orders, hasMore: !!result.nextCursor, error: null };
-          } catch (err) {
-            return { window: w, orders: [] as Record<string, unknown>[], hasMore: false, error: err };
-          }
-        })
-      );
+      const results = await Promise.all(batch.map(async (w) => {
+        try {
+          const r = await fetchOrdersPage(accessToken, connection.shop_cipher, w.startTs, w.endTs, null);
+          return { window: w, orders: r.orders, hasMore: !!r.nextCursor, error: false };
+        } catch {
+          return { window: w, orders: [] as Record<string, unknown>[], hasMore: false, error: true };
+        }
+      }));
       apiCalls += batch.length;
 
-      // Process results — check for windows that need splitting
-      const splitQueue: PendingWindow[] = [];
-      const allOrders: { order: Record<string, unknown>; window: PendingWindow }[] = [];
-
+      // Collect orders, handle splits
+      const batchRows: ReturnType<typeof parseOrder>[] = [];
       for (const r of results) {
-        if (r.error) {
-          console.warn(`[Sync] Window ${r.window.startTs}..${r.window.endTs} failed, skipping`);
+        if (r.error) continue;
+        if (r.hasMore && r.orders.length >= 100 && (r.window.endTs - r.window.startTs) > 1800) {
+          windowQueue = [...splitWindow(r.window), ...windowQueue];
           continue;
         }
-        if (r.hasMore && r.orders.length >= 100) {
-          // Window too large — split it and re-queue
-          const windowDuration = r.window.endTs - r.window.startTs;
-          if (windowDuration > 1800) { // Don't split below 30 minutes
-            const halves = splitWindow(r.window);
-            splitQueue.push(...halves);
-            console.log(`[Sync] Splitting window ${r.window.startTs}..${r.window.endTs} (${r.orders.length}+ orders)`);
-          } else {
-            // Accept what we got for tiny windows
-            for (const o of r.orders) allOrders.push({ order: o, window: r.window });
-          }
-        } else {
-          for (const o of r.orders) allOrders.push({ order: o, window: r.window });
+        for (const o of r.orders) batchRows.push(parseOrder(user.id, o));
+      }
+
+      if (batchRows.length === 0) continue;
+
+      // ===== BULK UPSERT all orders from this batch =====
+      const upsertRows = batchRows.map(b => b.row);
+      for (const chunk of chunkArray(upsertRows, UPSERT_BATCH_SIZE)) {
+        const { error: upsertErr } = await admin.from('synced_order_ids').upsert(chunk, { onConflict: 'user_id,order_id' });
+        if (upsertErr) console.error('[Sync] Bulk upsert error:', upsertErr.message);
+      }
+
+      // Track dates for rebuild
+      for (const b of batchRows) if (b.date) rebuildDates.add(b.date);
+      totalProcessed += batchRows.length;
+
+      // Batch create products (deduplicated by cache)
+      const productInfos = new Map<string, { productName: string; skuImage: string | null; skuId: string | null }>();
+      for (const b of batchRows) {
+        if (b.productInfo && !productInfos.has(b.productInfo.tikTokProductId)) {
+          productInfos.set(b.productInfo.tikTokProductId, { productName: b.productInfo.productName, skuImage: b.productInfo.skuImage, skuId: b.productInfo.skuId });
+        }
+      }
+      // Bulk check which products exist
+      const newProductIds = [...productInfos.keys()];
+      if (newProductIds.length > 0) {
+        const { data: existingProducts } = await admin.from('products').select('tiktok_product_id').eq('user_id', user.id).in('tiktok_product_id', newProductIds);
+        const existingSet = new Set((existingProducts || []).map((p: { tiktok_product_id: string }) => p.tiktok_product_id));
+        const toCreate = newProductIds.filter(id => !existingSet.has(id));
+        if (toCreate.length > 0) {
+          const productRows = toCreate.map(id => {
+            const info = productInfos.get(id)!;
+            return { user_id: user.id, name: info.productName || `Product ${id.slice(-6)}`, tiktok_product_id: id, image_url: info.skuImage, sku: info.skuId };
+          });
+          await admin.from('products').upsert(productRows, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
         }
       }
 
-      // Put split windows at front of queue for next iteration
-      windowQueue = [...splitQueue, ...windowQueue];
-
-      if (allOrders.length === 0 && splitQueue.length === 0) continue;
-
-      // Dedup all orders from this batch
-      const orderIds = allOrders.map(o => String((o.order as Record<string, unknown>).id || '')).filter(Boolean);
-      let existingMap = new Map<string, string>();
-      if (orderIds.length > 0) {
-        // Supabase .in() has a limit, chunk if needed
-        const chunks = chunkArray(orderIds, 200);
-        for (const chunk of chunks) {
-          const { data: rows } = await admin.from('synced_order_ids').select('order_id, status').eq('user_id', user.id).in('order_id', chunk);
-          for (const r of (rows || [])) existingMap.set(r.order_id, r.status);
-        }
-      }
-
-      // Process each order
-      for (const { order } of allOrders) {
-        const o = order as Record<string, unknown>;
-        const orderId = String(o.id || '');
-        if (!orderId) continue;
-        const createTime = o.create_time as number;
-        const date = new Date(createTime * 1000).toISOString().split('T')[0];
-        const status = String(o.status || '').toUpperCase();
-
-        if (existingMap.has(orderId)) {
-          // Update status if changed
-          const oldStatus = existingMap.get(orderId);
-          if (oldStatus !== status && status) {
-            await admin.from('synced_order_ids').update({ status }).eq('user_id', user.id).eq('order_id', orderId);
-            rebuildDates.add(date);
-          }
-          totalSkipped++;
-          continue;
-        }
-
-        totalNewOrders++;
-
-        const payment = (o.payment || {}) as Record<string, unknown>;
-        const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
-        const shipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || 0;
-        const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || toNum(payment.transaction_fee) || 0;
-        let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || toNum(payment.referral_fee) || 0;
-
-        const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
-        let units = 0;
-        let tikTokProductId: string | null = null;
-        let skuId: string | null = null;
-        let skuName: string | null = null;
-
-        for (const item of lineItems) {
-          units += Number(item.quantity) || 1;
-          if (affiliate === 0) affiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
-          if (!tikTokProductId) {
-            tikTokProductId = String(item.product_id || '') || null;
-            skuId = String(item.sku_id || '') || null;
-            skuName = String(item.sku_name || '') || null;
-            const productName = String(item.product_name || item.sku_name || '') || null;
-            const skuImage = String(item.sku_image || item.product_image || '') || null;
-            if (tikTokProductId && productName && !productCache[tikTokProductId]) {
-              productCache[tikTokProductId] = await getOrCreateTikTokProduct(admin, user.id, tikTokProductId, productName, skuImage, skuId);
-            }
-          }
-        }
-        if (units === 0) units = 1;
-
-        await admin.from('synced_order_ids').upsert({
-          user_id: user.id, order_id: orderId, order_date: date,
-          gmv, shipping, affiliate, platform_fee: platformFee, units,
-          tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName, status,
-        }, { onConflict: 'user_id,order_id' });
-
-        rebuildDates.add(date);
-      }
-
-      // Save progress every 30s or every 500 new orders
+      // Save progress periodically
       const elapsed = Date.now() - batchStart;
-      if (apiCalls % 10 === 0 || totalNewOrders % 500 < (totalNewOrders - allOrders.length) % 500) {
-        console.log(`[Sync] ${apiCalls} API calls, ${totalNewOrders} new, queue=${windowQueue.length}, day=${currentDay}, ${elapsed}ms`);
-      }
-      if (elapsed - lastProgressSave > 30_000 || totalNewOrders - lastProgressOrders >= 500) {
-        await admin.from('tiktok_connections').update({
-          sync_progress_orders: totalNewOrders + totalSkipped,
-          sync_progress_day: currentDay,
-        }).eq('user_id', user.id);
+      if (elapsed - lastProgressSave > 15_000) {
+        await admin.from('tiktok_connections').update({ sync_progress_orders: totalProcessed, sync_progress_day: currentDay }).eq('user_id', user.id);
         lastProgressSave = elapsed;
-        lastProgressOrders = totalNewOrders;
+        console.log(`[Sync] ${apiCalls} calls, ${totalProcessed} orders, day=${currentDay}, ${elapsed}ms`);
       }
     }
 
-    console.log(`[Sync] Batch done: ${apiCalls} API calls, ${totalNewOrders} new, ${totalSkipped} skipped, ${Date.now() - batchStart}ms`);
+    console.log(`[Sync] Fetch done: ${apiCalls} calls, ${totalProcessed} orders, ${Date.now() - batchStart}ms`);
 
-    // ===== SAVE CURSOR + RELEASE LOCK =====
+    // ===== SAVE CURSOR =====
     await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
       sync_cursor: isCaughtUp ? todayStr : currentDay,
       sync_page_cursor: windowQueue.length > 0 ? JSON.stringify(windowQueue) : null,
       sync_started_at: null,
-      sync_progress_orders: totalNewOrders + totalSkipped,
+      sync_progress_orders: totalProcessed,
       sync_progress_day: currentDay,
     }).eq('user_id', user.id);
 
-    // ===== REBUILD ENTRIES =====
+    // ===== BULK REBUILD ENTRIES =====
     let totalCreated = 0;
     let totalUpdated = 0;
 
@@ -273,34 +252,33 @@ export async function POST() {
         .select('gmv, shipping, affiliate, platform_fee, units, status')
         .eq('user_id', user.id).eq('order_date', date);
 
-      const active = ((dayOrders || []) as OrderRow[]).filter(row => !isOrderExcluded(row.status));
-      const t = active.reduce((acc: { gmv: number; shipping: number; affiliate: number; platformFee: number; units: number }, row: OrderRow) => ({
-        gmv: acc.gmv + Number(row.gmv), shipping: acc.shipping + Number(row.shipping),
-        affiliate: acc.affiliate + Number(row.affiliate), platformFee: acc.platformFee + Number(row.platform_fee),
-        units: acc.units + (Number(row.units) || 1),
+      const active = ((dayOrders || []) as OrderRow[]).filter(r => !isOrderExcluded(r.status));
+      const t = active.reduce((acc, r) => ({
+        gmv: acc.gmv + Number(r.gmv), shipping: acc.shipping + Number(r.shipping),
+        affiliate: acc.affiliate + Number(r.affiliate), platformFee: acc.platformFee + Number(r.platform_fee),
+        units: acc.units + (Number(r.units) || 1),
       }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
 
-      const r = await rebuildEntry(admin, {
+      const res = await rebuildEntry(admin, {
         user_id: user.id, product_id: product.id, date,
         gmv: t.gmv, shipping: t.shipping, affiliate: t.affiliate,
         platform_fee: t.platformFee, units_sold: t.units, source: 'tiktok',
       });
-      if (r === 'created') totalCreated++;
-      else if (r === 'updated') totalUpdated++;
+      if (res === 'created') totalCreated++;
+      else if (res === 'updated') totalUpdated++;
     }
 
     if (rebuildDates.size > 0) console.log(`[Sync] Rebuilt ${rebuildDates.size} dates`);
 
-    const { count: totalUniqueOrders } = await admin.from('synced_order_ids')
-      .select('*', { count: 'exact', head: true }).eq('user_id', user.id);
+    const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
 
     return NextResponse.json({
       success: true,
       summary: {
         dateRange: { startDate: startDay, endDate: currentDay },
         entriesCreated: totalCreated, entriesUpdated: totalUpdated,
-        ordersFetched: totalNewOrders, ordersSkipped: totalSkipped,
-        ordersThisBatch: totalNewOrders + totalSkipped,
+        ordersFetched: totalProcessed, ordersSkipped: 0,
+        ordersThisBatch: totalProcessed,
         totalUniqueOrders: totalUniqueOrders || 0,
         isCaughtUp, hasMorePages: !isCaughtUp,
         windowsProcessed: apiCalls, elapsedMs: Date.now() - batchStart,
@@ -308,38 +286,12 @@ export async function POST() {
     });
   } catch (error) {
     console.error('Sync failed:', error);
-    // Release sync lock on error
     await admin.from('tiktok_connections').update({ sync_started_at: null }).eq('user_id', user.id);
-    return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 });
+    return NextResponse.json({ error: 'Something went wrong.' }, { status: 500 });
   }
 }
 
 // ==================== HELPERS ====================
-
-function parsePendingWindows(raw: string | null): PendingWindow[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed;
-    // Legacy format: { day, splits, index } — convert to window list
-    if (parsed.day && parsed.splits && parsed.index !== undefined) {
-      const windows: PendingWindow[] = [];
-      const dayStart = dayToTs(parsed.day);
-      const windowSize = 86400 / parsed.splits;
-      for (let i = parsed.index; i < parsed.splits; i++) {
-        windows.push({ startTs: Math.floor(dayStart + windowSize * i), endTs: Math.floor(dayStart + windowSize * (i + 1)) });
-      }
-      return windows;
-    }
-    return [];
-  } catch { return []; }
-}
-
-function chunkArray<T>(arr: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
-  return chunks;
-}
 
 async function getOrCreateProduct(admin: AdminClient, userId: string, shopName: string) {
   const { data: existing } = await admin.from('products').select('*').eq('user_id', userId).eq('name', shopName).single();
@@ -349,45 +301,17 @@ async function getOrCreateProduct(admin: AdminClient, userId: string, shopName: 
   return created;
 }
 
-async function getOrCreateTikTokProduct(admin: AdminClient, userId: string, tikTokProductId: string, name: string, imageUrl: string | null, sku: string | null): Promise<string> {
-  const { data: existing } = await admin.from('products').select('id').eq('user_id', userId).eq('tiktok_product_id', tikTokProductId).single();
-  if (existing) {
-    if (imageUrl || sku) await admin.from('products').update({ ...(imageUrl ? { image_url: imageUrl } : {}), ...(sku ? { sku } : {}) }).eq('id', existing.id);
-    return existing.id;
-  }
-  const { data: created, error } = await admin.from('products').insert({ user_id: userId, name: name || `Product ${tikTokProductId.slice(-6)}`, tiktok_product_id: tikTokProductId, image_url: imageUrl, sku }).select('id').single();
-  if (error) {
-    const { data: retry, error: retryErr } = await admin.from('products').insert({ user_id: userId, name: `${name} (${tikTokProductId.slice(-6)})`, tiktok_product_id: tikTokProductId, image_url: imageUrl, sku }).select('id').single();
-    if (retryErr) throw new Error(`Failed to create product: ${retryErr.message}`);
-    return retry.id;
-  }
-  return created.id;
-}
-
-function isOrderExcluded(status: string | null | undefined): boolean {
-  if (!status) return false;
-  const s = status.toUpperCase();
-  return s === 'CANCELLED' || s.includes('CANCEL') || s.includes('REFUND');
-}
-
-function toNum(val: unknown): number {
-  if (val === null || val === undefined) return 0;
-  if (typeof val === 'number') return val;
-  if (typeof val === 'string') return parseFloat(val) || 0;
-  return 0;
-}
-
 async function rebuildEntry(admin: AdminClient, entry: { user_id: string; product_id: string; date: string; gmv: number; shipping: number; affiliate: number; platform_fee: number; units_sold: number; source: string }): Promise<'created' | 'updated' | 'error'> {
   try {
-    const { data: existing, error: selectErr } = await admin.from('entries').select('id').eq('user_id', entry.user_id).eq('product_id', entry.product_id).eq('date', entry.date).eq('source', 'tiktok').single();
-    if (selectErr && selectErr.code !== 'PGRST116') { console.error(`[rebuildEntry] Select error:`, selectErr); return 'error'; }
+    const { data: existing, error: selErr } = await admin.from('entries').select('id').eq('user_id', entry.user_id).eq('product_id', entry.product_id).eq('date', entry.date).eq('source', 'tiktok').single();
+    if (selErr && selErr.code !== 'PGRST116') { console.error('[rebuild] Select:', selErr); return 'error'; }
     if (existing) {
-      const { error: updateErr } = await admin.from('entries').update({ gmv: entry.gmv, shipping: entry.shipping, affiliate: entry.affiliate, platform_fee: entry.platform_fee, units_sold: entry.units_sold, ads: 0, updated_at: new Date().toISOString() }).eq('id', existing.id);
-      if (updateErr) { console.error(`[rebuildEntry] Update error:`, updateErr); return 'error'; }
+      const { error: upErr } = await admin.from('entries').update({ gmv: entry.gmv, shipping: entry.shipping, affiliate: entry.affiliate, platform_fee: entry.platform_fee, units_sold: entry.units_sold, ads: 0, updated_at: new Date().toISOString() }).eq('id', existing.id);
+      if (upErr) { console.error('[rebuild] Update:', upErr); return 'error'; }
       return 'updated';
     }
-    const { error: insertErr } = await admin.from('entries').insert({ user_id: entry.user_id, product_id: entry.product_id, date: entry.date, gmv: entry.gmv, ads: 0, shipping: entry.shipping, affiliate: entry.affiliate, platform_fee: entry.platform_fee, units_sold: entry.units_sold, videos_posted: 0, views: 0, source: entry.source });
-    if (insertErr) { console.error(`[rebuildEntry] Insert error:`, insertErr, JSON.stringify(entry)); return 'error'; }
+    const { error: insErr } = await admin.from('entries').insert({ user_id: entry.user_id, product_id: entry.product_id, date: entry.date, gmv: entry.gmv, ads: 0, shipping: entry.shipping, affiliate: entry.affiliate, platform_fee: entry.platform_fee, units_sold: entry.units_sold, videos_posted: 0, views: 0, source: entry.source });
+    if (insErr) { console.error('[rebuild] Insert:', insErr, JSON.stringify(entry)); return 'error'; }
     return 'created';
-  } catch (err) { console.error(`[rebuildEntry] Exception:`, err); return 'error'; }
+  } catch (err) { console.error('[rebuild] Exception:', err); return 'error'; }
 }
