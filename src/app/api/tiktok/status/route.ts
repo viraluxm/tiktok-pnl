@@ -11,21 +11,25 @@ export async function GET() {
 
   const { data: connection, error } = await supabase
     .from('tiktok_connections')
-    .select('id, shop_name, shop_cipher, advertiser_ids, connected_at, last_synced_at, sync_cursor')
+    .select('id, shop_name, shop_cipher, advertiser_ids, connected_at, last_synced_at, sync_cursor, sync_started_at, sync_progress_orders, sync_progress_day')
     .eq('user_id', user.id)
     .single();
 
   if (error && error.code !== 'PGRST116') {
-    // PGRST116 = no rows, which is expected when not connected
     console.error('Error fetching TikTok connection:', error);
     return NextResponse.json({ error: 'Failed to fetch connection' }, { status: 500 });
   }
 
   if (!connection) {
-    return NextResponse.json({
-      connected: false,
-      connection: null,
-    });
+    return NextResponse.json({ connected: false, connection: null });
+  }
+
+  // Check if a sync is currently in progress (started within last 5 minutes)
+  let syncInProgress = false;
+  if (connection.sync_started_at) {
+    const startedAt = new Date(connection.sync_started_at).getTime();
+    const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+    syncInProgress = startedAt > fiveMinAgo;
   }
 
   return NextResponse.json({
@@ -38,6 +42,9 @@ export async function GET() {
       connectedAt: connection.connected_at,
       lastSyncedAt: connection.last_synced_at,
       needsBackfill: !connection.sync_cursor,
+      syncInProgress,
+      syncProgressOrders: connection.sync_progress_orders || 0,
+      syncProgressDay: connection.sync_progress_day || null,
     },
   });
 }

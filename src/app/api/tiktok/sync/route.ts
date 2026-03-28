@@ -62,6 +62,30 @@ export async function POST() {
   if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
   if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher — reconnect TikTok' }, { status: 400 });
 
+  // Sync lock — prevent concurrent syncs
+  if (connection.sync_started_at) {
+    const startedAt = new Date(connection.sync_started_at).getTime();
+    const fiveMinAgo = Date.now() - 5 * 60 * 1000;
+    if (startedAt > fiveMinAgo) {
+      return NextResponse.json({
+        success: true,
+        status: 'already_syncing',
+        summary: {
+          syncInProgress: true,
+          syncProgressOrders: connection.sync_progress_orders || 0,
+          syncProgressDay: connection.sync_progress_day || null,
+        },
+      });
+    }
+  }
+
+  // Acquire sync lock
+  await admin.from('tiktok_connections').update({
+    sync_started_at: new Date().toISOString(),
+    sync_progress_orders: 0,
+    sync_progress_day: null,
+  }).eq('user_id', user.id);
+
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
@@ -92,6 +116,8 @@ export async function POST() {
     let totalNewOrders = 0;
     let totalSkipped = 0;
     let apiCalls = 0;
+    let lastProgressSave = 0;
+    let lastProgressOrders = 0;
     const startDay = currentDay;
 
     // Queue of windows to process. Start with any pending sub-windows from last call.
@@ -228,18 +254,31 @@ export async function POST() {
         rebuildDates.add(date);
       }
 
-      if (apiCalls % 10 === 0) {
-        console.log(`[Sync] ${apiCalls} API calls, ${totalNewOrders} new, queue=${windowQueue.length}, day=${currentDay}, ${Date.now() - batchStart}ms`);
+      // Save progress every 30s or every 500 new orders
+      const elapsed = Date.now() - batchStart;
+      if (apiCalls % 10 === 0 || totalNewOrders % 500 < (totalNewOrders - allOrders.length) % 500) {
+        console.log(`[Sync] ${apiCalls} API calls, ${totalNewOrders} new, queue=${windowQueue.length}, day=${currentDay}, ${elapsed}ms`);
+      }
+      if (elapsed - lastProgressSave > 30_000 || totalNewOrders - lastProgressOrders >= 500) {
+        await admin.from('tiktok_connections').update({
+          sync_progress_orders: totalNewOrders + totalSkipped,
+          sync_progress_day: currentDay,
+        }).eq('user_id', user.id);
+        lastProgressSave = elapsed;
+        lastProgressOrders = totalNewOrders;
       }
     }
 
     console.log(`[Sync] Batch done: ${apiCalls} API calls, ${totalNewOrders} new, ${totalSkipped} skipped, ${Date.now() - batchStart}ms`);
 
-    // ===== SAVE CURSOR =====
+    // ===== SAVE CURSOR + RELEASE LOCK =====
     await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
       sync_cursor: isCaughtUp ? todayStr : currentDay,
       sync_page_cursor: windowQueue.length > 0 ? JSON.stringify(windowQueue) : null,
+      sync_started_at: null,
+      sync_progress_orders: totalNewOrders + totalSkipped,
+      sync_progress_day: currentDay,
     }).eq('user_id', user.id);
 
     // ===== REBUILD ENTRIES =====
@@ -286,6 +325,8 @@ export async function POST() {
     });
   } catch (error) {
     console.error('Sync failed:', error);
+    // Release sync lock on error
+    await admin.from('tiktok_connections').update({ sync_started_at: null }).eq('user_id', user.id);
     return NextResponse.json({ error: 'Something went wrong. Please try again.' }, { status: 500 });
   }
 }

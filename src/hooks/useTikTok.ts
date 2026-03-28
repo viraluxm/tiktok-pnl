@@ -12,6 +12,9 @@ interface TikTokConnection {
   connectedAt: string;
   lastSyncedAt: string | null;
   needsBackfill: boolean;
+  syncInProgress: boolean;
+  syncProgressOrders: number;
+  syncProgressDay: string | null;
 }
 
 interface TikTokStatusResponse {
@@ -35,7 +38,8 @@ interface SyncSummary {
 
 interface SyncResponse {
   success: boolean;
-  summary: SyncSummary;
+  status?: string;
+  summary?: SyncSummary;
 }
 
 interface SyncProgress {
@@ -56,13 +60,17 @@ async function doSyncCall(): Promise<SyncResponse> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({}),
   });
-  if (res.status === 429) {
-    throw new RateLimitError();
-  }
+  if (res.status === 429) throw new RateLimitError();
   if (!res.ok) {
     const err = await res.json();
     throw new Error(err.error || 'Sync failed');
   }
+  return res.json();
+}
+
+async function fetchStatus(): Promise<TikTokStatusResponse> {
+  const res = await fetch('/api/tiktok/status');
+  if (!res.ok) throw new Error('Failed to fetch status');
   return res.json();
 }
 
@@ -77,11 +85,7 @@ export function useTikTok() {
   const connectionQuery = useQuery<TikTokStatusResponse>({
     queryKey: ['tiktok-status', user?.id],
     enabled: !!user,
-    queryFn: async () => {
-      const res = await fetch('/api/tiktok/status');
-      if (!res.ok) throw new Error('Failed to fetch TikTok status');
-      return res.json();
-    },
+    queryFn: fetchStatus,
     staleTime: 30_000,
   });
 
@@ -110,63 +114,85 @@ export function useTikTok() {
 
   const runSyncLoop = useCallback(async () => {
     abortRef.current = false;
-    let consecutiveErrors = 0;
-    let iteration = 0;
-
     setSyncProgress({ totalOrders: 0, currentRange: '', isSyncing: true });
 
     try {
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        iteration++;
-
-        if (abortRef.current) {
-          console.log(`[SyncLoop] Aborted at iteration ${iteration}`);
-          break;
-        }
-
-        let result: SyncResponse;
-        try {
+      // Step 1: Fire the sync call (may run for up to 5 minutes)
+      console.log('[SyncLoop] Starting sync call...');
+      let result: SyncResponse;
+      try {
+        result = await doSyncCall();
+      } catch (err) {
+        if (err instanceof RateLimitError) {
+          console.log('[SyncLoop] Rate limited, will retry...');
+          await sleep(10_000);
           result = await doSyncCall();
-          consecutiveErrors = 0;
-        } catch (err) {
-          if (err instanceof RateLimitError) {
-            console.log(`[SyncLoop] Iteration ${iteration}: Rate limited, waiting 10s...`);
-            await sleep(10_000);
-            continue;
-          }
-          consecutiveErrors++;
-          console.log(`[SyncLoop] Iteration ${iteration}: Error (${consecutiveErrors}/5):`, (err as Error).message);
-          if (consecutiveErrors >= 5) {
-            console.log(`[SyncLoop] Giving up after 5 consecutive errors at iteration ${iteration}`);
+        } else {
+          throw err;
+        }
+      }
+
+      // If we got "already_syncing", just poll status for progress
+      if (result.status === 'already_syncing') {
+        console.log('[SyncLoop] Another sync is running, polling status...');
+      }
+
+      // Step 2: Poll status for progress while sync is in progress
+      // (The sync call above may have completed, or another instance may be running)
+      let pollCount = 0;
+      while (!abortRef.current) {
+        pollCount++;
+        await sleep(2_000);
+
+        try {
+          const status = await fetchStatus();
+          const conn = status.connection;
+          if (!conn) break;
+
+          // Update progress from status endpoint
+          setSyncProgress({
+            totalOrders: conn.syncProgressOrders || 0,
+            currentRange: conn.syncProgressDay || '',
+            isSyncing: conn.syncInProgress,
+          });
+
+          queryClient.invalidateQueries({ queryKey: ['entries'] });
+
+          if (!conn.syncInProgress) {
+            console.log(`[SyncLoop] Sync complete after ${pollCount} polls`);
+            // Check if we need another batch (not caught up yet)
+            if (conn.needsBackfill || !conn.lastSyncedAt) {
+              // Trigger another sync call
+              console.log('[SyncLoop] Not caught up, starting another batch...');
+              try {
+                await doSyncCall();
+              } catch {
+                break;
+              }
+              continue; // Keep polling
+            }
             break;
           }
-          await sleep(2_000);
-          continue;
+
+          if (pollCount % 10 === 0) {
+            console.log(`[SyncLoop] Poll ${pollCount}: ${conn.syncProgressOrders} orders, day=${conn.syncProgressDay}`);
+          }
+        } catch {
+          // Status fetch failed — just keep polling
         }
-
-        const s = result.summary;
-
-        const rate = s.elapsedMs > 0 ? Math.round(s.ordersThisBatch / (s.elapsedMs / 60_000)) : 0;
-        console.log(`[SyncLoop] Iteration ${iteration}: caught_up=${s.isCaughtUp}, batch=${s.ordersThisBatch}, windows=${s.windowsProcessed}, total=${s.totalUniqueOrders}, ${s.elapsedMs}ms, ~${rate}/min`);
-
-        setSyncProgress({
-          totalOrders: s.totalUniqueOrders,
-          currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
-          isSyncing: true,
-        });
-
-        // Refresh dashboard data after every call
-        queryClient.invalidateQueries({ queryKey: ['entries'] });
-
-        // ONLY stop when fully caught up
-        if (s.isCaughtUp && !s.hasMorePages) {
-          console.log(`[SyncLoop] Fully caught up at iteration ${iteration}`);
-          break;
-        }
-
-        await sleep(500);
       }
+
+      // Final refresh
+      queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
+      queryClient.invalidateQueries({ queryKey: ['entries'] });
+
+      // If the first sync completed and returned data, log it
+      if (result.summary) {
+        const s = result.summary;
+        console.log(`[SyncLoop] Final: ${s.totalUniqueOrders} total, ${s.ordersThisBatch} this batch, ${s.elapsedMs}ms`);
+      }
+    } catch (err) {
+      console.error('[SyncLoop] Error:', (err as Error).message);
     } finally {
       setSyncProgress((prev: SyncProgress | null) => prev ? { ...prev, isSyncing: false } : null);
       queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
@@ -181,7 +207,19 @@ export function useTikTok() {
     if (loopRanRef.current) return;
 
     loopRanRef.current = true;
-    runSyncLoop();
+
+    // If a sync is already in progress (e.g. from another tab), just poll status
+    if (conn.syncInProgress) {
+      setSyncProgress({
+        totalOrders: conn.syncProgressOrders || 0,
+        currentRange: conn.syncProgressDay || '',
+        isSyncing: true,
+      });
+      // Start polling
+      runSyncLoop();
+    } else {
+      runSyncLoop();
+    }
   }, [connectionQuery.data, runSyncLoop]);
 
   const isConnected = connectionQuery.data?.connected ?? false;
