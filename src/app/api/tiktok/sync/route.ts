@@ -255,54 +255,87 @@ export async function POST() {
     }).eq('user_id', user.id);
 
     // ===== BULK REBUILD ENTRIES (3 DB calls instead of 730) =====
+    let totalCreated = 0;
     const rebuildStart = Date.now();
 
-    // 1. Fetch ALL orders in one query (just numeric fields)
-    const { data: allOrders, error: allErr } = await admin.from('synced_order_ids')
-      .select('order_date, gmv, shipping, affiliate, platform_fee, units, status')
-      .eq('user_id', user.id);
+    try {
+      // 1. Fetch ALL orders in one query
+      const { data: allOrders, error: allErr } = await admin.from('synced_order_ids')
+        .select('order_date, gmv, shipping, affiliate, platform_fee, units, status')
+        .eq('user_id', user.id);
 
-    if (allErr) {
-      console.error('[Rebuild] Failed to fetch orders:', allErr);
-    }
-
-    // 2. Aggregate in JS (instant, no DB calls)
-    type FullOrderRow = OrderRow & { order_date: string };
-    const dailyTotals = new Map<string, { gmv: number; shipping: number; affiliate: number; platformFee: number; units: number }>();
-    for (const row of (allOrders || []) as FullOrderRow[]) {
-      if (isOrderExcluded(row.status)) continue;
-      const date = row.order_date;
-      const existing = dailyTotals.get(date) || { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 };
-      existing.gmv += Number(row.gmv) || 0;
-      existing.shipping += Number(row.shipping) || 0;
-      existing.affiliate += Number(row.affiliate) || 0;
-      existing.platformFee += Number(row.platform_fee) || 0;
-      existing.units += Number(row.units) || 1;
-      dailyTotals.set(date, existing);
-    }
-
-    // 3. Delete old tiktok entries (1 DB call)
-    await admin.from('entries').delete().eq('user_id', user.id).eq('source', 'tiktok');
-
-    // 4. Bulk insert all daily entries (1-2 DB calls)
-    const entryRows = [...dailyTotals.entries()].map(([date, t]) => ({
-      user_id: user.id, product_id: product.id, date,
-      gmv: t.gmv, shipping: t.shipping, affiliate: t.affiliate,
-      platform_fee: t.platformFee, units_sold: t.units,
-      ads: 0, videos_posted: 0, views: 0, source: 'tiktok',
-    }));
-
-    let totalCreated = 0;
-    for (const chunk of chunkArray(entryRows, 500)) {
-      const { error: insertErr } = await admin.from('entries').insert(chunk);
-      if (insertErr) {
-        console.error('[Rebuild] Bulk insert error:', insertErr.message);
-      } else {
-        totalCreated += chunk.length;
+      if (allErr) {
+        console.error('[Rebuild] Failed to fetch orders:', allErr);
+        throw new Error(`Fetch orders failed: ${allErr.message}`);
       }
+
+      console.log(`[Rebuild] Fetched ${(allOrders || []).length} orders from synced_order_ids`);
+
+      // 2. Aggregate by date in JS (instant)
+      type FullOrderRow = OrderRow & { order_date: string };
+      const dailyTotals = new Map<string, { gmv: number; shipping: number; affiliate: number }>();
+      for (const row of (allOrders || []) as FullOrderRow[]) {
+        if (isOrderExcluded(row.status)) continue;
+        const date = row.order_date;
+        const prev = dailyTotals.get(date) || { gmv: 0, shipping: 0, affiliate: 0 };
+        prev.gmv += Number(row.gmv) || 0;
+        prev.shipping += Number(row.shipping) || 0;
+        prev.affiliate += Number(row.affiliate) || 0;
+        dailyTotals.set(date, prev);
+      }
+
+      console.log(`[Rebuild] Aggregated into ${dailyTotals.size} unique dates`);
+
+      // 3. Delete old tiktok entries
+      const { error: delErr } = await admin.from('entries')
+        .delete()
+        .eq('user_id', user.id)
+        .eq('source', 'tiktok');
+
+      if (delErr) {
+        console.error('[Rebuild] Delete error:', delErr);
+      }
+
+      // 4. Bulk insert — ONLY columns that exist in the entries table:
+      // id, user_id, product_id (nullable), date, gmv, videos_posted, views,
+      // shipping, affiliate, ads, created_at, updated_at, source
+      const now = new Date().toISOString();
+      const entryRows = [...dailyTotals.entries()].map(([date, t]) => ({
+        user_id: user.id,
+        product_id: null,
+        date,
+        gmv: t.gmv,
+        shipping: t.shipping,
+        affiliate: t.affiliate,
+        ads: 0,
+        videos_posted: 0,
+        views: 0,
+        source: 'tiktok' as const,
+        created_at: now,
+        updated_at: now,
+      }));
+
+      console.log(`[Rebuild] Inserting ${entryRows.length} entry rows...`);
+      if (entryRows.length > 0) {
+        console.log(`[Rebuild] Sample row:`, JSON.stringify(entryRows[0]));
+      }
+
+      for (const chunk of chunkArray(entryRows, 500)) {
+        const { error: insertErr, count } = await admin.from('entries').insert(chunk);
+        if (insertErr) {
+          console.error('[Rebuild] INSERT ERROR:', insertErr.message);
+          console.error('[Rebuild] Error details:', JSON.stringify(insertErr));
+          console.error('[Rebuild] First row of failed chunk:', JSON.stringify(chunk[0]));
+        } else {
+          totalCreated += chunk.length;
+          console.log(`[Rebuild] Inserted chunk: ${chunk.length} rows (total: ${totalCreated})`);
+        }
+      }
+    } catch (rebuildErr) {
+      console.error('[Rebuild] EXCEPTION:', rebuildErr);
     }
 
-    console.log(`[Rebuild] ${dailyTotals.size} dates, ${totalCreated} entries created, ${(allOrders || []).length} orders aggregated, ${Date.now() - rebuildStart}ms`);
+    console.log(`[Rebuild] Done: ${totalCreated} entries created in ${Date.now() - rebuildStart}ms`);
 
     const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
 
