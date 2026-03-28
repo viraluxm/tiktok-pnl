@@ -232,26 +232,20 @@ export async function POST() {
       for (const b of batchRows) if (b.date) rebuildDates.add(b.date);
       totalProcessed += batchRows.length;
 
-      // Batch create products (deduplicated by cache)
+      // Batch upsert products (deduplicated in memory, then upsert to handle DB conflicts)
       const productInfos = new Map<string, { productName: string; skuImage: string | null; skuId: string | null }>();
       for (const b of batchRows) {
         if (b.productInfo && !productInfos.has(b.productInfo.tikTokProductId)) {
-          productInfos.set(b.productInfo.tikTokProductId, { productName: b.productInfo.productName, skuImage: b.productInfo.skuImage, skuId: b.productInfo.skuId });
+          productInfos.set(b.productInfo.tikTokProductId, b.productInfo);
         }
       }
-      // Bulk check which products exist
-      const newProductIds = [...productInfos.keys()];
-      if (newProductIds.length > 0) {
-        const { data: existingProducts } = await admin.from('products').select('tiktok_product_id').eq('user_id', user.id).in('tiktok_product_id', newProductIds);
-        const existingSet = new Set((existingProducts || []).map((p: { tiktok_product_id: string }) => p.tiktok_product_id));
-        const toCreate = newProductIds.filter(id => !existingSet.has(id));
-        if (toCreate.length > 0) {
-          const productRows = toCreate.map(id => {
-            const info = productInfos.get(id)!;
-            return { user_id: user.id, name: info.productName || `Product ${id.slice(-6)}`, tiktok_product_id: id, image_url: info.skuImage, sku: info.skuId };
-          });
-          await admin.from('products').upsert(productRows, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
-        }
+      if (productInfos.size > 0) {
+        const productRows = [...productInfos.entries()].map(([id, info]) => ({
+          user_id: user.id, name: info.productName || `Product ${id.slice(-6)}`,
+          tiktok_product_id: id, image_url: info.skuImage, sku: info.skuId,
+        }));
+        const { error: prodErr } = await admin.from('products').upsert(productRows, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
+        if (prodErr) console.error('[Sync] Product upsert error:', prodErr.message);
       }
 
       // Save progress periodically

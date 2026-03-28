@@ -123,8 +123,6 @@ async function shopGet(path: string, accessToken: string, extraParams: Record<st
   const qs = new URLSearchParams(params).toString();
   const fullUrl = `${TIKTOK_SHOP_BASE}${path}?${qs}`;
 
-  console.log(`[TikTok shopGet] Fetching: ${fullUrl}`);
-
   const res = await fetch(fullUrl, {
     headers: {
       'Content-Type': 'application/json',
@@ -133,7 +131,6 @@ async function shopGet(path: string, accessToken: string, extraParams: Record<st
   });
 
   const rawText = await res.text();
-  console.log(`[TikTok shopGet] ${path} HTTP ${res.status}:`, rawText.slice(0, 1000));
 
   const json = JSON.parse(rawText);
 
@@ -162,11 +159,6 @@ async function shopPost(path: string, accessToken: string, body: Record<string, 
   const qs = new URLSearchParams(params).toString();
   const fullUrl = `${TIKTOK_SHOP_BASE}${path}?${qs}`;
 
-  console.log(`[TikTok shopPost] URL: ${fullUrl}`);
-  console.log(`[TikTok shopPost] Body string (${bodyString.length} bytes): ${bodyString}`);
-  console.log(`[TikTok shopPost] Body keys: ${Object.keys(body).join(', ')}`);
-  console.log(`[TikTok shopPost] access_token length: ${accessToken?.length || 0}`);
-
   const res = await fetch(fullUrl, {
     method: 'POST',
     headers: {
@@ -177,7 +169,6 @@ async function shopPost(path: string, accessToken: string, body: Record<string, 
   });
 
   const rawText = await res.text();
-  console.log(`[TikTok shopPost] ${path} HTTP ${res.status} Response: ${rawText.slice(0, 1500)}`);
 
   const json = JSON.parse(rawText);
 
@@ -199,7 +190,6 @@ export interface ShopInfo {
 
 export async function getAuthorizedShops(accessToken: string): Promise<ShopInfo[]> {
   const data = await shopGet('/authorization/202309/shops', accessToken);
-  console.log('[TikTok getAuthorizedShops] raw data:', JSON.stringify(data));
   if (!data?.shops) return [];
   return data.shops.map((s: Record<string, string>) => ({
     shop_cipher: s.cipher,
@@ -237,15 +227,9 @@ export async function fetchOrdersPage(
     queryParams.cursor = pageCursor;
   }
 
-  console.log(`[TikTok fetchOrdersPage] ts=${startTs}..${endTs} sentCursor=${pageCursor || 'none'}`);
-
   const data = await shopPost(path, accessToken, body, queryParams);
   const orders = data?.orders || [];
   const nextCursor = data?.next_cursor || data?.next_page_token || '';
-
-  const firstOrderId = orders.length > 0 ? (orders[0] as Record<string, unknown>).id || 'unknown' : 'none';
-  const lastOrderId = orders.length > 0 ? (orders[orders.length - 1] as Record<string, unknown>).id || 'unknown' : 'none';
-  console.log(`[TikTok fetchOrdersPage] Got ${orders.length} orders, firstId=${firstOrderId}, lastId=${lastOrderId}, receivedCursor=${nextCursor || 'none'}`);
 
   return {
     orders,
@@ -281,7 +265,6 @@ export async function fetchStatements(
     sort_field: 'statement_time',
   });
 
-  console.log('[TikTok fetchStatements] Response:', JSON.stringify(data).slice(0, 3000));
 
   const rawStatements = (data?.statements || data?.statement_transactions || []) as Record<string, unknown>[];
 
@@ -310,7 +293,6 @@ export async function fetchUnsettledOrders(
     page_size: '10',
   });
 
-  console.log('[TikTok fetchUnsettledOrders] Response:', JSON.stringify(data).slice(0, 3000));
   return data || {};
 }
 
