@@ -283,7 +283,7 @@ export async function POST() {
 
     const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
 
-    return NextResponse.json({
+    const response = {
       success: true,
       summary: {
         dateRange: { startDate: startDay, endDate: currentDay },
@@ -294,7 +294,9 @@ export async function POST() {
         isCaughtUp, hasMorePages: !isCaughtUp,
         windowsProcessed: apiCalls, elapsedMs: Date.now() - batchStart,
       },
-    });
+    };
+    console.log(`[Sync] Response: isCaughtUp=${isCaughtUp}, entries=${totalCreated}, orders=${totalUniqueOrders}, elapsed=${Date.now() - batchStart}ms`);
+    return NextResponse.json(response);
   } catch (error) {
     console.error('Sync failed:', error);
     await admin.from('tiktok_connections').update({ sync_started_at: null }).eq('user_id', user.id);
