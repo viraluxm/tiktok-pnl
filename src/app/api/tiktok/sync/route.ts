@@ -232,20 +232,29 @@ export async function POST() {
       for (const b of batchRows) if (b.date) rebuildDates.add(b.date);
       totalProcessed += batchRows.length;
 
-      // Batch upsert products (deduplicated in memory, then upsert to handle DB conflicts)
-      const productInfos = new Map<string, { productName: string; skuImage: string | null; skuId: string | null }>();
+      // Batch insert products — deduplicate by tiktok_product_id AND name, insert one at a time to handle conflicts
+      const seenProductIds = new Set<string>();
+      const seenProductNames = new Set<string>();
       for (const b of batchRows) {
-        if (b.productInfo && !productInfos.has(b.productInfo.tikTokProductId)) {
-          productInfos.set(b.productInfo.tikTokProductId, b.productInfo);
+        if (!b.productInfo) continue;
+        const pid = b.productInfo.tikTokProductId;
+        const pname = b.productInfo.productName || `Product ${pid.slice(-6)}`;
+        if (seenProductIds.has(pid) || seenProductNames.has(pname)) continue;
+        seenProductIds.add(pid);
+        seenProductNames.add(pname);
+
+        // Use individual upsert to handle both unique constraints gracefully
+        const { error: prodErr } = await admin.from('products').upsert({
+          user_id: user.id, name: pname,
+          tiktok_product_id: pid, image_url: b.productInfo.skuImage, sku: b.productInfo.skuId,
+        }, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
+        if (prodErr) {
+          // If name conflict, try with suffix
+          await admin.from('products').upsert({
+            user_id: user.id, name: `${pname} (${pid.slice(-6)})`,
+            tiktok_product_id: pid, image_url: b.productInfo.skuImage, sku: b.productInfo.skuId,
+          }, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
         }
-      }
-      if (productInfos.size > 0) {
-        const productRows = [...productInfos.entries()].map(([id, info]) => ({
-          user_id: user.id, name: info.productName || `Product ${id.slice(-6)}`,
-          tiktok_product_id: id, image_url: info.skuImage, sku: info.skuId,
-        }));
-        const { error: prodErr } = await admin.from('products').upsert(productRows, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
-        if (prodErr) console.error('[Sync] Product upsert error:', prodErr.message);
       }
 
       // Save progress periodically
