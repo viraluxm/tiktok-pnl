@@ -130,12 +130,10 @@ export async function POST(request: Request) {
   if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
   if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher' }, { status: 400 });
 
-  // Sync lock — prevent overlapping calls (self-chain or manual)
-  if (connection.sync_started_at) {
-    const startedAt = new Date(connection.sync_started_at).getTime();
-    if (Date.now() - startedAt < 120_000) { // 2 min lock
-      return NextResponse.json({ success: true, status: 'already_syncing' });
-    }
+  // Check if already caught up
+  const todayCheck = new Date().toISOString().split('T')[0];
+  if (connection.sync_cursor && connection.sync_cursor >= todayCheck) {
+    return NextResponse.json({ success: true, summary: { isCaughtUp: true, totalUniqueOrders: 0, ordersThisBatch: 0, entriesCreated: 0, entriesUpdated: 0, ordersFetched: 0, ordersSkipped: 0, hasMorePages: false, windowsProcessed: 0, elapsedMs: 0, dateRange: { startDate: todayCheck, endDate: todayCheck } } });
   }
 
   // Mark sync start (keep existing progress count so frontend doesn't see a reset)
@@ -343,6 +341,8 @@ export async function POST(request: Request) {
       const chainUrl = `${process.env.NEXT_PUBLIC_SITE_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://lensed.io'}/api/tiktok/sync`;
       const chainBody = JSON.stringify({ _internalSecret: internalSecret, _userId: userId });
       after(async () => {
+        // Wait 3s to ensure cursor save has completed before chaining
+        await new Promise(r => setTimeout(r, 3000));
         console.log('[Sync] after() — chaining next batch to:', chainUrl);
         try {
           await fetch(chainUrl, {
