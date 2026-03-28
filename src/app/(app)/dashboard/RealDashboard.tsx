@@ -105,18 +105,20 @@ export default function RealDashboard() {
       <div className="p-6 max-w-[1600px] mx-auto">
         <TikTokConnect />
 
-        {/* First-sync hero — ONLY when total entries across ALL dates is 0 AND sync is running.
-            Uses allEntries (unfiltered) so date filter changes never trigger this. */}
-        {isConnected && syncProgress?.isSyncing && allEntries.length === 0 && connection?.needsBackfill && (
+        {/* First-sync hero — show when connected shop has zero entries (any date).
+            Simple: connected + no entries = show hero. Once entries > 0 = show dashboard. */}
+        {isConnected && allEntries.length === 0 && (
           <div className="mb-8 p-8 rounded-2xl border border-tt-cyan/30 bg-gradient-to-br from-[rgba(105,201,208,0.12)] to-[rgba(105,201,208,0.03)]">
             <div className="flex flex-col items-center gap-5 text-center">
               <div className="w-14 h-14 border-[3px] border-tt-cyan border-t-transparent rounded-full animate-spin" />
               <div>
                 <h2 className="text-lg font-bold text-tt-text mb-2">Syncing your TikTok Shop data...</h2>
-                <p className="text-sm text-tt-cyan font-semibold mb-1">
-                  {syncProgress.totalOrders.toLocaleString()} orders imported
-                </p>
-                {syncProgress.currentRange && (
+                {syncProgress && (
+                  <p className="text-sm text-tt-cyan font-semibold mb-1">
+                    {syncProgress.totalOrders.toLocaleString()} orders imported
+                  </p>
+                )}
+                {syncProgress?.currentRange && (
                   <p className="text-xs text-tt-muted mb-3">
                     ({syncProgress.currentRange})
                   </p>
@@ -129,8 +131,8 @@ export default function RealDashboard() {
           </div>
         )}
 
-        {/* Show dashboard unless first-sync hero is visible */}
-        {!(isConnected && syncProgress?.isSyncing && allEntries.length === 0 && connection?.needsBackfill) && (
+        {/* Show dashboard when we have entries */}
+        {(!isConnected || allEntries.length > 0) && (
           <>
         <FiltersBar
           filters={filters}

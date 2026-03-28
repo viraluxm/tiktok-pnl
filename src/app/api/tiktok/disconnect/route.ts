@@ -33,7 +33,14 @@ export async function POST() {
     .eq('user_id', user.id);
   console.log(`[Disconnect] Deleted ${logCount ?? 0} sync_logs`);
 
-  // 4. Delete the connection
+  // 4. Delete products
+  const { count: productCount } = await admin
+    .from('products')
+    .delete({ count: 'exact' })
+    .eq('user_id', user.id);
+  console.log(`[Disconnect] Deleted ${productCount ?? 0} products`);
+
+  // 5. Delete the connection
   const { error: connErr } = await admin
     .from('tiktok_connections')
     .delete()
