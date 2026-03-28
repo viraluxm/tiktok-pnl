@@ -62,7 +62,7 @@ export default function RealDashboard() {
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
-  const { syncProgress, isConnected } = useTikTok();
+  const { syncProgress, isConnected, connection } = useTikTok();
   const { products } = useProducts();
   const { costsMap, upsertCost } = useProductCosts();
 
@@ -105,8 +105,9 @@ export default function RealDashboard() {
       <div className="p-6 max-w-[1600px] mx-auto">
         <TikTokConnect />
 
-        {/* First-sync hero — shown when syncing and no entries exist yet */}
-        {isConnected && syncProgress?.isSyncing && entries.length === 0 && (
+        {/* First-sync hero — ONLY when total entries across ALL dates is 0 AND sync is running.
+            Uses allEntries (unfiltered) so date filter changes never trigger this. */}
+        {isConnected && syncProgress?.isSyncing && allEntries.length === 0 && connection?.needsBackfill && (
           <div className="mb-8 p-8 rounded-2xl border border-tt-cyan/30 bg-gradient-to-br from-[rgba(105,201,208,0.12)] to-[rgba(105,201,208,0.03)]">
             <div className="flex flex-col items-center gap-5 text-center">
               <div className="w-14 h-14 border-[3px] border-tt-cyan border-t-transparent rounded-full animate-spin" />
@@ -128,8 +129,8 @@ export default function RealDashboard() {
           </div>
         )}
 
-        {/* Hide $0 metric cards during first sync */}
-        {!(isConnected && syncProgress?.isSyncing && entries.length === 0) && (
+        {/* Show dashboard unless first-sync hero is visible */}
+        {!(isConnected && syncProgress?.isSyncing && allEntries.length === 0 && connection?.needsBackfill) && (
           <>
         <FiltersBar
           filters={filters}
