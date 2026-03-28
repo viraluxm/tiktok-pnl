@@ -233,6 +233,17 @@ export async function POST() {
 
     console.log(`[Sync] Fetch done: ${apiCalls} calls, ${totalProcessed} orders, ${Date.now() - batchStart}ms`);
 
+    // If no new orders fetched, check if entries need rebuilding (e.g. after a deploy)
+    if (rebuildDates.size === 0) {
+      const { count: entryCount } = await admin.from('entries').select('*', { count: 'exact', head: true }).eq('user_id', user.id).eq('source', 'tiktok');
+      const { count: orderCount } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
+      if ((orderCount || 0) > 0 && (entryCount || 0) === 0) {
+        console.log(`[Sync] Entries empty but ${orderCount} orders exist — rebuilding all dates`);
+        const { data: allDates } = await admin.from('synced_order_ids').select('order_date').eq('user_id', user.id);
+        for (const r of (allDates || [])) rebuildDates.add(r.order_date);
+      }
+    }
+
     // ===== SAVE CURSOR =====
     await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
