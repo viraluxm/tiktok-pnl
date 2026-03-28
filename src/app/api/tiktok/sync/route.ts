@@ -6,11 +6,11 @@ import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
-const TIME_BUDGET_MS = 50_000;
+const TIME_BUDGET_MS = 280_000; // 280s for work, 20s buffer before 300s timeout
 const DEFAULT_WINDOW_DAYS = 7;
 const PARALLEL_FETCHES = 5;
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // Window: a time range to fetch. Stored as JSON in sync_page_cursor.
 // { windows: [{ startTs, endTs }], cursor: index-into-windows }

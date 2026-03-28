@@ -121,7 +121,7 @@ export default function RealDashboard() {
                   </p>
                 )}
                 <p className="text-xs text-tt-muted max-w-md mx-auto leading-relaxed">
-                  First-time syncs can take 30–60 minutes depending on your order volume. You can close this page and come back later.
+                  Usually takes 1–3 minutes. You can close this page and come back later.
                 </p>
               </div>
             </div>
