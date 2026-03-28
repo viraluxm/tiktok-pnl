@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, after } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { fetchOrdersPage } from '@/lib/tiktok/client';
@@ -334,15 +334,23 @@ export async function POST(request: Request) {
     };
     console.log(`[Sync] Response: isCaughtUp=${isCaughtUp}, entries=${totalCreated}, orders=${totalUniqueOrders}, elapsed=${Date.now() - batchStart}ms`);
 
-    // Self-chain: if not caught up, fire another sync call (fire-and-forget)
+    // Self-chain: if not caught up, use after() to fire next batch after response is sent
     if (!isCaughtUp) {
-      const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://lensed.io';
-      console.log(`[Sync] Not caught up — chaining next batch`);
-      fetch(`${baseUrl}/api/tiktok/sync`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ _internalSecret: internalSecret, _userId: userId }),
-      }).catch(err => console.error('[Sync] Self-chain failed:', err));
+      const chainUrl = `${process.env.NEXT_PUBLIC_SITE_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://lensed.io'}/api/tiktok/sync`;
+      const chainBody = JSON.stringify({ _internalSecret: internalSecret, _userId: userId });
+      after(async () => {
+        console.log('[Sync] after() — chaining next batch to:', chainUrl);
+        try {
+          await fetch(chainUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: chainBody,
+          });
+          console.log('[Sync] after() — chain request sent');
+        } catch (err) {
+          console.error('[Sync] after() — chain failed:', err);
+        }
+      });
     }
 
     return NextResponse.json(response);
