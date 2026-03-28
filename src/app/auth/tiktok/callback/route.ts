@@ -35,8 +35,15 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Exchange code for access token via TikTok Shop API
-    const tokenData = await exchangeCodeForToken(code);
+    // Exchange code for access token via TikTok Shop API (retry once on failure)
+    let tokenData;
+    try {
+      tokenData = await exchangeCodeForToken(code);
+    } catch (firstErr) {
+      console.warn('[TikTok callback] First token exchange failed, retrying in 2s:', (firstErr as Error).message);
+      await new Promise(r => setTimeout(r, 2000));
+      tokenData = await exchangeCodeForToken(code);
+    }
 
     // Get authorized shops — shop_cipher is required for all Shop API calls
     let shopCipher: string | null = null;

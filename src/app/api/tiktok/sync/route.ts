@@ -315,10 +315,20 @@ export async function POST() {
 // ==================== HELPERS ====================
 
 async function getOrCreateProduct(admin: AdminClient, userId: string, shopName: string) {
+  // Try to find existing product first
   const { data: existing } = await admin.from('products').select('*').eq('user_id', userId).eq('name', shopName).single();
   if (existing) return existing;
-  const { data: created, error } = await admin.from('products').insert({ user_id: userId, name: shopName }).select().single();
-  if (error) throw new Error(`Failed to create product: ${error.message}`);
+  // Use upsert to handle race conditions (another call may have inserted between our select and insert)
+  const { data: created, error } = await admin.from('products').upsert(
+    { user_id: userId, name: shopName },
+    { onConflict: 'user_id,name' }
+  ).select().single();
+  if (error) {
+    // Final fallback: just re-fetch
+    const { data: fallback } = await admin.from('products').select('*').eq('user_id', userId).eq('name', shopName).single();
+    if (fallback) return fallback;
+    throw new Error(`Failed to create product: ${error.message}`);
+  }
   return created;
 }
 
