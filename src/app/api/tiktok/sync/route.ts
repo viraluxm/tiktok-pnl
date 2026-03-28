@@ -6,7 +6,7 @@ import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
-const TIME_BUDGET_MS = 240_000; // 240s fetch, 60s for rebuild + cursor save
+const TIME_BUDGET_MS = 55_000; // 55s fetch, 5s for rebuild + cursor save (fits in browser fetch timeout)
 const DEFAULT_WINDOW_DAYS = 7;
 const PARALLEL_FETCHES = 5;
 const UPSERT_BATCH_SIZE = 500; // Rows per bulk upsert

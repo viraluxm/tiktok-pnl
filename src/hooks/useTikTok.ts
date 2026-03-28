@@ -51,17 +51,29 @@ interface SyncProgress {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 async function doSyncCall(): Promise<SyncResponse> {
-  const res = await fetch('/api/tiktok/sync', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  });
-  if (res.status === 429) throw new Error('rate_limited');
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Sync failed');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90_000); // 90s fetch timeout
+  try {
+    const res = await fetch('/api/tiktok/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+      signal: controller.signal,
+    });
+    if (res.status === 429) throw new Error('rate_limited');
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Sync failed');
+    }
+    return res.json();
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error('timeout');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
   }
-  return res.json();
 }
 
 async function fetchStatus(): Promise<TikTokStatusResponse> {
@@ -122,7 +134,7 @@ export function useTikTok() {
 
     try {
       let attempts = 0;
-      const MAX = 10;
+      const MAX = 30; // More attempts since each call is shorter (55s vs 240s)
 
       while (attempts < MAX) {
         attempts++;
@@ -132,9 +144,27 @@ export function useTikTok() {
         try {
           result = await doSyncCall();
         } catch (err) {
-          console.log('[SyncLoop] Call error:', (err as Error).message);
-          if ((err as Error).message === 'rate_limited') await sleep(10_000);
-          else await sleep(3_000);
+          const msg = (err as Error).message;
+          console.log('[SyncLoop] Call error:', msg);
+          if (msg === 'rate_limited') { await sleep(10_000); continue; }
+          if (msg === 'timeout') {
+            // Fetch timed out but server may still be processing.
+            // Check status and update progress, then continue the loop.
+            console.log('[SyncLoop] Fetch timed out, checking status...');
+            try {
+              const st = await fetchStatus();
+              if (st.connection) {
+                setSyncProgress({
+                  totalOrders: st.connection.syncProgressOrders || 0,
+                  currentRange: st.connection.syncProgressDay || '',
+                  isSyncing: true,
+                });
+              }
+            } catch { /* ignore */ }
+            await sleep(2_000);
+            continue;
+          }
+          await sleep(3_000);
           continue;
         }
 

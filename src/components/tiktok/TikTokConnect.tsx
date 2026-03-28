@@ -72,8 +72,8 @@ export default function TikTokConnect() {
 
   return (
     <>
-      {/* Sync progress banner — only for returning users doing manual sync, not first-time */}
-      {syncProgress?.isSyncing && !connection?.needsBackfill && (
+      {/* Sync progress banner — shows whenever sync is in progress */}
+      {syncProgress?.isSyncing && (
         <div className="mb-2 px-4 py-2 rounded-lg border border-tt-cyan/20 bg-[rgba(105,201,208,0.05)] flex items-center gap-2">
           <div className="w-3 h-3 border-2 border-tt-cyan border-t-transparent rounded-full animate-spin" />
           <span className="text-xs text-tt-cyan font-medium">
