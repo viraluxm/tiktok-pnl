@@ -14,7 +14,6 @@ const UPSERT_BATCH_SIZE = 500; // Rows per bulk upsert
 export const maxDuration = 300;
 
 type AdminClient = ReturnType<typeof createAdminClient>;
-type OrderRow = { gmv: number; shipping: number; affiliate: number; platform_fee: number; units: number; status: string };
 
 interface PendingWindow { startTs: number; endTs: number }
 
@@ -40,11 +39,6 @@ function toNum(val: unknown): number {
   if (typeof val === 'number') return val;
   if (typeof val === 'string') return parseFloat(val) || 0;
   return 0;
-}
-function isOrderExcluded(status: string | null | undefined): boolean {
-  if (!status) return false;
-  const s = status.toUpperCase();
-  return s === 'CANCELLED' || s.includes('CANCEL') || s.includes('REFUND');
 }
 
 // Parse order into a flat row for bulk upsert
@@ -243,99 +237,18 @@ export async function POST() {
       sync_progress_day: currentDay,
     }).eq('user_id', user.id);
 
-    // ===== BULK REBUILD ENTRIES (3 DB calls instead of 730) =====
-    let totalCreated = 0;
+    // ===== REBUILD ENTRIES VIA SQL FUNCTION (single call, no row limits) =====
     const rebuildStart = Date.now();
+    let totalCreated = 0;
 
-    try {
-      // 1. Fetch ALL orders — paginate to bypass Supabase's 1000-row default limit
-      const allOrders: Record<string, unknown>[] = [];
-      let fetchFrom = 0;
-      const FETCH_PAGE = 5000;
-      while (true) {
-        const { data: page, error: pageErr } = await admin.from('synced_order_ids')
-          .select('order_date, gmv, shipping, affiliate, platform_fee, units, status')
-          .eq('user_id', user.id)
-          .range(fetchFrom, fetchFrom + FETCH_PAGE - 1);
-        if (pageErr) {
-          console.error('[Rebuild] Fetch page error:', pageErr.message, 'at offset', fetchFrom);
-          break;
-        }
-        const pageLen = (page || []).length;
-        console.log(`[Rebuild] Page fetched: ${pageLen} rows at offset ${fetchFrom}, total so far: ${allOrders.length + pageLen}`);
-        if (pageLen === 0) break;
-        allOrders.push(...page!);
-        if (pageLen < FETCH_PAGE) break;
-        fetchFrom += FETCH_PAGE;
-      }
-
-      console.log(`[Rebuild] Total fetched: ${allOrders.length} orders from synced_order_ids`);
-
-      // 2. Aggregate by date in JS (instant)
-      type FullOrderRow = OrderRow & { order_date: string };
-      const dailyTotals = new Map<string, { gmv: number; shipping: number; affiliate: number }>();
-      for (const row of (allOrders || []) as FullOrderRow[]) {
-        if (isOrderExcluded(row.status)) continue;
-        const date = row.order_date;
-        const prev = dailyTotals.get(date) || { gmv: 0, shipping: 0, affiliate: 0 };
-        prev.gmv += Number(row.gmv) || 0;
-        prev.shipping += Number(row.shipping) || 0;
-        prev.affiliate += Number(row.affiliate) || 0;
-        dailyTotals.set(date, prev);
-      }
-
-      console.log(`[Rebuild] Aggregated into ${dailyTotals.size} unique dates`);
-
-      // 3. Delete old tiktok entries
-      const { error: delErr } = await admin.from('entries')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('source', 'tiktok');
-
-      if (delErr) {
-        console.error('[Rebuild] Delete error:', delErr);
-      }
-
-      // 4. Bulk insert — ONLY columns that exist in the entries table:
-      // id, user_id, product_id (nullable), date, gmv, videos_posted, views,
-      // shipping, affiliate, ads, created_at, updated_at, source
-      const now = new Date().toISOString();
-      const entryRows = [...dailyTotals.entries()].map(([date, t]) => ({
-        user_id: user.id,
-        product_id: null,
-        date,
-        gmv: t.gmv,
-        shipping: t.shipping,
-        affiliate: t.affiliate,
-        ads: 0,
-        videos_posted: 0,
-        views: 0,
-        source: 'tiktok' as const,
-        created_at: now,
-        updated_at: now,
-      }));
-
-      console.log(`[Rebuild] Inserting ${entryRows.length} entry rows...`);
-      if (entryRows.length > 0) {
-        console.log(`[Rebuild] Sample row:`, JSON.stringify(entryRows[0]));
-      }
-
-      for (const chunk of chunkArray(entryRows, 500)) {
-        const { error: insertErr, count } = await admin.from('entries').insert(chunk);
-        if (insertErr) {
-          console.error('[Rebuild] INSERT ERROR:', insertErr.message);
-          console.error('[Rebuild] Error details:', JSON.stringify(insertErr));
-          console.error('[Rebuild] First row of failed chunk:', JSON.stringify(chunk[0]));
-        } else {
-          totalCreated += chunk.length;
-          console.log(`[Rebuild] Inserted chunk: ${chunk.length} rows (total: ${totalCreated})`);
-        }
-      }
-    } catch (rebuildErr) {
-      console.error('[Rebuild] EXCEPTION:', rebuildErr);
+    const { data: rebuildCount, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: user.id });
+    if (rebuildErr) {
+      console.error('[Rebuild] SQL function error:', rebuildErr.message, JSON.stringify(rebuildErr));
+    } else {
+      totalCreated = rebuildCount || 0;
     }
 
-    console.log(`[Rebuild] Done: ${totalCreated} entries created in ${Date.now() - rebuildStart}ms`);
+    console.log(`[Rebuild] Created ${totalCreated} entries in ${Date.now() - rebuildStart}ms`);
 
     const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
 
