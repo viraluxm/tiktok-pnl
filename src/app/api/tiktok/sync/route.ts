@@ -338,7 +338,9 @@ export async function POST(request: Request) {
 
     // Self-chain: if not caught up, use after() to fire next batch after response is sent
     if (!isCaughtUp) {
-      const chainUrl = `${process.env.NEXT_PUBLIC_SITE_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://lensed.io'}/api/tiktok/sync`;
+      // Use VERCEL_URL (exact deployment URL, no redirects) or fallback to www.lensed.io
+      const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : (process.env.NEXT_PUBLIC_SITE_URL || 'https://www.lensed.io');
+      const chainUrl = `${baseUrl}/api/tiktok/sync`;
       const chainBody = JSON.stringify({ _internalSecret: internalSecret, _userId: userId });
       after(async () => {
         // Wait 3s to ensure cursor save has completed before chaining
