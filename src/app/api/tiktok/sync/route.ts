@@ -138,8 +138,8 @@ export async function POST(request: Request) {
     }
   }
 
-  // Mark sync start
-  await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString(), sync_progress_orders: 0, sync_progress_day: null }).eq('user_id', userId);
+  // Mark sync start (keep existing progress count so frontend doesn't see a reset)
+  await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString() }).eq('user_id', userId);
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
   const today = new Date();
@@ -281,7 +281,7 @@ export async function POST(request: Request) {
       // Save progress periodically
       const elapsed = Date.now() - batchStart;
       if (elapsed - lastProgressSave > 15_000) {
-        await admin.from('tiktok_connections').update({ sync_progress_orders: totalProcessed, sync_progress_day: currentDay }).eq('user_id', userId);
+        await admin.from('tiktok_connections').update({ sync_progress_orders: (existingOrderCount || 0) + totalProcessed, sync_progress_day: currentDay }).eq('user_id', userId);
         lastProgressSave = elapsed;
         console.log(`[Sync] ${apiCalls} calls, ${totalProcessed} orders, day=${currentDay}, ${elapsed}ms`);
       }
@@ -296,7 +296,7 @@ export async function POST(request: Request) {
       sync_cursor: saveCursor,
       sync_page_cursor: windowQueue.length > 0 ? JSON.stringify(windowQueue) : null,
       sync_started_at: null,
-      sync_progress_orders: totalProcessed,
+      sync_progress_orders: (existingOrderCount || 0) + totalProcessed,
       sync_progress_day: currentDay,
     }).eq('user_id', userId);
     if (saveErr) {

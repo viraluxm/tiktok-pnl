@@ -105,9 +105,8 @@ export default function RealDashboard() {
       <div className="p-6 max-w-[1600px] mx-auto">
         <TikTokConnect />
 
-        {/* First-sync hero — show when connected shop has zero entries (any date). */}
-        {(() => { console.log('[Hero] connected:', isConnected, 'allEntries:', allEntries.length, 'showHero:', isConnected && allEntries.length === 0); return null; })()}
-        {isConnected && allEntries.length === 0 && (
+        {/* Sync hero — show until isCaughtUp is true */}
+        {isConnected && syncProgress?.isSyncing && (
           <div className="mb-8 p-8 rounded-2xl border border-tt-cyan/30 bg-gradient-to-br from-[rgba(105,201,208,0.12)] to-[rgba(105,201,208,0.03)]">
             <div className="flex flex-col items-center gap-5 text-center">
               <div className="w-14 h-14 border-[3px] border-tt-cyan border-t-transparent rounded-full animate-spin" />
@@ -131,8 +130,8 @@ export default function RealDashboard() {
           </div>
         )}
 
-        {/* Show dashboard when we have entries */}
-        {(!isConnected || allEntries.length > 0) && (
+        {/* Show dashboard when sync is complete or not connected */}
+        {(!isConnected || !syncProgress?.isSyncing) && (
           <>
         <FiltersBar
           filters={filters}
