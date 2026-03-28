@@ -25,11 +25,12 @@ interface SyncSummary {
   entriesUpdated: number;
   ordersFetched: number;
   ordersSkipped: number;
+  ordersThisBatch: number;
   totalUniqueOrders: number;
   isCaughtUp: boolean;
   hasMorePages: boolean;
-  currentChunk: string;
-  nextChunk: string;
+  windowsProcessed: number;
+  elapsedMs: number;
 }
 
 interface SyncResponse {
@@ -140,15 +141,15 @@ export function useTikTok() {
             console.log(`[SyncLoop] Giving up after 5 consecutive errors at iteration ${iteration}`);
             break;
           }
-          await sleep(500);
+          await sleep(2_000);
           continue;
         }
 
         const s = result.summary;
 
-        console.log(`[SyncLoop] Iteration ${iteration}: caught_up=${s.isCaughtUp}, more_pages=${s.hasMorePages}, new=${s.ordersFetched}, skipped=${s.ordersSkipped}, total=${s.totalUniqueOrders}, chunk=${s.currentChunk}, next=${s.nextChunk}`);
+        const rate = s.elapsedMs > 0 ? Math.round(s.ordersThisBatch / (s.elapsedMs / 60_000)) : 0;
+        console.log(`[SyncLoop] Iteration ${iteration}: caught_up=${s.isCaughtUp}, batch=${s.ordersThisBatch}, windows=${s.windowsProcessed}, total=${s.totalUniqueOrders}, ${s.elapsedMs}ms, ~${rate}/min`);
 
-        // Update progress banner
         setSyncProgress({
           totalOrders: s.totalUniqueOrders,
           currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
@@ -167,7 +168,7 @@ export function useTikTok() {
         await sleep(500);
       }
     } finally {
-      setSyncProgress(prev => prev ? { ...prev, isSyncing: false } : null);
+      setSyncProgress((prev: SyncProgress | null) => prev ? { ...prev, isSyncing: false } : null);
       queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
       queryClient.invalidateQueries({ queryKey: ['entries'] });
     }
