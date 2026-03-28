@@ -65,44 +65,65 @@ export async function POST(request: Request) {
     let totalNew = 0;
     let daysProcessed = 0;
 
-    // ===== SIMPLE LOOP: one day at a time, one fetch per day =====
+    // ===== MAIN LOOP: one day at a time, paginate ALL orders within each day =====
     while (currentDay < todayStr && Date.now() - batchStart < TIME_BUDGET_MS) {
       const nextDay = advanceDay(currentDay);
       const startTs = dayToTs(currentDay);
       const endTs = dayToTs(nextDay);
 
-      try {
-        const { orders } = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, null);
+      // Fetch ALL pages for this day
+      let pageToken: string | null = null;
+      let dayOrders = 0;
+      let pageNum = 0;
 
-        if (orders.length > 0) {
-          // Parse and deduplicate
-          const rows = new Map<string, Record<string, unknown>>();
-          for (const o of orders) {
-            const parsed = parseOrder(userId, o as Record<string, unknown>);
-            const oid = String(parsed.order_id || '');
-            if (oid) rows.set(oid, parsed);
-          }
+      do {
+        if (Date.now() - batchStart >= TIME_BUDGET_MS) break;
+        pageNum++;
 
-          // Bulk upsert orders
-          const upsertData = [...rows.values()];
-          const { error: upsertErr } = await admin.from('synced_order_ids').upsert(upsertData, { onConflict: 'user_id,order_id' });
-          if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
-          else totalNew += upsertData.length;
+        try {
+          const { orders, nextCursor } = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageToken);
 
-          // Upsert products (one per unique tiktok_product_id)
-          const products = new Map<string, Record<string, unknown>>();
-          for (const row of upsertData) {
-            const pid = row.tiktok_product_id as string;
-            if (pid && !products.has(pid)) {
-              products.set(pid, { user_id: userId, tiktok_product_id: pid, name: (row as Record<string, unknown>).product_name || `Product ${pid.slice(-6)}` });
+          if (orders.length > 0) {
+            // Parse and deduplicate
+            const rows = new Map<string, Record<string, unknown>>();
+            for (const o of orders) {
+              const parsed = parseOrder(userId, o as Record<string, unknown>);
+              const oid = String(parsed.order_id || '');
+              if (oid) rows.set(oid, parsed);
+            }
+
+            // Bulk upsert
+            const upsertData = [...rows.values()];
+            const { error: upsertErr } = await admin.from('synced_order_ids').upsert(upsertData, { onConflict: 'user_id,order_id' });
+            if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
+            else totalNew += upsertData.length;
+
+            dayOrders += upsertData.length;
+
+            // Upsert products
+            const products = new Map<string, Record<string, unknown>>();
+            for (const row of upsertData) {
+              const pid = row.tiktok_product_id as string;
+              if (pid && !products.has(pid)) {
+                products.set(pid, { user_id: userId, tiktok_product_id: pid, name: String(row.sku_name || '') || `Product ${pid.slice(-6)}` });
+              }
+            }
+            for (const prod of products.values()) {
+              await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true }).catch(() => {});
             }
           }
-          for (const prod of products.values()) {
-            await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true }).catch(() => {});
-          }
+
+          // Advance to next page or exit
+          pageToken = nextCursor;
+          if (!nextCursor || orders.length < 50) pageToken = null;
+        } catch (err) {
+          console.error(`[Sync] Fetch error for ${currentDay} page ${pageNum}:`, (err as Error).message);
+          pageToken = null; // Stop paginating on error, move to next day
         }
-      } catch (err) {
-        console.error(`[Sync] Fetch error for ${currentDay}:`, (err as Error).message);
+      } while (pageToken);
+
+      if (dayOrders > 50) {
+        console.log(`[Sync] Day ${currentDay}: ${pageNum} pages, ${dayOrders} orders`);
       }
 
       currentDay = nextDay;
@@ -214,7 +235,6 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
     user_id: userId, order_id: orderId, order_date: date,
     gmv, shipping, affiliate, platform_fee: platformFee, units,
     tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName, status,
-    product_name: productName,
   };
 }
 

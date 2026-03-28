@@ -219,17 +219,17 @@ export async function fetchOrdersPage(
 
   const queryParams: Record<string, string> = {
     shop_cipher: shopCipher,
-    page_size: '100',
+    page_size: '50',
     sort_field: 'create_time',
     sort_order: 'DESC',
   };
   if (pageCursor) {
-    queryParams.cursor = pageCursor;
+    queryParams.page_token = pageCursor;
   }
 
   const data = await shopPost(path, accessToken, body, queryParams);
   const orders = data?.orders || [];
-  const nextCursor = data?.next_cursor || data?.next_page_token || '';
+  const nextCursor = data?.next_page_token || '';
 
   return {
     orders,
