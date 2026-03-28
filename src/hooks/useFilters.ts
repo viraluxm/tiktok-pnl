@@ -4,54 +4,57 @@ import { useState, useCallback } from 'react';
 import type { FilterState } from '@/types';
 
 export function useFilters() {
-  // Default to 30-day view
-  const [filters, setFilters] = useState<FilterState>(() => {
-    const to = new Date();
-    const from = new Date();
-    from.setDate(from.getDate() - 30);
-    return {
-      dateFrom: from.toISOString().split('T')[0],
-      dateTo: to.toISOString().split('T')[0],
-      productId: 'all',
-    };
+  // Default to "all" — shows all data regardless of date
+  const [filters, setFilters] = useState<FilterState>({
+    dateFrom: null,
+    dateTo: null,
+    productId: 'all',
   });
+
+  // latestDate: the most recent entry date, used as anchor for relative filters
+  // Set by the dashboard when entries load
+  const [latestDate, setLatestDate] = useState<string | null>(null);
 
   const setQuickFilter = useCallback((days: number | 'all') => {
     if (days === 'all') {
-      setFilters((prev) => ({ ...prev, dateFrom: null, dateTo: null }));
-    } else if (days === 0) {
-      // Today
-      const today = new Date().toISOString().split('T')[0];
-      setFilters((prev) => ({ ...prev, dateFrom: today, dateTo: today }));
-    } else if (days === 1) {
-      // Yesterday
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yStr = yesterday.toISOString().split('T')[0];
-      setFilters((prev) => ({ ...prev, dateFrom: yStr, dateTo: yStr }));
+      setFilters((prev: FilterState) => ({ ...prev, dateFrom: null, dateTo: null }));
     } else {
-      const to = new Date();
-      const from = new Date();
-      from.setDate(from.getDate() - days);
-      setFilters((prev) => ({
-        ...prev,
-        dateFrom: from.toISOString().split('T')[0],
-        dateTo: to.toISOString().split('T')[0],
-      }));
+      // Use latestDate as anchor if available, otherwise use today
+      const anchor = latestDate ? new Date(latestDate + 'T00:00:00Z') : new Date();
+      const anchorStr = anchor.toISOString().split('T')[0];
+
+      if (days === 0) {
+        // "Today" = latest date
+        setFilters((prev: FilterState) => ({ ...prev, dateFrom: anchorStr, dateTo: anchorStr }));
+      } else if (days === 1) {
+        // "Yesterday" = day before latest
+        const prev = new Date(anchor);
+        prev.setUTCDate(prev.getUTCDate() - 1);
+        const prevStr = prev.toISOString().split('T')[0];
+        setFilters((p: FilterState) => ({ ...p, dateFrom: prevStr, dateTo: prevStr }));
+      } else {
+        const from = new Date(anchor);
+        from.setUTCDate(from.getUTCDate() - days);
+        setFilters((prev: FilterState) => ({
+          ...prev,
+          dateFrom: from.toISOString().split('T')[0],
+          dateTo: anchorStr,
+        }));
+      }
     }
-  }, []);
+  }, [latestDate]);
 
   const setDateFrom = useCallback((date: string | null) => {
-    setFilters((prev) => ({ ...prev, dateFrom: date }));
+    setFilters((prev: FilterState) => ({ ...prev, dateFrom: date }));
   }, []);
 
   const setDateTo = useCallback((date: string | null) => {
-    setFilters((prev) => ({ ...prev, dateTo: date }));
+    setFilters((prev: FilterState) => ({ ...prev, dateTo: date }));
   }, []);
 
   const setProductId = useCallback((productId: string) => {
-    setFilters((prev) => ({ ...prev, productId }));
+    setFilters((prev: FilterState) => ({ ...prev, productId }));
   }, []);
 
-  return { filters, setQuickFilter, setDateFrom, setDateTo, setProductId };
+  return { filters, setQuickFilter, setDateFrom, setDateTo, setProductId, setLatestDate };
 }

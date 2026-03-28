@@ -233,17 +233,6 @@ export async function POST() {
 
     console.log(`[Sync] Fetch done: ${apiCalls} calls, ${totalProcessed} orders, ${Date.now() - batchStart}ms`);
 
-    // If no new orders fetched, check if entries need rebuilding (e.g. after a deploy)
-    if (rebuildDates.size === 0) {
-      const { count: entryCount } = await admin.from('entries').select('*', { count: 'exact', head: true }).eq('user_id', user.id).eq('source', 'tiktok');
-      const { count: orderCount } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
-      if ((orderCount || 0) > 0 && (entryCount || 0) === 0) {
-        console.log(`[Sync] Entries empty but ${orderCount} orders exist — rebuilding all dates`);
-        const { data: allDates } = await admin.from('synced_order_ids').select('order_date').eq('user_id', user.id);
-        for (const r of (allDates || [])) rebuildDates.add(r.order_date);
-      }
-    }
-
     // ===== SAVE CURSOR =====
     await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
@@ -259,10 +248,22 @@ export async function POST() {
     const rebuildStart = Date.now();
 
     try {
-      // 1. Fetch ALL orders in one query
-      const { data: allOrders, error: allErr } = await admin.from('synced_order_ids')
-        .select('order_date, gmv, shipping, affiliate, platform_fee, units, status')
-        .eq('user_id', user.id);
+      // 1. Fetch ALL orders — paginate to bypass Supabase's 1000-row default limit
+      let allOrders: Record<string, unknown>[] = [];
+      let allErr: Error | null = null;
+      let offset = 0;
+      const PAGE = 5000;
+      while (true) {
+        const { data: page, error: pageErr } = await admin.from('synced_order_ids')
+          .select('order_date, gmv, shipping, affiliate, platform_fee, units, status')
+          .eq('user_id', user.id)
+          .range(offset, offset + PAGE - 1);
+        if (pageErr) { allErr = new Error(pageErr.message); break; }
+        if (!page || page.length === 0) break;
+        allOrders = allOrders.concat(page);
+        if (page.length < PAGE) break; // Last page
+        offset += PAGE;
+      }
 
       if (allErr) {
         console.error('[Rebuild] Failed to fetch orders:', allErr);
