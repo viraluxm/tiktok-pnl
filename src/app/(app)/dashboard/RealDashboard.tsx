@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
@@ -61,7 +61,7 @@ export default function RealDashboard() {
   const [activeView, setActiveView] = useState<ViewTab>('dashboard');
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
 
-  const { filters, setQuickFilter, setDateFrom, setDateTo, setLatestDate } = useFilters();
+  const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected } = useTikTok();
   const { products } = useProducts();
   const { costsMap, upsertCost } = useProductCosts();
@@ -69,14 +69,6 @@ export default function RealDashboard() {
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
-
-  // Set the latest entry date as anchor for period filters
-  useEffect(() => {
-    if (allEntries.length > 0) {
-      const sorted = allEntries.map(e => e.date).sort();
-      setLatestDate(sorted[sorted.length - 1]);
-    }
-  }, [allEntries, setLatestDate]);
 
   // Pass costs into all calculations so cost per unit affects net profit
   const metrics = useMemo(() => computeDashboardMetrics(entries, costsMap), [entries, costsMap]);

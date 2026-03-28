@@ -45,6 +45,11 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
           <ChangeIndicator change={gmvChange} />
         </div>
         <div className="text-[26px] font-bold text-tt-cyan">{fmt(metrics.totalGMV)}</div>
+        {metrics.totalUnitsSold > 0 && (
+          <div className="text-xs text-tt-muted mt-1">
+            {fmtInt(metrics.totalUnitsSold)} orders
+          </div>
+        )}
       </div>
 
       {/* 2. Total Net Profit */}

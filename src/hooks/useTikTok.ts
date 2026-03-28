@@ -184,7 +184,8 @@ export function useTikTok() {
     } catch (err) {
       console.error('[SyncLoop] Fatal:', (err as Error).message);
     } finally {
-      setSyncProgress((prev: SyncProgress | null) => prev ? { ...prev, isSyncing: false } : null);
+      // Clear the banner completely when done
+      setSyncProgress(null);
       queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
       queryClient.invalidateQueries({ queryKey: ['entries'] });
     }
