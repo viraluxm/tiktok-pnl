@@ -168,7 +168,7 @@ export function useTikTok() {
         }
 
         const s = result.summary;
-        console.log(`[SyncLoop] Result: isCaughtUp=${s.isCaughtUp}, total=${s.totalUniqueOrders}, entries=${s.entriesCreated}, batch=${s.ordersThisBatch}, range=${s.dateRange.startDate}..${s.dateRange.endDate}`);
+        console.log(`[SyncLoop] isCaughtUp: ${s.isCaughtUp} — will fire again: ${!s.isCaughtUp} (attempt ${attempts}/${MAX_ATTEMPTS}, total=${s.totalUniqueOrders}, entries=${s.entriesCreated}, range=${s.dateRange.startDate}..${s.dateRange.endDate})`);
 
         setSyncProgress({
           totalOrders: s.totalUniqueOrders,

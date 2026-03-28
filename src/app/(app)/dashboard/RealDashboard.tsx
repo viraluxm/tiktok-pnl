@@ -105,8 +105,8 @@ export default function RealDashboard() {
       <div className="p-6 max-w-[1600px] mx-auto">
         <TikTokConnect />
 
-        {/* First-sync hero — show when connected shop has zero entries (any date).
-            Simple: connected + no entries = show hero. Once entries > 0 = show dashboard. */}
+        {/* First-sync hero — show when connected shop has zero entries (any date). */}
+        {(() => { console.log('[Hero] connected:', isConnected, 'allEntries:', allEntries.length, 'showHero:', isConnected && allEntries.length === 0); return null; })()}
         {isConnected && allEntries.length === 0 && (
           <div className="mb-8 p-8 rounded-2xl border border-tt-cyan/30 bg-gradient-to-br from-[rgba(105,201,208,0.12)] to-[rgba(105,201,208,0.03)]">
             <div className="flex flex-col items-center gap-5 text-center">
