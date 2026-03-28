@@ -175,8 +175,6 @@ export async function POST() {
 
     console.log(`[Sync] Deduped: ${newOrders.length} new, ${skippedCount} dupes`);
 
-    // Track affected dates+products for rebuild
-    const affectedKeys = new Set<string>(); // "date|productUuid"
     const productCache: Record<string, string> = {};
 
     // Update status on EXISTING orders (retroactive fix for cancelled/refunded)
@@ -255,7 +253,7 @@ export async function POST() {
         sku_id: skuId, sku_name: skuName, status,
       }, { onConflict: 'user_id,order_id' });
 
-      affectedKeys.add(`${date}|${productUuid}`);
+      // Order inserted successfully
     }
 
     // ===== ADVANCE WINDOW / DAY =====
@@ -290,53 +288,63 @@ export async function POST() {
       sync_page_cursor: newPageCursor,
     }).eq('user_id', user.id);
 
-    // ===== REBUILD AFFECTED DATE+PRODUCT ENTRIES =====
+    // ===== REBUILD DAILY ENTRIES FROM synced_order_ids =====
+    // Always rebuild for ALL dates that have orders — not just "affected" dates.
+    // This ensures entries table is never empty when synced_order_ids has data.
     let totalCreated = 0;
     let totalUpdated = 0;
 
-    if (affectedKeys.size > 0) {
-      for (const key of affectedKeys) {
-        const [date, productUuid] = key.split('|');
+    console.log(`[Rebuild] Starting rebuild for user ${user.id}, product ${product.id}`);
 
-        // Find which tiktok_product_ids map to this product UUID
-        const { data: productRow } = await admin.from('products').select('tiktok_product_id').eq('id', productUuid).single();
-        const tikTokPid = productRow?.tiktok_product_id;
+    // Get all unique dates from synced_order_ids
+    const { data: allDateRows, error: dateErr } = await admin
+      .from('synced_order_ids')
+      .select('order_date')
+      .eq('user_id', user.id);
 
-        // Query synced_order_ids for this date + product, excluding cancelled/refunded
-        let q = admin.from('synced_order_ids')
-          .select('gmv, shipping, affiliate, platform_fee, units, status')
-          .eq('user_id', user.id)
-          .eq('order_date', date);
-
-        if (tikTokPid) {
-          q = q.eq('tiktok_product_id', tikTokPid);
-        } else {
-          q = q.is('tiktok_product_id', null);
-        }
-
-        const { data: dayOrders } = await q;
-
-        // Filter out cancelled/refunded orders
-        const activeOrders = (dayOrders || []).filter(row => !isOrderExcluded(row.status));
-
-        const t = activeOrders.reduce((acc, row) => ({
-          gmv: acc.gmv + Number(row.gmv),
-          shipping: acc.shipping + Number(row.shipping),
-          affiliate: acc.affiliate + Number(row.affiliate),
-          platformFee: acc.platformFee + Number(row.platform_fee),
-          units: acc.units + (Number(row.units) || 1),
-        }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
-
-        const result = await setEntry(admin, {
-          user_id: user.id, product_id: productUuid, date,
-          gmv: t.gmv, shipping: t.shipping, affiliate: t.affiliate,
-          platform_fee: t.platformFee, units_sold: t.units, source: 'tiktok',
-        });
-        if (result === 'created') totalCreated++;
-        else if (result === 'updated') totalUpdated++;
-      }
-      console.log(`[Sync] Rebuilt ${affectedKeys.size} date+product entries`);
+    if (dateErr) {
+      console.error(`[Rebuild] Failed to query dates:`, dateErr);
     }
+
+    const uniqueDates = [...new Set((allDateRows || []).map(r => r.order_date))];
+    console.log(`[Rebuild] Found ${uniqueDates.length} unique dates to rebuild`);
+
+    for (const date of uniqueDates) {
+      // Sum all active orders for this date
+      const { data: dayOrders, error: dayErr } = await admin
+        .from('synced_order_ids')
+        .select('gmv, shipping, affiliate, platform_fee, units, status')
+        .eq('user_id', user.id)
+        .eq('order_date', date);
+
+      if (dayErr) {
+        console.error(`[Rebuild] Query failed for date ${date}:`, dayErr);
+        continue;
+      }
+
+      const activeOrders = (dayOrders || []).filter(row => !isOrderExcluded(row.status));
+
+      const t = activeOrders.reduce((acc, row) => ({
+        gmv: acc.gmv + Number(row.gmv),
+        shipping: acc.shipping + Number(row.shipping),
+        affiliate: acc.affiliate + Number(row.affiliate),
+        platformFee: acc.platformFee + Number(row.platform_fee),
+        units: acc.units + (Number(row.units) || 1),
+      }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
+
+      console.log(`[Rebuild] Date ${date}: ${activeOrders.length} active orders, gmv=$${t.gmv.toFixed(2)}, units=${t.units}`);
+
+      const result = await rebuildEntry(admin, {
+        user_id: user.id, product_id: product.id, date,
+        gmv: t.gmv, shipping: t.shipping, affiliate: t.affiliate,
+        platform_fee: t.platformFee, units_sold: t.units, source: 'tiktok',
+      });
+      if (result === 'created') totalCreated++;
+      else if (result === 'updated') totalUpdated++;
+      else if (result === 'error') console.error(`[Rebuild] FAILED for date ${date}`);
+    }
+
+    console.log(`[Rebuild] Done: ${totalCreated} created, ${totalUpdated} updated out of ${uniqueDates.length} dates`);
 
     // ===== FINANCE (when a full day completes) =====
     if (!newPageCursor && !isCaughtUp) {
@@ -453,28 +461,52 @@ function toNum(val: unknown): number {
   return 0;
 }
 
-async function setEntry(
+async function rebuildEntry(
   admin: ReturnType<typeof createAdminClient>,
   entry: { user_id: string; product_id: string; date: string; gmv: number; shipping: number; affiliate: number; platform_fee: number; units_sold: number; source: string }
-): Promise<'created' | 'updated'> {
-  const { data: existing } = await admin.from('entries').select('id')
-    .eq('user_id', entry.user_id).eq('product_id', entry.product_id)
-    .eq('date', entry.date).eq('source', 'tiktok').single();
+): Promise<'created' | 'updated' | 'error'> {
+  try {
+    // Check if entry exists for this user+product+date+source
+    const { data: existing, error: selectErr } = await admin.from('entries').select('id')
+      .eq('user_id', entry.user_id).eq('product_id', entry.product_id)
+      .eq('date', entry.date).eq('source', 'tiktok').single();
 
-  if (existing) {
-    await admin.from('entries').update({
-      gmv: entry.gmv, shipping: entry.shipping, affiliate: entry.affiliate,
-      platform_fee: entry.platform_fee, units_sold: entry.units_sold, ads: 0,
-      updated_at: new Date().toISOString(),
-    }).eq('id', existing.id);
-    return 'updated';
+    if (selectErr && selectErr.code !== 'PGRST116') {
+      // PGRST116 = no rows found (expected), anything else is a real error
+      console.error(`[rebuildEntry] Select error for ${entry.date}:`, selectErr);
+      return 'error';
+    }
+
+    if (existing) {
+      const { error: updateErr } = await admin.from('entries').update({
+        gmv: entry.gmv, shipping: entry.shipping, affiliate: entry.affiliate,
+        platform_fee: entry.platform_fee, units_sold: entry.units_sold, ads: 0,
+        updated_at: new Date().toISOString(),
+      }).eq('id', existing.id);
+
+      if (updateErr) {
+        console.error(`[rebuildEntry] Update error for ${entry.date}:`, updateErr);
+        return 'error';
+      }
+      return 'updated';
+    }
+
+    // Insert new entry
+    const { error: insertErr } = await admin.from('entries').insert({
+      user_id: entry.user_id, product_id: entry.product_id, date: entry.date,
+      gmv: entry.gmv, ads: 0, shipping: entry.shipping, affiliate: entry.affiliate,
+      platform_fee: entry.platform_fee, units_sold: entry.units_sold,
+      videos_posted: 0, views: 0, source: entry.source,
+    });
+
+    if (insertErr) {
+      console.error(`[rebuildEntry] Insert error for ${entry.date}:`, insertErr);
+      console.error(`[rebuildEntry] Entry data:`, JSON.stringify(entry));
+      return 'error';
+    }
+    return 'created';
+  } catch (err) {
+    console.error(`[rebuildEntry] Unexpected error for ${entry.date}:`, err);
+    return 'error';
   }
-
-  await admin.from('entries').insert({
-    user_id: entry.user_id, product_id: entry.product_id, date: entry.date,
-    gmv: entry.gmv, ads: 0, shipping: entry.shipping, affiliate: entry.affiliate,
-    platform_fee: entry.platform_fee, units_sold: entry.units_sold,
-    videos_posted: 0, views: 0, source: entry.source,
-  });
-  return 'created';
 }
