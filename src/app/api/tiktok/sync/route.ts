@@ -261,16 +261,19 @@ export async function POST() {
 
     // ===== SAVE CURSOR =====
     const saveCursor = isCaughtUp ? todayStr : currentDay;
-    console.log(`[Sync] Saving cursor: ${saveCursor} to DB (isCaughtUp=${isCaughtUp}, user=${user.id})`);
-    const { data: saveData, error: saveErr } = await admin.from('tiktok_connections').update({
+    const { error: saveErr } = await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
       sync_cursor: saveCursor,
       sync_page_cursor: windowQueue.length > 0 ? JSON.stringify(windowQueue) : null,
       sync_started_at: null,
       sync_progress_orders: totalProcessed,
       sync_progress_day: currentDay,
-    }).eq('user_id', user.id).select('sync_cursor');
-    console.log(`[Sync] CURSOR SAVE result:`, { attempted: saveCursor, saved: saveData, error: saveErr?.message || null });
+    }).eq('user_id', user.id);
+    if (saveErr) {
+      console.error('[Sync] CURSOR SAVE FAILED:', saveErr.message);
+    } else {
+      console.log(`[Sync] CURSOR SAVED: ${saveCursor}`);
+    }
 
     // ===== REBUILD ENTRIES VIA SQL FUNCTION (single call, no row limits) =====
     const rebuildStart = Date.now();
