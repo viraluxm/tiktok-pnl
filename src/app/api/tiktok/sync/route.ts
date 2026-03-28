@@ -190,13 +190,7 @@ export async function POST() {
           .eq('user_id', user.id)
           .eq('order_id', orderId);
 
-        // Mark this order's date for rebuild since status changed
-        const createTime = o.create_time as number;
-        if (createTime) {
-          const date = new Date(createTime * 1000).toISOString().split('T')[0];
-          // We need the product UUID — look it up or use fallback
-          affectedKeys.add(`${date}|${product.id}`);
-        }
+        // Status updated — rebuild will pick it up (rebuilds all dates)
       }
     }
 
