@@ -8,6 +8,7 @@ import SummaryCards from '@/components/dashboard/SummaryCards';
 import ForecastCard from '@/components/dashboard/ForecastCard';
 import ProductCostTable from '@/components/products/ProductCostTable';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
+import { useTikTok } from '@/hooks/useTikTok';
 import { useProducts } from '@/hooks/useProducts';
 import { useEntries } from '@/hooks/useEntries';
 import { useProductCosts } from '@/hooks/useProductCosts';
@@ -61,6 +62,7 @@ export default function RealDashboard() {
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>(30);
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
+  const { syncProgress, isConnected } = useTikTok();
   const { products } = useProducts();
   const { costsMap, upsertCost } = useProductCosts();
 
@@ -102,6 +104,33 @@ export default function RealDashboard() {
 
       <div className="p-6 max-w-[1600px] mx-auto">
         <TikTokConnect />
+
+        {/* First-sync hero — shown when syncing and no entries exist yet */}
+        {isConnected && syncProgress?.isSyncing && entries.length === 0 && (
+          <div className="mb-8 p-8 rounded-2xl border border-tt-cyan/30 bg-gradient-to-br from-[rgba(105,201,208,0.12)] to-[rgba(105,201,208,0.03)]">
+            <div className="flex flex-col items-center gap-5 text-center">
+              <div className="w-14 h-14 border-[3px] border-tt-cyan border-t-transparent rounded-full animate-spin" />
+              <div>
+                <h2 className="text-lg font-bold text-tt-text mb-2">Syncing your TikTok Shop data...</h2>
+                <p className="text-sm text-tt-cyan font-semibold mb-1">
+                  {syncProgress.totalOrders.toLocaleString()} orders imported
+                </p>
+                {syncProgress.currentRange && (
+                  <p className="text-xs text-tt-muted mb-3">
+                    ({syncProgress.currentRange})
+                  </p>
+                )}
+                <p className="text-xs text-tt-muted max-w-md mx-auto leading-relaxed">
+                  First-time syncs can take 30–60 minutes depending on your order volume. You can close this page and come back later.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Hide $0 metric cards during first sync */}
+        {!(isConnected && syncProgress?.isSyncing && entries.length === 0) && (
+          <>
         <FiltersBar
           filters={filters}
           onQuickFilter={handleQuickFilter}
@@ -146,6 +175,8 @@ export default function RealDashboard() {
             savedCosts={costsMap}
             onCostChange={handleCostChange}
           />
+        )}
+          </>
         )}
       </div>
     </div>

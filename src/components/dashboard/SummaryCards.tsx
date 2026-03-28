@@ -25,9 +25,8 @@ function ChangeIndicator({ change }: { change: number | null }) {
 
 export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps) {
   const profitColor = metrics.totalNetProfit >= 0 ? 'text-tt-green' : 'text-tt-red';
-  const roasDisplay = metrics.roas != null ? metrics.roas.toFixed(1) + 'x' : '\u221Ex';
+  const profitPerVideoColor = metrics.profitPerVideo >= 0 ? 'text-tt-green' : 'text-tt-red';
 
-  // Calculate % changes vs previous period
   const gmvChange = prevMetrics ? pctChange(metrics.totalGMV, prevMetrics.totalGMV) : null;
   const profitChange = prevMetrics ? pctChange(metrics.totalNetProfit, prevMetrics.totalNetProfit) : null;
   const videosChange = prevMetrics ? pctChange(metrics.totalVideos, prevMetrics.totalVideos) : null;
@@ -37,6 +36,8 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
 
   return (
     <div className="grid grid-cols-3 gap-4 mb-6">
+      {/* Row 1 */}
+
       {/* 1. Total GMV */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in">
         <div className="flex items-center gap-2 mb-2">
@@ -60,57 +61,62 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         </div>
       </div>
 
-      {/* 3. Units Sold */}
+      {/* 3. Videos Posted */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-2">
         <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Units Sold</span>
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Videos Posted</span>
+          <ChangeIndicator change={videosChange} />
         </div>
-        <div className="text-[26px] font-bold text-tt-cyan">{fmtInt(metrics.totalUnitsSold)}</div>
-        <div className="text-xs text-tt-muted mt-1">
-          {metrics.entryCount} active days
-        </div>
+        <div className="text-[26px] font-bold text-tt-text">{fmtInt(metrics.totalVideos)}</div>
+        {metrics.totalViews > 0 && (
+          <div className="text-xs text-tt-muted mt-1">
+            {fmtInt(metrics.totalViews)} views
+          </div>
+        )}
       </div>
+
+      {/* Row 2 */}
 
       {/* 4. Total Ad Spend */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-3">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Total Ad Spend</span>
+          <ChangeIndicator change={adsChange} />
         </div>
-        <div className="text-[26px] font-bold text-tt-text">{fmt(metrics.totalAds)}</div>
-        <div className="text-xs text-tt-muted mt-1">
-          {metrics.totalAds > 0 ? `ROAS: ${roasDisplay}` : 'TikTok Ads API coming soon'}
-        </div>
+        <div className="text-[26px] font-bold text-tt-red">{fmt(metrics.totalAds)}</div>
+        {metrics.totalAds > 0 && metrics.roas != null && (
+          <div className="text-xs text-tt-muted mt-1">
+            ROAS: {metrics.roas.toFixed(1)}x
+          </div>
+        )}
       </div>
 
       {/* 5. Affiliate Commission */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-4">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Affiliate Commission</span>
+          <ChangeIndicator change={affiliateChange} />
         </div>
-        {metrics.totalAffiliate > 0 ? (
-          <>
-            <div className="text-[26px] font-bold text-tt-yellow">{fmt(metrics.totalAffiliate)}</div>
-            <div className="text-xs text-tt-muted mt-1">
-              {((metrics.totalAffiliate / metrics.totalGMV) * 100).toFixed(1)}% of GMV
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="text-[20px] font-bold text-tt-muted">Coming Soon</div>
-            <div className="text-xs text-tt-muted mt-1">Requires Affiliate API scope</div>
-          </>
+        <div className="text-[26px] font-bold text-tt-yellow">{fmt(metrics.totalAffiliate)}</div>
+        {metrics.totalAffiliate > 0 && metrics.totalGMV > 0 && (
+          <div className="text-xs text-tt-muted mt-1">
+            {((metrics.totalAffiliate / metrics.totalGMV) * 100).toFixed(1)}% of GMV
+          </div>
         )}
       </div>
 
-      {/* 6. Shipping Cost */}
+      {/* 6. Profit Per Video */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-5">
         <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Total Shipping</span>
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Profit Per Video</span>
+          <ChangeIndicator change={profitPerVideoChange} />
         </div>
-        <div className="text-[26px] font-bold text-tt-text">{fmt(metrics.totalShipping)}</div>
-        <div className="text-xs text-tt-muted mt-1">
-          {metrics.totalGMV > 0 ? ((metrics.totalShipping / metrics.totalGMV) * 100).toFixed(1) : '0.0'}% of GMV
-        </div>
+        <div className={`text-[26px] font-bold ${profitPerVideoColor}`}>{fmt(metrics.profitPerVideo)}</div>
+        {metrics.revenuePerVideo > 0 && (
+          <div className="text-xs text-tt-muted mt-1">
+            {fmt(metrics.revenuePerVideo)} rev/video
+          </div>
+        )}
       </div>
     </div>
   );
