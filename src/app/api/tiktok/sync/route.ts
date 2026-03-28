@@ -1,55 +1,53 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchOrdersPage, fetchStatements, fetchUnsettledOrders } from '@/lib/tiktok/client';
+import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
-const TIME_BUDGET_MS = 50_000; // 50s for work, 10s buffer before Vercel's 60s timeout
+const TIME_BUDGET_MS = 50_000;
+const DEFAULT_WINDOW_DAYS = 7;
+const PARALLEL_FETCHES = 5;
 
 export const maxDuration = 60;
 
-interface WindowState {
-  day: string;
-  splits: number;
-  index: number;
+// Window: a time range to fetch. Stored as JSON in sync_page_cursor.
+// { windows: [{ startTs, endTs }], cursor: index-into-windows }
+// Between calls: sync_cursor = next start date, sync_page_cursor = pending sub-windows (from splits)
+
+type AdminClient = ReturnType<typeof createAdminClient>;
+type OrderRow = { gmv: number; shipping: number; affiliate: number; platform_fee: number; units: number; status: string };
+
+interface PendingWindow {
+  startTs: number;
+  endTs: number;
 }
 
-function parseWindowState(raw: string | null, fallbackDay: string): WindowState {
-  if (!raw) return { day: fallbackDay, splits: 1, index: 0 };
-  try {
-    const parsed = JSON.parse(raw);
-    return { day: parsed.day, splits: parsed.splits || 1, index: parsed.index || 0 };
-  } catch {
-    return { day: fallbackDay, splits: 1, index: 0 };
-  }
+function dayToTs(day: string): number {
+  return Math.floor(new Date(day + 'T00:00:00Z').getTime() / 1000);
 }
 
-function getWindowTimestamps(day: string, splits: number, index: number): { startTs: number; endTs: number } {
-  const dayStart = Math.floor(new Date(day + 'T00:00:00Z').getTime() / 1000);
-  const dayEnd = dayStart + 86400;
-  const windowSize = (dayEnd - dayStart) / splits;
-  return {
-    startTs: Math.floor(dayStart + windowSize * index),
-    endTs: Math.floor(dayStart + windowSize * (index + 1)),
-  };
-}
-
-function nextDayStr(day: string): string {
+function advanceDays(day: string, n: number): string {
   const d = new Date(day + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() + 1);
+  d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().split('T')[0];
+}
+
+// Split a window into two halves
+function splitWindow(w: PendingWindow): PendingWindow[] {
+  const mid = Math.floor((w.startTs + w.endTs) / 2);
+  return [
+    { startTs: w.startTs, endTs: mid },
+    { startTs: mid, endTs: w.endTs },
+  ];
 }
 
 export async function POST() {
   const batchStart = Date.now();
   const supabase = await createClient();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
-
-  if (authError || !user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  if (authError || !user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { success, retryAfterMs } = syncLimiter.check(`sync:${user.id}`);
   if (!success) {
@@ -60,41 +58,29 @@ export async function POST() {
   }
 
   const admin = createAdminClient();
-
-  const { data: connection, error: connError } = await admin
-    .from('tiktok_connections')
-    .select('*')
-    .eq('user_id', user.id)
-    .single();
-
-  if (connError || !connection) {
-    return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
-  }
-  if (!connection.shop_cipher) {
-    return NextResponse.json({ error: 'No shop_cipher — reconnect TikTok' }, { status: 400 });
-  }
+  const { data: connection, error: connError } = await admin.from('tiktok_connections').select('*').eq('user_id', user.id).single();
+  if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
+  if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher — reconnect TikTok' }, { status: 400 });
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
   const today = new Date();
   const todayStr = today.toISOString().split('T')[0];
+  const todayTs = dayToTs(todayStr) + 86400;
 
-  const backfillStart = new Date(today);
-  backfillStart.setUTCDate(backfillStart.getUTCDate() - BACKFILL_DAYS);
-  const backfillStartStr = backfillStart.toISOString().split('T')[0];
+  const backfillStartStr = advanceDays(todayStr, -BACKFILL_DAYS);
 
-  let syncCursor: string | null = connection.sync_cursor || null;
-  let pageCursorRaw: string | null = connection.sync_page_cursor || null;
+  const dbSyncCursor: string | null = connection.sync_cursor || null;
+  const dbPendingWindows: PendingWindow[] = parsePendingWindows(connection.sync_page_cursor);
   let isCaughtUp = false;
 
-  // Determine starting day
   let currentDay: string;
-  if (!syncCursor || syncCursor < backfillStartStr) {
+  if (!dbSyncCursor || dbSyncCursor < backfillStartStr) {
     currentDay = backfillStartStr;
-  } else if (syncCursor >= todayStr) {
+  } else if (dbSyncCursor >= todayStr) {
     currentDay = todayStr;
     isCaughtUp = true;
   } else {
-    currentDay = syncCursor;
+    currentDay = dbSyncCursor;
   }
 
   try {
@@ -105,78 +91,105 @@ export async function POST() {
 
     let totalNewOrders = 0;
     let totalSkipped = 0;
-    let windowsProcessed = 0;
-    let startDay = currentDay;
+    let apiCalls = 0;
+    const startDay = currentDay;
 
-    // ===== MAIN BATCH LOOP — process windows/days until time runs out =====
+    // Queue of windows to process. Start with any pending sub-windows from last call.
+    let windowQueue: PendingWindow[] = [...dbPendingWindows];
+
+    // ===== MAIN BATCH LOOP =====
     while (Date.now() - batchStart < TIME_BUDGET_MS && !isCaughtUp) {
-      const win = parseWindowState(pageCursorRaw, currentDay);
-      if (win.day !== currentDay) {
-        win.day = currentDay;
-        win.splits = 1;
-        win.index = 0;
+      // If queue is empty, generate next batch of 7-day windows
+      if (windowQueue.length === 0) {
+        for (let i = 0; i < PARALLEL_FETCHES; i++) {
+          if (currentDay >= todayStr) { isCaughtUp = true; break; }
+          const endDay = advanceDays(currentDay, DEFAULT_WINDOW_DAYS);
+          const endTs = Math.min(dayToTs(endDay), todayTs);
+          windowQueue.push({ startTs: dayToTs(currentDay), endTs });
+          currentDay = endDay >= todayStr ? todayStr : endDay;
+        }
+        if (windowQueue.length === 0) { isCaughtUp = true; break; }
       }
 
-      const { startTs, endTs } = getWindowTimestamps(win.day, win.splits, win.index);
+      // Take up to PARALLEL_FETCHES windows from the queue
+      const batch = windowQueue.splice(0, PARALLEL_FETCHES);
 
-      // Fetch one window
-      let orders: Record<string, unknown>[] = [];
-      let hasMorePages = false;
+      // Fetch all windows in parallel
+      const results = await Promise.all(
+        batch.map(async (w) => {
+          try {
+            const result = await fetchOrdersPage(accessToken, connection.shop_cipher, w.startTs, w.endTs, null);
+            return { window: w, orders: result.orders, hasMore: !!result.nextCursor, error: null };
+          } catch (err) {
+            return { window: w, orders: [] as Record<string, unknown>[], hasMore: false, error: err };
+          }
+        })
+      );
+      apiCalls += batch.length;
 
-      try {
-        const result = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, null);
-        orders = result.orders;
-        hasMorePages = !!result.nextCursor;
-      } catch {
-        // Skip this window on error — advance
-        orders = [];
-        hasMorePages = false;
-      }
+      // Process results — check for windows that need splitting
+      const splitQueue: PendingWindow[] = [];
+      const allOrders: { order: Record<string, unknown>; window: PendingWindow }[] = [];
 
-      // If window is too large, split it
-      if (hasMorePages && orders.length >= 100 && win.splits < 48) {
-        const newSplits = win.splits * 2;
-        const newIndex = win.index * 2;
-        pageCursorRaw = JSON.stringify({ day: win.day, splits: newSplits, index: newIndex });
-        console.log(`[Sync] Splitting ${win.day} ${win.splits}→${newSplits}`);
-        continue; // Retry with smaller window immediately
-      }
-
-      windowsProcessed++;
-
-      // Dedup
-      const orderIds = orders.map(o => String((o as Record<string, unknown>).id || '')).filter(Boolean);
-      const { data: existingRows } = await admin
-        .from('synced_order_ids')
-        .select('order_id, status')
-        .eq('user_id', user.id)
-        .in('order_id', orderIds.length > 0 ? orderIds : ['__none__']);
-
-      const existingMap = new Map((existingRows || []).map((r: { order_id: string; status: string }) => [r.order_id, r.status]));
-      const newOrders = orders.filter(o => !existingMap.has(String((o as Record<string, unknown>).id || '')));
-      totalNewOrders += newOrders.length;
-      totalSkipped += orders.length - newOrders.length;
-
-      // Update status on existing orders
-      for (const order of orders) {
-        const o = order as Record<string, unknown>;
-        const oid = String(o.id || '');
-        const ns = String(o.status || '').toUpperCase();
-        const os = existingMap.get(oid);
-        if (os !== undefined && os !== ns && ns) {
-          await admin.from('synced_order_ids').update({ status: ns }).eq('user_id', user.id).eq('order_id', oid);
-          const ct = o.create_time as number;
-          if (ct) rebuildDates.add(new Date(ct * 1000).toISOString().split('T')[0]);
+      for (const r of results) {
+        if (r.error) {
+          console.warn(`[Sync] Window ${r.window.startTs}..${r.window.endTs} failed, skipping`);
+          continue;
+        }
+        if (r.hasMore && r.orders.length >= 100) {
+          // Window too large — split it and re-queue
+          const windowDuration = r.window.endTs - r.window.startTs;
+          if (windowDuration > 1800) { // Don't split below 30 minutes
+            const halves = splitWindow(r.window);
+            splitQueue.push(...halves);
+            console.log(`[Sync] Splitting window ${r.window.startTs}..${r.window.endTs} (${r.orders.length}+ orders)`);
+          } else {
+            // Accept what we got for tiny windows
+            for (const o of r.orders) allOrders.push({ order: o, window: r.window });
+          }
+        } else {
+          for (const o of r.orders) allOrders.push({ order: o, window: r.window });
         }
       }
 
-      // Insert new orders
-      for (const order of newOrders) {
+      // Put split windows at front of queue for next iteration
+      windowQueue = [...splitQueue, ...windowQueue];
+
+      if (allOrders.length === 0 && splitQueue.length === 0) continue;
+
+      // Dedup all orders from this batch
+      const orderIds = allOrders.map(o => String((o.order as Record<string, unknown>).id || '')).filter(Boolean);
+      let existingMap = new Map<string, string>();
+      if (orderIds.length > 0) {
+        // Supabase .in() has a limit, chunk if needed
+        const chunks = chunkArray(orderIds, 200);
+        for (const chunk of chunks) {
+          const { data: rows } = await admin.from('synced_order_ids').select('order_id, status').eq('user_id', user.id).in('order_id', chunk);
+          for (const r of (rows || [])) existingMap.set(r.order_id, r.status);
+        }
+      }
+
+      // Process each order
+      for (const { order } of allOrders) {
         const o = order as Record<string, unknown>;
         const orderId = String(o.id || '');
+        if (!orderId) continue;
         const createTime = o.create_time as number;
         const date = new Date(createTime * 1000).toISOString().split('T')[0];
         const status = String(o.status || '').toUpperCase();
+
+        if (existingMap.has(orderId)) {
+          // Update status if changed
+          const oldStatus = existingMap.get(orderId);
+          if (oldStatus !== status && status) {
+            await admin.from('synced_order_ids').update({ status }).eq('user_id', user.id).eq('order_id', orderId);
+            rebuildDates.add(date);
+          }
+          totalSkipped++;
+          continue;
+        }
+
+        totalNewOrders++;
 
         const payment = (o.payment || {}) as Record<string, unknown>;
         const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
@@ -215,55 +228,33 @@ export async function POST() {
         rebuildDates.add(date);
       }
 
-      // Advance window/day
-      const nextWinIdx = win.index + 1;
-      if (nextWinIdx < win.splits) {
-        pageCursorRaw = JSON.stringify({ day: win.day, splits: win.splits, index: nextWinIdx });
-      } else {
-        // Day complete
-        const nd = nextDayStr(currentDay);
-        if (nd > todayStr) {
-          isCaughtUp = true;
-          currentDay = todayStr;
-        } else {
-          currentDay = nd;
-        }
-        pageCursorRaw = null;
-      }
-
-      // Log every 10 windows
-      if (windowsProcessed % 10 === 0) {
-        console.log(`[Sync] ${windowsProcessed} windows, ${totalNewOrders} new orders, day=${currentDay}, elapsed=${Date.now() - batchStart}ms`);
+      if (apiCalls % 10 === 0) {
+        console.log(`[Sync] ${apiCalls} API calls, ${totalNewOrders} new, queue=${windowQueue.length}, day=${currentDay}, ${Date.now() - batchStart}ms`);
       }
     }
 
-    console.log(`[Sync] Batch done: ${windowsProcessed} windows, ${totalNewOrders} new, ${totalSkipped} skipped, ${Date.now() - batchStart}ms`);
+    console.log(`[Sync] Batch done: ${apiCalls} API calls, ${totalNewOrders} new, ${totalSkipped} skipped, ${Date.now() - batchStart}ms`);
 
     // ===== SAVE CURSOR =====
     await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
       sync_cursor: isCaughtUp ? todayStr : currentDay,
-      sync_page_cursor: pageCursorRaw,
+      sync_page_cursor: windowQueue.length > 0 ? JSON.stringify(windowQueue) : null,
     }).eq('user_id', user.id);
 
-    // ===== REBUILD ENTRIES FOR AFFECTED DATES =====
+    // ===== REBUILD ENTRIES =====
     let totalCreated = 0;
     let totalUpdated = 0;
 
     for (const date of rebuildDates) {
-      const { data: dayOrders } = await admin
-        .from('synced_order_ids')
+      const { data: dayOrders } = await admin.from('synced_order_ids')
         .select('gmv, shipping, affiliate, platform_fee, units, status')
-        .eq('user_id', user.id)
-        .eq('order_date', date);
+        .eq('user_id', user.id).eq('order_date', date);
 
-      type OrderRow = { gmv: number; shipping: number; affiliate: number; platform_fee: number; units: number; status: string };
-      const active = (dayOrders as OrderRow[] || []).filter(row => !isOrderExcluded(row.status));
+      const active = ((dayOrders || []) as OrderRow[]).filter(row => !isOrderExcluded(row.status));
       const t = active.reduce((acc: { gmv: number; shipping: number; affiliate: number; platformFee: number; units: number }, row: OrderRow) => ({
-        gmv: acc.gmv + Number(row.gmv),
-        shipping: acc.shipping + Number(row.shipping),
-        affiliate: acc.affiliate + Number(row.affiliate),
-        platformFee: acc.platformFee + Number(row.platform_fee),
+        gmv: acc.gmv + Number(row.gmv), shipping: acc.shipping + Number(row.shipping),
+        affiliate: acc.affiliate + Number(row.affiliate), platformFee: acc.platformFee + Number(row.platform_fee),
         units: acc.units + (Number(row.units) || 1),
       }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
 
@@ -276,29 +267,21 @@ export async function POST() {
       else if (r === 'updated') totalUpdated++;
     }
 
-    if (rebuildDates.size > 0) {
-      console.log(`[Sync] Rebuilt ${rebuildDates.size} dates: ${totalCreated} created, ${totalUpdated} updated`);
-    }
+    if (rebuildDates.size > 0) console.log(`[Sync] Rebuilt ${rebuildDates.size} dates`);
 
-    const { count: totalUniqueOrders } = await admin
-      .from('synced_order_ids')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', user.id);
+    const { count: totalUniqueOrders } = await admin.from('synced_order_ids')
+      .select('*', { count: 'exact', head: true }).eq('user_id', user.id);
 
     return NextResponse.json({
       success: true,
       summary: {
         dateRange: { startDate: startDay, endDate: currentDay },
-        entriesCreated: totalCreated,
-        entriesUpdated: totalUpdated,
-        ordersFetched: totalNewOrders,
-        ordersSkipped: totalSkipped,
+        entriesCreated: totalCreated, entriesUpdated: totalUpdated,
+        ordersFetched: totalNewOrders, ordersSkipped: totalSkipped,
         ordersThisBatch: totalNewOrders + totalSkipped,
         totalUniqueOrders: totalUniqueOrders || 0,
-        isCaughtUp,
-        hasMorePages: !isCaughtUp,
-        windowsProcessed,
-        elapsedMs: Date.now() - batchStart,
+        isCaughtUp, hasMorePages: !isCaughtUp,
+        windowsProcessed: apiCalls, elapsedMs: Date.now() - batchStart,
       },
     });
   } catch (error) {
@@ -309,7 +292,32 @@ export async function POST() {
 
 // ==================== HELPERS ====================
 
-async function getOrCreateProduct(admin: ReturnType<typeof createAdminClient>, userId: string, shopName: string) {
+function parsePendingWindows(raw: string | null): PendingWindow[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed;
+    // Legacy format: { day, splits, index } — convert to window list
+    if (parsed.day && parsed.splits && parsed.index !== undefined) {
+      const windows: PendingWindow[] = [];
+      const dayStart = dayToTs(parsed.day);
+      const windowSize = 86400 / parsed.splits;
+      for (let i = parsed.index; i < parsed.splits; i++) {
+        windows.push({ startTs: Math.floor(dayStart + windowSize * i), endTs: Math.floor(dayStart + windowSize * (i + 1)) });
+      }
+      return windows;
+    }
+    return [];
+  } catch { return []; }
+}
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
+  return chunks;
+}
+
+async function getOrCreateProduct(admin: AdminClient, userId: string, shopName: string) {
   const { data: existing } = await admin.from('products').select('*').eq('user_id', userId).eq('name', shopName).single();
   if (existing) return existing;
   const { data: created, error } = await admin.from('products').insert({ user_id: userId, name: shopName }).select().single();
@@ -317,7 +325,7 @@ async function getOrCreateProduct(admin: ReturnType<typeof createAdminClient>, u
   return created;
 }
 
-async function getOrCreateTikTokProduct(admin: ReturnType<typeof createAdminClient>, userId: string, tikTokProductId: string, name: string, imageUrl: string | null, sku: string | null): Promise<string> {
+async function getOrCreateTikTokProduct(admin: AdminClient, userId: string, tikTokProductId: string, name: string, imageUrl: string | null, sku: string | null): Promise<string> {
   const { data: existing } = await admin.from('products').select('id').eq('user_id', userId).eq('tiktok_product_id', tikTokProductId).single();
   if (existing) {
     if (imageUrl || sku) await admin.from('products').update({ ...(imageUrl ? { image_url: imageUrl } : {}), ...(sku ? { sku } : {}) }).eq('id', existing.id);
@@ -345,7 +353,7 @@ function toNum(val: unknown): number {
   return 0;
 }
 
-async function rebuildEntry(admin: ReturnType<typeof createAdminClient>, entry: { user_id: string; product_id: string; date: string; gmv: number; shipping: number; affiliate: number; platform_fee: number; units_sold: number; source: string }): Promise<'created' | 'updated' | 'error'> {
+async function rebuildEntry(admin: AdminClient, entry: { user_id: string; product_id: string; date: string; gmv: number; shipping: number; affiliate: number; platform_fee: number; units_sold: number; source: string }): Promise<'created' | 'updated' | 'error'> {
   try {
     const { data: existing, error: selectErr } = await admin.from('entries').select('id').eq('user_id', entry.user_id).eq('product_id', entry.product_id).eq('date', entry.date).eq('source', 'tiktok').single();
     if (selectErr && selectErr.code !== 'PGRST116') { console.error(`[rebuildEntry] Select error:`, selectErr); return 'error'; }
