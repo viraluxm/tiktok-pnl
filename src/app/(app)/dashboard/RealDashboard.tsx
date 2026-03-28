@@ -59,7 +59,7 @@ function getPreviousPeriodEntries(
 
 export default function RealDashboard() {
   const [activeView, setActiveView] = useState<ViewTab>('dashboard');
-  const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
+  const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>(30);
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();

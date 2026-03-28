@@ -76,8 +76,8 @@ export function useTikTok() {
 
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const abortRef = useRef(false);
-  const syncCompleteRef = useRef(false); // Hard stop — once true, never auto-sync again
-  const autoSyncFiredRef = useRef(false); // Prevent duplicate auto-sync triggers
+  const syncCompleteRef = useRef(false);
+  const autoSyncFiredRef = useRef(false);
 
   const connectionQuery = useQuery<TikTokStatusResponse>({
     queryKey: ['tiktok-status', user?.id],
@@ -121,11 +121,13 @@ export function useTikTok() {
 
     try {
       let attempts = 0;
-      while (!abortRef.current && attempts < 5) {
-        attempts++;
-        console.log(`[SyncLoop] Attempt ${attempts}/5: firing sync call...`);
+      const MAX_ATTEMPTS = 10;
 
-        // Poll status in parallel for live progress updates
+      while (!abortRef.current && attempts < MAX_ATTEMPTS) {
+        attempts++;
+        console.log(`[SyncLoop] Attempt ${attempts}/${MAX_ATTEMPTS}`);
+
+        // Poll status in parallel
         let pollAbort = false;
         const pollPromise = (async () => {
           while (!pollAbort && !abortRef.current) {
@@ -144,61 +146,69 @@ export function useTikTok() {
           }
         })();
 
-        // Fire sync (blocks up to 5 min)
+        // Fire sync call (blocks up to 5 min)
         let result: SyncResponse | null = null;
         try {
           result = await doSyncCall();
         } catch (err) {
           console.log(`[SyncLoop] Error:`, (err as Error).message);
+          if ((err as Error).message === 'rate_limited') {
+            pollAbort = true;
+            await sleep(10_000);
+            continue;
+          }
         }
 
-        // Stop polling
         pollAbort = true;
 
-        if (result?.summary) {
-          const s = result.summary;
-          const shouldRetry = !s.isCaughtUp;
-          console.log(`[SyncLoop] Response: total=${s.totalUniqueOrders}, entries=${s.entriesCreated}, caught_up=${s.isCaughtUp}, will_retry=${shouldRetry}`);
-
-          setSyncProgress({
-            totalOrders: s.totalUniqueOrders,
-            currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
-            isSyncing: shouldRetry,
-          });
-
-          // Refresh dashboard data
-          queryClient.invalidateQueries({ queryKey: ['entries'] });
-
-          if (s.isCaughtUp) {
-            console.log('[SyncLoop] COMPLETE — setting hard stop');
-            syncCompleteRef.current = true;
-            break;
-          }
-
-          await sleep(1_000);
-        } else {
+        if (!result?.summary) {
           console.log('[SyncLoop] No summary in response, retrying in 3s');
           await sleep(3_000);
+          continue;
         }
+
+        const s = result.summary;
+        console.log(`[SyncLoop] Result: isCaughtUp=${s.isCaughtUp}, total=${s.totalUniqueOrders}, entries=${s.entriesCreated}, batch=${s.ordersThisBatch}, range=${s.dateRange.startDate}..${s.dateRange.endDate}`);
+
+        setSyncProgress({
+          totalOrders: s.totalUniqueOrders,
+          currentRange: `${s.dateRange.startDate} — ${s.dateRange.endDate}`,
+          isSyncing: !s.isCaughtUp,
+        });
+
+        queryClient.invalidateQueries({ queryKey: ['entries'] });
+
+        // ONLY stop when isCaughtUp is true
+        if (s.isCaughtUp === true) {
+          console.log('[SyncLoop] isCaughtUp=true — DONE, setting hard stop');
+          syncCompleteRef.current = true;
+          break;
+        }
+
+        // Not caught up — server's time budget expired, need another call
+        console.log(`[SyncLoop] Not caught up yet, waiting 2s before next call...`);
+        await sleep(2_000);
+      }
+
+      if (attempts >= MAX_ATTEMPTS && !syncCompleteRef.current) {
+        console.warn(`[SyncLoop] Hit ${MAX_ATTEMPTS} attempts without catching up — stopping. Click Sync to continue.`);
       }
     } catch (err) {
       console.error('[SyncLoop] Fatal:', (err as Error).message);
     } finally {
-      // Clear the banner completely when done
       setSyncProgress(null);
       queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
       queryClient.invalidateQueries({ queryKey: ['entries'] });
     }
   }, [queryClient]);
 
-  // Auto-sync: fires ONCE on first connect, NEVER again
+  // Auto-sync: fires ONCE on first connect
   useEffect(() => {
     const conn = connectionQuery.data?.connection;
     if (!conn || !connectionQuery.data?.connected) return;
-    if (autoSyncFiredRef.current) return; // Already fired
-    if (syncCompleteRef.current) return; // Already completed
+    if (autoSyncFiredRef.current) return;
+    if (syncCompleteRef.current) return;
     if (!conn.needsBackfill) {
-      // Returning user — mark as complete, don't auto-sync
       syncCompleteRef.current = true;
       return;
     }
@@ -207,12 +217,9 @@ export function useTikTok() {
     runSyncLoop();
   }, [connectionQuery.data, runSyncLoop]);
 
-  const isConnected = connectionQuery.data?.connected ?? false;
-  const connection = connectionQuery.data?.connection ?? null;
-
   return {
-    isConnected,
-    connection,
+    isConnected: connectionQuery.data?.connected ?? false,
+    connection: connectionQuery.data?.connection ?? null,
     isLoading: connectionQuery.isLoading,
     isSyncing: syncMutation.isPending,
     syncProgress,

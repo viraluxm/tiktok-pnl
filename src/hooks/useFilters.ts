@@ -4,11 +4,16 @@ import { useState, useCallback } from 'react';
 import type { FilterState } from '@/types';
 
 export function useFilters() {
-  // Default to "all" — shows all data regardless of date
-  const [filters, setFilters] = useState<FilterState>({
-    dateFrom: null,
-    dateTo: null,
-    productId: 'all',
+  // Default to 30 days from today
+  const [filters, setFilters] = useState<FilterState>(() => {
+    const now = new Date();
+    const from = new Date(now);
+    from.setDate(from.getDate() - 30);
+    return {
+      dateFrom: from.toISOString().split('T')[0],
+      dateTo: now.toISOString().split('T')[0],
+      productId: 'all',
+    };
   });
 
   const setQuickFilter = useCallback((days: number | 'all') => {

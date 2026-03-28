@@ -134,7 +134,7 @@ export async function POST() {
   else if (dbSyncCursor >= todayStr) { currentDay = todayStr; isCaughtUp = true; }
   else currentDay = dbSyncCursor;
 
-  console.log(`[Sync] Start: todayStr=${todayStr}, backfill=${backfillStartStr}, cursor=${dbSyncCursor}, currentDay=${currentDay}, isCaughtUp=${isCaughtUp}`);
+  console.log(`[Sync] Target end: ${todayStr}, backfill start: ${backfillStartStr}, cursor: ${dbSyncCursor}, starting at: ${currentDay}, isCaughtUp: ${isCaughtUp}`);
 
   try {
     const shopName = connection.shop_name || 'TikTok Shop';
