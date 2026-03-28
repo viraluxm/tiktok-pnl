@@ -134,6 +134,8 @@ export async function POST() {
   else if (dbSyncCursor >= todayStr) { currentDay = todayStr; isCaughtUp = true; }
   else currentDay = dbSyncCursor;
 
+  console.log(`[Sync] Start: todayStr=${todayStr}, backfill=${backfillStartStr}, cursor=${dbSyncCursor}, currentDay=${currentDay}, isCaughtUp=${isCaughtUp}`);
+
   try {
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
@@ -256,7 +258,7 @@ export async function POST() {
       }
     }
 
-    console.log(`[Sync] Fetch done: ${apiCalls} calls, ${totalProcessed} orders, ${Date.now() - batchStart}ms`);
+    console.log(`[Sync] Fetch done: ${apiCalls} calls, ${totalProcessed} orders, currentDay=${currentDay}, isCaughtUp=${isCaughtUp}, queueLen=${windowQueue.length}, ${Date.now() - batchStart}ms`);
 
     // ===== SAVE CURSOR =====
     await admin.from('tiktok_connections').update({
