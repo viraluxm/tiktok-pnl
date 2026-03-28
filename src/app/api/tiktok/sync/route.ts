@@ -163,22 +163,53 @@ export async function POST() {
       const results = await Promise.all(batch.map(async (w) => {
         try {
           const r = await fetchOrdersPage(accessToken, connection.shop_cipher, w.startTs, w.endTs, null);
-          return { window: w, orders: r.orders, hasMore: !!r.nextCursor, error: false };
+          return { window: w, orders: r.orders, hasMore: !!r.nextCursor, nextCursor: r.nextCursor, error: false };
         } catch {
-          return { window: w, orders: [] as Record<string, unknown>[], hasMore: false, error: true };
+          return { window: w, orders: [] as Record<string, unknown>[], hasMore: false, nextCursor: null as string | null, error: true };
         }
       }));
       apiCalls += batch.length;
 
-      // Collect orders, handle splits
+      // Collect orders, handle splits and pagination
       const batchRows: ReturnType<typeof parseOrder>[] = [];
       for (const r of results) {
         if (r.error) continue;
-        if (r.hasMore && r.orders.length >= 100 && (r.window.endTs - r.window.startTs) > 1800) {
-          windowQueue = [...splitWindow(r.window), ...windowQueue];
-          continue;
-        }
+
+        // Add orders from first page
         for (const o of r.orders) batchRows.push(parseOrder(user.id, o));
+
+        if (r.hasMore && r.orders.length >= 100) {
+          const windowDuration = r.window.endTs - r.window.startTs;
+
+          if (windowDuration > 86400) {
+            // Multi-day window: split into halves
+            windowQueue = [...splitWindow(r.window), ...windowQueue];
+            // Don't use orders from this oversized window — they'll be re-fetched in halves
+            batchRows.splice(batchRows.length - r.orders.length, r.orders.length);
+          } else {
+            // Single day or smaller: PAGINATE with next_page_token
+            let cursor = r.nextCursor;
+            let pageNum = 1;
+            let dayTotal = r.orders.length;
+
+            while (cursor && Date.now() - batchStart < TIME_BUDGET_MS) {
+              pageNum++;
+              try {
+                const nextPage = await fetchOrdersPage(accessToken, connection.shop_cipher, r.window.startTs, r.window.endTs, cursor);
+                apiCalls++;
+                for (const o of nextPage.orders) batchRows.push(parseOrder(user.id, o));
+                dayTotal += nextPage.orders.length;
+                cursor = nextPage.nextCursor;
+                if (nextPage.orders.length < 100) cursor = null;
+              } catch {
+                cursor = null;
+              }
+            }
+
+            const dayLabel = new Date(r.window.startTs * 1000).toISOString().split('T')[0];
+            console.log(`[Sync] Day ${dayLabel}: ${pageNum} pages, ${dayTotal} total orders`);
+          }
+        }
       }
 
       if (batchRows.length === 0) continue;
