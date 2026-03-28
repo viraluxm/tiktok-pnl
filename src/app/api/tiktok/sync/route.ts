@@ -249,28 +249,27 @@ export async function POST() {
 
     try {
       // 1. Fetch ALL orders — paginate to bypass Supabase's 1000-row default limit
-      let allOrders: Record<string, unknown>[] = [];
-      let allErr: Error | null = null;
-      let offset = 0;
-      const PAGE = 5000;
+      const allOrders: Record<string, unknown>[] = [];
+      let fetchFrom = 0;
+      const FETCH_PAGE = 5000;
       while (true) {
         const { data: page, error: pageErr } = await admin.from('synced_order_ids')
           .select('order_date, gmv, shipping, affiliate, platform_fee, units, status')
           .eq('user_id', user.id)
-          .range(offset, offset + PAGE - 1);
-        if (pageErr) { allErr = new Error(pageErr.message); break; }
-        if (!page || page.length === 0) break;
-        allOrders = allOrders.concat(page);
-        if (page.length < PAGE) break; // Last page
-        offset += PAGE;
+          .range(fetchFrom, fetchFrom + FETCH_PAGE - 1);
+        if (pageErr) {
+          console.error('[Rebuild] Fetch page error:', pageErr.message, 'at offset', fetchFrom);
+          break;
+        }
+        const pageLen = (page || []).length;
+        console.log(`[Rebuild] Page fetched: ${pageLen} rows at offset ${fetchFrom}, total so far: ${allOrders.length + pageLen}`);
+        if (pageLen === 0) break;
+        allOrders.push(...page!);
+        if (pageLen < FETCH_PAGE) break;
+        fetchFrom += FETCH_PAGE;
       }
 
-      if (allErr) {
-        console.error('[Rebuild] Failed to fetch orders:', allErr);
-        throw new Error(`Fetch orders failed: ${allErr.message}`);
-      }
-
-      console.log(`[Rebuild] Fetched ${(allOrders || []).length} orders from synced_order_ids`);
+      console.log(`[Rebuild] Total fetched: ${allOrders.length} orders from synced_order_ids`);
 
       // 2. Aggregate by date in JS (instant)
       type FullOrderRow = OrderRow & { order_date: string };
