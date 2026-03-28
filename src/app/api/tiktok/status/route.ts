@@ -32,6 +32,10 @@ export async function GET() {
     syncInProgress = startedAt > fiveMinAgo;
   }
 
+  // isCaughtUp: sync_cursor >= today's date
+  const todayStr = new Date().toISOString().split('T')[0];
+  const isCaughtUp = !!connection.sync_cursor && connection.sync_cursor >= todayStr;
+
   return NextResponse.json({
     connected: true,
     connection: {
@@ -42,6 +46,7 @@ export async function GET() {
       connectedAt: connection.connected_at,
       lastSyncedAt: connection.last_synced_at,
       needsBackfill: !connection.sync_cursor,
+      isCaughtUp,
       syncInProgress,
       syncProgressOrders: connection.sync_progress_orders || 0,
       syncProgressDay: connection.sync_progress_day || null,

@@ -12,6 +12,7 @@ interface TikTokConnection {
   connectedAt: string;
   lastSyncedAt: string | null;
   needsBackfill: boolean;
+  isCaughtUp: boolean;
   syncInProgress: boolean;
   syncProgressOrders: number;
   syncProgressDay: string | null;
@@ -208,7 +209,7 @@ export function useTikTok() {
     }
   }, [queryClient]);
 
-  // Auto-start effect — depends ONLY on connection status, not entries or UI
+  // Auto-start effect — syncs whenever connected and NOT caught up
   useEffect(() => {
     const conn = connectionQuery.data?.connection;
     const connected = connectionQuery.data?.connected;
@@ -217,18 +218,18 @@ export function useTikTok() {
     // Already done or already running — skip
     if (syncCompleteRef.current || syncRunningRef.current) return;
 
-    if (!conn.needsBackfill) {
-      // Returning user with existing sync — mark complete, don't sync
+    // If caught up to today, mark complete and skip
+    if (conn.isCaughtUp) {
       syncCompleteRef.current = true;
-      console.log('[SyncLoop] Returning user, skipping auto-sync');
+      console.log('[SyncLoop] Already caught up, skipping');
       return;
     }
 
-    // First-time connection — start the loop
-    console.log('[SyncLoop] First connect detected, starting backfill');
+    // Not caught up — start the sync loop (first connect OR resuming after page refresh)
+    console.log(`[SyncLoop] Auto-starting sync (needsBackfill=${conn.needsBackfill}, isCaughtUp=${conn.isCaughtUp})`);
     startSyncLoop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionQuery.data?.connected, connectionQuery.data?.connection?.needsBackfill]);
+  }, [connectionQuery.data?.connected, connectionQuery.data?.connection?.isCaughtUp]);
 
   return {
     isConnected: connectionQuery.data?.connected ?? false,
