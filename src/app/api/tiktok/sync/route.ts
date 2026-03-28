@@ -279,7 +279,7 @@ export async function POST() {
       else if (res === 'updated') totalUpdated++;
     }
 
-    if (rebuildDates.size > 0) console.log(`[Sync] Rebuilt ${rebuildDates.size} dates`);
+    console.log(`[Sync] Rebuild: ${rebuildDates.size} dates, ${totalCreated} created, ${totalUpdated} updated, errors=${rebuildDates.size - totalCreated - totalUpdated}`);
 
     const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
 

@@ -187,11 +187,13 @@ export function useTikTok() {
     }
   }, [queryClient]);
 
-  // Auto-start sync when connected
+  // Auto-start sync ONLY for first-time backfill (needsBackfill=true)
+  // Returning users with existing data don't auto-sync — they click Sync manually
   useEffect(() => {
     const conn = connectionQuery.data?.connection;
     if (!conn || !connectionQuery.data?.connected) return;
     if (loopRanRef.current) return;
+    if (!conn.needsBackfill) return; // Already synced before — don't auto-start
     loopRanRef.current = true;
     runSyncLoop();
   }, [connectionQuery.data, runSyncLoop]);
