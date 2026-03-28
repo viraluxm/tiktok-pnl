@@ -130,11 +130,13 @@ export async function POST() {
   let isCaughtUp = false;
   const dbSyncCursor = connection.sync_cursor || null;
 
+  console.log(`[Sync] READ CURSOR: ${JSON.stringify(connection.sync_cursor)} type: ${typeof connection.sync_cursor}`);
+
   if (!dbSyncCursor || dbSyncCursor < backfillStartStr) currentDay = backfillStartStr;
   else if (dbSyncCursor >= todayStr) { currentDay = todayStr; isCaughtUp = true; }
   else currentDay = dbSyncCursor;
 
-  console.log(`[Sync] Target end: ${todayStr}, backfill start: ${backfillStartStr}, cursor: ${dbSyncCursor}, starting at: ${currentDay}, isCaughtUp: ${isCaughtUp}`);
+  console.log(`[Sync] Target end: ${todayStr}, backfill: ${backfillStartStr}, cursor: ${dbSyncCursor}, starting: ${currentDay}, isCaughtUp: ${isCaughtUp}`);
 
   try {
     const { count: existingOrderCount } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
@@ -265,16 +267,16 @@ export async function POST() {
 
     // ===== SAVE CURSOR =====
     const saveCursor = isCaughtUp ? todayStr : currentDay;
-    console.log(`[Sync] Saving cursor: ${saveCursor} to DB (isCaughtUp=${isCaughtUp})`);
-    const { error: saveErr } = await admin.from('tiktok_connections').update({
+    console.log(`[Sync] Saving cursor: ${saveCursor} to DB (isCaughtUp=${isCaughtUp}, user=${user.id})`);
+    const { data: saveData, error: saveErr } = await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
       sync_cursor: saveCursor,
       sync_page_cursor: windowQueue.length > 0 ? JSON.stringify(windowQueue) : null,
       sync_started_at: null,
       sync_progress_orders: totalProcessed,
       sync_progress_day: currentDay,
-    }).eq('user_id', user.id);
-    if (saveErr) console.error('[Sync] CURSOR SAVE FAILED:', saveErr.message);
+    }).eq('user_id', user.id).select('sync_cursor');
+    console.log(`[Sync] CURSOR SAVE result:`, { attempted: saveCursor, saved: saveData, error: saveErr?.message || null });
 
     // ===== REBUILD ENTRIES VIA SQL FUNCTION (single call, no row limits) =====
     const rebuildStart = Date.now();
