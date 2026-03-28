@@ -4,16 +4,11 @@ import { useState, useCallback } from 'react';
 import type { FilterState } from '@/types';
 
 export function useFilters() {
-  // Default to 30 days from today
-  const [filters, setFilters] = useState<FilterState>(() => {
-    const now = new Date();
-    const from = new Date(now);
-    from.setDate(from.getDate() - 30);
-    return {
-      dateFrom: from.toISOString().split('T')[0],
-      dateTo: now.toISOString().split('T')[0],
-      productId: 'all',
-    };
+  // Default to "all" — shows all data. The user can narrow with quick filters.
+  const [filters, setFilters] = useState<FilterState>({
+    dateFrom: null,
+    dateTo: null,
+    productId: 'all',
   });
 
   const setQuickFilter = useCallback((days: number | 'all') => {

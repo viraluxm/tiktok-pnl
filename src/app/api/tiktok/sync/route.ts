@@ -137,6 +137,9 @@ export async function POST() {
   console.log(`[Sync] Target end: ${todayStr}, backfill start: ${backfillStartStr}, cursor: ${dbSyncCursor}, starting at: ${currentDay}, isCaughtUp: ${isCaughtUp}`);
 
   try {
+    const { count: existingOrderCount } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
+    console.log(`[Sync] Starting. Existing orders in DB: ${existingOrderCount}`);
+
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, user.id, shopName);
     const rebuildDates = new Set<string>();
@@ -261,14 +264,17 @@ export async function POST() {
     console.log(`[Sync] Fetch done: ${apiCalls} calls, ${totalProcessed} orders, currentDay=${currentDay}, isCaughtUp=${isCaughtUp}, queueLen=${windowQueue.length}, ${Date.now() - batchStart}ms`);
 
     // ===== SAVE CURSOR =====
-    await admin.from('tiktok_connections').update({
+    const saveCursor = isCaughtUp ? todayStr : currentDay;
+    console.log(`[Sync] Saving cursor: ${saveCursor} to DB (isCaughtUp=${isCaughtUp})`);
+    const { error: saveErr } = await admin.from('tiktok_connections').update({
       last_synced_at: new Date().toISOString(),
-      sync_cursor: isCaughtUp ? todayStr : currentDay,
+      sync_cursor: saveCursor,
       sync_page_cursor: windowQueue.length > 0 ? JSON.stringify(windowQueue) : null,
       sync_started_at: null,
       sync_progress_orders: totalProcessed,
       sync_progress_day: currentDay,
     }).eq('user_id', user.id);
+    if (saveErr) console.error('[Sync] CURSOR SAVE FAILED:', saveErr.message);
 
     // ===== REBUILD ENTRIES VIA SQL FUNCTION (single call, no row limits) =====
     const rebuildStart = Date.now();
