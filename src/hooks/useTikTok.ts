@@ -142,6 +142,7 @@ export function useTikTok() {
 
   // Manual sync button
   const manualSync = useCallback(() => {
+    pollingRef.current = false; // Reset polling so it can restart
     triggerSync();
     setSyncProgress({ totalOrders: 0, currentRange: '', isSyncing: true });
     startPolling();
