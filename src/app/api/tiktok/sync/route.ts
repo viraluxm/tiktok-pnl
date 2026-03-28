@@ -160,8 +160,8 @@ export async function POST(request: Request) {
   console.log(`[Sync] Target end: ${todayStr}, backfill: ${backfillStartStr}, cursor: ${dbSyncCursor}, starting: ${currentDay}, isCaughtUp: ${isCaughtUp}`);
 
   try {
-    const { count: existingOrderCount } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', userId);
-    console.log(`[Sync] Starting. Existing orders in DB: ${existingOrderCount}`);
+    const { count: existingOrderCount } = await admin.from('synced_order_ids').select('id', { count: 'exact' }).eq('user_id', userId).limit(0);
+    console.log(`[Sync] Starting. Existing orders in DB: ${existingOrderCount || 0}`);
 
     const shopName = connection.shop_name || 'TikTok Shop';
     const product = await getOrCreateProduct(admin, userId, shopName);
@@ -242,8 +242,12 @@ export async function POST(request: Request) {
 
       if (batchRows.length === 0) continue;
 
-      // ===== BULK UPSERT all orders from this batch =====
-      const upsertRows = batchRows.map(b => b.row);
+      // ===== BULK UPSERT all orders from this batch (deduplicated) =====
+      const orderMap = new Map<string, typeof batchRows[0]['row']>();
+      for (const b of batchRows) {
+        if (b.row.order_id) orderMap.set(b.row.order_id, b.row);
+      }
+      const upsertRows = [...orderMap.values()];
       for (const chunk of chunkArray(upsertRows, UPSERT_BATCH_SIZE)) {
         const { error: upsertErr } = await admin.from('synced_order_ids').upsert(chunk, { onConflict: 'user_id,order_id' });
         if (upsertErr) console.error('[Sync] Bulk upsert error:', upsertErr.message);
@@ -318,7 +322,7 @@ export async function POST(request: Request) {
 
     console.log(`[Rebuild] Created ${totalCreated} entries in ${Date.now() - rebuildStart}ms`);
 
-    const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+    const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('id', { count: 'exact' }).eq('user_id', userId).limit(0);
 
     const response = {
       success: true,
