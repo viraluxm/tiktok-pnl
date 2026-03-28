@@ -109,7 +109,8 @@ export async function POST(request: Request) {
               }
             }
             for (const prod of products.values()) {
-              await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true }).catch(() => {});
+              const { error: pErr } = await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
+              if (pErr) { /* ignore duplicate product errors */ }
             }
           }
 
