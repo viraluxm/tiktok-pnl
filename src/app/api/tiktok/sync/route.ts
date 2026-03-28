@@ -62,24 +62,7 @@ export async function POST() {
   if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection found' }, { status: 404 });
   if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher — reconnect TikTok' }, { status: 400 });
 
-  // Sync lock — prevent concurrent syncs
-  if (connection.sync_started_at) {
-    const startedAt = new Date(connection.sync_started_at).getTime();
-    const fiveMinAgo = Date.now() - 5 * 60 * 1000;
-    if (startedAt > fiveMinAgo) {
-      return NextResponse.json({
-        success: true,
-        status: 'already_syncing',
-        summary: {
-          syncInProgress: true,
-          syncProgressOrders: connection.sync_progress_orders || 0,
-          syncProgressDay: connection.sync_progress_day || null,
-        },
-      });
-    }
-  }
-
-  // Acquire sync lock
+  // Mark sync as in progress (for status endpoint to report)
   await admin.from('tiktok_connections').update({
     sync_started_at: new Date().toISOString(),
     sync_progress_orders: 0,
