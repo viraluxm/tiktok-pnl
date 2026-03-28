@@ -6,7 +6,7 @@ import { syncLimiter } from '@/lib/rate-limit';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
-const TIME_BUDGET_MS = 280_000;
+const TIME_BUDGET_MS = 240_000; // 240s fetch, 60s for rebuild + cursor save
 const DEFAULT_WINDOW_DAYS = 7;
 const PARALLEL_FETCHES = 5;
 const UPSERT_BATCH_SIZE = 500; // Rows per bulk upsert
@@ -254,32 +254,55 @@ export async function POST() {
       sync_progress_day: currentDay,
     }).eq('user_id', user.id);
 
-    // ===== BULK REBUILD ENTRIES =====
-    let totalCreated = 0;
-    let totalUpdated = 0;
+    // ===== BULK REBUILD ENTRIES (3 DB calls instead of 730) =====
+    const rebuildStart = Date.now();
 
-    for (const date of rebuildDates) {
-      const { data: dayOrders } = await admin.from('synced_order_ids')
-        .select('gmv, shipping, affiliate, platform_fee, units, status')
-        .eq('user_id', user.id).eq('order_date', date);
+    // 1. Fetch ALL orders in one query (just numeric fields)
+    const { data: allOrders, error: allErr } = await admin.from('synced_order_ids')
+      .select('order_date, gmv, shipping, affiliate, platform_fee, units, status')
+      .eq('user_id', user.id);
 
-      const active = ((dayOrders || []) as OrderRow[]).filter(r => !isOrderExcluded(r.status));
-      const t = active.reduce((acc, r) => ({
-        gmv: acc.gmv + Number(r.gmv), shipping: acc.shipping + Number(r.shipping),
-        affiliate: acc.affiliate + Number(r.affiliate), platformFee: acc.platformFee + Number(r.platform_fee),
-        units: acc.units + (Number(r.units) || 1),
-      }), { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 });
-
-      const res = await rebuildEntry(admin, {
-        user_id: user.id, product_id: product.id, date,
-        gmv: t.gmv, shipping: t.shipping, affiliate: t.affiliate,
-        platform_fee: t.platformFee, units_sold: t.units, source: 'tiktok',
-      });
-      if (res === 'created') totalCreated++;
-      else if (res === 'updated') totalUpdated++;
+    if (allErr) {
+      console.error('[Rebuild] Failed to fetch orders:', allErr);
     }
 
-    console.log(`[Sync] Rebuild: ${rebuildDates.size} dates, ${totalCreated} created, ${totalUpdated} updated, errors=${rebuildDates.size - totalCreated - totalUpdated}`);
+    // 2. Aggregate in JS (instant, no DB calls)
+    type FullOrderRow = OrderRow & { order_date: string };
+    const dailyTotals = new Map<string, { gmv: number; shipping: number; affiliate: number; platformFee: number; units: number }>();
+    for (const row of (allOrders || []) as FullOrderRow[]) {
+      if (isOrderExcluded(row.status)) continue;
+      const date = row.order_date;
+      const existing = dailyTotals.get(date) || { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0, units: 0 };
+      existing.gmv += Number(row.gmv) || 0;
+      existing.shipping += Number(row.shipping) || 0;
+      existing.affiliate += Number(row.affiliate) || 0;
+      existing.platformFee += Number(row.platform_fee) || 0;
+      existing.units += Number(row.units) || 1;
+      dailyTotals.set(date, existing);
+    }
+
+    // 3. Delete old tiktok entries (1 DB call)
+    await admin.from('entries').delete().eq('user_id', user.id).eq('source', 'tiktok');
+
+    // 4. Bulk insert all daily entries (1-2 DB calls)
+    const entryRows = [...dailyTotals.entries()].map(([date, t]) => ({
+      user_id: user.id, product_id: product.id, date,
+      gmv: t.gmv, shipping: t.shipping, affiliate: t.affiliate,
+      platform_fee: t.platformFee, units_sold: t.units,
+      ads: 0, videos_posted: 0, views: 0, source: 'tiktok',
+    }));
+
+    let totalCreated = 0;
+    for (const chunk of chunkArray(entryRows, 500)) {
+      const { error: insertErr } = await admin.from('entries').insert(chunk);
+      if (insertErr) {
+        console.error('[Rebuild] Bulk insert error:', insertErr.message);
+      } else {
+        totalCreated += chunk.length;
+      }
+    }
+
+    console.log(`[Rebuild] ${dailyTotals.size} dates, ${totalCreated} entries created, ${(allOrders || []).length} orders aggregated, ${Date.now() - rebuildStart}ms`);
 
     const { count: totalUniqueOrders } = await admin.from('synced_order_ids').select('*', { count: 'exact', head: true }).eq('user_id', user.id);
 
@@ -287,7 +310,7 @@ export async function POST() {
       success: true,
       summary: {
         dateRange: { startDate: startDay, endDate: currentDay },
-        entriesCreated: totalCreated, entriesUpdated: totalUpdated,
+        entriesCreated: totalCreated, entriesUpdated: 0,
         ordersFetched: totalProcessed, ordersSkipped: 0,
         ordersThisBatch: totalProcessed,
         totalUniqueOrders: totalUniqueOrders || 0,
@@ -312,17 +335,3 @@ async function getOrCreateProduct(admin: AdminClient, userId: string, shopName: 
   return created;
 }
 
-async function rebuildEntry(admin: AdminClient, entry: { user_id: string; product_id: string; date: string; gmv: number; shipping: number; affiliate: number; platform_fee: number; units_sold: number; source: string }): Promise<'created' | 'updated' | 'error'> {
-  try {
-    const { data: existing, error: selErr } = await admin.from('entries').select('id').eq('user_id', entry.user_id).eq('product_id', entry.product_id).eq('date', entry.date).eq('source', 'tiktok').single();
-    if (selErr && selErr.code !== 'PGRST116') { console.error('[rebuild] Select:', selErr); return 'error'; }
-    if (existing) {
-      const { error: upErr } = await admin.from('entries').update({ gmv: entry.gmv, shipping: entry.shipping, affiliate: entry.affiliate, platform_fee: entry.platform_fee, units_sold: entry.units_sold, ads: 0, updated_at: new Date().toISOString() }).eq('id', existing.id);
-      if (upErr) { console.error('[rebuild] Update:', upErr); return 'error'; }
-      return 'updated';
-    }
-    const { error: insErr } = await admin.from('entries').insert({ user_id: entry.user_id, product_id: entry.product_id, date: entry.date, gmv: entry.gmv, ads: 0, shipping: entry.shipping, affiliate: entry.affiliate, platform_fee: entry.platform_fee, units_sold: entry.units_sold, videos_posted: 0, views: 0, source: entry.source });
-    if (insErr) { console.error('[rebuild] Insert:', insErr, JSON.stringify(entry)); return 'error'; }
-    return 'created';
-  } catch (err) { console.error('[rebuild] Exception:', err); return 'error'; }
-}
