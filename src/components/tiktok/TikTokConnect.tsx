@@ -8,10 +8,7 @@ export default function TikTokConnect() {
     isConnected,
     connection,
     isLoading,
-    isSyncing,
     syncProgress,
-    lastSyncResult,
-    syncError,
     sync,
     disconnect,
     isDisconnecting,
@@ -89,24 +86,13 @@ export default function TikTokConnect() {
 
       <div className="mb-4 flex items-center justify-end">
         <div className="flex items-center gap-2">
-          {/* Sync Result / Error */}
-          {lastSyncResult && !isSyncing && !syncProgress?.isSyncing && (
-            <span className="text-xs text-tt-muted">
-              {lastSyncResult.totalUniqueOrders.toLocaleString()} orders synced
-              {(!lastSyncResult.isCaughtUp || lastSyncResult.hasMorePages) && ' · click Sync for more'}
-            </span>
-          )}
-          {syncError && !isSyncing && (
-            <span className="text-xs text-tt-red">{syncError}</span>
-          )}
-
           {/* Sync button */}
           <button
             onClick={() => sync()}
-            disabled={isSyncing || !!syncProgress?.isSyncing}
+            disabled={!!syncProgress?.isSyncing}
             className="px-2.5 py-1.5 rounded-lg border border-tt-border text-tt-muted text-[11px] font-medium hover:border-tt-cyan hover:text-tt-cyan transition-all disabled:opacity-50 flex items-center gap-1.5"
           >
-            {isSyncing ? (
+            {syncProgress?.isSyncing ? (
               <>
                 <div className="w-3 h-3 border-2 border-tt-cyan border-t-transparent rounded-full animate-spin" />
                 Syncing...
