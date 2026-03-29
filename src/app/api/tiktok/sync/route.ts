@@ -78,6 +78,12 @@ export async function POST() {
           const { orders, nextCursor } = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageToken);
 
           if (orders.length > 0) {
+            // Log first order's time fields once per sync
+            if (daysProcessed === 0 && pageNum === 1) {
+              const sample = orders[0] as Record<string, unknown>;
+              console.log(`[Sync] Order time fields: create_time=${sample.create_time}, paid_time=${sample.paid_time}, pay_time=${sample.pay_time}, payment_time=${sample.payment_time}, update_time=${sample.update_time}`);
+              console.log(`[Sync] Order keys:`, Object.keys(sample).filter(k => k.includes('time')).join(', '));
+            }
             // Parse and deduplicate by order_id
             const rows = new Map<string, Record<string, unknown>>();
             for (const o of orders) {
@@ -211,9 +217,11 @@ function advanceDay(day: string): string {
 
 function parseOrder(userId: string, o: Record<string, unknown>): Record<string, unknown> {
   const orderId = String(o.id || '');
+  // Use paid_time (matches TikTok's "Time paid" default), fallback to create_time
+  const paidTime = (o.paid_time || o.pay_time || o.payment_time) as number;
   const createTime = o.create_time as number;
-  // Convert to shop's local timezone (America/Los_Angeles) to match TikTok Seller Center dates
-  const date = createTime ? toLocalDate(createTime) : '';
+  const orderTime = paidTime || createTime;
+  const date = orderTime ? toLocalDate(orderTime) : '';
   const status = String(o.status || '').toUpperCase();
   const payment = (o.payment || {}) as Record<string, unknown>;
   const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
