@@ -1,13 +1,13 @@
-import { NextResponse, after } from 'next/server';
+import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
-const TIME_BUDGET_MS = 50_000;
+const TIME_BUDGET_MS = 50_000; // 50s for fetching, rest for DB work
 
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 type AdminClient = ReturnType<typeof createAdminClient>;
 
@@ -18,22 +18,14 @@ function toNum(val: unknown): number {
   return 0;
 }
 
-export async function POST(request: Request) {
+export async function POST() {
   const batchStart = Date.now();
 
-  // Auth: user session OR internal self-chain
-  let userId: string;
-  const body = await request.json().catch(() => ({}));
-  const internalSecret = process.env.SYNC_INTERNAL_SECRET || process.env.TIKTOK_SHOP_APP_SECRET;
-
-  if (body._internalSecret === internalSecret && body._userId) {
-    userId = body._userId;
-  } else {
-    const supabase = await createClient();
-    const { data, error: authError } = await supabase.auth.getUser();
-    if (authError || !data.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    userId = data.user.id;
-  }
+  // Auth via Supabase session
+  const supabase = await createClient();
+  const { data, error: authError } = await supabase.auth.getUser();
+  if (authError || !data.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const userId = data.user.id;
 
   const admin = createAdminClient();
   const { data: connection, error: connError } = await admin.from('tiktok_connections').select('*').eq('user_id', userId).single();
@@ -43,7 +35,7 @@ export async function POST(request: Request) {
   // Already caught up?
   const todayStr = new Date().toISOString().split('T')[0];
   if (connection.sync_cursor && connection.sync_cursor >= todayStr) {
-    return NextResponse.json({ success: true, summary: { isCaughtUp: true } });
+    return NextResponse.json({ success: true, summary: { isCaughtUp: true, totalUniqueOrders: connection.sync_progress_orders || 0 } });
   }
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
@@ -65,7 +57,7 @@ export async function POST(request: Request) {
     let totalNew = 0;
     let daysProcessed = 0;
 
-    // ===== MAIN LOOP: one day at a time, paginate ALL orders within each day =====
+    // ===== MAIN LOOP: one day at a time, paginate within each day =====
     while (currentDay < todayStr && Date.now() - batchStart < TIME_BUDGET_MS) {
       const nextDay = advanceDay(currentDay);
       const startTs = dayToTs(currentDay);
@@ -84,7 +76,7 @@ export async function POST(request: Request) {
           const { orders, nextCursor } = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageToken);
 
           if (orders.length > 0) {
-            // Parse and deduplicate
+            // Parse and deduplicate by order_id
             const rows = new Map<string, Record<string, unknown>>();
             for (const o of orders) {
               const parsed = parseOrder(userId, o as Record<string, unknown>);
@@ -92,7 +84,7 @@ export async function POST(request: Request) {
               if (oid) rows.set(oid, parsed);
             }
 
-            // Bulk upsert
+            // Bulk upsert orders
             const upsertData = [...rows.values()];
             const { error: upsertErr } = await admin.from('synced_order_ids').upsert(upsertData, { onConflict: 'user_id,order_id' });
             if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
@@ -100,7 +92,7 @@ export async function POST(request: Request) {
 
             dayOrders += upsertData.length;
 
-            // Upsert products
+            // Upsert unique products
             const products = new Map<string, Record<string, unknown>>();
             for (const row of upsertData) {
               const pid = row.tiktok_product_id as string;
@@ -110,22 +102,20 @@ export async function POST(request: Request) {
             }
             for (const prod of products.values()) {
               const { error: pErr } = await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
-              if (pErr) { /* ignore duplicate product errors */ }
+              if (pErr) { /* ignore */ }
             }
           }
 
-          // Advance to next page or exit
+          // Next page or done
           pageToken = nextCursor;
           if (!nextCursor || orders.length < 50) pageToken = null;
         } catch (err) {
-          console.error(`[Sync] Fetch error for ${currentDay} page ${pageNum}:`, (err as Error).message);
-          pageToken = null; // Stop paginating on error, move to next day
+          console.error(`[Sync] Fetch error ${currentDay} p${pageNum}:`, (err as Error).message);
+          pageToken = null;
         }
       } while (pageToken);
 
-      if (dayOrders > 50) {
-        console.log(`[Sync] Day ${currentDay}: ${pageNum} pages, ${dayOrders} orders`);
-      }
+      if (dayOrders > 50) console.log(`[Sync] Day ${currentDay}: ${pageNum} pages, ${dayOrders} orders`);
 
       currentDay = nextDay;
       daysProcessed++;
@@ -134,7 +124,7 @@ export async function POST(request: Request) {
       if (daysProcessed % 10 === 0) {
         await admin.from('tiktok_connections').update({
           sync_cursor: currentDay,
-          sync_progress_orders: totalNew + (connection.sync_progress_orders || 0),
+          sync_progress_orders: (connection.sync_progress_orders || 0) + totalNew,
           sync_progress_day: currentDay,
         }).eq('user_id', userId);
       }
@@ -142,49 +132,38 @@ export async function POST(request: Request) {
 
     const isCaughtUp = currentDay >= todayStr;
 
-    // Save cursor
+    // Save cursor + clear lock
     const { error: saveErr } = await admin.from('tiktok_connections').update({
       sync_cursor: isCaughtUp ? todayStr : currentDay,
       sync_started_at: null,
-      sync_progress_orders: totalNew + (connection.sync_progress_orders || 0),
+      sync_progress_orders: (connection.sync_progress_orders || 0) + totalNew,
       sync_progress_day: currentDay,
       last_synced_at: new Date().toISOString(),
     }).eq('user_id', userId);
 
-    if (saveErr) console.error('[Sync] CURSOR SAVE FAILED:', saveErr.message);
-    else console.log(`[Sync] CURSOR SAVED: ${isCaughtUp ? todayStr : currentDay}`);
+    if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
+    else console.log(`[Sync] SAVED cursor=${isCaughtUp ? todayStr : currentDay}`);
 
-    // Rebuild entries
+    // Rebuild entries via SQL
     const { data: rebuildCount, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: userId });
     if (rebuildErr) console.error('[Rebuild] Error:', rebuildErr.message);
-    console.log(`[Sync] Done: ${daysProcessed} days, ${totalNew} orders, entries=${rebuildCount || 0}, caught_up=${isCaughtUp}, ${Date.now() - batchStart}ms`);
 
-    // Self-chain if not caught up
-    if (!isCaughtUp) {
-      const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : (process.env.NEXT_PUBLIC_SITE_URL || 'https://www.lensed.io');
-      const chainUrl = `${baseUrl}/api/tiktok/sync`;
-      after(async () => {
-        await new Promise(r => setTimeout(r, 3000));
-        console.log('[Sync] Chaining to:', chainUrl);
-        try {
-          await fetch(chainUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ _internalSecret: internalSecret, _userId: userId }),
-          });
-          console.log('[Sync] Chain sent');
-        } catch (err) {
-          console.error('[Sync] Chain failed:', err);
-        }
-      });
-    }
+    console.log(`[Sync] DONE: ${daysProcessed}d, ${totalNew} orders, entries=${rebuildCount || 0}, caught_up=${isCaughtUp}, ${Date.now() - batchStart}ms`);
 
     return NextResponse.json({
       success: true,
-      summary: { isCaughtUp, totalUniqueOrders: totalNew + (connection.sync_progress_orders || 0), ordersThisBatch: totalNew, entriesCreated: rebuildCount || 0, daysProcessed, elapsedMs: Date.now() - batchStart },
+      summary: {
+        isCaughtUp,
+        totalUniqueOrders: (connection.sync_progress_orders || 0) + totalNew,
+        ordersThisBatch: totalNew,
+        entriesCreated: rebuildCount || 0,
+        daysProcessed,
+        currentDay,
+        elapsedMs: Date.now() - batchStart,
+      },
     });
   } catch (error) {
-    console.error('[Sync] Failed:', error);
+    console.error('[Sync] FAILED:', error);
     await admin.from('tiktok_connections').update({ sync_started_at: null }).eq('user_id', userId);
     return NextResponse.json({ error: 'Sync failed' }, { status: 500 });
   }
@@ -218,7 +197,6 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   let tikTokProductId: string | null = null;
   let skuId: string | null = null;
   let skuName: string | null = null;
-  let productName: string | null = null;
 
   for (const item of lineItems) {
     units += Number(item.quantity) || 1;
@@ -227,7 +205,6 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
       tikTokProductId = String(item.product_id || '') || null;
       skuId = String(item.sku_id || '') || null;
       skuName = String(item.sku_name || '') || null;
-      productName = String(item.product_name || item.sku_name || '') || null;
     }
   }
   if (units === 0) units = 1;

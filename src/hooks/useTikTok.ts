@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useUser } from './useUser';
 
 interface TikTokConnection {
@@ -31,122 +31,124 @@ interface SyncProgress {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// Fire-and-forget sync trigger — no waiting for response
-async function triggerSync(): Promise<void> {
-  try {
-    await fetch('/api/tiktok/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-  } catch {
-    // Fire and forget — errors are fine, the self-chain handles retries
-  }
-}
-
-async function fetchStatus(): Promise<TikTokStatusResponse> {
-  const res = await fetch('/api/tiktok/status');
-  if (!res.ok) throw new Error('Failed to fetch status');
-  return res.json();
-}
-
 export function useTikTok() {
   const { user } = useUser();
   const queryClient = useQueryClient();
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
-  const pollingRef = useRef(false);
-  const triggerFiredRef = useRef(false);
+  const loopRunningRef = useRef(false);
+  const loopStartedRef = useRef(false);
 
   const connectionQuery = useQuery<TikTokStatusResponse>({
     queryKey: ['tiktok-status', user?.id],
     enabled: !!user,
-    queryFn: fetchStatus,
+    queryFn: async () => {
+      const res = await fetch('/api/tiktok/status');
+      if (!res.ok) throw new Error('Status fetch failed');
+      return res.json();
+    },
     staleTime: 10_000,
   });
 
-  const disconnectMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch('/api/tiktok/disconnect', { method: 'POST' });
-      if (!res.ok) throw new Error('Failed to disconnect');
-      return res.json();
-    },
-    onSuccess: () => {
-      pollingRef.current = false;
-      triggerFiredRef.current = false;
+  // The sync driver: fire sync, poll status, repeat until caught up
+  const runSyncDriver = useCallback(async () => {
+    if (loopRunningRef.current) return;
+    loopRunningRef.current = true;
+    setSyncProgress({ totalOrders: 0, currentRange: '', isSyncing: true });
+    console.log('[SyncDriver] Starting');
+
+    try {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        // 1. Fire sync call (with 90s timeout to handle slow batches)
+        console.log(`[SyncDriver] Firing sync batch ${attempt + 1}`);
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 90_000);
+          const res = await fetch('/api/tiktok/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+
+          if (res.ok) {
+            const data = await res.json();
+            if (data.summary) {
+              console.log(`[SyncDriver] Batch done: caught_up=${data.summary.isCaughtUp}, orders=${data.summary.totalUniqueOrders}, cursor=${data.summary.currentDay}`);
+              setSyncProgress({
+                totalOrders: data.summary.totalUniqueOrders || 0,
+                currentRange: data.summary.currentDay || '',
+                isSyncing: !data.summary.isCaughtUp,
+              });
+              queryClient.invalidateQueries({ queryKey: ['entries'] });
+
+              if (data.summary.isCaughtUp) {
+                console.log('[SyncDriver] CAUGHT UP — done');
+                break;
+              }
+            }
+          }
+        } catch (err) {
+          // Timeout or network error — check status and continue
+          console.log('[SyncDriver] Call error:', (err as Error).name);
+        }
+
+        // 2. Brief pause, then poll status to update progress
+        await sleep(2_000);
+        try {
+          const st = await fetch('/api/tiktok/status').then(r => r.json()) as TikTokStatusResponse;
+          if (st.connection) {
+            setSyncProgress({
+              totalOrders: st.connection.syncProgressOrders || 0,
+              currentRange: st.connection.syncProgressDay || '',
+              isSyncing: !st.connection.isCaughtUp,
+            });
+            queryClient.invalidateQueries({ queryKey: ['entries'] });
+
+            if (st.connection.isCaughtUp) {
+              console.log('[SyncDriver] Status says caught up — done');
+              break;
+            }
+          }
+        } catch { /* ignore */ }
+      }
+    } finally {
+      loopRunningRef.current = false;
       setSyncProgress(null);
       queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
       queryClient.invalidateQueries({ queryKey: ['entries'] });
-    },
-  });
-
-  // Poll status every 3s while sync is in progress
-  const startPolling = useCallback(async () => {
-    if (pollingRef.current) return;
-    pollingRef.current = true;
-    console.log('[Sync] Polling started');
-
-    while (pollingRef.current) {
-      await sleep(3_000);
-      if (!pollingRef.current) break;
-
-      try {
-        const st = await fetchStatus();
-        const c = st.connection;
-        if (!c) break;
-
-        setSyncProgress({
-          totalOrders: c.syncProgressOrders || 0,
-          currentRange: c.syncProgressDay || '',
-          isSyncing: !c.isCaughtUp,
-        });
-
-        // Refresh dashboard entries
-        queryClient.invalidateQueries({ queryKey: ['entries'] });
-
-        if (c.isCaughtUp) {
-          console.log('[Sync] Caught up — stopping poll');
-          pollingRef.current = false;
-          setSyncProgress(null);
-          queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
-          break;
-        }
-      } catch {
-        // Status fetch failed — keep polling
-      }
+      console.log('[SyncDriver] Finished');
     }
-
-    pollingRef.current = false;
   }, [queryClient]);
 
-  // Auto-trigger: fire sync once if not caught up, then poll
+  // Auto-start when connected and not caught up
   useEffect(() => {
     const conn = connectionQuery.data?.connection;
-    const connected = connectionQuery.data?.connected;
-    if (!conn || !connected) return;
-    if (triggerFiredRef.current) return;
+    if (!conn || !connectionQuery.data?.connected) return;
+    if (loopStartedRef.current) return;
+    if (conn.isCaughtUp) return;
 
-    if (conn.isCaughtUp) {
-      // Already caught up — nothing to do
-      return;
-    }
+    loopStartedRef.current = true;
+    runSyncDriver();
+  }, [connectionQuery.data?.connected, connectionQuery.data?.connection?.isCaughtUp, runSyncDriver]);
 
-    // Not caught up — fire sync once and start polling
-    triggerFiredRef.current = true;
-    console.log(`[Sync] Not caught up (cursor at ${conn.syncProgressDay || 'start'}) — triggering sync`);
-    triggerSync();
-    startPolling();
-    setSyncProgress({ totalOrders: conn.syncProgressOrders || 0, currentRange: conn.syncProgressDay || '', isSyncing: true });
+  // Disconnect
+  const disconnect = useCallback(async () => {
+    try {
+      await fetch('/api/tiktok/disconnect', { method: 'POST' });
+    } catch { /* ignore */ }
+    loopStartedRef.current = false;
+    loopRunningRef.current = false;
+    setSyncProgress(null);
+    queryClient.invalidateQueries({ queryKey: ['tiktok-status'] });
+    queryClient.invalidateQueries({ queryKey: ['entries'] });
+  }, [queryClient]);
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionQuery.data?.connected, connectionQuery.data?.connection?.isCaughtUp]);
-
-  // Manual sync button
-  const manualSync = useCallback(() => {
-    pollingRef.current = false; // Reset polling so it can restart
-    triggerSync();
-    setSyncProgress({ totalOrders: 0, currentRange: '', isSyncing: true });
-    startPolling();
-  }, [startPolling]);
+  // Manual sync
+  const sync = useCallback(() => {
+    loopStartedRef.current = false;
+    loopRunningRef.current = false;
+    runSyncDriver();
+  }, [runSyncDriver]);
 
   return {
     isConnected: connectionQuery.data?.connected ?? false,
@@ -156,8 +158,8 @@ export function useTikTok() {
     syncProgress,
     lastSyncResult: null,
     syncError: null,
-    sync: manualSync,
-    disconnect: () => disconnectMutation.mutate(),
-    isDisconnecting: disconnectMutation.isPending,
+    sync,
+    disconnect,
+    isDisconnecting: false,
   };
 }
