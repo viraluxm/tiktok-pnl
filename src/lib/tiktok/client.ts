@@ -231,9 +231,13 @@ export async function fetchOrdersPage(
   const orders = data?.orders || [];
   const nextCursor = data?.next_page_token || '';
 
+  // Log pagination info for debugging
+  if (orders.length >= 50 || pageCursor) {
+    console.log(`[Pagination] ${orders.length} orders, next_page_token=${nextCursor ? 'yes' : 'no'}, sent_page_token=${pageCursor ? 'yes' : 'no'}, data_keys=${Object.keys(data || {}).join(',')}`);
+  }
+
   return {
     orders,
-    // Trust TikTok's cursor — if they provide one, there are more pages
     nextCursor: nextCursor || null,
   };
 }
