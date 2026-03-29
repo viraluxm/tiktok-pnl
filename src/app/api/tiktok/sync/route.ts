@@ -70,6 +70,7 @@ export async function POST() {
 
       do {
         if (Date.now() - batchStart >= TIME_BUDGET_MS) break;
+        if (pageNum >= 500) break; // Safety: max 500 pages per day (25,000 orders)
         pageNum++;
 
         try {
@@ -106,9 +107,8 @@ export async function POST() {
             }
           }
 
-          // Next page or done
+          // Next page or done — ONLY stop when TikTok returns no next_page_token
           pageToken = nextCursor;
-          if (!nextCursor || orders.length < 50) pageToken = null;
         } catch (err) {
           console.error(`[Sync] Fetch error ${currentDay} p${pageNum}:`, (err as Error).message);
           pageToken = null;
