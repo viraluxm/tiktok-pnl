@@ -45,9 +45,9 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
           <ChangeIndicator change={gmvChange} />
         </div>
         <div className="text-[26px] font-bold text-tt-cyan">{fmt(metrics.totalGMV)}</div>
-        {metrics.totalViews > 0 && (
+        {metrics.totalUnitsSold > 0 && (
           <div className="text-xs text-tt-muted mt-1">
-            {fmtInt(metrics.totalViews)} orders
+            {fmtInt(metrics.totalUnitsSold)} orders
           </div>
         )}
       </div>

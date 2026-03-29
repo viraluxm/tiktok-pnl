@@ -28,6 +28,7 @@ export interface Entry {
   ads: number;
   platform_fee?: number;
   units_sold?: number;
+  units?: number;
   variant_id?: string;
   created_at: string;
   updated_at: string;

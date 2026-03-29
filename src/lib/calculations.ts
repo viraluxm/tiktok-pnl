@@ -17,7 +17,7 @@ export function calcEntry(entry: Entry, costsMap?: CostsMap): EntryCalculations 
   const shipping = Number(entry.shipping) || 0;
   const affiliate = Number(entry.affiliate) || 0;
   const ads = Number(entry.ads) || 0;
-  const unitsSold = Number(entry.units_sold) || 0;
+  const unitsSold = Number(entry.units) || Number(entry.units_sold) || 0;
 
   // Use actual platform fee from DB (settlements), fall back to 6% estimate
   const platformFee = Number(entry.platform_fee) || (gmv * 0.06);
@@ -78,7 +78,7 @@ export function computeDashboardMetrics(entries: Entry[], costsMap?: CostsMap): 
   entries.forEach((e) => {
     const c = calcEntry(e, costsMap);
     const gmv = Number(e.gmv) || 0;
-    const units = Number(e.units_sold) || 0;
+    const units = Number(e.units) || Number(e.units_sold) || 0;
     totalGMV += gmv;
     totalVideos += Number(e.videos_posted) || 0;
     totalViews += Number(e.views) || 0;
@@ -149,7 +149,7 @@ export function computeChartData(entries: Entry[], costsMap?: CostsMap): ChartDa
   entries.forEach((e) => {
     const c = calcEntry(e, costsMap);
     const gmv = Number(e.gmv) || 0;
-    const unitsSold = Number(e.units_sold) || 0;
+    const unitsSold = Number(e.units) || Number(e.units_sold) || 0;
 
     // Calculate user COGS separately for the breakdown
     let costPerUnit = 0;
