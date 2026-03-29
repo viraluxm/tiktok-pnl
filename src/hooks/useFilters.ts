@@ -17,23 +17,24 @@ export function useFilters() {
       return;
     }
 
-    // Always use actual current date for Today/Yesterday/7d/30d
+    // Use local date (not UTC) so "Today" matches the user's timezone
     const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
+    const toLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const todayStr = toLocal(now);
 
     if (days === 0) {
       setFilters((prev: FilterState) => ({ ...prev, dateFrom: todayStr, dateTo: todayStr }));
     } else if (days === 1) {
       const yesterday = new Date(now);
       yesterday.setDate(yesterday.getDate() - 1);
-      const yStr = yesterday.toISOString().split('T')[0];
+      const yStr = toLocal(yesterday);
       setFilters((prev: FilterState) => ({ ...prev, dateFrom: yStr, dateTo: yStr }));
     } else {
       const from = new Date(now);
       from.setDate(from.getDate() - days);
       setFilters((prev: FilterState) => ({
         ...prev,
-        dateFrom: from.toISOString().split('T')[0],
+        dateFrom: toLocal(from),
         dateTo: todayStr,
       }));
     }
