@@ -5,6 +5,8 @@ DECLARE
 BEGIN
   DELETE FROM entries WHERE user_id = p_user_id AND source = 'tiktok';
 
+  -- TikTok's GMV definition: "doesn't subtract cancellations or refunds"
+  -- So we include ALL orders in GMV and order count
   INSERT INTO entries (user_id, product_id, date, gmv, shipping, affiliate, ads, videos_posted, views, source, created_at, updated_at)
   SELECT
     p_user_id,
@@ -13,18 +15,14 @@ BEGIN
     COALESCE(SUM(gmv), 0),
     COALESCE(SUM(shipping), 0),
     COALESCE(SUM(affiliate), 0),
-    0, 0, 0,
+    0, 0,
+    COUNT(*),
     'tiktok',
     now(),
     now()
   FROM synced_order_ids
   WHERE user_id = p_user_id
-    AND (status IS NULL OR (upper(status) NOT LIKE '%CANCEL%' AND upper(status) NOT LIKE '%REFUND%'))
-  GROUP BY order_date
-  ON CONFLICT (user_id, date, source) WHERE source = 'tiktok'
-  DO UPDATE SET
-    gmv = EXCLUDED.gmv, shipping = EXCLUDED.shipping, affiliate = EXCLUDED.affiliate,
-    updated_at = now();
+  GROUP BY order_date;
 
   GET DIAGNOSTICS row_count = ROW_COUNT;
   RETURN row_count;
