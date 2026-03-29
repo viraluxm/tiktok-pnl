@@ -32,8 +32,8 @@ export async function GET() {
     syncInProgress = startedAt > fiveMinAgo;
   }
 
-  // isCaughtUp: sync_cursor >= today's date
-  const todayStr = new Date().toISOString().split('T')[0];
+  // isCaughtUp: sync_cursor >= today's date (in shop timezone)
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   const isCaughtUp = !!connection.sync_cursor && connection.sync_cursor >= todayStr;
 
   return NextResponse.json({

@@ -33,15 +33,16 @@ export async function POST() {
   if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher' }, { status: 400 });
 
   // Already caught up?
-  const todayStr = new Date().toISOString().split('T')[0];
+  // Use shop timezone for all date calculations
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   if (connection.sync_cursor && connection.sync_cursor >= todayStr) {
     return NextResponse.json({ success: true, summary: { isCaughtUp: true, totalUniqueOrders: connection.sync_progress_orders || 0 } });
   }
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
   const backfillStart = new Date();
-  backfillStart.setUTCDate(backfillStart.getUTCDate() - BACKFILL_DAYS);
-  const backfillStartStr = backfillStart.toISOString().split('T')[0];
+  backfillStart.setDate(backfillStart.getDate() - BACKFILL_DAYS);
+  const backfillStartStr = backfillStart.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 
   let currentDay = connection.sync_cursor || backfillStartStr;
   if (currentDay < backfillStartStr) currentDay = backfillStartStr;
@@ -171,17 +172,35 @@ export async function POST() {
 
 // ===== HELPERS =====
 
-// Convert Unix timestamp to YYYY-MM-DD in America/Los_Angeles timezone
-// TikTok Seller Center uses the shop's local timezone for date grouping
+const SHOP_TIMEZONE = 'America/Los_Angeles';
+
+// Convert Unix timestamp to YYYY-MM-DD in shop's timezone
 function toLocalDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  return new Date(unixSeconds * 1000).toLocaleDateString('en-CA', { timeZone: SHOP_TIMEZONE });
 }
 
-// Convert YYYY-MM-DD to Unix timestamp at midnight UTC
-// We use UTC for API query boundaries (TikTok create_time is UTC)
-// The date ASSIGNMENT uses toLocalDate() to convert each order's create_time to Pacific
+// Convert YYYY-MM-DD to Unix timestamp at midnight in shop's timezone
+// Uses Intl to get the exact UTC offset (handles DST correctly)
 function dayToTs(day: string): number {
-  return Math.floor(new Date(day + 'T00:00:00Z').getTime() / 1000);
+  // Get what date/time it is in the shop timezone for a known UTC reference
+  // Then calculate the offset
+  const refUtc = new Date(day + 'T12:00:00Z'); // noon UTC on the target date
+  const utcDateStr = refUtc.toLocaleDateString('en-CA', { timeZone: 'UTC' });
+  const localDateStr = refUtc.toLocaleDateString('en-CA', { timeZone: SHOP_TIMEZONE });
+
+  // Get hours in both timezones to determine offset
+  const utcHours = refUtc.getUTCHours();
+  const localHoursStr = refUtc.toLocaleTimeString('en-GB', { timeZone: SHOP_TIMEZONE, hour: '2-digit', hour12: false });
+  const localHours = parseInt(localHoursStr);
+  let offsetHours = utcHours - localHours;
+  // Adjust for date boundary crossing
+  if (utcDateStr !== localDateStr) {
+    if (utcDateStr > localDateStr) offsetHours += 24;
+    else offsetHours -= 24;
+  }
+
+  // Midnight in shop timezone = midnight UTC + offset
+  return Math.floor(new Date(day + 'T00:00:00Z').getTime() / 1000) + (offsetHours * 3600);
 }
 
 function advanceDay(day: string): string {
