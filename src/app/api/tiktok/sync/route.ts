@@ -171,6 +171,15 @@ export async function POST() {
 
 // ===== HELPERS =====
 
+// Convert Unix timestamp to YYYY-MM-DD in America/Los_Angeles timezone
+// TikTok Seller Center uses the shop's local timezone for date grouping
+function toLocalDate(unixSeconds: number): string {
+  return new Date(unixSeconds * 1000).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+}
+
+// Convert YYYY-MM-DD to Unix timestamp at midnight UTC
+// We use UTC for API query boundaries (TikTok create_time is UTC)
+// The date ASSIGNMENT uses toLocalDate() to convert each order's create_time to Pacific
 function dayToTs(day: string): number {
   return Math.floor(new Date(day + 'T00:00:00Z').getTime() / 1000);
 }
@@ -184,7 +193,8 @@ function advanceDay(day: string): string {
 function parseOrder(userId: string, o: Record<string, unknown>): Record<string, unknown> {
   const orderId = String(o.id || '');
   const createTime = o.create_time as number;
-  const date = createTime ? new Date(createTime * 1000).toISOString().split('T')[0] : '';
+  // Convert to shop's local timezone (America/Los_Angeles) to match TikTok Seller Center dates
+  const date = createTime ? toLocalDate(createTime) : '';
   const status = String(o.status || '').toUpperCase();
   const payment = (o.payment || {}) as Record<string, unknown>;
   const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
