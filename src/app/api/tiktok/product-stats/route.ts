@@ -62,11 +62,11 @@ export async function GET(request: Request) {
     product.total_gmv += gmv;
     product.total_shipping += shipping;
 
-    const skuKey = `${skuId}|${skuName}`;
-    let sku = product.skus.get(skuKey);
+    // Key by sku_id only to avoid duplicates from name variations
+    let sku = product.skus.get(skuId);
     if (!sku) {
       sku = { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0 };
-      product.skus.set(skuKey, sku);
+      product.skus.set(skuId, sku);
     }
     sku.orders += 1;
     sku.gmv += gmv;
@@ -89,6 +89,7 @@ export async function GET(request: Request) {
     }
 
     // Merge all-time SKUs into productMap (add missing products/SKUs with 0 values)
+    // Build a set of known sku_ids per product to avoid duplicates
     for (const row of allSkuRows) {
       const pid = String(row.tiktok_product_id || 'unknown');
       const skuId = String(row.sku_id || '');
@@ -100,9 +101,8 @@ export async function GET(request: Request) {
         productMap.set(pid, product);
       }
 
-      const skuKey = `${skuId}|${skuName}`;
-      if (!product.skus.has(skuKey)) {
-        product.skus.set(skuKey, { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0 });
+      if (!product.skus.has(skuId)) {
+        product.skus.set(skuId, { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0 });
       }
     }
   }
@@ -128,9 +128,8 @@ export async function GET(request: Request) {
       }
       for (const v of variants) {
         if (!v.id) continue;
-        const skuKey = `${v.id}|${v.name || v.sku || 'Default'}`;
-        if (!product.skus.has(skuKey)) {
-          product.skus.set(skuKey, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0 });
+        if (!product.skus.has(v.id)) {
+          product.skus.set(v.id, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0 });
         }
       }
     }
