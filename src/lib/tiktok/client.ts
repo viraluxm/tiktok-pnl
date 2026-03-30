@@ -331,6 +331,8 @@ export interface FetchVideosResult {
 export async function fetchShopVideos(
   accessToken: string,
   shopCipher: string,
+  startDate: string,
+  endDate: string,
   pageToken: string | null,
 ): Promise<FetchVideosResult> {
   const path = '/analytics/202509/shop_videos/performance';
@@ -341,7 +343,14 @@ export async function fetchShopVideos(
   };
   if (pageToken) queryParams.page_token = pageToken;
 
-  const data = await shopPost(path, accessToken, {}, queryParams);
+  // POST body with date range (required by analytics endpoints)
+  const body: Record<string, unknown> = {
+    start_date: startDate,
+    end_date: endDate,
+  };
+
+  console.log('[VideoAPI] Calling with body:', JSON.stringify(body), 'params:', queryParams);
+  const data = await shopPost(path, accessToken, body, queryParams);
   const videos = ((data?.videos || []) as Array<Record<string, unknown>>).map(v => {
     const gmv = (v.gmv || {}) as Record<string, string>;
     const gpm = (v.gpm || {}) as Record<string, string>;

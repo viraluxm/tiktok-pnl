@@ -20,6 +20,10 @@ export async function POST() {
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
   try {
+    // Sync last 365 days of video data
+    const endDate = new Date().toISOString().split('T')[0];
+    const startDate = new Date(Date.now() - 365 * 86400000).toISOString().split('T')[0];
+
     let pageToken: string | null = null;
     let totalSynced = 0;
     let pageNum = 0;
@@ -29,7 +33,7 @@ export async function POST() {
       pageNum++;
       if (pageNum > MAX_PAGES) break;
 
-      const { videos, nextPageToken } = await fetchShopVideos(accessToken, connection.shop_cipher, pageToken);
+      const { videos, nextPageToken } = await fetchShopVideos(accessToken, connection.shop_cipher, startDate, endDate, pageToken);
 
       if (videos.length > 0) {
         const rows = videos.map(v => ({
