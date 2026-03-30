@@ -34,17 +34,33 @@ export async function POST() {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
-  // Debug: check finance order-level data for affiliate commission fields
+  // Debug: try multiple finance endpoints to find affiliate commission data
   try {
-    const { shopGet: sGet } = await import('@/lib/tiktok/client');
-    // Try the settled orders endpoint
-    const finData = await sGet('/finance/202309/orders', accessToken, {
-      shop_cipher: connection.shop_cipher,
-      page_size: '5',
-    });
-    console.log('[DEBUG Finance] Keys:', Object.keys(finData || {}));
-    const orders = (finData?.order_settlements || finData?.orders || []) as Record<string, unknown>[];
-    if (orders[0]) console.log('[DEBUG Finance] Order:', JSON.stringify(orders[0]).slice(0, 3000));
+    const { shopGet: sGet, shopPost: sPost } = await import('@/lib/tiktok/client');
+    const sc = connection.shop_cipher;
+
+    // Try 1: /finance/202309/transactions
+    try {
+      const d1 = await sGet('/finance/202309/transactions', accessToken, { shop_cipher: sc, page_size: '3' });
+      console.log('[DEBUG Fin1] transactions keys:', Object.keys(d1 || {}));
+      const txns = (d1?.transactions || d1?.transaction_list || []) as Record<string, unknown>[];
+      if (txns[0]) console.log('[DEBUG Fin1] txn:', JSON.stringify(txns[0]).slice(0, 2000));
+    } catch (e) { console.log('[DEBUG Fin1] Error:', (e as Error).message); }
+
+    // Try 2: POST /finance/202309/orders/search (settled orders)
+    try {
+      const d2 = await sPost('/finance/202309/orders/search', accessToken, {}, { shop_cipher: sc, page_size: '3' });
+      console.log('[DEBUG Fin2] orders/search keys:', Object.keys(d2 || {}));
+      const ords = (d2?.orders || d2?.order_settlements || []) as Record<string, unknown>[];
+      if (ords[0]) console.log('[DEBUG Fin2] order:', JSON.stringify(ords[0]).slice(0, 2000));
+    } catch (e) { console.log('[DEBUG Fin2] Error:', (e as Error).message); }
+
+    // Try 3: GET /affiliate/202405/seller_settlements (affiliate data)
+    try {
+      const d3 = await sGet('/affiliate/202405/seller_settlements', accessToken, { shop_cipher: sc, page_size: '3' });
+      console.log('[DEBUG Fin3] affiliate keys:', Object.keys(d3 || {}));
+    } catch (e) { console.log('[DEBUG Fin3] Error:', (e as Error).message); }
+
   } catch (err) {
     console.error('[DEBUG Finance] Error:', (err as Error).message);
   }

@@ -142,7 +142,7 @@ export async function shopGet(path: string, accessToken: string, extraParams: Re
   return json.data;
 }
 
-async function shopPost(path: string, accessToken: string, body: Record<string, unknown>, extraParams: Record<string, string> = {}) {
+export async function shopPost(path: string, accessToken: string, body: Record<string, unknown>, extraParams: Record<string, string> = {}) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const appKey = TIKTOK_SHOP_APP_KEY;
   const bodyString = JSON.stringify(body);
