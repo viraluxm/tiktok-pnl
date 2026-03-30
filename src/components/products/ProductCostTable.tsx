@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, Fragment } from 'react';
+import { useState, useRef, Fragment } from 'react';
 import type { ProductStats } from '@/hooks/useProductStats';
 
 const fmt = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -24,19 +24,13 @@ function CostInput({ currentValue, onSave }: { currentValue: number; onSave: (va
   };
 
   const save = () => {
-    const val = parseFloat(inputValue) || 0;
-    onSave(val);
+    onSave(parseFloat(inputValue) || 0);
     setEditing(false);
-  };
-
-  const cancel = () => {
-    setEditing(false);
-    setInputValue('');
   };
 
   if (!editing) {
     return (
-      <button onClick={startEdit} className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[13px] hover:bg-[rgba(105,201,208,0.08)] transition-all cursor-pointer min-w-[90px]">
+      <button onClick={startEdit} className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[13px] hover:bg-[rgba(105,201,208,0.08)] transition-all cursor-pointer min-w-[80px]">
         <span className="text-tt-muted">$</span>
         <span className={currentValue > 0 ? 'text-tt-text font-medium' : 'text-tt-muted'}>
           {currentValue > 0 ? currentValue.toFixed(2) : '0.00'}
@@ -59,17 +53,15 @@ function CostInput({ currentValue, onSave }: { currentValue: number; onSave: (va
         value={inputValue}
         placeholder="0.00"
         onChange={e => setInputValue(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel(); }}
+        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }}
         className="bg-tt-input-bg border border-tt-cyan text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[70px] focus:outline-none"
       />
-      {/* Checkmark */}
-      <button onClick={save} className="p-1 rounded hover:bg-[rgba(0,200,83,0.15)] transition-colors" title="Save">
+      <button onClick={save} className="p-1 rounded hover:bg-[rgba(0,200,83,0.15)] transition-colors">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00c853" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
           <polyline points="20 6 9 17 4 12" />
         </svg>
       </button>
-      {/* X */}
-      <button onClick={cancel} className="p-1 rounded hover:bg-[rgba(255,23,68,0.15)] transition-colors" title="Cancel">
+      <button onClick={() => setEditing(false)} className="p-1 rounded hover:bg-[rgba(255,23,68,0.15)] transition-colors">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ff1744" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
           <line x1="18" y1="6" x2="6" y2="18" />
           <line x1="6" y1="6" x2="18" y2="18" />
@@ -84,15 +76,27 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
 
   const getCost = (key: string) => costsMap?.[key] || 0;
 
-  // Net Profit = GMV - Shipping - Platform Fee (6%) - COGS
+  // Calculate profit for a product/SKU
   const calcProfit = (gmv: number, shipping: number, costKey: string, orders: number) => {
     const cogs = getCost(costKey) * orders;
     const platformFee = gmv * 0.06;
     return gmv - shipping - platformFee - cogs;
   };
 
-  const handleCostSave = (productId: string, skuId: string | null, value: number) => {
-    if (onCostChange) onCostChange(productId, skuId, value);
+  // Calculate hero product profit by summing variant profits (uses per-variant costs)
+  const calcHeroProfit = (product: ProductStats) => {
+    if (product.skus.length <= 1) {
+      return calcProfit(product.total_gmv, product.total_shipping, product.tiktok_product_id, product.total_orders);
+    }
+    // Sum variant-level profits
+    let totalProfit = 0;
+    for (const sku of product.skus) {
+      const skuCostKey = `${product.tiktok_product_id}-${sku.sku_id}`;
+      const gmvShare = product.total_gmv > 0 ? sku.gmv / product.total_gmv : 0;
+      const skuShipping = product.total_shipping * gmvShare;
+      totalProfit += calcProfit(sku.gmv, skuShipping, skuCostKey, sku.orders);
+    }
+    return totalProfit;
   };
 
   return (
@@ -105,7 +109,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
         <table className="w-full border-collapse">
           <thead>
             <tr>
-              {['Product Name', 'SKU / Variation', 'Orders', 'Total GMV', 'Net Profit', 'Cost per Unit', 'Status'].map(h => (
+              {['Product Name', 'Orders', 'Total GMV', 'Net Profit', 'Cost per Unit'].map(h => (
                 <th key={h} className="px-4 py-3 text-left text-[11px] uppercase tracking-wide text-tt-muted font-semibold border-b border-tt-border whitespace-nowrap bg-[rgba(25,25,25,0.95)]">
                   {h}
                 </th>
@@ -116,73 +120,76 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
             {productStats.map((product, idx) => {
               const hasVariants = product.skus.length > 1;
               const isExpanded = expandedProduct === product.tiktok_product_id;
-              const costKey = product.tiktok_product_id;
-              const profit = calcProfit(product.total_gmv, product.total_shipping, costKey, product.total_orders);
+              const profit = calcHeroProfit(product);
 
               return (
                 <Fragment key={product.tiktok_product_id}>
+                  {/* Hero product row */}
                   <tr className={`border-b border-tt-border transition-colors hover:bg-[rgba(255,255,255,0.03)] ${idx % 2 === 0 ? '' : 'bg-[rgba(255,255,255,0.015)]'}`}>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-3">
                         {product.image_url ? (
-                          <img src={product.image_url} alt="" className="w-8 h-8 rounded-lg object-cover border border-tt-border" />
+                          <img src={product.image_url} alt="" className="w-10 h-10 rounded-lg object-cover border border-tt-border flex-shrink-0" />
                         ) : (
-                          <div className="w-8 h-8 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center text-tt-cyan text-xs font-bold">
+                          <div className="w-10 h-10 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center text-tt-cyan text-sm font-bold flex-shrink-0">
                             {product.name.charAt(0).toUpperCase()}
                           </div>
                         )}
-                        <span className="text-[13px] font-medium text-tt-text">{product.name}</span>
-                        {hasVariants && (
-                          <button
-                            onClick={() => setExpandedProduct(isExpanded ? null : product.tiktok_product_id)}
-                            className={`ml-1 flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium cursor-pointer transition-all ${
-                              isExpanded ? 'border-tt-cyan bg-[rgba(105,201,208,0.1)] text-tt-cyan' : 'border-tt-border text-tt-muted hover:border-tt-cyan hover:text-tt-cyan'
-                            }`}
-                          >
-                            <span>{product.skus.length} variants</span>
-                            <span className={`transition-transform inline-block text-[10px] ${isExpanded ? 'rotate-180' : ''}`}>▼</span>
-                          </button>
-                        )}
+                        <div>
+                          <span className="text-[13px] font-medium text-tt-text">{product.name}</span>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-[10px] text-tt-muted font-mono">ID: {product.tiktok_product_id.slice(-10)}</span>
+                            {hasVariants && (
+                              <button
+                                onClick={() => setExpandedProduct(isExpanded ? null : product.tiktok_product_id)}
+                                className={`flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium cursor-pointer transition-all ${
+                                  isExpanded ? 'border-tt-cyan bg-[rgba(105,201,208,0.1)] text-tt-cyan' : 'border-tt-border text-tt-muted hover:border-tt-cyan hover:text-tt-cyan'
+                                }`}
+                              >
+                                {product.skus.length} SKUs
+                                <span className={`transition-transform inline-block ${isExpanded ? 'rotate-180' : ''}`}>▼</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                    </td>
-                    <td className="px-4 py-3 text-[13px] text-tt-muted">
-                      {hasVariants ? `${product.skus.length} variations` : product.skus[0]?.sku_name || '—'}
                     </td>
                     <td className="px-4 py-3 text-[13px] font-semibold text-tt-text tabular-nums">{fmtInt(product.total_orders)}</td>
                     <td className="px-4 py-3 text-[13px] font-semibold text-tt-cyan tabular-nums">{fmt(product.total_gmv)}</td>
                     <td className={`px-4 py-3 text-[13px] font-semibold tabular-nums ${profit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>{fmt(profit)}</td>
                     <td className="px-4 py-3">
                       {hasVariants ? (
-                        <span className="text-[11px] text-tt-muted italic">per variant ↓</span>
+                        <span className="text-[11px] text-tt-muted italic">per SKU ↓</span>
                       ) : (
-                        <CostInput currentValue={getCost(costKey)} onSave={v => handleCostSave(costKey, null, v)} />
+                        <CostInput
+                          currentValue={getCost(product.tiktok_product_id)}
+                          onSave={v => onCostChange?.(product.tiktok_product_id, null, v)}
+                        />
                       )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[rgba(0,200,83,0.12)] text-[#00c853]">Active</span>
                     </td>
                   </tr>
 
+                  {/* Expanded SKU rows */}
                   {isExpanded && product.skus.map((sku, si) => {
                     const skuCostKey = `${product.tiktok_product_id}-${sku.sku_id}`;
-                    // Distribute shipping proportionally by GMV share
                     const gmvShare = product.total_gmv > 0 ? sku.gmv / product.total_gmv : 0;
                     const skuShipping = product.total_shipping * gmvShare;
                     const skuProfit = calcProfit(sku.gmv, skuShipping, skuCostKey, sku.orders);
 
                     return (
-                      <tr key={`${sku.sku_id}-${si}`} className="border-b border-tt-border bg-[rgba(105,201,208,0.02)]">
-                        <td className="px-4 py-2.5 pl-14">
-                          <span className="text-[12px] text-tt-muted">└ {sku.sku_name}</span>
+                      <tr key={`${sku.sku_id}-${si}`} className="border-b border-[rgba(255,255,255,0.04)] bg-[rgba(105,201,208,0.015)]">
+                        <td className="px-4 py-2.5 pl-16">
+                          <span className="text-[12px] text-tt-text">└ {sku.sku_name}</span>
                         </td>
-                        <td className="px-4 py-2.5 text-[12px] text-tt-muted font-mono">{sku.sku_id ? sku.sku_id.slice(-8) : '—'}</td>
                         <td className="px-4 py-2.5 text-[12px] text-tt-text tabular-nums">{fmtInt(sku.orders)}</td>
                         <td className="px-4 py-2.5 text-[12px] text-tt-cyan tabular-nums">{fmt(sku.gmv)}</td>
                         <td className={`px-4 py-2.5 text-[12px] tabular-nums ${skuProfit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>{fmt(skuProfit)}</td>
                         <td className="px-4 py-2.5">
-                          <CostInput currentValue={getCost(skuCostKey)} onSave={v => handleCostSave(product.tiktok_product_id, sku.sku_id, v)} />
+                          <CostInput
+                            currentValue={getCost(skuCostKey)}
+                            onSave={v => onCostChange?.(product.tiktok_product_id, sku.sku_id, v)}
+                          />
                         </td>
-                        <td className="px-4 py-2.5" />
                       </tr>
                     );
                   })}
@@ -190,7 +197,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
               );
             })}
             {productStats.length === 0 && (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-tt-muted">No product data yet.</td></tr>
+              <tr><td colSpan={5} className="px-4 py-8 text-center text-sm text-tt-muted">No product data yet.</td></tr>
             )}
           </tbody>
         </table>
