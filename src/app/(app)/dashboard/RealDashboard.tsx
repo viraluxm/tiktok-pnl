@@ -14,6 +14,8 @@ import { useProductCosts } from '@/hooks/useProductCosts';
 import { useProductStats } from '@/hooks/useProductStats';
 import { useFilters } from '@/hooks/useFilters';
 import { useShopVideos } from '@/hooks/useShopVideos';
+import { useTikTokBusiness } from '@/hooks/useTikTokBusiness';
+import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
 import type { Entry } from '@/types';
 
@@ -67,6 +69,8 @@ export default function RealDashboard() {
   const { costsMap, upsertCost } = useProductCosts();
   const { data: productStats } = useProductStats(filters.dateFrom, filters.dateTo);
   const { data: videoMetrics } = useShopVideos(filters.dateFrom, filters.dateTo);
+  const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
+  const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -119,8 +123,22 @@ export default function RealDashboard() {
       };
     }
 
+    // Override ad spend from Business API if available
+    if (adSpendMetrics && adSpendMetrics.totalSpend > 0) {
+      const ads = adSpendMetrics.totalSpend;
+      const adjustedProfit = result.totalNetProfit - ads + result.totalAds; // remove old ads, add real
+      result = {
+        ...result,
+        totalAds: ads,
+        totalNetProfit: adjustedProfit,
+        avgMargin: result.totalGMV > 0 ? (adjustedProfit / result.totalGMV) * 100 : 0,
+        roas: ads > 0 ? result.totalGMV / ads : null,
+        profitPerVideo: result.totalVideos > 0 ? adjustedProfit / result.totalVideos : 0,
+      };
+    }
+
     return result;
-  }, [entries, totalProductCogs, videoMetrics]);
+  }, [entries, totalProductCogs, videoMetrics, adSpendMetrics]);
   const chartData = useMemo(() => computeChartData(entries, costsMap), [entries, costsMap]);
 
   // Previous period
@@ -153,6 +171,32 @@ export default function RealDashboard() {
 
       <div className="p-6 max-w-[1600px] mx-auto">
         <TikTokConnect />
+
+        {/* Ad Account Connection */}
+        {isConnected && (
+          <div className="mb-4 flex items-center gap-3">
+            {bizConnected ? (
+              <div className="flex items-center gap-3 px-4 py-2 rounded-lg border border-tt-border bg-tt-card">
+                <span className="text-xs text-tt-muted">Ad Account:</span>
+                <span className="text-xs font-medium text-tt-green">{advertiserName || 'Connected'}</span>
+                <button onClick={() => syncAdSpend()} className="text-[10px] px-2 py-0.5 rounded border border-tt-border text-tt-muted hover:text-tt-cyan hover:border-tt-cyan transition-colors">
+                  Sync Ads
+                </button>
+                <button onClick={() => disconnectBiz()} className="text-[10px] px-2 py-0.5 rounded border border-tt-border text-tt-muted hover:text-tt-red hover:border-tt-red transition-colors">
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => connectBiz()}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg border border-dashed border-tt-border text-tt-muted hover:border-tt-cyan hover:text-tt-cyan transition-colors text-xs"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14"/></svg>
+                Connect Ad Account
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Sync hero — show until isCaughtUp is true */}
         {isConnected && syncProgress?.isSyncing && (
