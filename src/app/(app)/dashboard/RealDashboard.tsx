@@ -70,8 +70,41 @@ export default function RealDashboard() {
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
-  // Pass costs into all calculations so cost per unit affects net profit
-  const metrics = useMemo(() => computeDashboardMetrics(entries, costsMap), [entries, costsMap]);
+  // Calculate total COGS from product stats (entries lack product_id so calcEntry can't look up costs)
+  const totalProductCogs = useMemo(() => {
+    if (!productStats?.length) return 0;
+    if (!costsMap || Object.keys(costsMap).length === 0) return 0;
+
+    let cogs = 0;
+    for (const product of productStats) {
+      if (product.skus.length <= 1) {
+        const cost = costsMap[product.tiktok_product_id] || 0;
+        if (cost > 0) cogs += cost * product.total_orders;
+      } else {
+        for (const sku of product.skus) {
+          const key = `${product.tiktok_product_id}-${sku.sku_id}`;
+          const cost = costsMap[key] || 0;
+          if (cost > 0) cogs += cost * sku.orders;
+        }
+      }
+    }
+    return cogs;
+  }, [productStats, costsMap]);
+
+  // Adjust net profit with product-level COGS
+  const metrics = useMemo(() => {
+    const base = computeDashboardMetrics(entries);
+    if (totalProductCogs > 0) {
+      const adjustedProfit = base.totalNetProfit - totalProductCogs;
+      return {
+        ...base,
+        totalNetProfit: adjustedProfit,
+        avgMargin: base.totalGMV > 0 ? (adjustedProfit / base.totalGMV) * 100 : 0,
+        profitPerVideo: base.totalVideos > 0 ? adjustedProfit / base.totalVideos : 0,
+      };
+    }
+    return base;
+  }, [entries, totalProductCogs]);
   const chartData = useMemo(() => computeChartData(entries, costsMap), [entries, costsMap]);
 
   // Previous period
@@ -80,8 +113,8 @@ export default function RealDashboard() {
     [allEntries, activeQuickFilter, filters.dateFrom, filters.dateTo],
   );
   const prevMetrics = useMemo(
-    () => (prevEntries.length > 0 ? computeDashboardMetrics(prevEntries, costsMap) : null),
-    [prevEntries, costsMap],
+    () => (prevEntries.length > 0 ? computeDashboardMetrics(prevEntries) : null),
+    [prevEntries],
   );
 
   const handleCostChange = useCallback((productId: string, variantId: string | null, cost: number) => {

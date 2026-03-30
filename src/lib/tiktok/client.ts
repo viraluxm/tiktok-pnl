@@ -313,7 +313,16 @@ export interface ShopProduct {
   product_id: string;
   product_name: string;
   status: string;
-  skus: { sku_id: string; seller_sku: string; price: string }[];
+  skus: { sku_id: string; seller_sku: string; sku_name: string; price: string }[];
+}
+
+function buildSkuName(sku: Record<string, unknown>): string {
+  // TikTok SKUs have sales_attributes: [{attribute_name: "Color", value_name: "Black"}, ...]
+  const attrs = (sku.sales_attributes || []) as Array<Record<string, string>>;
+  if (attrs.length > 0) {
+    return attrs.map(a => a.value_name || a.attribute_value || '').filter(Boolean).join(' + ');
+  }
+  return String(sku.seller_sku || sku.id || '');
 }
 
 export async function getProducts(
@@ -322,25 +331,37 @@ export async function getProducts(
 ): Promise<ShopProduct[]> {
   try {
     const path = '/product/202309/products/search';
-    const body = {};
-    const queryParams: Record<string, string> = {
-      shop_cipher: shopCipher,
-      page_size: '50',
-    };
+    const allProducts: ShopProduct[] = [];
+    let pageToken: string | null = null;
 
-    const data = await shopPost(path, accessToken, body, queryParams);
-    const products = data?.products || [];
+    do {
+      const queryParams: Record<string, string> = {
+        shop_cipher: shopCipher,
+        page_size: '50',
+      };
+      if (pageToken) queryParams.page_token = pageToken;
 
-    return products.map((p: Record<string, unknown>) => ({
-      product_id: p.id || '',
-      product_name: (p.title as string) || '',
-      status: (p.status as string) || '',
-      skus: ((p.skus as Array<Record<string, unknown>>) || []).map((s) => ({
-        sku_id: s.id || '',
-        seller_sku: s.seller_sku || '',
-        price: (s.price as Record<string, string>)?.sale_price || '0',
-      })),
-    }));
+      const data = await shopPost(path, accessToken, {}, queryParams);
+      const products = data?.products || [];
+
+      for (const p of products as Array<Record<string, unknown>>) {
+        allProducts.push({
+          product_id: String(p.id || ''),
+          product_name: (p.title as string) || '',
+          status: (p.status as string) || '',
+          skus: ((p.skus as Array<Record<string, unknown>>) || []).map((s) => ({
+            sku_id: String(s.id || ''),
+            seller_sku: String(s.seller_sku || ''),
+            sku_name: buildSkuName(s),
+            price: (s.price as Record<string, string>)?.sale_price || '0',
+          })),
+        });
+      }
+
+      pageToken = data?.next_page_token || null;
+    } while (pageToken);
+
+    return allProducts;
   } catch (error) {
     console.error('Failed to get products:', error);
     return [];

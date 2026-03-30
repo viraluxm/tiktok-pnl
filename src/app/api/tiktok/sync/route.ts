@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchOrdersPage } from '@/lib/tiktok/client';
+import { fetchOrdersPage, getProducts } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
@@ -86,24 +86,30 @@ export async function POST() {
               if (oid) rows.set(oid, parsed);
             }
 
-            // Bulk upsert orders
+            // Bulk upsert orders (strip product_name — not a DB column, used only for product naming)
             const upsertData = [...rows.values()];
-            const { error: upsertErr } = await admin.from('synced_order_ids').upsert(upsertData, { onConflict: 'user_id,order_id' });
+            const dbRows = upsertData.map(({ product_name: _, ...rest }) => rest);
+            const { error: upsertErr } = await admin.from('synced_order_ids').upsert(dbRows, { onConflict: 'user_id,order_id' });
             if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
             else totalNew += upsertData.length;
 
             dayOrders += upsertData.length;
 
-            // Upsert unique products
+            // Upsert unique products (use actual product_name from TikTok, not sku_name)
             const products = new Map<string, Record<string, unknown>>();
             for (const row of upsertData) {
               const pid = row.tiktok_product_id as string;
               if (pid && !products.has(pid)) {
-                products.set(pid, { user_id: userId, tiktok_product_id: pid, name: String(row.sku_name || '') || `Product ${pid.slice(-6)}` });
+                const name = String(row.product_name || '') || String(row.sku_name || '') || `Product ${pid.slice(-6)}`;
+                const hasRealName = !!String(row.product_name || '');
+                products.set(pid, { user_id: userId, tiktok_product_id: pid, name, _hasRealName: hasRealName });
               }
             }
-            for (const prod of products.values()) {
-              const { error: pErr } = await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: true });
+            for (const [, prod] of products) {
+              const hasRealName = prod._hasRealName;
+              delete prod._hasRealName;
+              // If we have a real product_name, update existing rows; otherwise only insert new
+              const { error: pErr } = await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: !hasRealName });
               if (pErr) { /* ignore */ }
             }
           }
@@ -144,6 +150,25 @@ export async function POST() {
 
     if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
     else console.log(`[Sync] SAVED cursor=${isCaughtUp ? todayStr : currentDay}`);
+
+    // Sync product catalog to get ALL SKUs (including ones with no orders)
+    try {
+      const catalogProducts = await getProducts(accessToken, connection.shop_cipher);
+      for (const cp of catalogProducts) {
+        if (!cp.product_id) continue;
+        const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku }));
+        const { error: pErr } = await admin.from('products').upsert({
+          user_id: userId,
+          tiktok_product_id: cp.product_id,
+          name: cp.product_name || `Product ${cp.product_id.slice(-6)}`,
+          variants: JSON.stringify(variants),
+        }, { onConflict: 'user_id,tiktok_product_id' });
+        if (pErr) console.error('[Sync] Product catalog upsert error:', pErr.message);
+      }
+      console.log(`[Sync] Product catalog: ${catalogProducts.length} products synced`);
+    } catch (err) {
+      console.error('[Sync] Product catalog sync failed:', (err as Error).message);
+    }
 
     // Rebuild entries via SQL
     const { data: rebuildCount, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: userId });
@@ -231,6 +256,8 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   let skuId: string | null = null;
   let skuName: string | null = null;
 
+  let productName: string | null = null;
+
   for (const item of lineItems) {
     units += Number(item.quantity) || 1;
     if (affiliate === 0) affiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
@@ -238,6 +265,7 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
       tikTokProductId = String(item.product_id || '') || null;
       skuId = String(item.sku_id || '') || null;
       skuName = String(item.sku_name || '') || null;
+      productName = String(item.product_name || '') || null;
     }
   }
   if (units === 0) units = 1;
@@ -245,7 +273,8 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   return {
     user_id: userId, order_id: orderId, order_date: date,
     gmv, shipping, affiliate, platform_fee: platformFee, units,
-    tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName, status,
+    tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName,
+    product_name: productName, status,
   };
 }
 
