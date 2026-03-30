@@ -90,8 +90,9 @@ export async function fetchAdSpend(
 
   const json = await res.json();
 
+  console.log(`[AdSpend Debug] advertiser=${advertiserId} range=${startDate}-${endDate} code=${json.code} msg=${json.message || 'ok'} rows=${json.data?.list?.length || 0}`);
   if (json.code !== 0) {
-    console.error('[TikTok Business] Report error:', JSON.stringify(json));
+    console.error('[TikTok Business] Report error:', JSON.stringify(json).slice(0, 1000));
     throw new Error(`TikTok Business report failed: ${json.message || 'unknown'}`);
   }
 
