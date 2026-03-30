@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchOrdersPage, getProducts } from '@/lib/tiktok/client';
+import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const BACKFILL_DAYS = 365;
@@ -32,14 +32,33 @@ export async function POST() {
   if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection' }, { status: 404 });
   if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher' }, { status: 400 });
 
+  const accessToken = decryptOrFallback(connection.access_token, 'access_token');
+
+  // Always sync product catalog (for variant names and current SKU list)
+  try {
+    const { getProducts } = await import('@/lib/tiktok/client');
+    const catalogProducts = await getProducts(accessToken, connection.shop_cipher);
+    for (const cp of catalogProducts) {
+      if (!cp.product_id) continue;
+      const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku }));
+      await admin.from('products').upsert({
+        user_id: userId,
+        tiktok_product_id: cp.product_id,
+        name: cp.product_name || `Product ${cp.product_id.slice(-6)}`,
+        variants: JSON.stringify(variants),
+      }, { onConflict: 'user_id,tiktok_product_id' });
+    }
+    console.log(`[Sync] Product catalog: ${catalogProducts.length} products synced`);
+  } catch (err) {
+    console.error('[Sync] Product catalog sync failed:', (err as Error).message);
+  }
+
   // Already caught up?
   // Use shop timezone for all date calculations
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   if (connection.sync_cursor && connection.sync_cursor >= todayStr) {
     return NextResponse.json({ success: true, summary: { isCaughtUp: true, totalUniqueOrders: connection.sync_progress_orders || 0 } });
   }
-
-  const accessToken = decryptOrFallback(connection.access_token, 'access_token');
   const backfillStart = new Date();
   backfillStart.setDate(backfillStart.getDate() - BACKFILL_DAYS);
   const backfillStartStr = backfillStart.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
@@ -150,25 +169,6 @@ export async function POST() {
 
     if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
     else console.log(`[Sync] SAVED cursor=${isCaughtUp ? todayStr : currentDay}`);
-
-    // Sync product catalog to get ALL SKUs (including ones with no orders)
-    try {
-      const catalogProducts = await getProducts(accessToken, connection.shop_cipher);
-      for (const cp of catalogProducts) {
-        if (!cp.product_id) continue;
-        const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku }));
-        const { error: pErr } = await admin.from('products').upsert({
-          user_id: userId,
-          tiktok_product_id: cp.product_id,
-          name: cp.product_name || `Product ${cp.product_id.slice(-6)}`,
-          variants: JSON.stringify(variants),
-        }, { onConflict: 'user_id,tiktok_product_id' });
-        if (pErr) console.error('[Sync] Product catalog upsert error:', pErr.message);
-      }
-      console.log(`[Sync] Product catalog: ${catalogProducts.length} products synced`);
-    } catch (err) {
-      console.error('[Sync] Product catalog sync failed:', (err as Error).message);
-    }
 
     // Rebuild entries via SQL
     const { data: rebuildCount, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: userId });
