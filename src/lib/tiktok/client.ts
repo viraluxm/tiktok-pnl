@@ -340,7 +340,7 @@ export async function fetchShopVideos(
   const queryParams: Record<string, string> = {
     shop_cipher: shopCipher,
     start_date_ge: startDate,
-    end_date_le: endDate,
+    end_date_lt: endDate,
     page_size: '50',
     sort_field: 'gmv',
     sort_order: 'DESC',
