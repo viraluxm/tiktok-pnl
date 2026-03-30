@@ -77,6 +77,7 @@ export async function fetchAdSpend(
   url.searchParams.set('data_level', 'AUCTION_ADVERTISER');
   url.searchParams.set('dimensions', JSON.stringify(['stat_time_day']));
   url.searchParams.set('metrics', JSON.stringify(['spend', 'impressions', 'clicks', 'conversion']));
+  url.searchParams.set('query_lifetime', 'false');
   url.searchParams.set('start_date', startDate);
   url.searchParams.set('end_date', endDate);
   url.searchParams.set('page_size', '365');
