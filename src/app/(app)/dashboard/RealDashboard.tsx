@@ -9,9 +9,9 @@ import ForecastCard from '@/components/dashboard/ForecastCard';
 import ProductCostTable from '@/components/products/ProductCostTable';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useTikTok } from '@/hooks/useTikTok';
-import { useProducts } from '@/hooks/useProducts';
 import { useEntries } from '@/hooks/useEntries';
 import { useProductCosts } from '@/hooks/useProductCosts';
+import { useProductStats } from '@/hooks/useProductStats';
 import { useFilters } from '@/hooks/useFilters';
 import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
 import type { Entry } from '@/types';
@@ -63,8 +63,8 @@ export default function RealDashboard() {
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
-  const { products } = useProducts();
   const { costsMap, upsertCost } = useProductCosts();
+  const { data: productStats } = useProductStats(filters.dateFrom, filters.dateTo);
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -170,11 +170,8 @@ export default function RealDashboard() {
         {/* Products View */}
         {activeView === 'products' && (
           <ProductCostTable
-            products={products}
-            productProfits={metrics.productProfits}
-            chartData={chartData}
-            entries={entries}
-            savedCosts={costsMap}
+            productStats={productStats || []}
+            costsMap={costsMap}
             onCostChange={handleCostChange}
           />
         )}
