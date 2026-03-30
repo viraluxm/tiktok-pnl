@@ -25,38 +25,30 @@ export async function POST() {
   const accessToken = decryptOrFallback(connection.access_token, 'business_access_token');
 
   try {
-    // Try Shop API analytics for GMV Max / Shop Ads spend
+    // Try GMV Max endpoints via Business API
     try {
-      const { shopGet: sGet } = await import('@/lib/tiktok/client');
-      const { data: shopConn } = await admin.from('tiktok_connections').select('access_token, shop_cipher').eq('user_id', userId).single();
-      if (shopConn?.shop_cipher) {
-        const shopToken = (await import('@/lib/crypto')).decryptOrFallback(shopConn.access_token, 'shop_token');
-        const testStart = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
-        const testEnd = new Date().toISOString().split('T')[0];
+      const bizBase = 'https://business-api.tiktok.com/open_api/v1.3';
 
-        // Try shop ads performance endpoint
-        const endpoints = [
-          '/analytics/202509/shop_ads/performance',
-          '/analytics/202509/ads/performance',
-          '/promotion/202309/activities',
-        ];
-        for (const ep of endpoints) {
-          try {
-            const d = await sGet(ep, shopToken, {
-              shop_cipher: shopConn.shop_cipher,
-              start_date_ge: testStart,
-              end_date_lt: testEnd,
-              page_size: '5',
-            });
-            console.log(`[AdSpend Shop] ${ep}: keys=${Object.keys(d || {})}`);
-            console.log(`[AdSpend Shop] ${ep}: data=${JSON.stringify(d).slice(0, 1000)}`);
-          } catch (e) {
-            console.log(`[AdSpend Shop] ${ep}: ${(e as Error).message}`);
-          }
-        }
-      }
+      // List GMV Max sessions (campaigns)
+      try {
+        const url = `${bizBase}/campaign/gmv_max/session/list/?advertiser_id=${connection.advertiser_id}`;
+        const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
+        const json = await res.json();
+        console.log(`[GMV Max] session/list: code=${json.code} msg=${json.message || 'ok'}`);
+        console.log(`[GMV Max] session/list data:`, JSON.stringify(json.data || json).slice(0, 2000));
+      } catch (e) { console.log('[GMV Max] session/list error:', (e as Error).message); }
+
+      // List stores
+      try {
+        const url = `${bizBase}/gmv_max/store/list/?advertiser_id=${connection.advertiser_id}`;
+        const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
+        const json = await res.json();
+        console.log(`[GMV Max] store/list: code=${json.code} msg=${json.message || 'ok'}`);
+        console.log(`[GMV Max] store/list data:`, JSON.stringify(json.data || json).slice(0, 2000));
+      } catch (e) { console.log('[GMV Max] store/list error:', (e as Error).message); }
+
     } catch (e) {
-      console.log('[AdSpend Shop] Error:', (e as Error).message);
+      console.log('[GMV Max] Error:', (e as Error).message);
     }
 
     // Sync last 365 days in 30-day chunks (Business API auction data)
