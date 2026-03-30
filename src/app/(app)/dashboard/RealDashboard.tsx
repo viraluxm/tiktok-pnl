@@ -13,6 +13,7 @@ import { useEntries } from '@/hooks/useEntries';
 import { useProductCosts } from '@/hooks/useProductCosts';
 import { useProductStats } from '@/hooks/useProductStats';
 import { useFilters } from '@/hooks/useFilters';
+import { useShopVideos } from '@/hooks/useShopVideos';
 import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
 import type { Entry } from '@/types';
 
@@ -65,6 +66,7 @@ export default function RealDashboard() {
   const { syncProgress, isConnected, connection } = useTikTok();
   const { costsMap, upsertCost } = useProductCosts();
   const { data: productStats } = useProductStats(filters.dateFrom, filters.dateTo);
+  const { data: videoMetrics } = useShopVideos(filters.dateFrom, filters.dateTo);
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -88,20 +90,37 @@ export default function RealDashboard() {
     }
   }
 
-  // Adjust net profit with product-level COGS
+  // Adjust net profit with product-level COGS and overlay video metrics
   const metrics = useMemo(() => {
     const base = computeDashboardMetrics(entries);
+    let result = base;
+
     if (totalProductCogs > 0) {
       const adjustedProfit = base.totalNetProfit - totalProductCogs;
-      return {
+      result = {
         ...base,
         totalNetProfit: adjustedProfit,
         avgMargin: base.totalGMV > 0 ? (adjustedProfit / base.totalGMV) * 100 : 0,
         profitPerVideo: base.totalVideos > 0 ? adjustedProfit / base.totalVideos : 0,
       };
     }
-    return base;
-  }, [entries, totalProductCogs]);
+
+    // Override video metrics from shop_videos table if available
+    if (videoMetrics && videoMetrics.totalVideos > 0) {
+      const videos = videoMetrics.totalVideos;
+      const views = videoMetrics.totalViews;
+      result = {
+        ...result,
+        totalVideos: videos,
+        totalViews: views,
+        avgViewsPerVideo: videos > 0 ? views / videos : 0,
+        revenuePerVideo: videos > 0 ? result.totalGMV / videos : 0,
+        profitPerVideo: videos > 0 ? result.totalNetProfit / videos : 0,
+      };
+    }
+
+    return result;
+  }, [entries, totalProductCogs, videoMetrics]);
   const chartData = useMemo(() => computeChartData(entries, costsMap), [entries, costsMap]);
 
   // Previous period

@@ -300,6 +300,82 @@ export async function fetchUnsettledOrders(
   return data || {};
 }
 
+// ==================== VIDEO ANALYTICS ====================
+
+export interface ShopVideo {
+  id: string;
+  title: string;
+  username: string;
+  video_post_time: string;
+  duration: number;
+  hash_tags: string[];
+  gmv_amount: number;
+  gmv_currency: string;
+  gpm_amount: number;
+  gpm_currency: string;
+  avg_customers: number;
+  sku_orders: number;
+  items_sold: number;
+  views: number;
+  click_through_rate: number;
+  products: Array<{ id: string; name: string }>;
+}
+
+export interface FetchVideosResult {
+  videos: ShopVideo[];
+  nextPageToken: string | null;
+  totalCount: number;
+  latestAvailableDate: string | null;
+}
+
+export async function fetchShopVideos(
+  accessToken: string,
+  shopCipher: string,
+  pageToken: string | null,
+): Promise<FetchVideosResult> {
+  const path = '/analytics/202509/shop_videos/performance';
+
+  const queryParams: Record<string, string> = {
+    shop_cipher: shopCipher,
+    page_size: '50',
+  };
+  if (pageToken) queryParams.page_token = pageToken;
+
+  const data = await shopPost(path, accessToken, {}, queryParams);
+  const videos = ((data?.videos || []) as Array<Record<string, unknown>>).map(v => {
+    const gmv = (v.gmv || {}) as Record<string, string>;
+    const gpm = (v.gpm || {}) as Record<string, string>;
+    return {
+      id: String(v.id || ''),
+      title: String(v.title || ''),
+      username: String(v.username || ''),
+      video_post_time: String(v.video_post_time || ''),
+      duration: Number(v.duration) || 0,
+      hash_tags: (v.hash_tags || []) as string[],
+      gmv_amount: parseFloat(gmv.amount || '0') || 0,
+      gmv_currency: gmv.currency || 'USD',
+      gpm_amount: parseFloat(gpm.amount || '0') || 0,
+      gpm_currency: gpm.currency || 'USD',
+      avg_customers: Number(v.avg_customers) || 0,
+      sku_orders: Number(v.sku_orders) || 0,
+      items_sold: Number(v.items_sold) || 0,
+      views: Number(v.views) || 0,
+      click_through_rate: parseFloat(String(v.click_through_rate || '0')) || 0,
+      products: ((v.products || []) as Array<Record<string, string>>).map(p => ({
+        id: String(p.id || ''),
+        name: String(p.name || ''),
+      })),
+    };
+  });
+
+  return {
+    videos,
+    nextPageToken: data?.next_page_token || null,
+    totalCount: Number(data?.total_count) || 0,
+    latestAvailableDate: data?.latest_available_date || null,
+  };
+}
+
 function toFloat(val: unknown): number {
   if (val === null || val === undefined) return 0;
   if (typeof val === 'number') return val;

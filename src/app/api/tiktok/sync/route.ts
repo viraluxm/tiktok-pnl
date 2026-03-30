@@ -34,41 +34,6 @@ export async function POST() {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
-  // Debug: find affiliate commission data
-  try {
-    const { shopGet: sGet } = await import('@/lib/tiktok/client');
-    const sc = connection.shop_cipher;
-
-    // Get a recent order ID
-    const { orders: recentOrders } = await fetchOrdersPage(accessToken, sc,
-      dayToTs(new Date(Date.now() - 3 * 86400000).toISOString().split('T')[0]),
-      dayToTs(new Date(Date.now() - 1 * 86400000).toISOString().split('T')[0]), null);
-    const orderId = recentOrders[0] ? String((recentOrders[0] as Record<string, unknown>).id || '') : '';
-
-    // Try individual order detail (might have more payment fields than search)
-    if (orderId) {
-      try {
-        const d1 = await sGet(`/order/202309/orders/${orderId}`, accessToken, { shop_cipher: sc });
-        const pay = (d1?.payment || {}) as Record<string, unknown>;
-        console.log('[DEBUG OrderDetail] Payment keys:', Object.keys(pay));
-        console.log('[DEBUG OrderDetail] Payment:', JSON.stringify(pay).slice(0, 3000));
-      } catch (e) { console.log('[DEBUG OrderDetail] Error:', (e as Error).message); }
-    }
-
-    // Check statement data for commission breakdown
-    try {
-      const now = Math.floor(Date.now() / 1000);
-      const d2 = await sGet('/finance/202309/statements', accessToken, {
-        shop_cipher: sc, statement_time_ge: String(now - 30 * 86400), statement_time_lt: String(now), page_size: '2',
-      });
-      const stmts = (d2?.statements || []) as Record<string, unknown>[];
-      if (stmts[0]) console.log('[DEBUG Statement]', JSON.stringify(stmts[0]).slice(0, 3000));
-    } catch (e) { console.log('[DEBUG Statement] Error:', (e as Error).message); }
-
-  } catch (err) {
-    console.error('[DEBUG] Error:', (err as Error).message);
-  }
-
   // Always sync product catalog (for variant names and current SKU list)
   try {
     const { getProducts } = await import('@/lib/tiktok/client');

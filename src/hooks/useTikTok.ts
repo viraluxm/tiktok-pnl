@@ -82,7 +82,13 @@ export function useTikTok() {
               queryClient.invalidateQueries({ queryKey: ['entries'] });
 
               if (data.summary.isCaughtUp) {
-                console.log('[SyncDriver] CAUGHT UP — done');
+                console.log('[SyncDriver] CAUGHT UP — syncing videos');
+                // Sync video analytics after orders are caught up
+                try {
+                  await fetch('/api/tiktok/sync-videos', { method: 'POST' });
+                  queryClient.invalidateQueries({ queryKey: ['shop-videos-metrics'] });
+                  console.log('[SyncDriver] Video sync complete');
+                } catch (e) { console.log('[SyncDriver] Video sync error:', e); }
                 break;
               }
             }
