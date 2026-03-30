@@ -339,18 +339,17 @@ export async function fetchShopVideos(
 
   const queryParams: Record<string, string> = {
     shop_cipher: shopCipher,
+    start_date: startDate,
+    end_date: endDate,
     page_size: '50',
+    sort_field: 'gmv',
+    sort_order: 'DESC',
+    currency: 'USD',
+    video_type: 'ALL',
   };
   if (pageToken) queryParams.page_token = pageToken;
 
-  // POST body with date range (required by analytics endpoints)
-  const body: Record<string, unknown> = {
-    start_date: startDate,
-    end_date: endDate,
-  };
-
-  console.log('[VideoAPI] Calling with body:', JSON.stringify(body), 'params:', queryParams);
-  const data = await shopPost(path, accessToken, body, queryParams);
+  const data = await shopGet(path, accessToken, queryParams);
   const videos = ((data?.videos || []) as Array<Record<string, unknown>>).map(v => {
     const gmv = (v.gmv || {}) as Record<string, string>;
     const gpm = (v.gpm || {}) as Record<string, string>;
