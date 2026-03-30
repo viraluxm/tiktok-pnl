@@ -84,8 +84,13 @@ export async function GET(request: Request) {
     productLookup.set(pid, { name: String(p.name || ''), image_url: p.image_url as string | null });
 
     // Merge current catalog variants so SKUs with 0 sales in this period still appear
-    const variants = (typeof p.variants === 'string' ? JSON.parse(p.variants) : p.variants) as Array<{ id: string; name: string; sku?: string }> | null;
+    let rawVariants = p.variants;
+    if (typeof rawVariants === 'string') {
+      try { rawVariants = JSON.parse(rawVariants); } catch { rawVariants = null; }
+    }
+    const variants = (Array.isArray(rawVariants) ? rawVariants : null) as Array<{ id: string; name: string; sku?: string }> | null;
     if (variants && variants.length > 0) {
+      console.log(`[ProductStats] Product ${pid} has ${variants.length} catalog variants`);
       let product = productMap.get(pid);
       if (!product) {
         product = { tiktok_product_id: pid, total_orders: 0, total_gmv: 0, total_shipping: 0, skus: new Map() };

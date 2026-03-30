@@ -41,12 +41,13 @@ export async function POST() {
     for (const cp of catalogProducts) {
       if (!cp.product_id) continue;
       const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku }));
-      await admin.from('products').upsert({
+      const { error: catErr } = await admin.from('products').upsert({
         user_id: userId,
         tiktok_product_id: cp.product_id,
         name: cp.product_name || `Product ${cp.product_id.slice(-6)}`,
-        variants: JSON.stringify(variants),
+        variants,
       }, { onConflict: 'user_id,tiktok_product_id' });
+      if (catErr) console.error(`[Sync] Catalog upsert error for ${cp.product_id}:`, catErr.message);
     }
     console.log(`[Sync] Product catalog: ${catalogProducts.length} products synced`);
   } catch (err) {
