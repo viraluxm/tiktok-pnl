@@ -107,32 +107,14 @@ export async function GET(request: Request) {
     }
   }
 
-  // Join with products table for names, images, and catalog variants
-  const { data: prods } = await admin.from('products').select('tiktok_product_id, name, image_url, sku, variants').eq('user_id', data.user.id);
+  // Join with products table for names and images
+  const { data: prods } = await admin.from('products').select('tiktok_product_id, name, image_url').eq('user_id', data.user.id);
   const productsData: Record<string, unknown>[] = prods || [];
 
   const productLookup = new Map<string, { name: string; image_url: string | null }>();
   for (const p of productsData) {
     const pid = String(p.tiktok_product_id || '');
-    if (!pid) continue;
-    productLookup.set(pid, { name: String(p.name || ''), image_url: p.image_url as string | null });
-
-    // Merge catalog variants (from TikTok product API) into productMap
-    // This ensures SKUs with 0 orders still appear
-    const variants = (typeof p.variants === 'string' ? JSON.parse(p.variants) : p.variants) as Array<{ id: string; name: string; sku?: string }> | null;
-    if (variants && variants.length > 0) {
-      let product = productMap.get(pid);
-      if (!product) {
-        product = { tiktok_product_id: pid, total_orders: 0, total_gmv: 0, total_shipping: 0, skus: new Map() };
-        productMap.set(pid, product);
-      }
-      for (const v of variants) {
-        if (!v.id) continue;
-        if (!product.skus.has(v.id)) {
-          product.skus.set(v.id, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0 });
-        }
-      }
-    }
+    if (pid) productLookup.set(pid, { name: String(p.name || ''), image_url: p.image_url as string | null });
   }
 
   // Build response

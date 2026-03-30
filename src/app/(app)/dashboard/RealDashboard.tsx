@@ -70,26 +70,23 @@ export default function RealDashboard() {
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
-  // Calculate total COGS from product stats (entries lack product_id so calcEntry can't look up costs)
-  const totalProductCogs = useMemo(() => {
-    if (!productStats?.length) return 0;
-    if (!costsMap || Object.keys(costsMap).length === 0) return 0;
-
-    let cogs = 0;
+  // Calculate total COGS from product stats + costsMap
+  // No useMemo — must recompute every render to stay in sync with costsMap
+  let totalProductCogs = 0;
+  if (productStats?.length && costsMap) {
     for (const product of productStats) {
       if (product.skus.length <= 1) {
         const cost = costsMap[product.tiktok_product_id] || 0;
-        if (cost > 0) cogs += cost * product.total_orders;
+        if (cost > 0) totalProductCogs += cost * product.total_orders;
       } else {
         for (const sku of product.skus) {
           const key = `${product.tiktok_product_id}-${sku.sku_id}`;
           const cost = costsMap[key] || 0;
-          if (cost > 0) cogs += cost * sku.orders;
+          if (cost > 0) totalProductCogs += cost * sku.orders;
         }
       }
     }
-    return cogs;
-  }, [productStats, costsMap]);
+  }
 
   // Adjust net profit with product-level COGS
   const metrics = useMemo(() => {
