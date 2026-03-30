@@ -312,6 +312,7 @@ function toFloat(val: unknown): number {
 export interface ShopProduct {
   product_id: string;
   product_name: string;
+  image_url: string | null;
   status: string;
   skus: { sku_id: string; seller_sku: string; sku_name: string; price: string }[];
 }
@@ -346,9 +347,16 @@ async function getProductDetail(
       price: (s.price as Record<string, string>)?.sale_price || '0',
     }));
 
+    // Extract hero image from main_images array
+    const mainImages = (data.main_images || []) as Array<Record<string, unknown>>;
+    const imageUrl = mainImages.length > 0
+      ? String((mainImages[0].urls as string[])?.[0] || mainImages[0].url || mainImages[0].thumb_url || '')
+      : null;
+
     return {
       product_id: String(data.id || productId),
       product_name: String(data.title || ''),
+      image_url: imageUrl || null,
       status: String(data.status || ''),
       skus,
     };

@@ -45,6 +45,7 @@ export async function POST() {
         user_id: userId,
         tiktok_product_id: cp.product_id,
         name: cp.product_name || `Product ${cp.product_id.slice(-6)}`,
+        image_url: cp.image_url,
         variants,
       }, { onConflict: 'user_id,tiktok_product_id' });
       if (catErr) console.error(`[Sync] Catalog upsert error for ${cp.product_id}:`, catErr.message);
