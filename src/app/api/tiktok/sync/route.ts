@@ -78,6 +78,12 @@ export async function POST() {
           const { orders, nextCursor } = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageToken);
 
           if (orders.length > 0) {
+            // Log first order's payment object once to discover discount/promotion fields
+            if (daysProcessed === 0 && pageNum === 1) {
+              const sample = orders[0] as Record<string, unknown>;
+              console.log('[Sync] PAYMENT FIELDS:', JSON.stringify(sample.payment));
+              console.log('[Sync] ORDER TOP KEYS:', Object.keys(sample).join(', '));
+            }
             // Parse and deduplicate by order_id
             const rows = new Map<string, Record<string, unknown>>();
             for (const o of orders) {
