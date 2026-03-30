@@ -25,40 +25,47 @@ export async function POST() {
   const accessToken = decryptOrFallback(connection.access_token, 'business_access_token');
 
   try {
-    // Sync last 365 days
-    const endDate = new Date().toISOString().split('T')[0];
-    const startDate = new Date(Date.now() - 365 * 86400000).toISOString().split('T')[0];
+    // Sync last 365 days in 30-day chunks (TikTok max time span is 30 days)
+    const now = new Date();
+    let totalDays = 0;
 
-    const rows = await fetchAdSpend(accessToken, connection.advertiser_id, startDate, endDate);
+    for (let i = 0; i < 13; i++) {
+      const chunkEnd = new Date(now.getTime() - i * 30 * 86400000);
+      const chunkStart = new Date(chunkEnd.getTime() - 29 * 86400000);
+      const startDate = chunkStart.toISOString().split('T')[0];
+      const endDate = chunkEnd.toISOString().split('T')[0];
 
-    if (rows.length > 0) {
-      const dbRows = rows
-        .filter(r => r.date)
-        .map(r => ({
-          user_id: userId,
-          date: r.date,
-          spend_amount: r.spend,
-          spend_currency: r.currency,
-          impressions: r.impressions,
-          clicks: r.clicks,
-          conversions: r.conversions,
-          synced_at: new Date().toISOString(),
-        }));
+      try {
+        const rows = await fetchAdSpend(accessToken, connection.advertiser_id, startDate, endDate);
 
-      const { error: upsertErr } = await admin
-        .from('ad_spend')
-        .upsert(dbRows, { onConflict: 'user_id,date' });
+        if (rows.length > 0) {
+          const dbRows = rows
+            .filter(r => r.date)
+            .map(r => ({
+              user_id: userId,
+              date: r.date,
+              spend_amount: r.spend,
+              spend_currency: r.currency,
+              impressions: r.impressions,
+              clicks: r.clicks,
+              conversions: r.conversions,
+              synced_at: new Date().toISOString(),
+            }));
 
-      if (upsertErr) {
-        console.error('[AdSpend] Upsert error:', upsertErr.message);
-        return NextResponse.json({ error: upsertErr.message }, { status: 500 });
+          const { error: upsertErr } = await admin
+            .from('ad_spend')
+            .upsert(dbRows, { onConflict: 'user_id,date' });
+
+          if (upsertErr) console.error(`[AdSpend] Upsert error (${startDate}-${endDate}):`, upsertErr.message);
+          else totalDays += dbRows.length;
+        }
+      } catch (err) {
+        console.error(`[AdSpend] Chunk ${startDate}-${endDate} failed:`, (err as Error).message);
       }
-
-      console.log(`[AdSpend] Synced ${dbRows.length} days of ad spend`);
-      return NextResponse.json({ success: true, days: dbRows.length });
     }
 
-    return NextResponse.json({ success: true, days: 0 });
+    console.log(`[AdSpend] Synced ${totalDays} days of ad spend`);
+    return NextResponse.json({ success: true, days: totalDays });
   } catch (error) {
     console.error('[AdSpend] Failed:', error);
     return NextResponse.json({ error: 'Ad spend sync failed' }, { status: 500 });
