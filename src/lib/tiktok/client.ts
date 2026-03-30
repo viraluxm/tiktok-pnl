@@ -320,9 +320,16 @@ function buildSkuName(sku: Record<string, unknown>): string {
   // TikTok SKUs have sales_attributes: [{attribute_name: "Color", value_name: "Black"}, ...]
   const attrs = (sku.sales_attributes || []) as Array<Record<string, string>>;
   if (attrs.length > 0) {
-    return attrs.map(a => a.value_name || a.attribute_value || '').filter(Boolean).join(' + ');
+    const name = attrs.map(a => a.value_name || a.attribute_value || '').filter(Boolean).join(', ');
+    if (name) return name;
   }
-  return String(sku.seller_sku || sku.id || '');
+  // Try other common name fields
+  if (sku.name) return String(sku.name);
+  if (sku.title) return String(sku.title);
+  if (sku.seller_sku) return String(sku.seller_sku);
+  // Log raw SKU keys to help debug what fields TikTok returns
+  console.log('[TikTok SKU fields]', Object.keys(sku));
+  return String(sku.id || 'Unknown');
 }
 
 export async function getProducts(
