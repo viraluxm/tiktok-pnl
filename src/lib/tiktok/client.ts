@@ -107,7 +107,7 @@ function generateShopSignature(path: string, params: Record<string, string>, bod
   return crypto.createHmac('sha256', secret).update(signString).digest('hex');
 }
 
-async function shopGet(path: string, accessToken: string, extraParams: Record<string, string> = {}) {
+export async function shopGet(path: string, accessToken: string, extraParams: Record<string, string> = {}) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const appKey = TIKTOK_SHOP_APP_KEY;
 

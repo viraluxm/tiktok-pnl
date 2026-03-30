@@ -34,22 +34,19 @@ export async function POST() {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
-  // Debug: log one order's payment structure to find affiliate fields
+  // Debug: check finance order-level data for affiliate commission fields
   try {
-    const { orders: sampleOrders } = await fetchOrdersPage(accessToken, connection.shop_cipher,
-      dayToTs(new Date(Date.now() - 2 * 86400000).toISOString().split('T')[0]),
-      dayToTs(new Date(Date.now() - 1 * 86400000).toISOString().split('T')[0]),
-      null);
-    if (sampleOrders[0]) {
-      const o = sampleOrders[0] as Record<string, unknown>;
-      const payment = (o.payment || {}) as Record<string, unknown>;
-      console.log('[DEBUG] Order keys:', Object.keys(o));
-      console.log('[DEBUG] Payment:', JSON.stringify(payment).slice(0, 3000));
-      const items = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
-      if (items[0]) console.log('[DEBUG] LineItem:', JSON.stringify(items[0]).slice(0, 2000));
-    }
+    const { shopGet: sGet } = await import('@/lib/tiktok/client');
+    // Try the settled orders endpoint
+    const finData = await sGet('/finance/202309/orders', accessToken, {
+      shop_cipher: connection.shop_cipher,
+      page_size: '5',
+    });
+    console.log('[DEBUG Finance] Keys:', Object.keys(finData || {}));
+    const orders = (finData?.order_settlements || finData?.orders || []) as Record<string, unknown>[];
+    if (orders[0]) console.log('[DEBUG Finance] Order:', JSON.stringify(orders[0]).slice(0, 3000));
   } catch (err) {
-    console.error('[DEBUG] Sample order fetch failed:', (err as Error).message);
+    console.error('[DEBUG Finance] Error:', (err as Error).message);
   }
 
   // Always sync product catalog (for variant names and current SKU list)
