@@ -78,12 +78,6 @@ export async function POST() {
           const { orders, nextCursor } = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageToken);
 
           if (orders.length > 0) {
-            // Log first order's payment object once to discover discount/promotion fields
-            if (daysProcessed === 0 && pageNum === 1) {
-              const sample = orders[0] as Record<string, unknown>;
-              console.log('[Sync] PAYMENT FIELDS:', JSON.stringify(sample.payment));
-              console.log('[Sync] ORDER TOP KEYS:', Object.keys(sample).join(', '));
-            }
             // Parse and deduplicate by order_id
             const rows = new Map<string, Record<string, unknown>>();
             for (const o of orders) {
@@ -221,8 +215,13 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   const date = createTime ? toLocalDate(createTime) : '';
   const status = String(o.status || '').toUpperCase();
   const payment = (o.payment || {}) as Record<string, unknown>;
-  const gmv = toNum(payment.total_amount) || toNum(payment.product_total_amount) || 0;
-  const shipping = toNum(payment.shipping_fee) || toNum(payment.shipping_fee_amount) || 0;
+  // TikTok GMV = Price × Items + Shipping - Seller promotions - Platform co-funding (excludes tax)
+  const productPrice = toNum(payment.original_total_product_price) || toNum(payment.sub_total) || 0;
+  const shippingFee = toNum(payment.shipping_fee) || 0;
+  const sellerDiscount = toNum(payment.seller_discount) || 0;
+  const platformDiscount = toNum(payment.platform_discount) || 0;
+  const gmv = productPrice + shippingFee - sellerDiscount - platformDiscount;
+  const shipping = shippingFee;
   const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || 0;
   let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || 0;
 
