@@ -25,47 +25,41 @@ export async function POST() {
   const accessToken = decryptOrFallback(connection.access_token, 'business_access_token');
 
   try {
-    // Also try GMV Max / Shop Ads reporting via Business API with different data levels
-    const { fetchAdSpend: fetchGmvMax } = await import('@/lib/tiktok/business-client');
-
-    // Try to find which reporting endpoint has data
-    const testStart = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
-    const testEnd = new Date().toISOString().split('T')[0];
-
-    // Try RESERVATION data level (GMV Max campaigns)
+    // Try Shop API analytics for GMV Max / Shop Ads spend
     try {
-      const url = new URL('https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/');
-      url.searchParams.set('advertiser_id', connection.advertiser_id);
-      url.searchParams.set('report_type', 'BASIC');
-      url.searchParams.set('data_level', 'RESERVATION_ADVERTISER');
-      url.searchParams.set('dimensions', JSON.stringify(['stat_time_day']));
-      url.searchParams.set('metrics', JSON.stringify(['spend', 'impressions', 'clicks']));
-      url.searchParams.set('start_date', testStart);
-      url.searchParams.set('end_date', testEnd);
-      const res = await fetch(url.toString(), { headers: { 'Access-Token': accessToken } });
-      const json = await res.json();
-      console.log(`[AdSpend] RESERVATION test: code=${json.code} rows=${json.data?.list?.length || 0} msg=${json.message || ''}`);
-      if (json.data?.list?.[0]) console.log('[AdSpend] RESERVATION sample:', JSON.stringify(json.data.list[0]).slice(0, 500));
-    } catch (e) { console.log('[AdSpend] RESERVATION error:', (e as Error).message); }
+      const { shopGet: sGet } = await import('@/lib/tiktok/client');
+      const { data: shopConn } = await admin.from('tiktok_connections').select('access_token, shop_cipher').eq('user_id', userId).single();
+      if (shopConn?.shop_cipher) {
+        const shopToken = (await import('@/lib/crypto')).decryptOrFallback(shopConn.access_token, 'shop_token');
+        const testStart = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+        const testEnd = new Date().toISOString().split('T')[0];
 
-    // Try campaign-level to see GMV Max
-    try {
-      const url = new URL('https://business-api.tiktok.com/open_api/v1.3/report/integrated/get/');
-      url.searchParams.set('advertiser_id', connection.advertiser_id);
-      url.searchParams.set('report_type', 'BASIC');
-      url.searchParams.set('data_level', 'AUCTION_CAMPAIGN');
-      url.searchParams.set('dimensions', JSON.stringify(['stat_time_day', 'campaign_id']));
-      url.searchParams.set('metrics', JSON.stringify(['spend', 'campaign_name']));
-      url.searchParams.set('start_date', testStart);
-      url.searchParams.set('end_date', testEnd);
-      url.searchParams.set('page_size', '5');
-      const res = await fetch(url.toString(), { headers: { 'Access-Token': accessToken } });
-      const json = await res.json();
-      console.log(`[AdSpend] CAMPAIGN test: code=${json.code} rows=${json.data?.list?.length || 0} msg=${json.message || ''}`);
-      if (json.data?.list?.[0]) console.log('[AdSpend] CAMPAIGN sample:', JSON.stringify(json.data.list[0]).slice(0, 500));
-    } catch (e) { console.log('[AdSpend] CAMPAIGN error:', (e as Error).message); }
+        // Try shop ads performance endpoint
+        const endpoints = [
+          '/analytics/202509/shop_ads/performance',
+          '/analytics/202509/ads/performance',
+          '/promotion/202309/activities',
+        ];
+        for (const ep of endpoints) {
+          try {
+            const d = await sGet(ep, shopToken, {
+              shop_cipher: shopConn.shop_cipher,
+              start_date_ge: testStart,
+              end_date_lt: testEnd,
+              page_size: '5',
+            });
+            console.log(`[AdSpend Shop] ${ep}: keys=${Object.keys(d || {})}`);
+            console.log(`[AdSpend Shop] ${ep}: data=${JSON.stringify(d).slice(0, 1000)}`);
+          } catch (e) {
+            console.log(`[AdSpend Shop] ${ep}: ${(e as Error).message}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.log('[AdSpend Shop] Error:', (e as Error).message);
+    }
 
-    // Sync last 365 days in 30-day chunks (TikTok max time span is 30 days)
+    // Sync last 365 days in 30-day chunks (Business API auction data)
     const now = new Date();
     let totalDays = 0;
 
