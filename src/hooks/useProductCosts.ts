@@ -49,18 +49,32 @@ export function useProductCosts() {
       const match = products.find((p: { id: string; tiktok_product_id: string | null }) => p.tiktok_product_id === productId);
       if (match) dbProductId = match.id;
 
+      console.log('[CostSave] productId:', productId, '→ dbProductId:', dbProductId, 'variant:', variantId, 'cost:', costPerUnit);
+
+      // Delete existing then insert (avoids NULL variant_id unique constraint issues)
+      if (variantId) {
+        await supabase.from('product_costs').delete().eq('user_id', user!.id).eq('product_id', dbProductId).eq('variant_id', variantId);
+      } else {
+        await supabase.from('product_costs').delete().eq('user_id', user!.id).eq('product_id', dbProductId).is('variant_id', null);
+      }
+
       const { data, error } = await supabase
         .from('product_costs')
-        .upsert({
+        .insert({
           user_id: user!.id,
           product_id: dbProductId,
           variant_id: variantId,
           cost_per_unit: costPerUnit,
           updated_at: new Date().toISOString(),
-        }, { onConflict: 'user_id,product_id,variant_id' })
+        })
         .select()
         .single();
-      if (error) throw error;
+
+      if (error) {
+        console.error('[CostSave] Error:', error.message);
+        throw error;
+      }
+      console.log('[CostSave] Saved:', data);
       return data;
     },
     onSuccess: () => {

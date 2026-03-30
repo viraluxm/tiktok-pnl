@@ -29,6 +29,11 @@ function CostInput({ currentValue, onSave }: { currentValue: number; onSave: (va
     setEditing(false);
   };
 
+  const cancel = () => {
+    setEditing(false);
+    setInputValue('');
+  };
+
   if (!editing) {
     return (
       <button onClick={startEdit} className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[13px] hover:bg-[rgba(105,201,208,0.08)] transition-all cursor-pointer min-w-[90px]">
@@ -54,10 +59,22 @@ function CostInput({ currentValue, onSave }: { currentValue: number; onSave: (va
         value={inputValue}
         placeholder="0.00"
         onChange={e => setInputValue(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }}
-        onBlur={save}
-        className="bg-tt-input-bg border border-tt-cyan text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[80px] focus:outline-none"
+        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') cancel(); }}
+        className="bg-tt-input-bg border border-tt-cyan text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[70px] focus:outline-none"
       />
+      {/* Checkmark */}
+      <button onClick={save} className="p-1 rounded hover:bg-[rgba(0,200,83,0.15)] transition-colors" title="Save">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00c853" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      </button>
+      {/* X */}
+      <button onClick={cancel} className="p-1 rounded hover:bg-[rgba(255,23,68,0.15)] transition-colors" title="Cancel">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ff1744" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
     </div>
   );
 }
