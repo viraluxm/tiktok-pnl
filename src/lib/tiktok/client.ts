@@ -323,13 +323,39 @@ function buildSkuName(sku: Record<string, unknown>): string {
     const name = attrs.map(a => a.value_name || a.attribute_value || '').filter(Boolean).join(', ');
     if (name) return name;
   }
-  // Try other common name fields
   if (sku.name) return String(sku.name);
   if (sku.title) return String(sku.title);
   if (sku.seller_sku) return String(sku.seller_sku);
-  // Log raw SKU keys to help debug what fields TikTok returns
-  console.log('[TikTok SKU fields]', Object.keys(sku));
   return String(sku.id || 'Unknown');
+}
+
+async function getProductDetail(
+  accessToken: string,
+  shopCipher: string,
+  productId: string,
+): Promise<ShopProduct | null> {
+  try {
+    const path = `/product/202309/products/${productId}`;
+    const data = await shopGet(path, accessToken, { shop_cipher: shopCipher });
+    if (!data) return null;
+
+    const skus = ((data.skus as Array<Record<string, unknown>>) || []).map((s) => ({
+      sku_id: String(s.id || ''),
+      seller_sku: String(s.seller_sku || ''),
+      sku_name: buildSkuName(s),
+      price: (s.price as Record<string, string>)?.sale_price || '0',
+    }));
+
+    return {
+      product_id: String(data.id || productId),
+      product_name: String(data.title || ''),
+      status: String(data.status || ''),
+      skus,
+    };
+  } catch (err) {
+    console.error(`[TikTok] Failed to get product ${productId}:`, (err as Error).message);
+    return null;
+  }
 }
 
 export async function getProducts(
@@ -337,8 +363,9 @@ export async function getProducts(
   shopCipher: string,
 ): Promise<ShopProduct[]> {
   try {
+    // Step 1: Search to get product IDs
     const path = '/product/202309/products/search';
-    const allProducts: ShopProduct[] = [];
+    const productIds: string[] = [];
     let pageToken: string | null = null;
 
     do {
@@ -352,21 +379,19 @@ export async function getProducts(
       const products = data?.products || [];
 
       for (const p of products as Array<Record<string, unknown>>) {
-        allProducts.push({
-          product_id: String(p.id || ''),
-          product_name: (p.title as string) || '',
-          status: (p.status as string) || '',
-          skus: ((p.skus as Array<Record<string, unknown>>) || []).map((s) => ({
-            sku_id: String(s.id || ''),
-            seller_sku: String(s.seller_sku || ''),
-            sku_name: buildSkuName(s),
-            price: (s.price as Record<string, string>)?.sale_price || '0',
-          })),
-        });
+        const id = String(p.id || '');
+        if (id) productIds.push(id);
       }
 
       pageToken = data?.next_page_token || null;
     } while (pageToken);
+
+    // Step 2: Fetch full details for each product (has sales_attributes for SKU names)
+    const allProducts: ShopProduct[] = [];
+    for (const pid of productIds) {
+      const detail = await getProductDetail(accessToken, shopCipher, pid);
+      if (detail) allProducts.push(detail);
+    }
 
     return allProducts;
   } catch (error) {
