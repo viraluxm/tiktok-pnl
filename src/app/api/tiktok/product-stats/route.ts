@@ -72,49 +72,32 @@ export async function GET(request: Request) {
     sku.gmv += gmv;
   }
 
-  // Fetch ALL known SKUs (no date filter) so we show variations with 0 sales too
-  if (dateFrom || dateTo) {
-    const allSkuRows: Record<string, unknown>[] = [];
-    let allSkuOffset = 0;
-    let allSkuQuery = admin
-      .from('synced_order_ids')
-      .select('tiktok_product_id, sku_id, sku_name')
-      .eq('user_id', data.user.id);
-    while (true) {
-      const { data: page, error } = await allSkuQuery.range(allSkuOffset, allSkuOffset + PAGE - 1);
-      if (error || !page || page.length === 0) break;
-      allSkuRows.push(...page);
-      if (page.length < PAGE) break;
-      allSkuOffset += PAGE;
-    }
-
-    // Merge all-time SKUs into productMap (add missing products/SKUs with 0 values)
-    // Build a set of known sku_ids per product to avoid duplicates
-    for (const row of allSkuRows) {
-      const pid = String(row.tiktok_product_id || 'unknown');
-      const skuId = String(row.sku_id || '');
-      const skuName = String(row.sku_name || 'Default');
-
-      let product = productMap.get(pid);
-      if (!product) {
-        product = { tiktok_product_id: pid, total_orders: 0, total_gmv: 0, total_shipping: 0, skus: new Map() };
-        productMap.set(pid, product);
-      }
-
-      if (!product.skus.has(skuId)) {
-        product.skus.set(skuId, { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0 });
-      }
-    }
-  }
-
-  // Join with products table for names and images
-  const { data: prods } = await admin.from('products').select('tiktok_product_id, name, image_url').eq('user_id', data.user.id);
+  // Merge current catalog variants (from products.variants) so current SKUs
+  // with 0 sales still appear — but NOT old/inactive variations from order history
+  const { data: prods } = await admin.from('products').select('tiktok_product_id, name, image_url, variants').eq('user_id', data.user.id);
   const productsData: Record<string, unknown>[] = prods || [];
 
   const productLookup = new Map<string, { name: string; image_url: string | null }>();
   for (const p of productsData) {
     const pid = String(p.tiktok_product_id || '');
-    if (pid) productLookup.set(pid, { name: String(p.name || ''), image_url: p.image_url as string | null });
+    if (!pid) continue;
+    productLookup.set(pid, { name: String(p.name || ''), image_url: p.image_url as string | null });
+
+    // Merge current catalog variants so SKUs with 0 sales in this period still appear
+    const variants = (typeof p.variants === 'string' ? JSON.parse(p.variants) : p.variants) as Array<{ id: string; name: string; sku?: string }> | null;
+    if (variants && variants.length > 0) {
+      let product = productMap.get(pid);
+      if (!product) {
+        product = { tiktok_product_id: pid, total_orders: 0, total_gmv: 0, total_shipping: 0, skus: new Map() };
+        productMap.set(pid, product);
+      }
+      for (const v of variants) {
+        if (!v.id) continue;
+        if (!product.skus.has(v.id)) {
+          product.skus.set(v.id, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0 });
+        }
+      }
+    }
   }
 
   // Build response
