@@ -36,7 +36,7 @@ export async function POST() {
 
   // Debug: log one order's payment structure to find affiliate fields
   try {
-    const { data: sampleOrders } = await fetchOrdersPage(accessToken, connection.shop_cipher,
+    const { orders: sampleOrders } = await fetchOrdersPage(accessToken, connection.shop_cipher,
       dayToTs(new Date(Date.now() - 2 * 86400000).toISOString().split('T')[0]),
       dayToTs(new Date(Date.now() - 1 * 86400000).toISOString().split('T')[0]),
       null);
