@@ -31,28 +31,33 @@ export function useProductCosts() {
     },
   });
 
+  // Also fetch products to build tiktok_product_id → UUID mapping
+  const productsQuery = useQuery({
+    queryKey: ['products-map', user?.id],
+    enabled: !!user,
+    queryFn: async () => {
+      const { data } = await supabase.from('products').select('id, tiktok_product_id');
+      return data || [];
+    },
+  });
+
   const upsertCost = useMutation({
-    mutationFn: async ({
-      productId,
-      variantId,
-      costPerUnit,
-    }: {
-      productId: string;
-      variantId: string | null;
-      costPerUnit: number;
-    }) => {
+    mutationFn: async ({ productId, variantId, costPerUnit }: { productId: string; variantId: string | null; costPerUnit: number }) => {
+      // productId might be a tiktok_product_id — look up the UUID
+      let dbProductId = productId;
+      const products = productsQuery.data || [];
+      const match = products.find((p: { id: string; tiktok_product_id: string | null }) => p.tiktok_product_id === productId);
+      if (match) dbProductId = match.id;
+
       const { data, error } = await supabase
         .from('product_costs')
-        .upsert(
-          {
-            user_id: user!.id,
-            product_id: productId,
-            variant_id: variantId,
-            cost_per_unit: costPerUnit,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'user_id,product_id,variant_id' }
-        )
+        .upsert({
+          user_id: user!.id,
+          product_id: dbProductId,
+          variant_id: variantId,
+          cost_per_unit: costPerUnit,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id,product_id,variant_id' })
         .select()
         .single();
       if (error) throw error;
@@ -63,13 +68,29 @@ export function useProductCosts() {
     },
   });
 
-  // Build a lookup map: "productId" or "productId-variantId" -> cost_per_unit
+  // Build costsMap keyed by BOTH UUID and tiktok_product_id
   const costsMap: Record<string, number> = {};
+  const products = productsQuery.data || [];
+  const tiktokToUuid = new Map<string, string>();
+  for (const p of products) {
+    const prod = p as { id: string; tiktok_product_id: string | null };
+    if (prod.tiktok_product_id) tiktokToUuid.set(prod.tiktok_product_id, prod.id);
+  }
+
   if (query.data) {
-    query.data.forEach((c) => {
-      const key = c.variant_id ? `${c.product_id}-${c.variant_id}` : c.product_id;
-      costsMap[key] = c.cost_per_unit;
-    });
+    for (const c of query.data) {
+      // Key by UUID
+      const uuidKey = c.variant_id ? `${c.product_id}-${c.variant_id}` : c.product_id;
+      costsMap[uuidKey] = c.cost_per_unit;
+
+      // Also key by tiktok_product_id for the products page
+      for (const [tikId, uuid] of tiktokToUuid.entries()) {
+        if (uuid === c.product_id) {
+          const tikKey = c.variant_id ? `${tikId}-${c.variant_id}` : tikId;
+          costsMap[tikKey] = c.cost_per_unit;
+        }
+      }
+    }
   }
 
   return {

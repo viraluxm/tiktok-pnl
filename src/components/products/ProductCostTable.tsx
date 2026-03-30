@@ -12,18 +12,26 @@ interface ProductCostTableProps {
   onCostChange?: (productId: string, skuId: string | null, cost: number) => void;
 }
 
-function CostInput({ costKey, currentValue, onSave }: { costKey: string; currentValue: number; onSave: (value: number) => void }) {
+function CostInput({ currentValue, onSave }: { currentValue: number; onSave: (value: number) => void }) {
   const [editing, setEditing] = useState(false);
-  const [inputValue, setInputValue] = useState(String(currentValue || ''));
-  const [showConfirm, setShowConfirm] = useState(false);
+  const [inputValue, setInputValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const startEdit = () => {
+    setEditing(true);
+    setInputValue(currentValue > 0 ? currentValue.toFixed(2) : '');
+    setTimeout(() => inputRef.current?.focus(), 50);
+  };
+
+  const save = () => {
+    const val = parseFloat(inputValue) || 0;
+    onSave(val);
+    setEditing(false);
+  };
 
   if (!editing) {
     return (
-      <button
-        onClick={() => { setEditing(true); setInputValue(String(currentValue || '')); setTimeout(() => inputRef.current?.focus(), 50); }}
-        className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[13px] hover:bg-[rgba(105,201,208,0.08)] transition-all cursor-pointer min-w-[90px]"
-      >
+      <button onClick={startEdit} className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[13px] hover:bg-[rgba(105,201,208,0.08)] transition-all cursor-pointer min-w-[90px]">
         <span className="text-tt-muted">$</span>
         <span className={currentValue > 0 ? 'text-tt-text font-medium' : 'text-tt-muted'}>
           {currentValue > 0 ? currentValue.toFixed(2) : '0.00'}
@@ -36,62 +44,20 @@ function CostInput({ costKey, currentValue, onSave }: { costKey: string; current
     );
   }
 
-  const handleSave = () => {
-    const newValue = parseFloat(inputValue) || 0;
-    if (newValue !== currentValue) {
-      setShowConfirm(true);
-    } else {
-      setEditing(false);
-    }
-  };
-
-  const confirmSave = () => {
-    const newValue = parseFloat(inputValue) || 0;
-    onSave(newValue);
-    setShowConfirm(false);
-    setEditing(false);
-  };
-
   return (
-    <div className="relative">
-      <div className="flex items-center gap-1">
-        <span className="text-tt-muted text-[13px]">$</span>
-        <input
-          ref={inputRef}
-          type="number"
-          step="0.01"
-          value={inputValue}
-          onChange={e => setInputValue(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleSave(); if (e.key === 'Escape') setEditing(false); }}
-          onBlur={handleSave}
-          className="bg-tt-input-bg border border-tt-cyan text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[80px] focus:outline-none"
-        />
-        <button onClick={handleSave} className="text-tt-cyan text-[11px] font-semibold px-1">Save</button>
-        <button onClick={() => setEditing(false)} className="text-tt-muted text-[11px] px-1">Cancel</button>
-      </div>
-
-      {/* Confirmation modal */}
-      {showConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={e => e.stopPropagation()}>
-          <div className="bg-tt-card border border-tt-border rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
-            <h3 className="text-sm font-semibold text-tt-text mb-2">Update Cost per Unit?</h3>
-            <p className="text-xs text-tt-muted mb-1">
-              Changing from <strong>${(currentValue || 0).toFixed(2)}</strong> to <strong>${(parseFloat(inputValue) || 0).toFixed(2)}</strong>
-            </p>
-            <p className="text-xs text-tt-muted mb-4">
-              This will recalculate net profit for all orders with this product.
-            </p>
-            <div className="flex gap-3 justify-end">
-              <button onClick={() => { setShowConfirm(false); setEditing(false); }} className="px-4 py-2 rounded-lg border border-tt-border text-tt-muted text-[12px] font-medium hover:border-tt-text hover:text-tt-text transition-all">
-                Cancel
-              </button>
-              <button onClick={confirmSave} className="px-4 py-2 rounded-lg bg-tt-cyan text-black text-[12px] font-semibold hover:opacity-90 transition-opacity">
-                Confirm
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+    <div className="flex items-center gap-1">
+      <span className="text-tt-muted text-[13px]">$</span>
+      <input
+        ref={inputRef}
+        type="number"
+        step="0.01"
+        value={inputValue}
+        placeholder="0.00"
+        onChange={e => setInputValue(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }}
+        onBlur={save}
+        className="bg-tt-input-bg border border-tt-cyan text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[80px] focus:outline-none"
+      />
     </div>
   );
 }
@@ -101,11 +67,10 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
 
   const getCost = (key: string) => costsMap?.[key] || 0;
 
+  // Net Profit = GMV - Shipping - Platform Fee (6%) - COGS
   const calcProfit = (gmv: number, shipping: number, costKey: string, orders: number) => {
     const cogs = getCost(costKey) * orders;
     const platformFee = gmv * 0.06;
-    // Net Profit = GMV - Shipping - Platform Fee - COGS
-    // (Tax already excluded from GMV in the sync)
     return gmv - shipping - platformFee - cogs;
   };
 
@@ -154,9 +119,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
                           <button
                             onClick={() => setExpandedProduct(isExpanded ? null : product.tiktok_product_id)}
                             className={`ml-1 flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium cursor-pointer transition-all ${
-                              isExpanded
-                                ? 'border-tt-cyan bg-[rgba(105,201,208,0.1)] text-tt-cyan'
-                                : 'border-tt-border text-tt-muted hover:border-tt-cyan hover:text-tt-cyan'
+                              isExpanded ? 'border-tt-cyan bg-[rgba(105,201,208,0.1)] text-tt-cyan' : 'border-tt-border text-tt-muted hover:border-tt-cyan hover:text-tt-cyan'
                             }`}
                           >
                             <span>{product.skus.length} variants</span>
@@ -168,61 +131,39 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
                     <td className="px-4 py-3 text-[13px] text-tt-muted">
                       {hasVariants ? `${product.skus.length} variations` : product.skus[0]?.sku_name || '—'}
                     </td>
-                    <td className="px-4 py-3 text-[13px] font-semibold text-tt-text tabular-nums">
-                      {fmtInt(product.total_orders)}
-                    </td>
-                    <td className="px-4 py-3 text-[13px] font-semibold text-tt-cyan tabular-nums">
-                      {fmt(product.total_gmv)}
-                    </td>
-                    <td className={`px-4 py-3 text-[13px] font-semibold tabular-nums ${profit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>
-                      {fmt(profit)}
-                    </td>
+                    <td className="px-4 py-3 text-[13px] font-semibold text-tt-text tabular-nums">{fmtInt(product.total_orders)}</td>
+                    <td className="px-4 py-3 text-[13px] font-semibold text-tt-cyan tabular-nums">{fmt(product.total_gmv)}</td>
+                    <td className={`px-4 py-3 text-[13px] font-semibold tabular-nums ${profit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>{fmt(profit)}</td>
                     <td className="px-4 py-3">
                       {hasVariants ? (
                         <span className="text-[11px] text-tt-muted italic">per variant ↓</span>
                       ) : (
-                        <CostInput
-                          costKey={costKey}
-                          currentValue={getCost(costKey)}
-                          onSave={v => handleCostSave(costKey, null, v)}
-                        />
+                        <CostInput currentValue={getCost(costKey)} onSave={v => handleCostSave(costKey, null, v)} />
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[rgba(0,200,83,0.12)] text-[#00c853]">
-                        Active
-                      </span>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[rgba(0,200,83,0.12)] text-[#00c853]">Active</span>
                     </td>
                   </tr>
 
-                  {/* Expanded variation rows */}
                   {isExpanded && product.skus.map((sku, si) => {
                     const skuCostKey = `${product.tiktok_product_id}-${sku.sku_id}`;
-                    const skuProfit = calcProfit(sku.gmv, 0, skuCostKey, sku.orders);
+                    // Distribute shipping proportionally by GMV share
+                    const gmvShare = product.total_gmv > 0 ? sku.gmv / product.total_gmv : 0;
+                    const skuShipping = product.total_shipping * gmvShare;
+                    const skuProfit = calcProfit(sku.gmv, skuShipping, skuCostKey, sku.orders);
 
                     return (
                       <tr key={`${sku.sku_id}-${si}`} className="border-b border-tt-border bg-[rgba(105,201,208,0.02)]">
                         <td className="px-4 py-2.5 pl-14">
                           <span className="text-[12px] text-tt-muted">└ {sku.sku_name}</span>
                         </td>
-                        <td className="px-4 py-2.5 text-[12px] text-tt-muted font-mono">
-                          {sku.sku_id ? sku.sku_id.slice(-8) : '—'}
-                        </td>
-                        <td className="px-4 py-2.5 text-[12px] text-tt-text tabular-nums">
-                          {fmtInt(sku.orders)}
-                        </td>
-                        <td className="px-4 py-2.5 text-[12px] text-tt-cyan tabular-nums">
-                          {fmt(sku.gmv)}
-                        </td>
-                        <td className={`px-4 py-2.5 text-[12px] tabular-nums ${skuProfit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>
-                          {fmt(skuProfit)}
-                        </td>
+                        <td className="px-4 py-2.5 text-[12px] text-tt-muted font-mono">{sku.sku_id ? sku.sku_id.slice(-8) : '—'}</td>
+                        <td className="px-4 py-2.5 text-[12px] text-tt-text tabular-nums">{fmtInt(sku.orders)}</td>
+                        <td className="px-4 py-2.5 text-[12px] text-tt-cyan tabular-nums">{fmt(sku.gmv)}</td>
+                        <td className={`px-4 py-2.5 text-[12px] tabular-nums ${skuProfit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>{fmt(skuProfit)}</td>
                         <td className="px-4 py-2.5">
-                          <CostInput
-                            costKey={skuCostKey}
-                            currentValue={getCost(skuCostKey)}
-                            onSave={v => handleCostSave(product.tiktok_product_id, sku.sku_id, v)}
-                          />
+                          <CostInput currentValue={getCost(skuCostKey)} onSave={v => handleCostSave(product.tiktok_product_id, sku.sku_id, v)} />
                         </td>
                         <td className="px-4 py-2.5" />
                       </tr>
@@ -232,11 +173,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
               );
             })}
             {productStats.length === 0 && (
-              <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-sm text-tt-muted">
-                  No product data yet. Sync your TikTok shop to see products.
-                </td>
-              </tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-tt-muted">No product data yet.</td></tr>
             )}
           </tbody>
         </table>
