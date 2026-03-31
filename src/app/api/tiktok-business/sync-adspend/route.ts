@@ -33,15 +33,19 @@ export async function POST() {
       if (shopConn?.shop_cipher) {
         const shopToken = (await import('@/lib/crypto')).decryptOrFallback(shopConn.access_token, 'shop_token');
 
-        // Get a few recent order IDs to test
-        const { data: recentOrders } = await admin
+        // Get OLDER orders that should be settled (at least 2 weeks old)
+        const twoWeeksAgo = new Date(Date.now() - 14 * 86400000).toISOString().split('T')[0];
+        const { data: settledOrders } = await admin
           .from('synced_order_ids')
-          .select('order_id')
+          .select('order_id, order_date')
           .eq('user_id', userId)
+          .lte('order_date', twoWeeksAgo)
           .order('order_date', { ascending: false })
-          .limit(3);
+          .limit(5);
 
-        for (const row of (recentOrders || []).slice(0, 2)) {
+        console.log(`[Settlement] Testing ${settledOrders?.length || 0} older orders`);
+        for (const row of (settledOrders || []).slice(0, 3)) {
+          console.log(`[Settlement] Trying order=${row.order_id} date=${row.order_date}`);
           try {
             const path = `/finance/202501/orders/${row.order_id}/statement_transactions`;
             const d = await sGet(path, shopToken, { shop_cipher: shopConn.shop_cipher });
