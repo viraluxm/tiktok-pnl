@@ -131,7 +131,7 @@ export function computeDashboardMetrics(entries: Entry[], costsMap?: CostsMap): 
   };
 }
 
-export function computeChartData(entries: Entry[], costsMap?: CostsMap): ChartData {
+export function computeChartData(entries: Entry[], costsMap?: CostsMap, overrideCogs?: number): ChartData {
   // Profit by date
   const profitByDateMap: Record<string, number> = {};
   const gmvByDateMap: Record<string, number> = {};
@@ -201,6 +201,12 @@ export function computeChartData(entries: Entry[], costsMap?: CostsMap): ChartDa
     gmv: prodEntries.map(([, data]) => data.gmv),
     profit: prodEntries.map(([, data]) => data.profit),
   };
+
+  // Use override COGS from product stats if per-entry lookup returned 0
+  if (overrideCogs && overrideCogs > 0 && totalUserCogs === 0) {
+    totalUserCogs = overrideCogs;
+    totalProfit -= overrideCogs;
+  }
 
   // Cost breakdown — as percentages adding up to 100%
   // If user has entered COGS, show it separately from platform fee

@@ -139,7 +139,7 @@ export default function RealDashboard() {
 
     return result;
   }, [entries, totalProductCogs, videoMetrics, adSpendMetrics]);
-  const chartData = useMemo(() => computeChartData(entries, costsMap), [entries, costsMap]);
+  const chartData = useMemo(() => computeChartData(entries, costsMap, totalProductCogs), [entries, costsMap, totalProductCogs]);
 
   // Previous period
   const prevEntries = useMemo(
