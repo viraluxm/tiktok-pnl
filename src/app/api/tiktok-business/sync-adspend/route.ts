@@ -25,27 +25,41 @@ export async function POST() {
   const accessToken = decryptOrFallback(connection.access_token, 'business_access_token');
 
   try {
-    // Try GMV Max endpoints via Business API
+    // Get GMV Max campaign IDs, then query spend via reporting
     try {
       const bizBase = 'https://business-api.tiktok.com/open_api/v1.3';
+      const advId = connection.advertiser_id;
 
-      // List GMV Max sessions (campaigns)
+      // Step 1: List all campaigns to find GMV Max ones
       try {
-        const url = `${bizBase}/campaign/gmv_max/session/list/?advertiser_id=${connection.advertiser_id}`;
+        const url = `${bizBase}/campaign/get/?advertiser_id=${advId}&page_size=50`;
         const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
         const json = await res.json();
-        console.log(`[GMV Max] session/list: code=${json.code} msg=${json.message || 'ok'}`);
-        console.log(`[GMV Max] session/list data:`, JSON.stringify(json.data || json).slice(0, 2000));
-      } catch (e) { console.log('[GMV Max] session/list error:', (e as Error).message); }
+        const campaigns = (json.data?.list || []) as Array<Record<string, unknown>>;
+        console.log(`[GMV Max] campaign/get: code=${json.code} total=${campaigns.length}`);
+        for (const c of campaigns.slice(0, 5)) {
+          console.log(`[GMV Max] Campaign: id=${c.campaign_id} name=${c.campaign_name} type=${c.campaign_type} objective=${c.objective_type} status=${c.operation_status}`);
+        }
 
-      // List stores
-      try {
-        const url = `${bizBase}/gmv_max/store/list/?advertiser_id=${connection.advertiser_id}`;
-        const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
-        const json = await res.json();
-        console.log(`[GMV Max] store/list: code=${json.code} msg=${json.message || 'ok'}`);
-        console.log(`[GMV Max] store/list data:`, JSON.stringify(json.data || json).slice(0, 2000));
-      } catch (e) { console.log('[GMV Max] store/list error:', (e as Error).message); }
+        // Step 2: Try reporting at campaign level with recent dates
+        if (campaigns.length > 0) {
+          const testStart = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+          const testEnd = new Date().toISOString().split('T')[0];
+          const rptUrl = new URL(`${bizBase}/report/integrated/get/`);
+          rptUrl.searchParams.set('advertiser_id', advId);
+          rptUrl.searchParams.set('report_type', 'BASIC');
+          rptUrl.searchParams.set('data_level', 'AUCTION_CAMPAIGN');
+          rptUrl.searchParams.set('dimensions', JSON.stringify(['stat_time_day', 'campaign_id']));
+          rptUrl.searchParams.set('metrics', JSON.stringify(['spend', 'impressions', 'clicks', 'conversion', 'total_complete_payment_rate']));
+          rptUrl.searchParams.set('start_date', testStart);
+          rptUrl.searchParams.set('end_date', testEnd);
+          rptUrl.searchParams.set('page_size', '20');
+          const rptRes = await fetch(rptUrl.toString(), { headers: { 'Access-Token': accessToken } });
+          const rptJson = await rptRes.json();
+          console.log(`[GMV Max] Campaign report: code=${rptJson.code} rows=${rptJson.data?.list?.length || 0} msg=${rptJson.message || ''}`);
+          if (rptJson.data?.list?.[0]) console.log('[GMV Max] Report sample:', JSON.stringify(rptJson.data.list[0]).slice(0, 500));
+        }
+      } catch (e) { console.log('[GMV Max] campaign/get error:', (e as Error).message); }
 
     } catch (e) {
       console.log('[GMV Max] Error:', (e as Error).message);
