@@ -16,7 +16,7 @@ export async function GET(request: Request) {
   // Get per-product stats from synced_order_ids
   let query = admin
     .from('synced_order_ids')
-    .select('tiktok_product_id, sku_id, sku_name, gmv, shipping, units, status')
+    .select('tiktok_product_id, sku_id, sku_name, gmv, shipping, affiliate, platform_fee, units, status, order_date')
     .eq('user_id', data.user.id);
 
   if (dateFrom) query = query.gte('order_date', dateFrom);
@@ -131,5 +131,31 @@ export async function GET(request: Request) {
       };
     });
 
-  return NextResponse.json({ products: result });
+  // Compute aggregate dashboard totals from the same raw order data
+  let totalGMV = 0;
+  let totalShipping = 0;
+  let totalAffiliate = 0;
+  let totalPlatformFee = 0;
+  let totalUnits = 0;
+  let totalOrders = 0;
+  const gmvByDate: Record<string, number> = {};
+
+  for (const row of allRows) {
+    const gmv = Number(row.gmv) || 0;
+    const date = String(row.order_date || '');
+    totalGMV += gmv;
+    totalShipping += Number(row.shipping) || 0;
+    totalAffiliate += Number(row.affiliate) || 0;
+    totalPlatformFee += Number(row.platform_fee) || 0;
+    totalUnits += Number(row.units) || 0;
+    totalOrders += 1;
+    if (date) {
+      gmvByDate[date] = (gmvByDate[date] || 0) + gmv;
+    }
+  }
+
+  return NextResponse.json({
+    products: result,
+    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, gmvByDate },
+  });
 }

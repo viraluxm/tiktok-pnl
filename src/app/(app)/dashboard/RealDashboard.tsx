@@ -17,7 +17,7 @@ import { useShopVideos } from '@/hooks/useShopVideos';
 import { useTikTokBusiness } from '@/hooks/useTikTokBusiness';
 import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
-import type { Entry } from '@/types';
+import type { Entry, DashboardMetrics } from '@/types';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
@@ -67,7 +67,9 @@ export default function RealDashboard() {
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
   const { costsMap, upsertCost } = useProductCosts();
-  const { data: productStats } = useProductStats(filters.dateFrom, filters.dateTo);
+  const { data: productStatsData } = useProductStats(filters.dateFrom, filters.dateTo);
+  const productStats = productStatsData?.products;
+  const orderTotals = productStatsData?.totals;
   const { data: videoMetrics } = useShopVideos(filters.dateFrom, filters.dateTo);
   const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
   const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
@@ -96,18 +98,33 @@ export default function RealDashboard() {
 
   // Adjust net profit with product-level COGS and overlay video metrics
   const metrics = useMemo(() => {
-    const base = computeDashboardMetrics(entries);
-    let result = base;
+    // Compute base metrics from order totals (synced_order_ids) — more reliable than entries table
+    const t = orderTotals;
+    const gmv = t?.totalGMV || 0;
+    const shipping = t?.totalShipping || 0;
+    const affiliate = t?.totalAffiliate || 0;
+    const platformFee = t?.totalPlatformFee || 0;
+    const effectivePlatformFee = platformFee || (gmv * 0.06);
+    const baseProfit = gmv - effectivePlatformFee - shipping - affiliate - totalProductCogs;
 
-    if (totalProductCogs > 0) {
-      const adjustedProfit = base.totalNetProfit - totalProductCogs;
-      result = {
-        ...base,
-        totalNetProfit: adjustedProfit,
-        avgMargin: base.totalGMV > 0 ? (adjustedProfit / base.totalGMV) * 100 : 0,
-        profitPerVideo: base.totalVideos > 0 ? adjustedProfit / base.totalVideos : 0,
-      };
-    }
+    let result: DashboardMetrics = {
+      totalGMV: gmv,
+      totalNetProfit: baseProfit,
+      avgMargin: gmv > 0 ? (baseProfit / gmv) * 100 : 0,
+      totalVideos: 0,
+      totalViews: 0,
+      totalAds: 0,
+      totalAffiliate: affiliate,
+      totalShipping: shipping,
+      totalUnitsSold: t?.totalOrders || 0,
+      entryCount: t?.totalOrders || 0,
+      avgViewsPerVideo: 0,
+      revenuePerVideo: 0,
+      profitPerVideo: 0,
+      roas: null,
+      topProduct: null,
+      productProfits: {},
+    };
 
     // Override video metrics from shop_videos table if available
     if (videoMetrics && videoMetrics.totalVideos > 0) {
@@ -138,7 +155,7 @@ export default function RealDashboard() {
     }
 
     return result;
-  }, [entries, totalProductCogs, videoMetrics, adSpendMetrics]);
+  }, [orderTotals, totalProductCogs, videoMetrics, adSpendMetrics]);
   const chartData = useMemo(() => computeChartData(entries, costsMap, totalProductCogs), [entries, costsMap, totalProductCogs]);
 
   // Previous period

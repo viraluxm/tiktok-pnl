@@ -21,10 +21,25 @@ export interface ProductStats {
   skus: ProductSku[];
 }
 
+export interface OrderTotals {
+  totalGMV: number;
+  totalShipping: number;
+  totalAffiliate: number;
+  totalPlatformFee: number;
+  totalUnits: number;
+  totalOrders: number;
+  gmvByDate: Record<string, number>;
+}
+
+export interface ProductStatsResponse {
+  products: ProductStats[];
+  totals: OrderTotals;
+}
+
 export function useProductStats(dateFrom: string | null, dateTo: string | null) {
   const { user } = useUser();
 
-  return useQuery<ProductStats[]>({
+  return useQuery<ProductStatsResponse>({
     queryKey: ['product-stats', user?.id, dateFrom, dateTo],
     enabled: !!user,
     queryFn: async () => {
@@ -34,7 +49,10 @@ export function useProductStats(dateFrom: string | null, dateTo: string | null) 
       const res = await fetch(`/api/tiktok/product-stats?${params}`);
       if (!res.ok) throw new Error('Failed to fetch product stats');
       const data = await res.json();
-      return data.products || [];
+      return {
+        products: data.products || [],
+        totals: data.totals || { totalGMV: 0, totalShipping: 0, totalAffiliate: 0, totalPlatformFee: 0, totalUnits: 0, totalOrders: 0, gmvByDate: {} },
+      };
     },
     staleTime: 30_000,
   });

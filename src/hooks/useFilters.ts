@@ -17,24 +17,24 @@ export function useFilters() {
       return;
     }
 
-    // Use local date (not UTC) so "Today" matches the user's timezone
+    // Use shop timezone (America/Los_Angeles) to match how order dates are stored
     const now = new Date();
-    const toLocal = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    const todayStr = toLocal(now);
+    const toShopDate = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    const todayStr = toShopDate(now);
 
     if (days === 0) {
       setFilters((prev: FilterState) => ({ ...prev, dateFrom: todayStr, dateTo: todayStr }));
     } else if (days === 1) {
       const yesterday = new Date(now);
       yesterday.setDate(yesterday.getDate() - 1);
-      const yStr = toLocal(yesterday);
+      const yStr = toShopDate(yesterday);
       setFilters((prev: FilterState) => ({ ...prev, dateFrom: yStr, dateTo: yStr }));
     } else {
       const from = new Date(now);
       from.setDate(from.getDate() - days);
       setFilters((prev: FilterState) => ({
         ...prev,
-        dateFrom: toLocal(from),
+        dateFrom: toShopDate(from),
         dateTo: todayStr,
       }));
     }
