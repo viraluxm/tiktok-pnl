@@ -33,16 +33,16 @@ export async function POST() {
       if (shopConn?.shop_cipher) {
         const shopToken = (await import('@/lib/crypto')).decryptOrFallback(shopConn.access_token, 'shop_token');
 
-        // Get yesterday's orders to test settlement data
-        const yesterday = new Date(Date.now() - 1 * 86400000).toISOString().split('T')[0];
+        // Get recent orders to test settlement data
         const { data: testOrders } = await admin
           .from('synced_order_ids')
           .select('order_id, order_date')
           .eq('user_id', userId)
-          .eq('order_date', yesterday)
+          .gte('order_date', '2026-03-28')
+          .order('order_date', { ascending: false })
           .limit(5);
 
-        console.log(`[Settlement] Testing ${testOrders?.length || 0} orders from ${yesterday}`);
+        console.log(`[Settlement] Testing ${testOrders?.length || 0} recent orders`);
         for (const row of (testOrders || []).slice(0, 3)) {
           console.log(`[Settlement] Trying order=${row.order_id} date=${row.order_date}`);
           try {
