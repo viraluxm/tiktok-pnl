@@ -77,7 +77,7 @@ export async function POST() {
   // Already caught up?
   // Use shop timezone for all date calculations
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-  if (connection.sync_cursor && connection.sync_cursor >= todayStr) {
+  if (connection.sync_cursor && connection.sync_cursor > todayStr) {
     return NextResponse.json({ success: true, summary: { isCaughtUp: true, totalUniqueOrders: connection.sync_progress_orders || 0 } });
   }
   const backfillStart = new Date();
@@ -99,7 +99,7 @@ export async function POST() {
     let daysProcessed = 0;
 
     // ===== MAIN LOOP: one day at a time, paginate within each day =====
-    while (currentDay < todayStr && Date.now() - batchStart < TIME_BUDGET_MS) {
+    while (currentDay <= todayStr && Date.now() - batchStart < TIME_BUDGET_MS) {
       const nextDay = advanceDay(currentDay);
       const startTs = dayToTs(currentDay);
       const endTs = dayToTs(nextDay);
@@ -177,11 +177,11 @@ export async function POST() {
       }
     }
 
-    const isCaughtUp = currentDay >= todayStr;
+    const isCaughtUp = currentDay > todayStr;
 
     // Save cursor + clear lock
     const { error: saveErr } = await admin.from('tiktok_connections').update({
-      sync_cursor: isCaughtUp ? todayStr : currentDay,
+      sync_cursor: isCaughtUp ? advanceDay(todayStr) : currentDay,
       sync_started_at: null,
       sync_progress_orders: (connection.sync_progress_orders || 0) + totalNew,
       sync_progress_day: currentDay,
