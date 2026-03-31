@@ -61,8 +61,19 @@ export async function POST() {
           } catch (e) { console.log(`[GMV Max] sessions error:`, (e as Error).message); }
         }
 
-        // Try reporting filtered by GMV Max campaign IDs
-        const testStart = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+        // Get campaign info (might have spend/budget data)
+        for (const cid of allCampaignIds.slice(0, 2)) {
+          try {
+            const url = `${bizBase}/campaign/gmv_max/info/?advertiser_id=${advId}&campaign_id=${cid}`;
+            const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
+            const json = await res.json();
+            console.log(`[GMV Max] info(${cid}): code=${json.code}`);
+            console.log(`[GMV Max] info data:`, JSON.stringify(json.data || json).slice(0, 3000));
+          } catch (e) { console.log(`[GMV Max] info error:`, (e as Error).message); }
+        }
+
+        // Try reporting with correct filtering format
+        const testStart = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
         const testEnd = new Date().toISOString().split('T')[0];
         try {
           const url = new URL(`${bizBase}/report/integrated/get/`);
@@ -70,14 +81,14 @@ export async function POST() {
           url.searchParams.set('report_type', 'BASIC');
           url.searchParams.set('data_level', 'AUCTION_CAMPAIGN');
           url.searchParams.set('dimensions', JSON.stringify(['stat_time_day', 'campaign_id']));
-          url.searchParams.set('metrics', JSON.stringify(['spend', 'impressions', 'clicks', 'conversion']));
+          url.searchParams.set('metrics', JSON.stringify(['spend', 'impressions', 'clicks']));
           url.searchParams.set('start_date', testStart);
           url.searchParams.set('end_date', testEnd);
-          url.searchParams.set('filtering', JSON.stringify({ campaign_ids: allCampaignIds }));
+          url.searchParams.set('filtering', JSON.stringify([{ field_name: 'campaign_ids', filter_type: 'IN', filter_value: JSON.stringify(allCampaignIds) }]));
           url.searchParams.set('page_size', '30');
           const res = await fetch(url.toString(), { headers: { 'Access-Token': accessToken } });
           const json = await res.json();
-          console.log(`[GMV Max] Filtered report: code=${json.code} rows=${json.data?.list?.length || 0} msg=${json.message || ''}`);
+          console.log(`[GMV Max] Report v2: code=${json.code} rows=${json.data?.list?.length || 0} msg=${json.message || ''}`);
           if (json.data?.list?.[0]) console.log(`[GMV Max] Report sample:`, JSON.stringify(json.data.list[0]).slice(0, 500));
         } catch (e) { console.log('[GMV Max] report error:', (e as Error).message); }
       }
