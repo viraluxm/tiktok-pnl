@@ -217,8 +217,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange,
                     <td className={`px-4 py-3 text-[13px] font-semibold tabular-nums ${profit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>{fmt(profit)}</td>
                     <td className="px-4 py-3">
                       {hasVariants ? (() => {
-                        const costs = product.skus.map(s => getCost(`${product.tiktok_product_id}-${s.sku_id}`)).filter(c => c > 0);
-                        if (costs.length === 0) return <span className="text-[11px] text-tt-muted italic">per SKU ↓</span>;
+                        const costs = product.skus.map(s => getCost(`${product.tiktok_product_id}-${s.sku_id}`));
                         const min = Math.min(...costs);
                         const max = Math.max(...costs);
                         return (
@@ -236,7 +235,15 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange,
                     <td className="px-4 py-3">
                       {hasVariants ? (() => {
                         const totalInv = product.skus.reduce((sum, s) => sum + (s.inventory || 0), 0);
-                        return <span className="text-[13px] text-tt-text tabular-nums">{fmtInt(totalInv)}</span>;
+                        return (
+                          <button
+                            onClick={() => setExpandedProduct(isExpanded ? null : product.tiktok_product_id)}
+                            className="flex items-center gap-1.5 text-[13px] text-tt-text tabular-nums hover:text-tt-cyan transition-colors cursor-pointer"
+                          >
+                            {fmtInt(totalInv)}
+                            <span className={`transition-transform inline-block text-tt-muted ${isExpanded ? 'rotate-180' : ''}`}>▼</span>
+                          </button>
+                        );
                       })() : (
                         <span className="text-[13px] text-tt-text tabular-nums">{fmtInt(product.skus[0]?.inventory || 0)}</span>
                       )}
