@@ -216,9 +216,17 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange,
                     <td className="px-4 py-3 text-[13px] font-semibold text-tt-cyan tabular-nums">{fmt(product.total_gmv)}</td>
                     <td className={`px-4 py-3 text-[13px] font-semibold tabular-nums ${profit >= 0 ? 'text-tt-green' : 'text-tt-red'}`}>{fmt(profit)}</td>
                     <td className="px-4 py-3">
-                      {hasVariants ? (
-                        <span className="text-[11px] text-tt-muted italic">per SKU ↓</span>
-                      ) : (
+                      {hasVariants ? (() => {
+                        const costs = product.skus.map(s => getCost(`${product.tiktok_product_id}-${s.sku_id}`)).filter(c => c > 0);
+                        if (costs.length === 0) return <span className="text-[11px] text-tt-muted italic">per SKU ↓</span>;
+                        const min = Math.min(...costs);
+                        const max = Math.max(...costs);
+                        return (
+                          <span className="text-[13px] text-tt-text tabular-nums">
+                            {min === max ? fmt(min) : `${fmt(min)} - ${fmt(max)}`}
+                          </span>
+                        );
+                      })() : (
                         <CostInput
                           currentValue={getCost(product.tiktok_product_id)}
                           onSave={v => onCostChange?.(product.tiktok_product_id, null, v)}
@@ -226,9 +234,10 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange,
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {hasVariants ? (
-                        <span className="text-[11px] text-tt-muted italic">per SKU ↓</span>
-                      ) : (
+                      {hasVariants ? (() => {
+                        const totalInv = product.skus.reduce((sum, s) => sum + (s.inventory || 0), 0);
+                        return <span className="text-[13px] text-tt-text tabular-nums">{fmtInt(totalInv)}</span>;
+                      })() : (
                         <span className="text-[13px] text-tt-text tabular-nums">{fmtInt(product.skus[0]?.inventory || 0)}</span>
                       )}
                     </td>
