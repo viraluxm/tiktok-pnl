@@ -30,12 +30,25 @@ export async function POST() {
       const bizBase = 'https://business-api.tiktok.com/open_api/v1.3';
       const advId = connection.advertiser_id;
 
-      // 1. Get GMV Max campaigns
+      // 1. Get GMV Max campaigns with required filtering
+      try {
+        // Try different promotion types
+        for (const promoType of ['SHOP_ADS', 'GMV_MAX', 'PRODUCT_GMV_MAX', 'LIVE_GMV_MAX', 'CUSTOM_SHOP_ADS']) {
+          try {
+            const filtering = JSON.stringify({ gmv_max_promotion_types: [promoType] });
+            const url = `${bizBase}/gmv_max/campaign/get/?advertiser_id=${advId}&filtering=${encodeURIComponent(filtering)}`;
+            const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
+            const json = await res.json();
+            console.log(`[GMV Max] campaign(${promoType}): code=${json.code} msg=${json.message || ''} data=${JSON.stringify(json.data || {}).slice(0, 1000)}`);
+          } catch (e) { /* skip */ }
+        }
+      } catch (e) { console.log('[GMV Max] campaign/get error:', (e as Error).message); }
+
       try {
         const url = `${bizBase}/gmv_max/campaign/get/?advertiser_id=${advId}`;
         const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
         const json = await res.json();
-        console.log(`[GMV Max] gmv_max/campaign/get: code=${json.code} msg=${json.message || ''}`);
+        console.log(`[GMV Max] gmv_max/campaign/get (no filter): code=${json.code} msg=${json.message || ''}`);
         console.log(`[GMV Max] campaign data:`, JSON.stringify(json.data || json).slice(0, 3000));
 
         // If we got campaigns, try session list for each
