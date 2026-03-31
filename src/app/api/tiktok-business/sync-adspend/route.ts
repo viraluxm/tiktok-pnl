@@ -30,51 +30,57 @@ export async function POST() {
       const bizBase = 'https://business-api.tiktok.com/open_api/v1.3';
       const advId = connection.advertiser_id;
 
-      // 1. Get GMV Max campaigns with required filtering
-      try {
-        // Try different promotion types
-        for (const promoType of ['SHOP_ADS', 'GMV_MAX', 'PRODUCT_GMV_MAX', 'LIVE_GMV_MAX', 'CUSTOM_SHOP_ADS']) {
+      // 1. Get all GMV Max campaign IDs
+      const allCampaignIds: string[] = [];
+      for (const promoType of ['PRODUCT_GMV_MAX', 'LIVE_GMV_MAX']) {
+        try {
+          const filtering = JSON.stringify({ gmv_max_promotion_types: [promoType] });
+          const url = `${bizBase}/gmv_max/campaign/get/?advertiser_id=${advId}&filtering=${encodeURIComponent(filtering)}&page_size=50`;
+          const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
+          const json = await res.json();
+          const campaigns = (json.data?.list || []) as Array<Record<string, unknown>>;
+          for (const c of campaigns) {
+            const cid = String(c.campaign_id || '');
+            if (cid) allCampaignIds.push(cid);
+          }
+          console.log(`[GMV Max] ${promoType}: ${campaigns.length} campaigns`);
+        } catch (e) { /* skip */ }
+      }
+      console.log(`[GMV Max] Total campaign IDs: ${allCampaignIds.length} → ${allCampaignIds.join(', ')}`);
+
+      // 2. Get sessions for active campaign + try reporting with campaign filter
+      if (allCampaignIds.length > 0) {
+        // Try sessions for first few campaigns
+        for (const cid of allCampaignIds.slice(0, 3)) {
           try {
-            const filtering = JSON.stringify({ gmv_max_promotion_types: [promoType] });
-            const url = `${bizBase}/gmv_max/campaign/get/?advertiser_id=${advId}&filtering=${encodeURIComponent(filtering)}`;
+            const url = `${bizBase}/campaign/gmv_max/session/list/?advertiser_id=${advId}&campaign_id=${cid}&page_size=10`;
             const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
             const json = await res.json();
-            console.log(`[GMV Max] campaign(${promoType}): code=${json.code} msg=${json.message || ''} data=${JSON.stringify(json.data || {}).slice(0, 1000)}`);
-          } catch (e) { /* skip */ }
+            console.log(`[GMV Max] sessions(${cid}): code=${json.code} msg=${json.message || ''}`);
+            console.log(`[GMV Max] session data:`, JSON.stringify(json.data || json).slice(0, 3000));
+          } catch (e) { console.log(`[GMV Max] sessions error:`, (e as Error).message); }
         }
-      } catch (e) { console.log('[GMV Max] campaign/get error:', (e as Error).message); }
 
-      try {
-        const url = `${bizBase}/gmv_max/campaign/get/?advertiser_id=${advId}`;
-        const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
-        const json = await res.json();
-        console.log(`[GMV Max] gmv_max/campaign/get (no filter): code=${json.code} msg=${json.message || ''}`);
-        console.log(`[GMV Max] campaign data:`, JSON.stringify(json.data || json).slice(0, 3000));
-
-        // If we got campaigns, try session list for each
-        const campaigns = (json.data?.list || json.data?.campaigns || []) as Array<Record<string, unknown>>;
-        for (const c of campaigns.slice(0, 3)) {
-          const cid = String(c.campaign_id || c.id || '');
-          if (cid) {
-            try {
-              const sessUrl = `${bizBase}/campaign/gmv_max/session/list/?advertiser_id=${advId}&campaign_id=${cid}&page_size=10`;
-              const sessRes = await fetch(sessUrl, { headers: { 'Access-Token': accessToken } });
-              const sessJson = await sessRes.json();
-              console.log(`[GMV Max] sessions(campaign=${cid}): code=${sessJson.code}`);
-              console.log(`[GMV Max] session data:`, JSON.stringify(sessJson.data || sessJson).slice(0, 2000));
-            } catch (e) { console.log(`[GMV Max] sessions error:`, (e as Error).message); }
-          }
-        }
-      } catch (e) { console.log('[GMV Max] campaign/get error:', (e as Error).message); }
-
-      // 2. Also try campaign/gmv_max/info
-      try {
-        const url = `${bizBase}/campaign/gmv_max/info/?advertiser_id=${advId}`;
-        const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
-        const json = await res.json();
-        console.log(`[GMV Max] info: code=${json.code} msg=${json.message || ''}`);
-        console.log(`[GMV Max] info data:`, JSON.stringify(json.data || json).slice(0, 2000));
-      } catch (e) { console.log('[GMV Max] info error:', (e as Error).message); }
+        // Try reporting filtered by GMV Max campaign IDs
+        const testStart = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+        const testEnd = new Date().toISOString().split('T')[0];
+        try {
+          const url = new URL(`${bizBase}/report/integrated/get/`);
+          url.searchParams.set('advertiser_id', advId);
+          url.searchParams.set('report_type', 'BASIC');
+          url.searchParams.set('data_level', 'AUCTION_CAMPAIGN');
+          url.searchParams.set('dimensions', JSON.stringify(['stat_time_day', 'campaign_id']));
+          url.searchParams.set('metrics', JSON.stringify(['spend', 'impressions', 'clicks', 'conversion']));
+          url.searchParams.set('start_date', testStart);
+          url.searchParams.set('end_date', testEnd);
+          url.searchParams.set('filtering', JSON.stringify({ campaign_ids: allCampaignIds }));
+          url.searchParams.set('page_size', '30');
+          const res = await fetch(url.toString(), { headers: { 'Access-Token': accessToken } });
+          const json = await res.json();
+          console.log(`[GMV Max] Filtered report: code=${json.code} rows=${json.data?.list?.length || 0} msg=${json.message || ''}`);
+          if (json.data?.list?.[0]) console.log(`[GMV Max] Report sample:`, JSON.stringify(json.data.list[0]).slice(0, 500));
+        } catch (e) { console.log('[GMV Max] report error:', (e as Error).message); }
+      }
 
     } catch (e) {
       console.log('[GMV Max] Error:', (e as Error).message);
