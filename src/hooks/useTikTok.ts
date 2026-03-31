@@ -157,6 +157,40 @@ export function useTikTok() {
     runSyncDriver();
   }, [runSyncDriver]);
 
+  // Auto-sync on page load + poll every 5 minutes while tab is active
+  const autoSyncRef = useRef(false);
+  useEffect(() => {
+    if (!connectionQuery.data?.connected || autoSyncRef.current) return;
+    autoSyncRef.current = true;
+
+    // Sync on first load (silent — no spinner)
+    const doSilentSync = async () => {
+      if (loopRunningRef.current) return;
+      try {
+        const res = await fetch('/api/tiktok/sync', { method: 'POST' });
+        if (res.ok) {
+          queryClient.invalidateQueries({ queryKey: ['entries'] });
+          queryClient.invalidateQueries({ queryKey: ['product-stats'] });
+          // Also sync videos silently
+          fetch('/api/tiktok/sync-videos', { method: 'POST' }).then(() => {
+            queryClient.invalidateQueries({ queryKey: ['shop-videos-metrics'] });
+          }).catch(() => {});
+        }
+      } catch { /* silent */ }
+    };
+
+    doSilentSync();
+
+    // Poll every 5 minutes while tab is visible
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible' && !loopRunningRef.current) {
+        doSilentSync();
+      }
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, [connectionQuery.data?.connected, queryClient]);
+
   return {
     isConnected: connectionQuery.data?.connected ?? false,
     connection: connectionQuery.data?.connection ?? null,
