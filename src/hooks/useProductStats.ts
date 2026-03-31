@@ -21,6 +21,13 @@ export interface ProductStats {
   skus: ProductSku[];
 }
 
+export interface DateBreakdown {
+  gmv: number;
+  shipping: number;
+  affiliate: number;
+  platformFee: number;
+}
+
 export interface OrderTotals {
   totalGMV: number;
   totalShipping: number;
@@ -28,7 +35,7 @@ export interface OrderTotals {
   totalPlatformFee: number;
   totalUnits: number;
   totalOrders: number;
-  gmvByDate: Record<string, number>;
+  byDate: Record<string, DateBreakdown>;
 }
 
 export interface ProductStatsResponse {
@@ -51,7 +58,7 @@ export function useProductStats(dateFrom: string | null, dateTo: string | null) 
       const data = await res.json();
       return {
         products: data.products || [],
-        totals: data.totals || { totalGMV: 0, totalShipping: 0, totalAffiliate: 0, totalPlatformFee: 0, totalUnits: 0, totalOrders: 0, gmvByDate: {} },
+        totals: data.totals || { totalGMV: 0, totalShipping: 0, totalAffiliate: 0, totalPlatformFee: 0, totalUnits: 0, totalOrders: 0, byDate: {} },
       };
     },
     staleTime: 30_000,

@@ -26,7 +26,7 @@ export async function GET(request: Request) {
   // Use pagination to get all rows
   const allRows: Record<string, unknown>[] = [];
   let offset = 0;
-  const PAGE = 5000;
+  const PAGE = 1000; // Supabase default row limit per request
   while (true) {
     const { data: page, error } = await query.range(offset, offset + PAGE - 1);
     if (error) { console.error('Product stats error:', error); break; }
@@ -138,24 +138,31 @@ export async function GET(request: Request) {
   let totalPlatformFee = 0;
   let totalUnits = 0;
   let totalOrders = 0;
-  const gmvByDate: Record<string, number> = {};
+  const byDate: Record<string, { gmv: number; shipping: number; affiliate: number; platformFee: number }> = {};
 
   for (const row of allRows) {
     const gmv = Number(row.gmv) || 0;
+    const shipping = Number(row.shipping) || 0;
+    const affiliate = Number(row.affiliate) || 0;
+    const platformFee = Number(row.platform_fee) || 0;
     const date = String(row.order_date || '');
     totalGMV += gmv;
-    totalShipping += Number(row.shipping) || 0;
-    totalAffiliate += Number(row.affiliate) || 0;
-    totalPlatformFee += Number(row.platform_fee) || 0;
+    totalShipping += shipping;
+    totalAffiliate += affiliate;
+    totalPlatformFee += platformFee;
     totalUnits += Number(row.units) || 0;
     totalOrders += 1;
     if (date) {
-      gmvByDate[date] = (gmvByDate[date] || 0) + gmv;
+      if (!byDate[date]) byDate[date] = { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0 };
+      byDate[date].gmv += gmv;
+      byDate[date].shipping += shipping;
+      byDate[date].affiliate += affiliate;
+      byDate[date].platformFee += platformFee;
     }
   }
 
   return NextResponse.json({
     products: result,
-    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, gmvByDate },
+    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate },
   });
 }

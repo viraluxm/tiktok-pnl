@@ -66,7 +66,7 @@ export default function Charts({ chartData }: ChartsProps) {
       pointBackgroundColor: '#EE1D52',
       pointBorderColor: '#0f0f0f',
       pointBorderWidth: 2,
-      yAxisID: chartView === 'both' ? 'y1' : 'y',
+      yAxisID: 'y',
     });
   }
 
@@ -75,62 +75,37 @@ export default function Charts({ chartData }: ChartsProps) {
     ? chartData.profitByDate.labels
     : chartData.gmvByDate.labels;
 
-  // Build chart options based on view
+  // Build chart options — single left Y axis for all views
   const getOptions = () => {
     const baseOptions = getLineChartOptions('$');
-    if (chartView === 'both') {
-      return {
-        ...baseOptions,
-        scales: {
-          ...baseOptions.scales,
-          y: {
-            ...(baseOptions.scales as Record<string, unknown>)?.y as object,
-            position: 'left' as const,
-            title: {
-              display: true,
-              text: 'Net Profit ($)',
-              color: '#69C9D0',
-              font: { size: 11 },
-            },
-            ticks: {
-              color: 'rgba(255,255,255,0.5)',
-              font: { size: 11 },
-              callback: (value: unknown) => '$' + value,
-            },
-            grid: {
-              color: 'rgba(255,255,255,0.06)',
-            },
+    return {
+      ...baseOptions,
+      scales: {
+        y: {
+          position: 'left' as const,
+          ticks: {
+            color: 'rgba(255,255,255,0.5)',
+            font: { size: 11 },
+            callback: (value: unknown) => '$' + Number(value).toLocaleString(),
           },
-          y1: {
-            position: 'right' as const,
-            title: {
-              display: true,
-              text: 'Sales / GMV ($)',
-              color: '#EE1D52',
-              font: { size: 11 },
-            },
-            ticks: {
-              color: 'rgba(255,255,255,0.5)',
-              font: { size: 11 },
-              callback: (value: unknown) => '$' + value,
-            },
-            grid: {
-              drawOnChartArea: false,
-            },
-          },
-          x: {
-            ticks: {
-              color: 'rgba(255,255,255,0.5)',
-              font: { size: 11 },
-            },
-            grid: {
-              color: 'rgba(255,255,255,0.06)',
-            },
+          grid: {
+            color: 'rgba(255,255,255,0.06)',
           },
         },
-      };
-    }
-    return baseOptions;
+        x: {
+          ticks: {
+            color: 'rgba(255,255,255,0.5)',
+            font: { size: 11 },
+            maxRotation: 45,
+            autoSkip: true,
+            maxTicksLimit: 15,
+          },
+          grid: {
+            color: 'rgba(255,255,255,0.06)',
+          },
+        },
+      },
+    };
   };
 
   return (

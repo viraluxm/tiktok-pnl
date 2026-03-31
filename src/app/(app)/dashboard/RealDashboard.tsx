@@ -16,8 +16,9 @@ import { useFilters } from '@/hooks/useFilters';
 import { useShopVideos } from '@/hooks/useShopVideos';
 import { useTikTokBusiness } from '@/hooks/useTikTokBusiness';
 import { useAdSpend } from '@/hooks/useAdSpend';
-import { computeDashboardMetrics, computeChartData } from '@/lib/calculations';
-import type { Entry, DashboardMetrics } from '@/types';
+import { computeDashboardMetrics } from '@/lib/calculations';
+import type { Entry, DashboardMetrics, ChartData } from '@/types';
+import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
@@ -156,7 +157,59 @@ export default function RealDashboard() {
 
     return result;
   }, [orderTotals, totalProductCogs, videoMetrics, adSpendMetrics]);
-  const chartData = useMemo(() => computeChartData(entries, costsMap, totalProductCogs), [entries, costsMap, totalProductCogs]);
+  // Build chart data from orderTotals.byDate (synced_order_ids) instead of entries
+  const chartData = useMemo((): ChartData => {
+    const byDate = orderTotals?.byDate || {};
+    const sortedDates = Object.keys(byDate).sort();
+
+    const gmvData: number[] = [];
+    const profitData: number[] = [];
+    let totalPlatFee = 0, totalShip = 0, totalAff = 0, totalProf = 0, totalUserCogs = 0;
+
+    for (const date of sortedDates) {
+      const d = byDate[date];
+      const pf = d.platformFee || (d.gmv * 0.06);
+      const dayProfit = d.gmv - pf - d.shipping - d.affiliate;
+      gmvData.push(d.gmv);
+      profitData.push(dayProfit);
+      totalPlatFee += pf;
+      totalShip += d.shipping;
+      totalAff += d.affiliate;
+      totalProf += dayProfit;
+    }
+
+    // Subtract COGS from total profit
+    totalUserCogs = totalProductCogs;
+    totalProf -= totalUserCogs;
+
+    const hasUserCogs = totalUserCogs > 0;
+    const breakdownLabels = hasUserCogs
+      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Affiliate', 'Ads', 'Net Profit']
+      : ['Platform Fee (6%)', 'Shipping', 'Affiliate', 'Ads', 'Net Profit'];
+    const rawAmounts = hasUserCogs
+      ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)]
+      : [Math.max(0, totalPlatFee), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)];
+    const breakdownColors = hasUserCogs
+      ? ['#ff6384', '#f97316', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0']
+      : ['#ff6384', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0'];
+    const totalCosts = rawAmounts.reduce((a, b) => a + b, 0);
+
+    return {
+      profitByDate: { labels: sortedDates, data: profitData },
+      gmvByDate: { labels: sortedDates, data: gmvData },
+      productCompare: { labels: [], gmv: [], profit: [] },
+      costBreakdown: {
+        labels: breakdownLabels,
+        data: totalCosts > 0 ? rawAmounts.map(v => (v / totalCosts) * 100) : rawAmounts.map(() => 0),
+        colors: breakdownColors,
+        rawAmounts,
+      },
+      marginByDate: {
+        labels: sortedDates,
+        data: sortedDates.map((_, i) => gmvData[i] > 0 ? (profitData[i] / gmvData[i]) * 100 : 0),
+      },
+    };
+  }, [orderTotals, totalProductCogs]);
 
   // Previous period
   const prevEntries = useMemo(
