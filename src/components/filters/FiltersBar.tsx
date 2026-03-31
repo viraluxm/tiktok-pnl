@@ -1,6 +1,7 @@
 'use client';
 
 import type { FilterState } from '@/types';
+import DatePicker from './DatePicker';
 
 interface FiltersBarProps {
   filters: FilterState;
@@ -44,24 +45,12 @@ export default function FiltersBar({
           ))}
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <label className="text-[13px] text-tt-muted font-medium">From:</label>
-        <input
-          type="date"
-          value={filters.dateFrom || ''}
-          onChange={(e) => onDateFromChange(e.target.value || null)}
-          className="bg-tt-input-bg border border-tt-input-border text-tt-text px-2.5 py-1.5 rounded-lg text-[13px] focus:outline-none focus:border-tt-cyan"
-        />
-      </div>
-      <div className="flex items-center gap-2">
-        <label className="text-[13px] text-tt-muted font-medium">To:</label>
-        <input
-          type="date"
-          value={filters.dateTo || ''}
-          onChange={(e) => onDateToChange(e.target.value || null)}
-          className="bg-tt-input-bg border border-tt-input-border text-tt-text px-2.5 py-1.5 rounded-lg text-[13px] focus:outline-none focus:border-tt-cyan"
-        />
-      </div>
+      <DatePicker
+        dateFrom={filters.dateFrom}
+        dateTo={filters.dateTo}
+        onDateFromChange={onDateFromChange}
+        onDateToChange={onDateToChange}
+      />
     </div>
   );
 }
