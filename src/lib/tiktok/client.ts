@@ -196,7 +196,7 @@ export async function getAuthorizedShops(accessToken: string): Promise<ShopInfo[
     shop_cipher: String(s.cipher || ''),
     shop_name: String(s.name || ''),
     region: String(s.region || ''),
-    logo_url: String(s.logo?.url || s.logo || '') || null,
+    logo_url: String((s.logo as Record<string, string>)?.url || s.logo || '') || null,
   }));
 }
 

@@ -34,6 +34,34 @@ export async function POST() {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
+  // Debug: check if order detail has commission fields
+  try {
+    const { shopGet: sGet } = await import('@/lib/tiktok/client');
+    // Get a recent settled order
+    const { data: testOrder } = await admin.from('synced_order_ids').select('order_id, order_date')
+      .eq('user_id', userId).lte('order_date', '2026-03-17').order('order_date', { ascending: false }).limit(1).single();
+    if (testOrder) {
+      const d = await sGet(`/order/202309/orders/${testOrder.order_id}`, accessToken, { shop_cipher: connection.shop_cipher });
+      const pay = (d?.payment || {}) as Record<string, unknown>;
+      const items = (d?.line_items || []) as Record<string, unknown>[];
+      // Log all payment keys and any commission-related values
+      console.log('[OrderDetail] Payment keys:', Object.keys(pay));
+      for (const [k, v] of Object.entries(pay)) {
+        if (String(k).includes('commission') || String(k).includes('affiliate') || String(k).includes('creator') || Number(v) !== 0) {
+          console.log(`[OrderDetail] payment.${k}:`, v);
+        }
+      }
+      if (items[0]) {
+        console.log('[OrderDetail] LineItem keys:', Object.keys(items[0]));
+        for (const [k, v] of Object.entries(items[0])) {
+          if (String(k).includes('commission') || String(k).includes('affiliate') || String(k).includes('creator')) {
+            console.log(`[OrderDetail] item.${k}:`, v);
+          }
+        }
+      }
+    }
+  } catch (e) { console.log('[OrderDetail] Debug error:', (e as Error).message); }
+
   // Sync shop logo
   try {
     const { getShopDetail } = await import('@/lib/tiktok/client');
