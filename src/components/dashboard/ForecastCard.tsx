@@ -33,7 +33,7 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
   last30DaysEntries.forEach((e) => {
     const c = calcEntry(e, costsMap);
     last30Sales += Number(e.gmv) || 0;
-    last30Units += Number(e.units_sold) || 1; // Fallback to 1 unit per entry if no units_sold
+    last30Units += Number(e.units_sold) || Number(e.units) || 0;
     last30Videos += Number(e.videos_posted) || 0;
     last30NetProfit += c.totalNetProfit;
   });
