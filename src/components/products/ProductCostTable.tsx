@@ -10,6 +10,7 @@ interface ProductCostTableProps {
   productStats: ProductStats[];
   costsMap?: Record<string, number>;
   onCostChange?: (productId: string, skuId: string | null, cost: number) => void;
+  onInventoryChange?: (productId: string, skuId: string, quantity: number) => void;
 }
 
 function CostInput({ currentValue, onSave }: { currentValue: number; onSave: (value: number) => void }) {
@@ -71,7 +72,64 @@ function CostInput({ currentValue, onSave }: { currentValue: number; onSave: (va
   );
 }
 
-export default function ProductCostTable({ productStats, costsMap, onCostChange }: ProductCostTableProps) {
+function InventoryInput({ currentValue, onSave }: { currentValue: number; onSave: (value: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [inputValue, setInputValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const startEdit = () => {
+    setEditing(true);
+    setInputValue(currentValue > 0 ? String(currentValue) : '');
+    setTimeout(() => inputRef.current?.focus(), 50);
+  };
+
+  const save = () => {
+    onSave(parseInt(inputValue) || 0);
+    setEditing(false);
+  };
+
+  if (!editing) {
+    return (
+      <button onClick={startEdit} className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[13px] hover:bg-[rgba(105,201,208,0.08)] transition-all cursor-pointer min-w-[60px]">
+        <span className={currentValue > 0 ? 'text-tt-text font-medium' : 'text-tt-muted'}>
+          {currentValue > 0 ? fmtInt(currentValue) : '0'}
+        </span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-tt-muted ml-auto">
+          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+        </svg>
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        ref={inputRef}
+        type="number"
+        step="1"
+        value={inputValue}
+        placeholder="0"
+        onChange={e => setInputValue(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }}
+        className="bg-tt-input-bg border border-tt-cyan text-tt-text px-2 py-1.5 rounded-md text-[13px] w-[60px] focus:outline-none"
+      />
+      <button onClick={save} className="p-1 rounded hover:bg-[rgba(0,200,83,0.15)] transition-colors">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#00c853" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      </button>
+      <button onClick={() => setEditing(false)} className="p-1 rounded hover:bg-[rgba(255,23,68,0.15)] transition-colors">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ff1744" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+export default function ProductCostTable({ productStats, costsMap, onCostChange, onInventoryChange }: ProductCostTableProps) {
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null);
 
   const getCost = (key: string) => costsMap?.[key] || 0;
@@ -109,7 +167,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
         <table className="w-full border-collapse">
           <thead>
             <tr>
-              {['Product Name', 'Orders', 'Total GMV', 'Net Profit', 'Cost per Unit'].map(h => (
+              {['Product Name', 'Orders', 'Total GMV', 'Net Profit', 'Cost per Unit', 'Inventory'].map(h => (
                 <th key={h} className="px-4 py-3 text-left text-[11px] uppercase tracking-wide text-tt-muted font-semibold border-b border-tt-border whitespace-nowrap bg-[rgba(25,25,25,0.95)]">
                   {h}
                 </th>
@@ -167,6 +225,13 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
                         />
                       )}
                     </td>
+                    <td className="px-4 py-3">
+                      {hasVariants ? (
+                        <span className="text-[11px] text-tt-muted italic">per SKU ↓</span>
+                      ) : (
+                        <span className="text-[13px] text-tt-text tabular-nums">{fmtInt(product.skus[0]?.inventory || 0)}</span>
+                      )}
+                    </td>
                   </tr>
 
                   {/* Expanded SKU rows */}
@@ -190,6 +255,12 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
                             onSave={v => onCostChange?.(product.tiktok_product_id, sku.sku_id, v)}
                           />
                         </td>
+                        <td className="px-4 py-2.5">
+                          <InventoryInput
+                            currentValue={sku.inventory || 0}
+                            onSave={v => onInventoryChange?.(product.tiktok_product_id, sku.sku_id, v)}
+                          />
+                        </td>
                       </tr>
                     );
                   })}
@@ -197,7 +268,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange 
               );
             })}
             {productStats.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-8 text-center text-sm text-tt-muted">No product data yet.</td></tr>
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-tt-muted">No product data yet.</td></tr>
             )}
           </tbody>
         </table>

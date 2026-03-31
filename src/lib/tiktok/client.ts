@@ -393,12 +393,20 @@ function toFloat(val: unknown): number {
 
 // ==================== PRODUCT ENDPOINTS ====================
 
+export interface ShopProductSku {
+  sku_id: string;
+  seller_sku: string;
+  sku_name: string;
+  price: string;
+  inventory: number;
+}
+
 export interface ShopProduct {
   product_id: string;
   product_name: string;
   image_url: string | null;
   status: string;
-  skus: { sku_id: string; seller_sku: string; sku_name: string; price: string }[];
+  skus: ShopProductSku[];
 }
 
 function buildSkuName(sku: Record<string, unknown>): string {
@@ -424,12 +432,23 @@ async function getProductDetail(
     const data = await shopGet(path, accessToken, { shop_cipher: shopCipher });
     if (!data) return null;
 
-    const skus = ((data.skus as Array<Record<string, unknown>>) || []).map((s) => ({
-      sku_id: String(s.id || ''),
-      seller_sku: String(s.seller_sku || ''),
-      sku_name: buildSkuName(s),
-      price: (s.price as Record<string, string>)?.sale_price || '0',
-    }));
+    const skus = ((data.skus as Array<Record<string, unknown>>) || []).map((s) => {
+      // Inventory can be a number or array of warehouse quantities
+      let inventory = 0;
+      const inv = s.inventory as Array<Record<string, unknown>> | number | undefined;
+      if (Array.isArray(inv)) {
+        inventory = inv.reduce((sum, w) => sum + (Number(w.quantity) || 0), 0);
+      } else if (typeof inv === 'number') {
+        inventory = inv;
+      }
+      return {
+        sku_id: String(s.id || ''),
+        seller_sku: String(s.seller_sku || ''),
+        sku_name: buildSkuName(s),
+        price: (s.price as Record<string, string>)?.sale_price || '0',
+        inventory,
+      };
+    });
 
     // Extract hero image from main_images array
     const mainImages = (data.main_images || []) as Array<Record<string, unknown>>;
@@ -489,6 +508,27 @@ export async function getProducts(
   } catch (error) {
     console.error('Failed to get products:', error);
     return [];
+  }
+}
+
+// ==================== INVENTORY UPDATE ====================
+
+export async function updateInventory(
+  accessToken: string,
+  shopCipher: string,
+  productId: string,
+  skuId: string,
+  quantity: number,
+): Promise<boolean> {
+  try {
+    const path = `/product/202309/products/${productId}/inventory`;
+    await shopPost(path, accessToken, {
+      skus: [{ id: skuId, inventory: [{ quantity }] }],
+    }, { shop_cipher: shopCipher });
+    return true;
+  } catch (err) {
+    console.error(`[TikTok] Inventory update failed for ${productId}/${skuId}:`, (err as Error).message);
+    return false;
   }
 }
 

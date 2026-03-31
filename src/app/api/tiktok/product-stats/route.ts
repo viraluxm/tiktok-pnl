@@ -42,7 +42,7 @@ export async function GET(request: Request) {
     total_orders: number;
     total_gmv: number;
     total_shipping: number;
-    skus: Map<string, { sku_id: string; sku_name: string; orders: number; gmv: number }>;
+    skus: Map<string, { sku_id: string; sku_name: string; orders: number; gmv: number; inventory: number }>;
   }>();
 
   for (const row of allRows) {
@@ -65,7 +65,7 @@ export async function GET(request: Request) {
     // Key by sku_id only to avoid duplicates from name variations
     let sku = product.skus.get(skuId);
     if (!sku) {
-      sku = { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0 };
+      sku = { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0, inventory: 0 };
       product.skus.set(skuId, sku);
     }
     sku.orders += 1;
@@ -88,9 +88,8 @@ export async function GET(request: Request) {
     if (typeof rawVariants === 'string') {
       try { rawVariants = JSON.parse(rawVariants); } catch { rawVariants = null; }
     }
-    const variants = (Array.isArray(rawVariants) ? rawVariants : null) as Array<{ id: string; name: string; sku?: string }> | null;
+    const variants = (Array.isArray(rawVariants) ? rawVariants : null) as Array<{ id: string; name: string; sku?: string; inventory?: number }> | null;
     if (variants && variants.length > 0) {
-      console.log(`[ProductStats] Product ${pid} has ${variants.length} catalog variants`);
       let product = productMap.get(pid);
       if (!product) {
         product = { tiktok_product_id: pid, total_orders: 0, total_gmv: 0, total_shipping: 0, skus: new Map() };
@@ -98,8 +97,11 @@ export async function GET(request: Request) {
       }
       for (const v of variants) {
         if (!v.id) continue;
-        if (!product.skus.has(v.id)) {
-          product.skus.set(v.id, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0 });
+        const existing = product.skus.get(v.id);
+        if (existing) {
+          existing.inventory = Number(v.inventory) || 0;
+        } else {
+          product.skus.set(v.id, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0, inventory: Number(v.inventory) || 0 });
         }
       }
     }
@@ -124,6 +126,7 @@ export async function GET(request: Request) {
             sku_name: s.sku_name,
             orders: s.orders,
             gmv: Math.round(s.gmv * 100) / 100,
+            inventory: s.inventory,
           })),
       };
     });

@@ -40,7 +40,7 @@ export async function POST() {
     const catalogProducts = await getProducts(accessToken, connection.shop_cipher);
     for (const cp of catalogProducts) {
       if (!cp.product_id) continue;
-      const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku }));
+      const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku, inventory: s.inventory }));
       const { error: catErr } = await admin.from('products').upsert({
         user_id: userId,
         tiktok_product_id: cp.product_id,

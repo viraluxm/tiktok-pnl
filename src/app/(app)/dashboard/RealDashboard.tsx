@@ -155,6 +155,18 @@ export default function RealDashboard() {
     upsertCost.mutate({ productId, variantId, costPerUnit: cost });
   }, [upsertCost]);
 
+  const handleInventoryChange = useCallback(async (productId: string, skuId: string, quantity: number) => {
+    try {
+      await fetch('/api/tiktok/update-inventory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ productId, skuId, quantity }),
+      });
+    } catch (err) {
+      console.error('Inventory update failed:', err);
+    }
+  }, []);
+
   function handleQuickFilter(days: number | 'all') {
     setActiveQuickFilter(days);
     setQuickFilter(days);
@@ -266,6 +278,7 @@ export default function RealDashboard() {
             productStats={productStats || []}
             costsMap={costsMap}
             onCostChange={handleCostChange}
+            onInventoryChange={handleInventoryChange}
           />
         )}
           </>

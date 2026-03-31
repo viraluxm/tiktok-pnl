@@ -8,6 +8,7 @@ export interface ProductSku {
   sku_name: string;
   orders: number;
   gmv: number;
+  inventory: number;
 }
 
 export interface ProductStats {

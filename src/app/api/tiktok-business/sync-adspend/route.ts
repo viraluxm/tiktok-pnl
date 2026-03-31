@@ -25,40 +25,6 @@ export async function POST() {
   const accessToken = decryptOrFallback(connection.access_token, 'business_access_token');
 
   try {
-    // Debug: fetch per-order settlement transactions via Shop API
-    // This gives us actual fees, affiliate commission, ad costs per order
-    try {
-      const { shopGet: sGet } = await import('@/lib/tiktok/client');
-      const { data: shopConn } = await admin.from('tiktok_connections').select('access_token, shop_cipher').eq('user_id', userId).single();
-      if (shopConn?.shop_cipher) {
-        const shopToken = (await import('@/lib/crypto')).decryptOrFallback(shopConn.access_token, 'shop_token');
-
-        // Get recent orders to test settlement data
-        const { data: testOrders } = await admin
-          .from('synced_order_ids')
-          .select('order_id, order_date')
-          .eq('user_id', userId)
-          .gte('order_date', '2026-03-28')
-          .order('order_date', { ascending: false })
-          .limit(5);
-
-        console.log(`[Settlement] Testing ${testOrders?.length || 0} recent orders`);
-        for (const row of (testOrders || []).slice(0, 3)) {
-          console.log(`[Settlement] Trying order=${row.order_id} date=${row.order_date}`);
-          try {
-            const path = `/finance/202501/orders/${row.order_id}/statement_transactions`;
-            const d = await sGet(path, shopToken, { shop_cipher: shopConn.shop_cipher });
-            console.log(`[Settlement] order=${row.order_id}:`);
-            console.log(`[Settlement] data:`, JSON.stringify(d).slice(0, 3000));
-          } catch (e) {
-            console.log(`[Settlement] order=${row.order_id}: ${(e as Error).message}`);
-          }
-        }
-      }
-    } catch (e) {
-      console.log('[Settlement] Error:', (e as Error).message);
-    }
-
     // Sync last 365 days in 30-day chunks (Business API auction data)
     const now = new Date();
     let totalDays = 0;
