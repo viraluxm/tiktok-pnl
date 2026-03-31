@@ -25,76 +25,35 @@ export async function POST() {
   const accessToken = decryptOrFallback(connection.access_token, 'business_access_token');
 
   try {
-    // Try GMV Max specific endpoints (separate from regular campaign system)
+    // Debug: fetch per-order settlement transactions via Shop API
+    // This gives us actual fees, affiliate commission, ad costs per order
     try {
-      const bizBase = 'https://business-api.tiktok.com/open_api/v1.3';
-      const advId = connection.advertiser_id;
+      const { shopGet: sGet } = await import('@/lib/tiktok/client');
+      const { data: shopConn } = await admin.from('tiktok_connections').select('access_token, shop_cipher').eq('user_id', userId).single();
+      if (shopConn?.shop_cipher) {
+        const shopToken = (await import('@/lib/crypto')).decryptOrFallback(shopConn.access_token, 'shop_token');
 
-      // 1. Get all GMV Max campaign IDs
-      const allCampaignIds: string[] = [];
-      for (const promoType of ['PRODUCT_GMV_MAX', 'LIVE_GMV_MAX']) {
-        try {
-          const filtering = JSON.stringify({ gmv_max_promotion_types: [promoType] });
-          const url = `${bizBase}/gmv_max/campaign/get/?advertiser_id=${advId}&filtering=${encodeURIComponent(filtering)}&page_size=50`;
-          const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
-          const json = await res.json();
-          const campaigns = (json.data?.list || []) as Array<Record<string, unknown>>;
-          for (const c of campaigns) {
-            const cid = String(c.campaign_id || '');
-            if (cid) allCampaignIds.push(cid);
+        // Get a few recent order IDs to test
+        const { data: recentOrders } = await admin
+          .from('synced_order_ids')
+          .select('order_id')
+          .eq('user_id', userId)
+          .order('order_date', { ascending: false })
+          .limit(3);
+
+        for (const row of (recentOrders || []).slice(0, 2)) {
+          try {
+            const path = `/finance/202501/orders/${row.order_id}/statement_transactions`;
+            const d = await sGet(path, shopToken, { shop_cipher: shopConn.shop_cipher });
+            console.log(`[Settlement] order=${row.order_id}:`);
+            console.log(`[Settlement] data:`, JSON.stringify(d).slice(0, 3000));
+          } catch (e) {
+            console.log(`[Settlement] order=${row.order_id}: ${(e as Error).message}`);
           }
-          console.log(`[GMV Max] ${promoType}: ${campaigns.length} campaigns`);
-        } catch (e) { /* skip */ }
-      }
-      console.log(`[GMV Max] Total campaign IDs: ${allCampaignIds.length} → ${allCampaignIds.join(', ')}`);
-
-      // 2. Get sessions for active campaign + try reporting with campaign filter
-      if (allCampaignIds.length > 0) {
-        // Try sessions for first few campaigns
-        for (const cid of allCampaignIds.slice(0, 3)) {
-          try {
-            const url = `${bizBase}/campaign/gmv_max/session/list/?advertiser_id=${advId}&campaign_id=${cid}&page_size=10`;
-            const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
-            const json = await res.json();
-            console.log(`[GMV Max] sessions(${cid}): code=${json.code} msg=${json.message || ''}`);
-            console.log(`[GMV Max] session data:`, JSON.stringify(json.data || json).slice(0, 3000));
-          } catch (e) { console.log(`[GMV Max] sessions error:`, (e as Error).message); }
         }
-
-        // Get campaign info (might have spend/budget data)
-        for (const cid of allCampaignIds.slice(0, 2)) {
-          try {
-            const url = `${bizBase}/campaign/gmv_max/info/?advertiser_id=${advId}&campaign_id=${cid}`;
-            const res = await fetch(url, { headers: { 'Access-Token': accessToken } });
-            const json = await res.json();
-            console.log(`[GMV Max] info(${cid}): code=${json.code}`);
-            console.log(`[GMV Max] info data:`, JSON.stringify(json.data || json).slice(0, 3000));
-          } catch (e) { console.log(`[GMV Max] info error:`, (e as Error).message); }
-        }
-
-        // Try reporting with correct filtering format
-        const testStart = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
-        const testEnd = new Date().toISOString().split('T')[0];
-        try {
-          const url = new URL(`${bizBase}/report/integrated/get/`);
-          url.searchParams.set('advertiser_id', advId);
-          url.searchParams.set('report_type', 'BASIC');
-          url.searchParams.set('data_level', 'AUCTION_CAMPAIGN');
-          url.searchParams.set('dimensions', JSON.stringify(['stat_time_day', 'campaign_id']));
-          url.searchParams.set('metrics', JSON.stringify(['spend', 'impressions', 'clicks']));
-          url.searchParams.set('start_date', testStart);
-          url.searchParams.set('end_date', testEnd);
-          url.searchParams.set('filtering', JSON.stringify([{ field_name: 'campaign_ids', filter_type: 'IN', filter_value: JSON.stringify(allCampaignIds) }]));
-          url.searchParams.set('page_size', '30');
-          const res = await fetch(url.toString(), { headers: { 'Access-Token': accessToken } });
-          const json = await res.json();
-          console.log(`[GMV Max] Report v2: code=${json.code} rows=${json.data?.list?.length || 0} msg=${json.message || ''}`);
-          if (json.data?.list?.[0]) console.log(`[GMV Max] Report sample:`, JSON.stringify(json.data.list[0]).slice(0, 500));
-        } catch (e) { console.log('[GMV Max] report error:', (e as Error).message); }
       }
-
     } catch (e) {
-      console.log('[GMV Max] Error:', (e as Error).message);
+      console.log('[Settlement] Error:', (e as Error).message);
     }
 
     // Sync last 365 days in 30-day chunks (Business API auction data)
