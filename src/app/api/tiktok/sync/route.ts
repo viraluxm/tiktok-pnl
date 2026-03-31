@@ -34,6 +34,17 @@ export async function POST() {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
+  // Sync shop logo
+  try {
+    const { getShopDetail } = await import('@/lib/tiktok/client');
+    const shopDetail = await getShopDetail(accessToken, connection.shop_cipher);
+    if (shopDetail.logo_url) {
+      await admin.from('tiktok_connections').update({ shop_logo: shopDetail.logo_url }).eq('user_id', userId);
+    }
+  } catch (err) {
+    console.log('[Sync] Shop logo fetch failed:', (err as Error).message);
+  }
+
   // Always sync product catalog (for variant names and current SKU list)
   try {
     const { getProducts } = await import('@/lib/tiktok/client');

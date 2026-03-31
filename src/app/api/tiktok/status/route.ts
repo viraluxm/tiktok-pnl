@@ -11,7 +11,7 @@ export async function GET() {
 
   const { data: connection, error } = await supabase
     .from('tiktok_connections')
-    .select('id, shop_name, shop_cipher, advertiser_ids, connected_at, last_synced_at, sync_cursor, sync_started_at, sync_progress_orders, sync_progress_day')
+    .select('id, shop_name, shop_cipher, shop_logo, advertiser_ids, connected_at, last_synced_at, sync_cursor, sync_started_at, sync_progress_orders, sync_progress_day')
     .eq('user_id', user.id)
     .single();
 
@@ -50,6 +50,7 @@ export async function GET() {
       syncInProgress,
       syncProgressOrders: connection.sync_progress_orders || 0,
       syncProgressDay: connection.sync_progress_day || null,
+      shopLogo: connection.shop_logo || null,
     },
   });
 }

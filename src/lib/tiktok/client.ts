@@ -186,16 +186,29 @@ export interface ShopInfo {
   shop_cipher: string;
   shop_name: string;
   region: string;
+  logo_url: string | null;
 }
 
 export async function getAuthorizedShops(accessToken: string): Promise<ShopInfo[]> {
   const data = await shopGet('/authorization/202309/shops', accessToken);
   if (!data?.shops) return [];
-  return data.shops.map((s: Record<string, string>) => ({
-    shop_cipher: s.cipher,
-    shop_name: s.name,
-    region: s.region,
+  return data.shops.map((s: Record<string, unknown>) => ({
+    shop_cipher: String(s.cipher || ''),
+    shop_name: String(s.name || ''),
+    region: String(s.region || ''),
+    logo_url: String(s.logo?.url || s.logo || '') || null,
   }));
+}
+
+export async function getShopDetail(accessToken: string, shopCipher: string): Promise<{ logo_url: string | null }> {
+  try {
+    const data = await shopGet('/shop/202309/shops', accessToken, { shop_cipher: shopCipher });
+    const logoUrl = String(data?.logo?.url || data?.logo?.uri || data?.logo || '') || null;
+    console.log('[Shop Detail] logo:', logoUrl, 'keys:', Object.keys(data || {}));
+    return { logo_url: logoUrl };
+  } catch {
+    return { logo_url: null };
+  }
 }
 
 export interface FetchOrdersPageResult {

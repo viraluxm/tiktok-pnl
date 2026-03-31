@@ -151,14 +151,18 @@ export default function TikTokConnect() {
               onClick={() => setIsOpen(!isOpen)}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-tt-border bg-tt-card text-[12px] font-medium text-tt-text hover:border-tt-cyan transition-all cursor-pointer"
             >
-              <div className="w-5 h-5 rounded flex items-center justify-center bg-[rgba(105,201,208,0.15)]">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-                  <path
-                    d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.88-2.89 2.89 2.89 0 0 1 2.88-2.89c.28 0 .56.04.82.1v-3.5a6.37 6.37 0 0 0-.82-.05A6.34 6.34 0 0 0 3.15 15.2a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V8.87a8.16 8.16 0 0 0 4.76 1.52v-3.4a4.85 4.85 0 0 1-1-.3z"
-                    fill="#69C9D0"
-                  />
-                </svg>
-              </div>
+              {connection?.shopLogo ? (
+                <img src={connection.shopLogo} alt="" className="w-5 h-5 rounded object-cover" />
+              ) : (
+                <div className="w-5 h-5 rounded flex items-center justify-center bg-[rgba(105,201,208,0.15)]">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                    <path
+                      d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.88-2.89 2.89 2.89 0 0 1 2.88-2.89c.28 0 .56.04.82.1v-3.5a6.37 6.37 0 0 0-.82-.05A6.34 6.34 0 0 0 3.15 15.2a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V8.87a8.16 8.16 0 0 0 4.76 1.52v-3.4a4.85 4.85 0 0 1-1-.3z"
+                      fill="#69C9D0"
+                    />
+                  </svg>
+                </div>
+              )}
               <span>{shopName}</span>
               <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-[rgba(0,200,83,0.15)] text-[#00c853] leading-none">
                 Connected
@@ -185,9 +189,13 @@ export default function TikTokConnect() {
                     onClick={() => setIsOpen(false)}
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[12px] text-tt-text hover:bg-[rgba(255,255,255,0.04)] transition-colors"
                   >
-                    <div className="w-7 h-7 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center text-[13px]">
-                      🏪
-                    </div>
+                    {connection?.shopLogo ? (
+                      <img src={connection.shopLogo} alt="" className="w-7 h-7 rounded-lg object-cover border border-tt-border" />
+                    ) : (
+                      <div className="w-7 h-7 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center text-[13px]">
+                        🏪
+                      </div>
+                    )}
                     <span className="font-medium">{shopName}</span>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#69C9D0" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="ml-auto">
                       <polyline points="20 6 9 17 4 12" />
