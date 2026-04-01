@@ -159,7 +159,7 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange,
 
   return (
     <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
-      <div className="flex items-center justify-between px-5 py-4 border-b border-tt-border">
+      <div className="flex items-center justify-between px-6 py-5 border-b border-tt-border">
         <h2 className="text-base font-semibold">Products & Cost per SKU</h2>
         <span className="text-xs text-tt-muted">{productStats.length} products</span>
       </div>

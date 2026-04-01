@@ -99,8 +99,8 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
   const monthName = now.toLocaleString('en-US', { month: 'long' });
 
   return (
-    <div className="mb-6 animate-fade-in">
-      <div className="bg-gradient-to-br from-[rgba(105,201,208,0.15)] to-[rgba(105,201,208,0.05)] border border-[rgba(105,201,208,0.3)] rounded-[14px] p-5 backdrop-blur-xl">
+    <div className="mb-8 animate-fade-in">
+      <div className="bg-gradient-to-br from-[rgba(105,201,208,0.15)] to-[rgba(105,201,208,0.05)] border border-[rgba(105,201,208,0.3)] rounded-[14px] p-6 backdrop-blur-xl">
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div>

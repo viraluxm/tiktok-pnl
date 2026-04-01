@@ -109,7 +109,7 @@ export default function Charts({ chartData }: ChartsProps) {
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-8">
       {/* Combined Profit & Sales Chart */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl lg:col-span-1">
         <div className="flex items-center justify-between mb-4">
@@ -130,7 +130,7 @@ export default function Charts({ chartData }: ChartsProps) {
             ))}
           </div>
         </div>
-        <div className="relative h-[280px]">
+        <div className="relative h-[340px]">
           <Line
             data={{ labels, datasets }}
             options={getOptions()}
@@ -141,7 +141,7 @@ export default function Charts({ chartData }: ChartsProps) {
       {/* Cost Breakdown */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl">
         <h3 className="text-sm font-semibold text-tt-muted mb-4">Cost Breakdown</h3>
-        <div className="relative h-[280px]">
+        <div className="relative h-[340px]">
           <Doughnut
             data={{
               labels: chartData.costBreakdown.labels,

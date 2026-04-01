@@ -251,7 +251,7 @@ export default function RealDashboard() {
     <div className="min-h-screen bg-tt-bg">
       <Header />
 
-      <div className="p-6 max-w-[1600px] mx-auto">
+      <div className="px-8 py-6">
         <TikTokConnect />
 
         {/* Ad Account Connection */}
@@ -317,12 +317,12 @@ export default function RealDashboard() {
         />
 
         {/* View Tabs */}
-        <div className="flex gap-1 mb-6">
+        <div className="flex gap-2 mb-8">
           {tabs.map((tab) => (
             <button
               key={tab.value}
               onClick={() => setActiveView(tab.value)}
-              className={`px-5 py-2 rounded-lg border text-[13px] font-medium cursor-pointer transition-all ${
+              className={`px-6 py-2.5 rounded-lg border text-sm font-medium cursor-pointer transition-all ${
                 activeView === tab.value
                   ? 'bg-tt-cyan text-black border-tt-cyan font-semibold'
                   : 'border-tt-border text-tt-muted hover:bg-tt-card-hover'

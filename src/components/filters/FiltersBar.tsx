@@ -26,7 +26,7 @@ export default function FiltersBar({
   ];
 
   return (
-    <div className="flex items-center gap-3 mb-6 flex-wrap">
+    <div className="flex items-center gap-4 mb-8 flex-wrap">
       <div className="flex items-center gap-2">
         <label className="text-[13px] text-tt-muted font-medium">Period:</label>
         <div className="flex gap-1">
