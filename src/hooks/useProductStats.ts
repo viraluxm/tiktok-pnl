@@ -9,6 +9,7 @@ export interface ProductSku {
   orders: number;
   gmv: number;
   inventory: number;
+  active: boolean;
 }
 
 export interface ProductStats {

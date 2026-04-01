@@ -260,7 +260,14 @@ export default function ProductCostTable({ productStats, costsMap, onCostChange,
                     return (
                       <tr key={`${sku.sku_id}-${si}`} className="border-b border-[rgba(255,255,255,0.04)] bg-[rgba(105,201,208,0.015)]">
                         <td className="px-4 py-2.5 pl-16">
-                          <span className="text-[12px] text-tt-text">└ {sku.sku_name}</span>
+                          <span className={`text-[12px] ${sku.active === false ? 'text-tt-muted' : 'text-tt-text'}`}>
+                            └ {sku.sku_name}
+                            {sku.active === false && (
+                              <span className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider bg-[rgba(255,255,255,0.06)] text-tt-muted">
+                                Inactive
+                              </span>
+                            )}
+                          </span>
                         </td>
                         <td className="px-4 py-2.5 text-[12px] text-tt-text tabular-nums">{fmtInt(sku.orders)}</td>
                         <td className="px-4 py-2.5 text-[12px] text-tt-cyan tabular-nums">{fmt(sku.gmv)}</td>

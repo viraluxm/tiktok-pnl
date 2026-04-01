@@ -42,8 +42,11 @@ export async function GET(request: Request) {
     total_orders: number;
     total_gmv: number;
     total_shipping: number;
-    skus: Map<string, { sku_id: string; sku_name: string; orders: number; gmv: number; inventory: number }>;
+    skus: Map<string, { sku_id: string; sku_name: string; orders: number; gmv: number; inventory: number; active: boolean }>;
   }>();
+
+  // Track active SKU IDs from the current catalog (populated during merge below)
+  const activeSku = new Set<string>();
 
   for (const row of allRows) {
     const pid = String(row.tiktok_product_id || 'unknown');
@@ -65,7 +68,7 @@ export async function GET(request: Request) {
     // Key by sku_id only to avoid duplicates from name variations
     let sku = product.skus.get(skuId);
     if (!sku) {
-      sku = { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0, inventory: 0 };
+      sku = { sku_id: skuId, sku_name: skuName, orders: 0, gmv: 0, inventory: 0, active: false };
       product.skus.set(skuId, sku);
     }
     sku.orders += 1;
@@ -97,11 +100,13 @@ export async function GET(request: Request) {
       }
       for (const v of variants) {
         if (!v.id) continue;
+        activeSku.add(v.id);
         const existing = product.skus.get(v.id);
         if (existing) {
           existing.inventory = Number(v.inventory) || 0;
+          existing.active = true;
         } else {
-          product.skus.set(v.id, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0, inventory: Number(v.inventory) || 0 });
+          product.skus.set(v.id, { sku_id: v.id, sku_name: v.name || v.sku || 'Default', orders: 0, gmv: 0, inventory: Number(v.inventory) || 0, active: true });
         }
       }
     }
@@ -127,6 +132,7 @@ export async function GET(request: Request) {
             orders: s.orders,
             gmv: Math.round(s.gmv * 100) / 100,
             inventory: s.inventory,
+            active: s.active,
           })),
       };
     });
