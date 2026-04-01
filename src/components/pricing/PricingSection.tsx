@@ -7,12 +7,12 @@ export default function PricingSection() {
   const [yearly, setYearly] = useState(true);
 
   const monthlyPrice = 49;
-  const yearlyMonthly = Math.round(monthlyPrice * 10 / 12); // 10 months = 2 free
-  const yearlyTotal = monthlyPrice * 10;
+  const yearlyMonthly = 39; // 20% off
+  const yearlyTotal = 470;
   const extraShopPrice = 39;
 
   const displayPrice = yearly ? yearlyMonthly : monthlyPrice;
-  const billingLabel = yearly ? '/mo (billed yearly)' : '/month';
+  const billingLabel = yearly ? '/mo (billed annually)' : '/month';
 
   return (
     <div className="max-w-7xl mx-auto px-6">
@@ -39,7 +39,7 @@ export default function PricingSection() {
           <span className={`text-sm font-medium ${yearly ? 'text-white' : 'text-gray-500'}`}>Yearly</span>
           {yearly && (
             <span className="ml-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#69C9D0]/20 text-[#69C9D0] border border-[#69C9D0]/30">
-              2 months free
+              Save 20%
             </span>
           )}
         </div>
@@ -57,7 +57,7 @@ export default function PricingSection() {
             <span className="text-gray-500 ml-1">{billingLabel}</span>
           </div>
           {yearly && (
-            <p className="text-xs text-gray-500 mb-4">${yearlyTotal}/year — save ${monthlyPrice * 2}</p>
+            <p className="text-xs text-gray-500 mb-4">${yearlyTotal}/year — save ${monthlyPrice * 12 - yearlyTotal}/year</p>
           )}
           {!yearly && <div className="mb-4" />}
 

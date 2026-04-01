@@ -51,15 +51,15 @@ export default function LandingPage() {
           </div>
 
           <h1 className="text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.1] mb-6 text-white">
-            Your TikTok Shop
+            Stop Guessing.
             <br />
             <span className="bg-gradient-to-r from-[#69C9D0] to-[#4F46E5] bg-clip-text text-transparent">
-              P&L Dashboard
+              Start Profiting.
             </span>
           </h1>
 
           <p className="text-lg md:text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-            Track profit, manage products, and visualize your TikTok Shop performance — all in one place. Stop guessing, start growing.
+            The P&L dashboard built for TikTok Shop sellers who want to increase sales and know exactly where their money goes — all synced automatically.
           </p>
 
           <div className="flex items-center justify-center gap-4 mb-16">
@@ -70,15 +70,15 @@ export default function LandingPage() {
               Start Free Trial
             </Link>
             <a
-              href="#features"
+              href="#demo"
               className="px-8 py-3.5 text-base font-semibold text-gray-300 bg-white/[0.06] border border-white/10 rounded-xl hover:bg-white/10 transition-all"
             >
-              See Features
+              Watch Demo
             </a>
           </div>
 
           {/* Dashboard Preview */}
-          <div className="max-w-5xl mx-auto">
+          <div className="max-w-6xl mx-auto">
             <div className="rounded-2xl border border-white/[0.08] bg-[#111111] shadow-2xl shadow-black/40 overflow-hidden">
               <div className="flex items-center gap-2 px-4 py-3 bg-[#161616] border-b border-white/[0.06]">
                 <div className="w-3 h-3 rounded-full bg-[#ff5f57]" />
@@ -261,8 +261,71 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* Who Is This For */}
+      <section className="py-24 bg-[#111111]">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="text-center mb-16">
+            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/[0.06] border border-white/[0.08] text-[#69C9D0] text-sm font-medium mb-4">
+              Who Is This For
+            </div>
+            <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight mb-4 text-white">
+              Built for Sellers Who Are Scaling
+            </h2>
+            <p className="text-gray-400 max-w-2xl mx-auto">
+              Built for TikTok Shop sellers who are scaling and need real numbers — not guesswork — to increase sales and maximize profit.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-6">
+            {[
+              {
+                icon: (
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 20V10"/>
+                    <path d="M18 20V4"/>
+                    <path d="M6 20v-4"/>
+                  </svg>
+                ),
+                title: 'Doing $5K–$100K/mo',
+                description: 'You\'re past the startup phase and need to understand your real margins — not just top-line revenue.',
+              },
+              {
+                icon: (
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M16 8l-8 8"/>
+                    <path d="M8 8l8 8"/>
+                  </svg>
+                ),
+                title: 'Running Ads & Affiliates',
+                description: 'You\'re spending on GMV Max and affiliate commissions and need to know if it\'s actually profitable.',
+              },
+              {
+                icon: (
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="7" width="20" height="14" rx="2"/>
+                    <path d="M16 7V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v3"/>
+                    <path d="M12 12v4"/>
+                  </svg>
+                ),
+                title: 'Expanding Your Catalog',
+                description: 'You\'re adding SKUs and need per-product P&L to know which products to scale and which to cut.',
+              },
+            ].map((persona, i) => (
+              <div key={i} className="bg-white/[0.03] rounded-2xl p-8 border border-white/[0.06] text-center">
+                <div className="w-12 h-12 rounded-xl bg-white/[0.06] text-[#69C9D0] flex items-center justify-center mx-auto mb-5">
+                  {persona.icon}
+                </div>
+                <h3 className="text-lg font-bold mb-2 text-white">{persona.title}</h3>
+                <p className="text-gray-400 text-sm leading-relaxed">{persona.description}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* How It Works */}
-      <section id="how-it-works" className="py-24 bg-[#111111]">
+      <section id="how-it-works" className="py-24 bg-[#0a0a0a]">
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
             <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/[0.06] border border-white/[0.08] text-[#69C9D0] text-sm font-medium mb-4">
@@ -283,12 +346,12 @@ export default function LandingPage() {
               {
                 step: '2',
                 title: 'Connect Your TikTok Shop',
-                description: 'Link your seller account, input your cost per SKU and any additional expenses to get accurate profit numbers.',
+                description: 'We sync your orders, revenue, and fees automatically.',
               },
               {
                 step: '3',
-                title: 'See Your Profits',
-                description: 'Instantly visualize your P&L with charts, margins, and expense breakdowns.',
+                title: 'See Your Real Profit',
+                description: 'Instantly see your P&L with breakdowns by product, date, and video.',
               },
             ].map((step, i) => (
               <div key={i} className="text-center">
