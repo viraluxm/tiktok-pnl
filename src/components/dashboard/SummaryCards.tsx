@@ -35,7 +35,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
   const profitPerVideoChange = prevMetrics ? pctChange(metrics.profitPerVideo, prevMetrics.profitPerVideo) : null;
 
   return (
-    <div className="grid grid-cols-3 gap-5 mb-8">
+    <div className="grid grid-cols-4 gap-5 mb-8">
       {/* Row 1 */}
 
       {/* 1. Total GMV */}
@@ -80,9 +80,22 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         )}
       </div>
 
+      {/* 4. Returns / Refunds */}
+      <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-3">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Returns / Refunds</span>
+        </div>
+        <div className="text-[30px] font-bold text-tt-red">{fmtInt(metrics.returnsCount || 0)}</div>
+        {(metrics.returnsAmount || 0) > 0 && (
+          <div className="text-xs text-tt-muted mt-1">
+            {fmt(metrics.returnsAmount || 0)} value
+          </div>
+        )}
+      </div>
+
       {/* Row 2 */}
 
-      {/* 4. Total Ad Spend */}
+      {/* 5. Total Ad Spend */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-3">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Total Ad Spend</span>
@@ -124,22 +137,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         )}
       </div>
 
-      {/* Row 3 */}
-
-      {/* 7. Returns / Refunds */}
-      <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-6">
-        <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Returns / Refunds</span>
-        </div>
-        <div className="text-[30px] font-bold text-tt-red">{fmtInt(metrics.returnsCount || 0)}</div>
-        {(metrics.returnsAmount || 0) > 0 && (
-          <div className="text-xs text-tt-muted mt-1">
-            {fmt(metrics.returnsAmount || 0)} value
-          </div>
-        )}
-      </div>
-
-      {/* 8. Samples Sent */}
+      {/* 8. Est. Samples Sent */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-7">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Est. Samples Sent</span>
