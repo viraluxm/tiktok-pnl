@@ -37,6 +37,9 @@ export interface OrderTotals {
   totalUnits: number;
   totalOrders: number;
   byDate: Record<string, DateBreakdown>;
+  returnsCount: number;
+  returnsAmount: number;
+  samplesCount: number;
 }
 
 export interface ProductStatsResponse {
@@ -59,7 +62,7 @@ export function useProductStats(dateFrom: string | null, dateTo: string | null) 
       const data = await res.json();
       return {
         products: data.products || [],
-        totals: data.totals || { totalGMV: 0, totalShipping: 0, totalAffiliate: 0, totalPlatformFee: 0, totalUnits: 0, totalOrders: 0, byDate: {} },
+        totals: data.totals || { totalGMV: 0, totalShipping: 0, totalAffiliate: 0, totalPlatformFee: 0, totalUnits: 0, totalOrders: 0, byDate: {}, returnsCount: 0, returnsAmount: 0, samplesCount: 0 },
       };
     },
     staleTime: 30_000,

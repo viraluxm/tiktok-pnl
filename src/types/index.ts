@@ -61,6 +61,9 @@ export interface DashboardMetrics {
   roas: number | null;
   topProduct: { name: string; profit: number } | null;
   productProfits: Record<string, { profit: number; gmv: number; unitsSold: number }>;
+  returnsCount?: number;
+  returnsAmount?: number;
+  samplesCount?: number;
 }
 
 export interface ChartData {

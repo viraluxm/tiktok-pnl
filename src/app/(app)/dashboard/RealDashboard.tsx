@@ -17,12 +17,14 @@ import { useShopVideos } from '@/hooks/useShopVideos';
 import { useTikTokBusiness } from '@/hooks/useTikTokBusiness';
 import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics } from '@/lib/calculations';
+import { useReturns } from '@/hooks/useReturns';
+import ReturnsTab from '@/components/dashboard/ReturnsTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'products';
+type ViewTab = 'dashboard' | 'products' | 'returns';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -74,6 +76,7 @@ export default function RealDashboard() {
   const { data: videoMetrics } = useShopVideos(filters.dateFrom, filters.dateTo);
   const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
   const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
+  const { data: returnsData, isLoading: returnsLoading } = useReturns(filters.dateFrom, filters.dateTo);
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -125,6 +128,9 @@ export default function RealDashboard() {
       roas: null,
       topProduct: null,
       productProfits: {},
+      returnsCount: t?.returnsCount || 0,
+      returnsAmount: t?.returnsAmount || 0,
+      samplesCount: t?.samplesCount || 0,
     };
 
     // Override video metrics from shop_videos table if available
@@ -245,6 +251,7 @@ export default function RealDashboard() {
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
     { label: 'Products', value: 'products' },
+    { label: 'Returns', value: 'returns' },
   ];
 
   return (
@@ -350,6 +357,11 @@ export default function RealDashboard() {
             onCostChange={handleCostChange}
             onInventoryChange={handleInventoryChange}
           />
+        )}
+
+        {/* Returns View */}
+        {activeView === 'returns' && (
+          <ReturnsTab data={returnsData} isLoading={returnsLoading} />
         )}
           </>
         )}

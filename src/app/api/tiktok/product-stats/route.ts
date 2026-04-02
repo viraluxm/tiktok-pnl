@@ -49,6 +49,9 @@ export async function GET(request: Request) {
   const activeSku = new Set<string>();
 
   for (const row of allRows) {
+    const status = String(row.status || '').toUpperCase();
+    if (status === 'CANCELLED' || status.includes('CANCEL')) continue;
+
     const pid = String(row.tiktok_product_id || 'unknown');
     const skuId = String(row.sku_id || '');
     const skuName = String(row.sku_name || 'Default');
@@ -146,12 +149,30 @@ export async function GET(request: Request) {
   let totalOrders = 0;
   const byDate: Record<string, { gmv: number; shipping: number; affiliate: number; platformFee: number }> = {};
 
+  let returnsCount = 0;
+  let returnsAmount = 0;
+  let samplesCount = 0;
+
   for (const row of allRows) {
+    const status = String(row.status || '').toUpperCase();
     const gmv = Number(row.gmv) || 0;
     const shipping = Number(row.shipping) || 0;
     const affiliate = Number(row.affiliate) || 0;
     const platformFee = Number(row.platform_fee) || 0;
     const date = String(row.order_date || '');
+
+    // Count returns/cancellations
+    if (status === 'CANCELLED' || status.includes('CANCEL') || status.includes('REVERSE') || status.includes('REFUND') || status.includes('RETURN')) {
+      returnsCount += 1;
+      returnsAmount += gmv;
+      continue; // Don't include in GMV totals
+    }
+
+    // Count samples ($0 GMV completed orders)
+    if (gmv === 0 && (status === 'COMPLETED' || status === 'DELIVERED' || status === 'IN_TRANSIT' || status === '')) {
+      samplesCount += 1;
+    }
+
     totalGMV += gmv;
     totalShipping += shipping;
     totalAffiliate += affiliate;
@@ -169,6 +190,6 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     products: result,
-    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate },
+    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate, returnsCount, returnsAmount, samplesCount },
   });
 }
