@@ -6,6 +6,7 @@ import { useUser } from './useUser';
 export interface ReturnItem {
   order_id: string;
   product_name: string;
+  product_image: string | null;
   gmv: number;
   status: string;
   order_date: string;

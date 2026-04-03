@@ -557,6 +557,7 @@ export interface TikTokReturn {
   product_name: string;
   product_id: string;
   sku_name: string;
+  product_image: string;
   return_reason: string;
   refund_amount: number;
   units: number;
@@ -605,17 +606,28 @@ export async function fetchReturns(
       let productName = '';
       let productId = '';
       let skuName = '';
+      let productImage = '';
       let units = 0;
 
       for (const item of lineItems) {
         if (!productName) productName = String(item.product_name || '');
         if (!productId) productId = String(item.product_id || '');
         if (!skuName) skuName = String(item.sku_name || '');
+        if (!productImage) {
+          const img = item.product_image as Record<string, unknown> | undefined;
+          productImage = String(img?.url || img?.uri || item.product_image || '');
+        }
         units += Number(item.quantity) || 1;
       }
 
-      const refund = (r.refund || {}) as Record<string, unknown>;
-      const refundAmount = toFloat(refund.refund_total) || toFloat(refund.buyer_refund_amount) || toFloat(r.refund_amount) || 0;
+      // refund_amount can be a nested object {refund_total, refund_subtotal, ...} or a number
+      const refundObj = r.refund_amount as Record<string, unknown> | number | undefined;
+      let refundAmount = 0;
+      if (typeof refundObj === 'object' && refundObj !== null) {
+        refundAmount = toFloat(refundObj.refund_total) || toFloat(refundObj.refund_subtotal) || 0;
+      } else {
+        refundAmount = toFloat(r.refund_amount) || 0;
+      }
 
       allReturns.push({
         return_id: String(r.return_id || r.id || ''),
@@ -627,6 +639,7 @@ export async function fetchReturns(
         product_name: productName,
         product_id: productId,
         sku_name: skuName,
+        product_image: productImage,
         return_reason: String(r.return_reason || r.reason || ''),
         refund_amount: refundAmount,
         units: units || 1,
@@ -675,17 +688,28 @@ export async function fetchCancellations(
       let productName = '';
       let productId = '';
       let skuName = '';
+      let productImage = '';
       let units = 0;
 
       for (const item of lineItems) {
         if (!productName) productName = String(item.product_name || '');
         if (!productId) productId = String(item.product_id || '');
         if (!skuName) skuName = String(item.sku_name || '');
+        if (!productImage) {
+          const img = item.product_image as Record<string, unknown> | undefined;
+          productImage = String(img?.url || img?.uri || item.product_image || '');
+        }
         units += Number(item.quantity) || 1;
       }
 
-      const refundAmountObj = (c.refund_amount || {}) as Record<string, unknown>;
-      const refundAmount = toFloat(refundAmountObj.refund_total) || toFloat(refundAmountObj.refund_subtotal) || toFloat(c.refund_amount) || 0;
+      // refund_amount is nested: {currency, refund_total, refund_subtotal, refund_shipping_fee, refund_tax}
+      const refundObj = c.refund_amount as Record<string, unknown> | number | undefined;
+      let refundAmount = 0;
+      if (typeof refundObj === 'object' && refundObj !== null) {
+        refundAmount = toFloat(refundObj.refund_total) || toFloat(refundObj.refund_subtotal) || 0;
+      } else {
+        refundAmount = toFloat(c.refund_amount) || 0;
+      }
 
       allCancellations.push({
         return_id: String(c.cancel_id || c.id || ''),
@@ -697,6 +721,7 @@ export async function fetchCancellations(
         product_name: productName,
         product_id: productId,
         sku_name: skuName,
+        product_image: productImage,
         return_reason: String(c.cancel_reason || c.reason || ''),
         refund_amount: refundAmount,
         units: units || 1,

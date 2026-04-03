@@ -85,6 +85,7 @@ export async function GET(request: Request) {
   let items: Array<{
     order_id: string;
     product_name: string;
+    product_image: string | null;
     gmv: number;
     status: string;
     order_date: string;
@@ -104,6 +105,7 @@ export async function GET(request: Request) {
       items = allReturns.map(r => ({
         order_id: r.order_id || r.return_id,
         product_name: r.product_name || r.sku_name || 'Unknown',
+        product_image: r.product_image || null,
         gmv: r.refund_amount,
         status: r.status,
         order_date: r.create_time ? toLocalDate(r.create_time) : '',
@@ -148,19 +150,23 @@ export async function GET(request: Request) {
 
     const productIds = [...new Set(returns.map(r => String(r.tiktok_product_id || '')).filter(Boolean))];
     const { data: products } = productIds.length > 0
-      ? await admin.from('products').select('tiktok_product_id, name').eq('user_id', data.user.id).in('tiktok_product_id', productIds)
+      ? await admin.from('products').select('tiktok_product_id, name, image_url').eq('user_id', data.user.id).in('tiktok_product_id', productIds)
       : { data: [] };
-    const nameMap = new Map((products || []).map((p: Record<string, string>) => [p.tiktok_product_id, p.name]));
+    const productMap = new Map((products || []).map((p: Record<string, string>) => [p.tiktok_product_id, { name: p.name, image_url: p.image_url }]));
 
     items = returns
-      .map(r => ({
-        order_id: String(r.order_id || ''),
-        product_name: nameMap.get(String(r.tiktok_product_id)) || String(r.sku_name || 'Unknown'),
-        gmv: Number(r.gmv) || 0,
-        status: String(r.status || ''),
-        order_date: String(r.order_date || ''),
-        units: Number(r.units) || 0,
-      }))
+      .map(r => {
+        const prod = productMap.get(String(r.tiktok_product_id));
+        return {
+          order_id: String(r.order_id || ''),
+          product_name: prod?.name || String(r.sku_name || 'Unknown'),
+          product_image: prod?.image_url || null,
+          gmv: Number(r.gmv) || 0,
+          status: String(r.status || ''),
+          order_date: String(r.order_date || ''),
+          units: Number(r.units) || 0,
+        };
+      })
       .sort((a, b) => b.order_date.localeCompare(a.order_date));
   }
 

@@ -64,7 +64,16 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
               {items.map((item, i) => (
                 <tr key={`${item.order_id}-${i}`} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
                   <td className="px-5 py-3 text-xs text-tt-muted font-mono">{item.order_id.slice(-12)}</td>
-                  <td className="px-5 py-3 text-[13px] text-tt-text">{item.product_name}</td>
+                  <td className="px-5 py-3">
+                    <div className="flex items-center gap-3">
+                      {item.product_image ? (
+                        <img src={item.product_image} alt="" className="w-9 h-9 rounded-lg object-cover flex-shrink-0" />
+                      ) : (
+                        <div className="w-9 h-9 rounded-lg bg-tt-border flex-shrink-0" />
+                      )}
+                      <span className="text-[13px] text-tt-text">{item.product_name}</span>
+                    </div>
+                  </td>
                   <td className="px-5 py-3 text-xs text-tt-muted">{item.order_date}</td>
                   <td className="px-5 py-3"><StatusBadge status={item.status} /></td>
                   <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{item.units}</td>
