@@ -545,6 +545,151 @@ export async function updateInventory(
   }
 }
 
+// ==================== RETURNS / CANCELLATIONS ====================
+
+export interface TikTokReturn {
+  return_id: string;
+  order_id: string;
+  status: string;
+  return_type: string;
+  create_time: number;
+  update_time: number;
+  product_name: string;
+  product_id: string;
+  sku_name: string;
+  return_reason: string;
+  refund_amount: number;
+  units: number;
+}
+
+export async function fetchReturns(
+  accessToken: string,
+  shopCipher: string,
+  startTs: number,
+  endTs: number,
+): Promise<TikTokReturn[]> {
+  const path = '/return_refund/202309/returns/search';
+  const allReturns: TikTokReturn[] = [];
+  let pageToken: string | null = null;
+
+  do {
+    const queryParams: Record<string, string> = {
+      shop_cipher: shopCipher,
+      page_size: '50',
+    };
+    if (pageToken) queryParams.page_token = pageToken;
+
+    const body: Record<string, unknown> = {
+      create_time_ge: startTs,
+      create_time_lt: endTs,
+    };
+
+    const data = await shopPost(path, accessToken, body, queryParams);
+    const returns = (data?.returns || []) as Array<Record<string, unknown>>;
+
+    for (const r of returns) {
+      const lineItems = (r.return_line_items || r.line_items || []) as Array<Record<string, unknown>>;
+      let productName = '';
+      let productId = '';
+      let skuName = '';
+      let units = 0;
+
+      for (const item of lineItems) {
+        if (!productName) productName = String(item.product_name || '');
+        if (!productId) productId = String(item.product_id || '');
+        if (!skuName) skuName = String(item.sku_name || '');
+        units += Number(item.quantity) || 1;
+      }
+
+      const refund = (r.refund || {}) as Record<string, unknown>;
+      const refundAmount = toFloat(refund.refund_total) || toFloat(refund.buyer_refund_amount) || toFloat(r.refund_amount) || 0;
+
+      allReturns.push({
+        return_id: String(r.return_id || r.id || ''),
+        order_id: String(r.order_id || ''),
+        status: String(r.status || ''),
+        return_type: String(r.return_type || r.type || ''),
+        create_time: Number(r.create_time) || 0,
+        update_time: Number(r.update_time) || 0,
+        product_name: productName,
+        product_id: productId,
+        sku_name: skuName,
+        return_reason: String(r.return_reason || r.reason || ''),
+        refund_amount: refundAmount,
+        units: units || 1,
+      });
+    }
+
+    pageToken = data?.next_page_token || null;
+  } while (pageToken);
+
+  return allReturns;
+}
+
+export async function fetchCancellations(
+  accessToken: string,
+  shopCipher: string,
+  startTs: number,
+  endTs: number,
+): Promise<TikTokReturn[]> {
+  const path = '/return_refund/202309/cancellations/search';
+  const allCancellations: TikTokReturn[] = [];
+  let pageToken: string | null = null;
+
+  do {
+    const queryParams: Record<string, string> = {
+      shop_cipher: shopCipher,
+      page_size: '50',
+    };
+    if (pageToken) queryParams.page_token = pageToken;
+
+    const body: Record<string, unknown> = {
+      create_time_ge: startTs,
+      create_time_lt: endTs,
+    };
+
+    const data = await shopPost(path, accessToken, body, queryParams);
+    const cancellations = (data?.cancellations || []) as Array<Record<string, unknown>>;
+
+    for (const c of cancellations) {
+      const lineItems = (c.return_line_items || c.line_items || []) as Array<Record<string, unknown>>;
+      let productName = '';
+      let productId = '';
+      let skuName = '';
+      let units = 0;
+
+      for (const item of lineItems) {
+        if (!productName) productName = String(item.product_name || '');
+        if (!productId) productId = String(item.product_id || '');
+        if (!skuName) skuName = String(item.sku_name || '');
+        units += Number(item.quantity) || 1;
+      }
+
+      const refund = (c.refund || {}) as Record<string, unknown>;
+      const refundAmount = toFloat(refund.refund_total) || toFloat(refund.buyer_refund_amount) || toFloat(c.refund_amount) || 0;
+
+      allCancellations.push({
+        return_id: String(c.cancel_id || c.id || ''),
+        order_id: String(c.order_id || ''),
+        status: String(c.status || ''),
+        return_type: 'CANCELLATION',
+        create_time: Number(c.create_time) || 0,
+        update_time: Number(c.update_time) || 0,
+        product_name: productName,
+        product_id: productId,
+        sku_name: skuName,
+        return_reason: String(c.cancel_reason || c.reason || ''),
+        refund_amount: refundAmount,
+        units: units || 1,
+      });
+    }
+
+    pageToken = data?.next_page_token || null;
+  } while (pageToken);
+
+  return allCancellations;
+}
+
 // Helper to get date range strings
 export function getDateRange(days: number = 30): { startDate: string; endDate: string } {
   const end = new Date();
