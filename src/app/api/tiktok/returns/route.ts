@@ -111,7 +111,9 @@ export async function GET(request: Request) {
       })).sort((a, b) => b.order_date.localeCompare(a.order_date));
 
       usedLiveApi = true;
-      console.log(`[Returns] Live API: ${returns.length} returns, ${cancellations.length} cancellations`);
+      const distinctStatuses = [...new Set(allReturns.map(r => r.status))];
+      const pendingItems = items.filter(i => isPendingStatus(i.status));
+      console.log(`[Returns] Live API: ${returns.length} returns, ${cancellations.length} cancellations, statuses: ${JSON.stringify(distinctStatuses)}, pending: ${pendingItems.length}`);
     } catch (err) {
       console.error('[Returns] Live API failed, falling back to DB:', (err as Error).message);
     }
