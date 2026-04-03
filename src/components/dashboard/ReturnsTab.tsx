@@ -88,7 +88,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
 
 function StatusBadge({ status }: { status: string }) {
   const s = status.toUpperCase();
-  const isPending = s.includes('IN_CANCEL') || s.includes('REQUESTED') || s.includes('IN_PROGRESS');
+  const isPending = s.includes('IN_CANCEL') || s.includes('REQUESTED') || s.includes('IN_PROGRESS') || s.includes('PENDING') || s.includes('AWAITING') || s.includes('IN_TRANSIT');
   const isCancelled = s === 'CANCELLED' || s.includes('CANCEL');
 
   let colorClass = 'bg-tt-red/15 text-tt-red';

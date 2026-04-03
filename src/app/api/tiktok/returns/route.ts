@@ -62,12 +62,17 @@ export async function GET(request: Request) {
   const totalAmount = items.reduce((sum, i) => sum + i.gmv, 0);
   const pendingReturns = items.filter(i => {
     const s = i.status.toUpperCase();
-    return s.includes('IN_CANCEL') || s.includes('REQUESTED') || s.includes('IN_PROGRESS');
+    return s.includes('IN_CANCEL') || s.includes('REQUESTED') || s.includes('IN_PROGRESS') || s.includes('PENDING') || s.includes('AWAITING') || s.includes('IN_TRANSIT');
   }).length;
   const completedReturns = totalReturns - pendingReturns;
+
+  // Debug: all distinct statuses in the DB for this user/period
+  const allStatuses = [...new Set(allRows.map(r => String(r.status || '')))].sort();
+  const returnStatuses = [...new Set(items.map(i => i.status))].sort();
 
   return NextResponse.json({
     summary: { totalReturns, pendingReturns, completedReturns, totalAmount: Math.round(totalAmount * 100) / 100 },
     items,
+    debug: { allStatuses, returnStatuses, totalOrders: allRows.length },
   });
 }
