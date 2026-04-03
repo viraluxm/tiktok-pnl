@@ -585,7 +585,20 @@ export async function fetchReturns(
     };
 
     const data = await shopPost(path, accessToken, body, queryParams);
-    const returns = (data?.returns || []) as Array<Record<string, unknown>>;
+
+    // Debug: log raw response keys and first item
+    if (allReturns.length === 0) {
+      console.log('[Returns] Raw response keys:', JSON.stringify(Object.keys(data || {})));
+      const returnsList = (data?.returns || data?.return_orders || []) as Array<Record<string, unknown>>;
+      if (returnsList.length > 0) {
+        console.log('[Returns] Sample raw object keys:', JSON.stringify(Object.keys(returnsList[0])));
+        console.log('[Returns] Sample raw object:', JSON.stringify(returnsList[0]).slice(0, 1000));
+      } else {
+        console.log('[Returns] No items found in response. Full data:', JSON.stringify(data).slice(0, 500));
+      }
+    }
+
+    const returns = (data?.returns || data?.return_orders || []) as Array<Record<string, unknown>>;
 
     for (const r of returns) {
       const lineItems = (r.return_line_items || r.line_items || []) as Array<Record<string, unknown>>;
@@ -607,7 +620,7 @@ export async function fetchReturns(
       allReturns.push({
         return_id: String(r.return_id || r.id || ''),
         order_id: String(r.order_id || ''),
-        status: String(r.status || ''),
+        status: String(r.return_status || r.status || ''),
         return_type: String(r.return_type || r.type || ''),
         create_time: Number(r.create_time) || 0,
         update_time: Number(r.update_time) || 0,
@@ -658,7 +671,7 @@ export async function fetchCancellations(
     }
 
     for (const c of cancellations) {
-      const lineItems = (c.return_line_items || c.line_items || []) as Array<Record<string, unknown>>;
+      const lineItems = (c.cancel_line_items || c.line_items || []) as Array<Record<string, unknown>>;
       let productName = '';
       let productId = '';
       let skuName = '';
@@ -671,13 +684,13 @@ export async function fetchCancellations(
         units += Number(item.quantity) || 1;
       }
 
-      const refund = (c.refund || {}) as Record<string, unknown>;
-      const refundAmount = toFloat(refund.refund_total) || toFloat(refund.buyer_refund_amount) || toFloat(c.refund_amount) || 0;
+      const refundAmountObj = (c.refund_amount || {}) as Record<string, unknown>;
+      const refundAmount = toFloat(refundAmountObj.refund_total) || toFloat(refundAmountObj.refund_subtotal) || toFloat(c.refund_amount) || 0;
 
       allCancellations.push({
         return_id: String(c.cancel_id || c.id || ''),
         order_id: String(c.order_id || ''),
-        status: String(c.status || c.cancel_status || ''),
+        status: String(c.cancel_status || c.status || ''),
         return_type: 'CANCELLATION',
         create_time: Number(c.create_time) || 0,
         update_time: Number(c.update_time) || 0,
