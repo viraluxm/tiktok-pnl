@@ -651,6 +651,12 @@ export async function fetchCancellations(
     const data = await shopPost(path, accessToken, body, queryParams);
     const cancellations = (data?.cancellations || []) as Array<Record<string, unknown>>;
 
+    // Log first cancellation object to see field names
+    if (cancellations.length > 0 && allCancellations.length === 0) {
+      console.log('[Cancellations] Sample raw object keys:', JSON.stringify(Object.keys(cancellations[0])));
+      console.log('[Cancellations] Sample raw object:', JSON.stringify(cancellations[0]).slice(0, 1000));
+    }
+
     for (const c of cancellations) {
       const lineItems = (c.return_line_items || c.line_items || []) as Array<Record<string, unknown>>;
       let productName = '';
@@ -671,7 +677,7 @@ export async function fetchCancellations(
       allCancellations.push({
         return_id: String(c.cancel_id || c.id || ''),
         order_id: String(c.order_id || ''),
-        status: String(c.status || ''),
+        status: String(c.status || c.cancel_status || ''),
         return_type: 'CANCELLATION',
         create_time: Number(c.create_time) || 0,
         update_time: Number(c.update_time) || 0,
