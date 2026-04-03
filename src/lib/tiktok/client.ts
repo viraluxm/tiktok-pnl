@@ -743,6 +743,56 @@ export async function fetchCancellations(
   return allCancellations;
 }
 
+// ==================== RETURN/CANCELLATION ACTIONS ====================
+
+export async function approveReturn(
+  accessToken: string,
+  shopCipher: string,
+  returnId: string,
+): Promise<void> {
+  const path = `/return_refund/202309/returns/${returnId}/approve`;
+  await shopPost(path, accessToken, {}, { shop_cipher: shopCipher });
+}
+
+export async function rejectReturn(
+  accessToken: string,
+  shopCipher: string,
+  returnId: string,
+  rejectReason: string,
+  sellerComments?: string,
+): Promise<void> {
+  const path = `/return_refund/202309/returns/${returnId}/reject`;
+  const body: Record<string, unknown> = {
+    reject_reason: rejectReason,
+  };
+  if (sellerComments) body.seller_comments = sellerComments;
+  await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
+}
+
+export async function approveCancellation(
+  accessToken: string,
+  shopCipher: string,
+  cancelId: string,
+): Promise<void> {
+  const path = `/return_refund/202309/cancellations/${cancelId}/approve`;
+  await shopPost(path, accessToken, {}, { shop_cipher: shopCipher });
+}
+
+export async function rejectCancellation(
+  accessToken: string,
+  shopCipher: string,
+  cancelId: string,
+  rejectReason: string,
+  sellerComments?: string,
+): Promise<void> {
+  const path = `/return_refund/202309/cancellations/${cancelId}/reject`;
+  const body: Record<string, unknown> = {
+    reject_reason: rejectReason,
+  };
+  if (sellerComments) body.seller_comments = sellerComments;
+  await shopPost(path, accessToken, body, { shop_cipher: shopCipher });
+}
+
 // Helper to get date range strings
 export function getDateRange(days: number = 30): { startDate: string; endDate: string } {
   const end = new Date();

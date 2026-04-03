@@ -83,6 +83,7 @@ export async function GET(request: Request) {
 
   // Try fetching from TikTok Returns API directly
   let items: Array<{
+    return_id: string;
     order_id: string;
     product_name: string;
     product_image: string | null;
@@ -107,6 +108,7 @@ export async function GET(request: Request) {
 
       const allReturns = [...returns, ...cancellations];
       items = allReturns.map(r => ({
+        return_id: r.return_id,
         order_id: r.order_id || r.return_id,
         product_name: r.product_name || r.sku_name || 'Unknown',
         product_image: r.product_image || null,
@@ -166,6 +168,7 @@ export async function GET(request: Request) {
       .map(r => {
         const prod = productMap.get(String(r.tiktok_product_id));
         return {
+          return_id: '',
           order_id: String(r.order_id || ''),
           product_name: prod?.name || String(r.sku_name || 'Unknown'),
           product_image: prod?.image_url || null,
