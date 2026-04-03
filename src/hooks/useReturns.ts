@@ -18,6 +18,8 @@ export interface ReturnsSummary {
   pendingReturns: number;
   completedReturns: number;
   totalAmount: number;
+  pendingAmount: number;
+  completedAmount: number;
 }
 
 export interface ReturnsResponse {

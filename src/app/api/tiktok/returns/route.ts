@@ -173,11 +173,20 @@ export async function GET(request: Request) {
   // Summary
   const totalReturns = items.length;
   const totalAmount = items.reduce((sum, i) => sum + i.gmv, 0);
-  const pendingReturns = items.filter(i => isPendingStatus(i.status)).length;
-  const completedReturns = totalReturns - pendingReturns;
+  const pendingItems = items.filter(i => isPendingStatus(i.status));
+  const completedItems = items.filter(i => !isPendingStatus(i.status));
+  const pendingReturns = pendingItems.length;
+  const completedReturns = completedItems.length;
+  const pendingAmount = pendingItems.reduce((sum, i) => sum + i.gmv, 0);
+  const completedAmount = completedItems.reduce((sum, i) => sum + i.gmv, 0);
 
   return NextResponse.json({
-    summary: { totalReturns, pendingReturns, completedReturns, totalAmount: Math.round(totalAmount * 100) / 100 },
+    summary: {
+      totalReturns, pendingReturns, completedReturns,
+      totalAmount: Math.round(totalAmount * 100) / 100,
+      pendingAmount: Math.round(pendingAmount * 100) / 100,
+      completedAmount: Math.round(completedAmount * 100) / 100,
+    },
     items,
   });
 }

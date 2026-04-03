@@ -1,14 +1,22 @@
 'use client';
 
+import { useState } from 'react';
 import { fmt, fmtInt } from '@/lib/calculations';
-import type { ReturnsResponse } from '@/hooks/useReturns';
+import type { ReturnsResponse, ReturnItem } from '@/hooks/useReturns';
 
 interface ReturnsTabProps {
   data: ReturnsResponse | undefined;
   isLoading: boolean;
 }
 
+function isPendingStatus(status: string): boolean {
+  const s = status.toUpperCase();
+  return s.includes('IN_CANCEL') || s.includes('REQUESTED') || s.includes('IN_PROGRESS') || s.includes('PENDING') || s.includes('AWAITING') || s.includes('IN_TRANSIT');
+}
+
 export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
+  const [filter, setFilter] = useState<'all' | 'pending'>('all');
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16 text-tt-muted">
@@ -23,6 +31,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
   }
 
   const { summary, items } = data;
+  const filteredItems = filter === 'pending' ? items.filter(i => isPendingStatus(i.status)) : items;
 
   return (
     <div>
@@ -36,17 +45,41 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
         <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Pending</span>
           <div className="text-[30px] font-bold text-tt-yellow mt-2">{fmtInt(summary.pendingReturns)}</div>
+          <div className="text-xs text-tt-muted mt-1">{fmt(summary.pendingAmount)} value</div>
         </div>
         <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Completed</span>
           <div className="text-[30px] font-bold text-tt-green mt-2">{fmtInt(summary.completedReturns)}</div>
+          <div className="text-xs text-tt-muted mt-1">{fmt(summary.completedAmount)} value</div>
         </div>
       </div>
 
       {/* Returns table */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
-        <div className="px-6 py-5 border-b border-tt-border">
+        <div className="px-6 py-5 border-b border-tt-border flex items-center justify-between">
           <h2 className="text-base font-semibold text-tt-text">Return & Cancellation History</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setFilter('all')}
+              className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                filter === 'all'
+                  ? 'bg-white/10 text-tt-text'
+                  : 'text-tt-muted hover:text-tt-text hover:bg-white/5'
+              }`}
+            >
+              View All
+            </button>
+            <button
+              onClick={() => setFilter('pending')}
+              className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                filter === 'pending'
+                  ? 'bg-tt-yellow/15 text-tt-yellow'
+                  : 'text-tt-muted hover:text-tt-text hover:bg-white/5'
+              }`}
+            >
+              Pending ({fmtInt(summary.pendingReturns)})
+            </button>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">
@@ -61,7 +94,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
               </tr>
             </thead>
             <tbody>
-              {items.map((item, i) => (
+              {filteredItems.map((item, i) => (
                 <tr key={`${item.order_id}-${i}`} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
                   <td className="px-5 py-3 text-xs text-tt-muted font-mono">{item.order_id.slice(-12)}</td>
                   <td className="px-5 py-3">
@@ -80,10 +113,10 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
                   <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(item.gmv)}</td>
                 </tr>
               ))}
-              {items.length === 0 && (
+              {filteredItems.length === 0 && (
                 <tr>
                   <td colSpan={6} className="px-5 py-12 text-center text-tt-muted text-sm">
-                    No returns or cancellations found for this period
+                    {filter === 'pending' ? 'No pending returns or cancellations' : 'No returns or cancellations found for this period'}
                   </td>
                 </tr>
               )}
@@ -97,11 +130,11 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
 
 function StatusBadge({ status }: { status: string }) {
   const s = status.toUpperCase();
-  const isPending = s.includes('IN_CANCEL') || s.includes('REQUESTED') || s.includes('IN_PROGRESS') || s.includes('PENDING') || s.includes('AWAITING') || s.includes('IN_TRANSIT');
+  const pending = isPendingStatus(s);
   const isCancelled = s === 'CANCELLED' || s.includes('CANCEL');
 
   let colorClass = 'bg-tt-red/15 text-tt-red';
-  if (isPending) colorClass = 'bg-tt-yellow/15 text-tt-yellow';
+  if (pending) colorClass = 'bg-tt-yellow/15 text-tt-yellow';
   else if (!isCancelled) colorClass = 'bg-tt-muted/15 text-tt-muted';
 
   // Clean up display
