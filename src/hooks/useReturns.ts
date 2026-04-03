@@ -9,6 +9,10 @@ export interface ReturnItem {
   product_image: string | null;
   gmv: number;
   status: string;
+  return_type: string;
+  role: string;
+  reason: string;
+  buyer_remarks: string;
   order_date: string;
   units: number;
 }

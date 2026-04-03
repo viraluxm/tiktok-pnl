@@ -552,6 +552,7 @@ export interface TikTokReturn {
   order_id: string;
   status: string;
   return_type: string;
+  role: string;
   create_time: number;
   update_time: number;
   product_name: string;
@@ -559,6 +560,8 @@ export interface TikTokReturn {
   sku_name: string;
   product_image: string;
   return_reason: string;
+  return_reason_text: string;
+  buyer_remarks: string;
   refund_amount: number;
   units: number;
 }
@@ -634,6 +637,7 @@ export async function fetchReturns(
         order_id: String(r.order_id || ''),
         status: String(r.return_status || r.status || ''),
         return_type: String(r.return_type || r.type || ''),
+        role: String(r.role || ''),
         create_time: Number(r.create_time) || 0,
         update_time: Number(r.update_time) || 0,
         product_name: productName,
@@ -641,6 +645,8 @@ export async function fetchReturns(
         sku_name: skuName,
         product_image: productImage,
         return_reason: String(r.return_reason || r.reason || ''),
+        return_reason_text: String(r.return_reason_text || r.reason_text || ''),
+        buyer_remarks: String(r.buyer_remarks || r.comments || r.buyer_comments || ''),
         refund_amount: refundAmount,
         units: units || 1,
       });
@@ -716,6 +722,7 @@ export async function fetchCancellations(
         order_id: String(c.order_id || ''),
         status: String(c.cancel_status || c.status || ''),
         return_type: 'CANCELLATION',
+        role: String(c.role || ''),
         create_time: Number(c.create_time) || 0,
         update_time: Number(c.update_time) || 0,
         product_name: productName,
@@ -723,6 +730,8 @@ export async function fetchCancellations(
         sku_name: skuName,
         product_image: productImage,
         return_reason: String(c.cancel_reason || c.reason || ''),
+        return_reason_text: String(c.cancel_reason_text || c.reason_text || ''),
+        buyer_remarks: String(c.buyer_remarks || c.comments || ''),
         refund_amount: refundAmount,
         units: units || 1,
       });

@@ -88,6 +88,10 @@ export async function GET(request: Request) {
     product_image: string | null;
     gmv: number;
     status: string;
+    return_type: string;
+    role: string;
+    reason: string;
+    buyer_remarks: string;
     order_date: string;
     units: number;
   }> = [];
@@ -108,6 +112,10 @@ export async function GET(request: Request) {
         product_image: r.product_image || null,
         gmv: r.refund_amount,
         status: r.status,
+        return_type: r.return_type || '',
+        role: r.role || '',
+        reason: r.return_reason_text || r.return_reason || '',
+        buyer_remarks: r.buyer_remarks || '',
         order_date: r.create_time ? toLocalDate(r.create_time) : '',
         units: r.units,
       })).sort((a, b) => b.order_date.localeCompare(a.order_date));
@@ -163,6 +171,10 @@ export async function GET(request: Request) {
           product_image: prod?.image_url || null,
           gmv: Number(r.gmv) || 0,
           status: String(r.status || ''),
+          return_type: '',
+          role: '',
+          reason: '',
+          buyer_remarks: '',
           order_date: String(r.order_date || ''),
           units: Number(r.units) || 0,
         };

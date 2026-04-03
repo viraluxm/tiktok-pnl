@@ -14,6 +14,19 @@ function isPendingStatus(status: string): boolean {
   return s.includes('IN_CANCEL') || s.includes('REQUESTED') || s.includes('IN_PROGRESS') || s.includes('PENDING') || s.includes('AWAITING') || s.includes('IN_TRANSIT');
 }
 
+function isAwaitingSellerAction(item: ReturnItem): boolean {
+  const role = item.role.toUpperCase();
+  if (role === 'SELLER' || role.includes('SELLER')) return true;
+  // Fallback: if status suggests seller needs to act
+  const s = item.status.toUpperCase();
+  return s.includes('AWAITING_ISSUE_REFUND') || s.includes('WAITING_FOR_SELLER') || s.includes('SELLER_RECEIVE');
+}
+
+function formatReturnType(type: string): string {
+  if (!type) return '';
+  return type.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+}
+
 export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
   const [filter, setFilter] = useState<'all' | 'pending'>('all');
 
@@ -87,10 +100,11 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
               <tr className="border-b border-tt-border">
                 <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Order ID</th>
                 <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Product</th>
+                <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Type / Reason</th>
                 <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Date</th>
                 <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Status</th>
                 <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Units</th>
-                <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">GMV</th>
+                <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Refund</th>
               </tr>
             </thead>
             <tbody>
@@ -104,18 +118,38 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
                       ) : (
                         <div className="w-9 h-9 rounded-lg bg-tt-border flex-shrink-0" />
                       )}
-                      <span className="text-[13px] text-tt-text">{item.product_name}</span>
+                      <span className="text-[13px] text-tt-text line-clamp-2">{item.product_name}</span>
+                    </div>
+                  </td>
+                  <td className="px-5 py-3">
+                    <div className="flex flex-col gap-0.5">
+                      {item.return_type && (
+                        <span className="text-[11px] text-tt-text font-medium">{formatReturnType(item.return_type)}</span>
+                      )}
+                      {item.reason && (
+                        <span className="text-[11px] text-tt-muted">{item.reason}</span>
+                      )}
+                      {item.buyer_remarks && (
+                        <span className="text-[10px] text-tt-muted/70 italic line-clamp-2">&ldquo;{item.buyer_remarks}&rdquo;</span>
+                      )}
                     </div>
                   </td>
                   <td className="px-5 py-3 text-xs text-tt-muted">{item.order_date}</td>
-                  <td className="px-5 py-3"><StatusBadge status={item.status} /></td>
+                  <td className="px-5 py-3">
+                    <div className="flex flex-col gap-1">
+                      <StatusBadge status={item.status} />
+                      {isPendingStatus(item.status) && isAwaitingSellerAction(item) && (
+                        <span className="text-[9px] font-semibold text-tt-red uppercase tracking-wide">Action needed</span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{item.units}</td>
                   <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(item.gmv)}</td>
                 </tr>
               ))}
               {filteredItems.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-5 py-12 text-center text-tt-muted text-sm">
+                  <td colSpan={7} className="px-5 py-12 text-center text-tt-muted text-sm">
                     {filter === 'pending' ? 'No pending returns or cancellations' : 'No returns or cancellations found for this period'}
                   </td>
                 </tr>
