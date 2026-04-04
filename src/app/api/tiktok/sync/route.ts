@@ -258,6 +258,8 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   const orderId = String(o.id || '');
   const createTime = o.create_time as number;
   const date = createTime ? toLocalDate(createTime) : '';
+  const updateTime = o.update_time as number;
+  const updatedDate = updateTime ? toLocalDate(updateTime) : '';
   const status = String(o.status || '').toUpperCase();
   const payment = (o.payment || {}) as Record<string, unknown>;
   // TikTok GMV = Price × Items + Shipping - Seller promotions - Platform co-funding (excludes tax)
@@ -291,7 +293,7 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   if (units === 0) units = 1;
 
   return {
-    user_id: userId, order_id: orderId, order_date: date,
+    user_id: userId, order_id: orderId, order_date: date, updated_date: updatedDate,
     gmv, shipping, affiliate, platform_fee: platformFee, units,
     tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName,
     product_name: productName, status,

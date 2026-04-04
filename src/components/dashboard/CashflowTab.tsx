@@ -1,7 +1,156 @@
 'use client';
 
+import { useState, useMemo } from 'react';
 import { fmt, fmtInt } from '@/lib/calculations';
-import type { FinanceData } from '@/hooks/useFinance';
+import type { FinanceData, PaymentRecord, UnsettledSummary } from '@/hooks/useFinance';
+
+/* ── PayoutCalendar sub-component ────────────────────────────── */
+
+function PayoutCalendar({
+  payments,
+  unsettled,
+}: {
+  payments: PaymentRecord[];
+  unsettled: UnsettledSummary;
+}) {
+  const today = new Date();
+  const [viewYear, setViewYear] = useState(today.getFullYear());
+  const [viewMonth, setViewMonth] = useState(today.getMonth()); // 0-indexed
+  const [tooltip, setTooltip] = useState<{ key: string; label: string; x: number; y: number } | null>(null);
+
+  // Build a map of past payout amounts keyed by YYYY-MM-DD
+  const pastPayouts = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const p of payments) {
+      if (p.status === 'PAID' && p.paidTime) {
+        map[p.paidTime] = (map[p.paidTime] || 0) + p.amount;
+      }
+    }
+    return map;
+  }, [payments]);
+
+  // Build a map of projected payout amounts for the next 7 days
+  const projectedPayouts = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (unsettled.estSettlement <= 0) return map;
+    const dailyAmount = unsettled.estSettlement / 7;
+    for (let i = 1; i <= 7; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() + i);
+      const key = d.toISOString().slice(0, 10);
+      map[key] = dailyAmount;
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unsettled.estSettlement]);
+
+  // Calendar grid computation
+  const firstOfMonth = new Date(viewYear, viewMonth, 1);
+  const startDow = firstOfMonth.getDay(); // 0=Sun
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+
+  const monthLabel = firstOfMonth.toLocaleString('default', { month: 'long', year: 'numeric' });
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+  const prevMonth = () => {
+    if (viewMonth === 0) { setViewYear(y => y - 1); setViewMonth(11); }
+    else setViewMonth(m => m - 1);
+  };
+  const nextMonth = () => {
+    if (viewMonth === 11) { setViewYear(y => y + 1); setViewMonth(0); }
+    else setViewMonth(m => m + 1);
+  };
+
+  // Build 6x7 grid of day numbers (0 = empty cell)
+  const cells: number[] = [];
+  for (let i = 0; i < startDow; i++) cells.push(0);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length < 42) cells.push(0);
+
+  const handleMouseEnter = (e: React.MouseEvent, dayKey: string, amount: number, kind: string) => {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setTooltip({
+      key: dayKey,
+      label: `${kind}: ${fmt(amount)}`,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 6,
+    });
+  };
+
+  return (
+    <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden mb-8">
+      {/* Header */}
+      <div className="px-6 py-4 border-b border-tt-border flex items-center justify-between">
+        <h2 className="text-base font-semibold text-tt-text">Payout Calendar</h2>
+        <div className="flex items-center gap-3">
+          <button onClick={prevMonth} className="text-tt-muted hover:text-tt-text transition-colors text-sm px-1">&larr;</button>
+          <span className="text-sm text-tt-text font-medium min-w-[140px] text-center">{monthLabel}</span>
+          <button onClick={nextMonth} className="text-tt-muted hover:text-tt-text transition-colors text-sm px-1">&rarr;</button>
+        </div>
+      </div>
+
+      {/* Day-of-week headers */}
+      <div className="grid grid-cols-7 px-4 pt-3 pb-1">
+        {dayNames.map(d => (
+          <div key={d} className="text-center text-[10px] text-tt-muted uppercase tracking-wide font-medium">{d}</div>
+        ))}
+      </div>
+
+      {/* Calendar grid */}
+      <div className="grid grid-cols-7 px-4 pb-4 gap-y-1">
+        {cells.map((day, idx) => {
+          if (day === 0) return <div key={`empty-${idx}`} />;
+
+          const dayKey = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          const pastAmount = pastPayouts[dayKey];
+          const projAmount = projectedPayouts[dayKey];
+          const isToday = dayKey === todayKey;
+
+          return (
+            <div
+              key={dayKey}
+              className={`relative flex flex-col items-center justify-center py-1.5 rounded-lg text-xs transition-colors ${
+                isToday ? 'ring-1 ring-tt-cyan/60' : ''
+              } hover:bg-tt-card-hover`}
+              onMouseEnter={(e) => {
+                if (pastAmount) handleMouseEnter(e, dayKey, pastAmount, 'Paid');
+                else if (projAmount) handleMouseEnter(e, dayKey, projAmount, 'Projected');
+              }}
+              onMouseLeave={() => setTooltip(null)}
+            >
+              <span className={`tabular-nums ${isToday ? 'text-tt-cyan font-bold' : 'text-tt-muted'}`}>{day}</span>
+              {/* Dots */}
+              <div className="flex gap-0.5 mt-0.5 h-[6px]">
+                {pastAmount && (
+                  <span className="block w-[5px] h-[5px] rounded-full bg-tt-green" />
+                )}
+                {projAmount && (
+                  <span className="block w-[5px] h-[5px] rounded-full bg-tt-cyan animate-pulse" />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Tooltip (portal-less, fixed position) */}
+      {tooltip && (
+        <div
+          className="fixed z-50 px-2.5 py-1.5 rounded-md bg-[#1a1a2e] border border-tt-border text-[11px] text-tt-text shadow-lg whitespace-nowrap pointer-events-none"
+          style={{
+            left: tooltip.x,
+            top: tooltip.y,
+            transform: 'translate(-50%, -100%)',
+          }}
+        >
+          {tooltip.label}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface CashflowTabProps {
   data: FinanceData | undefined;
@@ -68,6 +217,9 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
           </div>
         </div>
       )}
+
+      {/* Payout Calendar */}
+      <PayoutCalendar payments={payments} unsettled={unsettled} />
 
       {/* Summary cards */}
       <div className="grid grid-cols-4 gap-5 mb-8">
