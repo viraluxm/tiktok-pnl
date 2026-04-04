@@ -303,16 +303,31 @@ export async function fetchUnsettledOrders(
   accessToken: string,
   shopCipher: string,
 ): Promise<Record<string, unknown>> {
-  const path = '/finance/202507/orders/unsettled';
+  // Try the newer endpoint first, fall back to legacy
+  for (const path of ['/finance/202507/orders/unsettled', '/finance/202309/orders/unsettled']) {
+    for (const sortField of ['create_time', 'order_create_time', 'settlement_time']) {
+      try {
+        const data = await shopGet(path, accessToken, {
+          shop_cipher: shopCipher,
+          page_size: '50',
+          sort_field: sortField,
+          sort_order: 'DESC',
+        });
+        console.log(`[Finance] Unsettled orders success with path=${path}, sort_field=${sortField}`);
+        return data || {};
+      } catch (err) {
+        const msg = (err as Error).message;
+        // If it's a sort field error, try next field; otherwise try next path
+        if (msg.includes('SortField') || msg.includes('sort')) continue;
+        if (msg.includes('schema') || msg.includes('not found')) break; // path doesn't exist, try next
+        console.error(`[Finance] Unsettled orders error (${path}, ${sortField}):`, msg);
+        break;
+      }
+    }
+  }
 
-  const data = await shopGet(path, accessToken, {
-    shop_cipher: shopCipher,
-    page_size: '50',
-    sort_field: 'order_create_time',
-    sort_order: 'DESC',
-  });
-
-  return data || {};
+  console.log('[Finance] All unsettled orders attempts failed');
+  return {};
 }
 
 export async function fetchPayments(
