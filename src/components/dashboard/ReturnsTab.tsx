@@ -59,7 +59,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
     return <div className="text-tt-muted text-center py-16">No return data available</div>;
   }
 
-  const { summary, items } = data;
+  const { summary, items, awaitingAction = [] } = data;
   const filteredItems = filter === 'pending' ? items.filter(i => isPendingStatus(i.status)) : items;
 
   function openModal(item: ReturnItem) {
@@ -133,6 +133,79 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
           <div className="text-xs text-tt-muted mt-1">{fmt(summary.completedAmount)} value</div>
         </div>
       </div>
+
+      {/* Awaiting Your Response */}
+      {awaitingAction.length > 0 && (
+        <div className="bg-tt-card border border-tt-yellow/30 rounded-[14px] backdrop-blur-xl overflow-hidden mb-8">
+          <div className="px-6 py-5 border-b border-tt-border flex items-center gap-3">
+            <div className="w-2 h-2 rounded-full bg-tt-yellow animate-pulse" />
+            <h2 className="text-base font-semibold text-tt-text">
+              Awaiting Your Response
+              <span className="ml-2 text-sm font-normal text-tt-yellow">({awaitingAction.length})</span>
+            </h2>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="border-b border-tt-border">
+                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Order ID</th>
+                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Product</th>
+                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Type / Reason</th>
+                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Date</th>
+                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Status</th>
+                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Refund</th>
+                  <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {awaitingAction.map((item, i) => (
+                  <tr key={`awaiting-${item.return_id}-${i}`} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
+                    <td className="px-5 py-3 text-xs text-tt-muted font-mono">{item.order_id.slice(-12)}</td>
+                    <td className="px-5 py-3">
+                      <div className="flex items-center gap-3">
+                        {item.product_image ? (
+                          <img src={item.product_image} alt="" className="w-9 h-9 rounded-lg object-cover flex-shrink-0" />
+                        ) : (
+                          <div className="w-9 h-9 rounded-lg bg-tt-border flex-shrink-0" />
+                        )}
+                        <span className="text-[13px] text-tt-text line-clamp-2">{item.product_name}</span>
+                      </div>
+                    </td>
+                    <td className="px-5 py-3">
+                      <div className="flex flex-col gap-0.5">
+                        {item.return_type && (
+                          <span className="text-[11px] text-tt-text font-medium">{formatReturnType(item.return_type)}</span>
+                        )}
+                        {item.reason && (
+                          <span className="text-[11px] text-tt-muted">{item.reason}</span>
+                        )}
+                        {item.buyer_remarks && (
+                          <span className="text-[10px] text-tt-muted/70 italic line-clamp-2">&ldquo;{item.buyer_remarks}&rdquo;</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3 text-xs text-tt-muted">{item.order_date}</td>
+                    <td className="px-5 py-3"><StatusBadge status={item.status} /></td>
+                    <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(item.gmv)}</td>
+                    <td className="px-5 py-3 text-center">
+                      {item.return_id ? (
+                        <button
+                          onClick={() => openModal(item)}
+                          className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+                        >
+                          Respond
+                        </button>
+                      ) : (
+                        <span className="text-[11px] text-tt-muted">--</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Returns table */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">

@@ -185,7 +185,54 @@ export async function GET(request: Request) {
       .sort((a, b) => b.order_date.localeCompare(a.order_date));
   }
 
-  // Summary
+  // Fetch ALL pending returns awaiting seller action (ignores date filter)
+  type ItemType = typeof items[number];
+  let awaitingAction: ItemType[] = [];
+
+  if (connection?.access_token && connection?.shop_cipher) {
+    try {
+      const accessToken = decryptOrFallback(connection.access_token, 'access_token');
+      // Fetch last 365 days to capture all open returns
+      const wideFrom = new Date();
+      wideFrom.setDate(wideFrom.getDate() - 365);
+      const wideFromStr = wideFrom.toLocaleDateString('en-CA', { timeZone: SHOP_TIMEZONE });
+      const wideToNext = new Date();
+      wideToNext.setDate(wideToNext.getDate() + 1);
+      const wideToStr = wideToNext.toLocaleDateString('en-CA', { timeZone: SHOP_TIMEZONE });
+      const wideStartTs = dayToTs(wideFromStr);
+      const wideEndTs = dayToTs(wideToStr);
+
+      const [allReturns, allCancellations] = await Promise.all([
+        fetchReturns(accessToken, connection.shop_cipher, wideStartTs, wideEndTs),
+        fetchCancellations(accessToken, connection.shop_cipher, wideStartTs, wideEndTs),
+      ]);
+
+      const allItems = [...allReturns, ...allCancellations];
+      awaitingAction = allItems
+        .filter(r => isPendingStatus(r.status))
+        .map(r => ({
+          return_id: r.return_id,
+          order_id: r.order_id || r.return_id,
+          product_name: r.product_name || r.sku_name || 'Unknown',
+          product_image: r.product_image || null,
+          gmv: r.refund_amount,
+          status: r.status,
+          return_type: r.return_type || '',
+          role: r.role || '',
+          reason: r.return_reason_text || r.return_reason || '',
+          buyer_remarks: r.buyer_remarks || '',
+          order_date: r.create_time ? toLocalDate(r.create_time) : '',
+          units: r.units,
+        }))
+        .sort((a, b) => b.order_date.localeCompare(a.order_date));
+
+      console.log(`[Returns] Awaiting action: ${awaitingAction.length} items (all-time)`);
+    } catch (err) {
+      console.error('[Returns] Awaiting action fetch failed:', (err as Error).message);
+    }
+  }
+
+  // Summary (date-filtered)
   const totalReturns = items.length;
   const totalAmount = items.reduce((sum, i) => sum + i.gmv, 0);
   const pendingItems = items.filter(i => isPendingStatus(i.status));
@@ -203,5 +250,6 @@ export async function GET(request: Request) {
       completedAmount: Math.round(completedAmount * 100) / 100,
     },
     items,
+    awaitingAction,
   });
 }

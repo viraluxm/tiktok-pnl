@@ -30,6 +30,7 @@ export interface ReturnsSummary {
 export interface ReturnsResponse {
   summary: ReturnsSummary;
   items: ReturnItem[];
+  awaitingAction: ReturnItem[];
 }
 
 export function useReturns(dateFrom: string | null, dateTo: string | null) {
