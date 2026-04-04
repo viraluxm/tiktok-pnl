@@ -18,9 +18,8 @@ function PayoutCalendar({
   const today = new Date();
   const [viewYear, setViewYear] = useState(today.getFullYear());
   const [viewMonth, setViewMonth] = useState(today.getMonth());
-  const [tooltip, setTooltip] = useState<{ key: string; label: string; x: number; y: number } | null>(null);
+  const [tooltip, setTooltip] = useState<{ label: string; x: number; y: number } | null>(null);
 
-  // Map past payout amounts by date (from payments)
   const pastPayouts = useMemo(() => {
     const map: Record<string, number> = {};
     for (const p of payments) {
@@ -28,16 +27,14 @@ function PayoutCalendar({
         map[p.paidTime] = (map[p.paidTime] || 0) + p.amount;
       }
     }
-    // Also add statement settlement amounts by date
     for (const s of statements) {
-      if (s.date && s.settlement > 0) {
-        map[s.date] = (map[s.date] || 0) + s.settlement;
+      if (s.date && s.settlement > 0 && !map[s.date]) {
+        map[s.date] = s.settlement;
       }
     }
     return map;
   }, [payments, statements]);
 
-  // Projected payouts for next 7 days
   const projectedPayouts = useMemo(() => {
     const map: Record<string, number> = {};
     if (unsettled.estSettlement <= 0) return map;
@@ -73,31 +70,43 @@ function PayoutCalendar({
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
   while (cells.length < 42) cells.push(0);
 
-  const handleMouseEnter = (e: React.MouseEvent, dayKey: string, amount: number, kind: string) => {
+  const handleMouseEnter = (e: React.MouseEvent, amount: number, kind: string) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setTooltip({ key: dayKey, label: `${kind}: ${fmt(amount)}`, x: rect.left + rect.width / 2, y: rect.top - 6 });
+    setTooltip({ label: `${kind}: ${fmt(amount)}`, x: rect.left + rect.width / 2, y: rect.top - 6 });
   };
 
   return (
     <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden mb-8">
-      <div className="px-6 py-4 border-b border-tt-border flex items-center justify-between">
-        <h2 className="text-base font-semibold text-tt-text">Payout Calendar</h2>
-        <div className="flex items-center gap-3">
-          <button onClick={prevMonth} className="text-tt-muted hover:text-tt-text transition-colors text-sm px-1">&larr;</button>
-          <span className="text-sm text-tt-text font-medium min-w-[140px] text-center">{monthLabel}</span>
-          <button onClick={nextMonth} className="text-tt-muted hover:text-tt-text transition-colors text-sm px-1">&rarr;</button>
+      {/* Header with pending total */}
+      <div className="px-6 py-5 border-b border-tt-border">
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-base font-semibold text-tt-text">Payout Calendar</h2>
+          <div className="flex items-center gap-3">
+            <button onClick={prevMonth} className="text-tt-muted hover:text-tt-text transition-colors text-sm px-1">&larr;</button>
+            <span className="text-sm text-tt-text font-medium min-w-[140px] text-center">{monthLabel}</span>
+            <button onClick={nextMonth} className="text-tt-muted hover:text-tt-text transition-colors text-sm px-1">&rarr;</button>
+          </div>
         </div>
+        {unsettled.totalCount > 0 && (
+          <div className="flex items-center gap-2 mt-2">
+            <div className="w-1.5 h-1.5 rounded-full bg-tt-cyan animate-pulse" />
+            <span className="text-sm text-tt-cyan font-semibold">{fmt(unsettled.estSettlement)}</span>
+            <span className="text-xs text-tt-muted">pending across {fmtInt(unsettled.totalCount)} orders</span>
+          </div>
+        )}
       </div>
 
+      {/* Day headers */}
       <div className="grid grid-cols-7 px-4 pt-3 pb-1">
         {dayNames.map(d => (
           <div key={d} className="text-center text-[10px] text-tt-muted uppercase tracking-wide font-medium">{d}</div>
         ))}
       </div>
 
-      <div className="grid grid-cols-7 px-4 pb-4 gap-y-1">
+      {/* Calendar grid */}
+      <div className="grid grid-cols-7 px-4 pb-3 gap-y-0.5">
         {cells.map((day, idx) => {
-          if (day === 0) return <div key={`empty-${idx}`} />;
+          if (day === 0) return <div key={`empty-${idx}`} className="py-3" />;
 
           const dayKey = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
           const pastAmount = pastPayouts[dayKey];
@@ -107,12 +116,12 @@ function PayoutCalendar({
           return (
             <div
               key={dayKey}
-              className={`relative flex flex-col items-center justify-center py-2 rounded-lg text-xs transition-colors ${
-                isToday ? 'ring-1 ring-tt-cyan/60' : ''
+              className={`relative flex flex-col items-center justify-center py-3 rounded-lg text-xs transition-colors ${
+                isToday ? 'bg-tt-cyan/10 ring-1 ring-tt-cyan/40' : ''
               } hover:bg-tt-card-hover`}
               onMouseEnter={(e) => {
-                if (pastAmount) handleMouseEnter(e, dayKey, pastAmount, 'Paid');
-                else if (projAmount) handleMouseEnter(e, dayKey, projAmount, 'Projected');
+                if (pastAmount) handleMouseEnter(e, pastAmount, 'Paid');
+                else if (projAmount) handleMouseEnter(e, projAmount, 'Projected');
               }}
               onMouseLeave={() => setTooltip(null)}
             >
@@ -120,7 +129,7 @@ function PayoutCalendar({
               {pastAmount ? (
                 <span className="text-[9px] text-tt-green font-semibold tabular-nums mt-0.5">{fmt(pastAmount)}</span>
               ) : projAmount ? (
-                <span className="text-[9px] text-tt-cyan/70 font-semibold tabular-nums mt-0.5 animate-pulse">~{fmt(projAmount)}</span>
+                <span className="text-[9px] text-tt-cyan/60 tabular-nums mt-0.5">~{fmt(projAmount)}</span>
               ) : (
                 <span className="h-[14px]" />
               )}
@@ -136,7 +145,7 @@ function PayoutCalendar({
           <span className="text-[10px] text-tt-muted">Paid</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-tt-cyan animate-pulse" />
+          <span className="w-2 h-2 rounded-full bg-tt-cyan" />
           <span className="text-[10px] text-tt-muted">Projected</span>
         </div>
       </div>
@@ -186,7 +195,6 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
   const paidPayments = payments.filter(p => p.status === 'PAID');
   const totalPaid = paidPayments.reduce((sum, p) => sum + p.amount, 0);
 
-  // Match statements to payments by date for breakdown in payout rows
   const statementsByDate: Record<string, typeof statements[number]> = {};
   for (const s of statements) {
     if (s.date) statementsByDate[s.date] = s;
@@ -194,7 +202,7 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
 
   return (
     <div>
-      {/* 1. Summary cards (period-dependent, at top) */}
+      {/* 1. Summary cards */}
       <div className="grid grid-cols-4 gap-5 mb-8">
         <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Net Sales</span>
@@ -214,43 +222,10 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
         </div>
       </div>
 
-      {/* 2. Projected Payout */}
-      {unsettled.totalCount > 0 && (
-        <div className="mb-8">
-          <div className="bg-tt-card border border-tt-cyan/30 rounded-[14px] backdrop-blur-xl overflow-hidden">
-            <div className="px-6 py-5 border-b border-tt-border flex items-center gap-3">
-              <div className="w-2 h-2 rounded-full bg-tt-cyan animate-pulse" />
-              <h2 className="text-base font-semibold text-tt-text">Projected Payout</h2>
-              <span className="text-xs text-tt-muted ml-auto">{fmtInt(unsettled.totalCount)} unsettled orders</span>
-            </div>
-            <div className="p-6">
-              <div className="grid grid-cols-4 gap-6">
-                <div>
-                  <span className="text-xs text-tt-muted uppercase tracking-wide">Est. Revenue</span>
-                  <div className="text-2xl font-bold text-tt-text mt-1">{fmt(unsettled.estRevenue)}</div>
-                </div>
-                <div>
-                  <span className="text-xs text-tt-muted uppercase tracking-wide">Est. Fees</span>
-                  <div className="text-2xl font-bold text-tt-red mt-1">-{fmt(Math.abs(unsettled.estFees))}</div>
-                </div>
-                <div>
-                  <span className="text-xs text-tt-muted uppercase tracking-wide">Est. Adjustments</span>
-                  <div className="text-2xl font-bold text-tt-text mt-1">{fmt(unsettled.estAdjustments)}</div>
-                </div>
-                <div>
-                  <span className="text-xs text-tt-muted uppercase tracking-wide">Est. Payout</span>
-                  <div className="text-2xl font-bold text-tt-green mt-1">{fmt(unsettled.estSettlement)}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 3. Payout Calendar */}
+      {/* 2. Calendar (includes pending total) */}
       <PayoutCalendar payments={payments} unsettled={unsettled} statements={statements} />
 
-      {/* 4. Payouts — collapsible, each row expandable for breakdown */}
+      {/* 3. Payouts — collapsed by default */}
       {payments.length > 0 && (
         <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
           <button
@@ -275,12 +250,10 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
             <div className="border-t border-tt-border">
               {payments.map((p, i) => {
                 const isExpanded = expandedPayout === p.id;
-                // Find matching statement for breakdown
                 const stmt = statementsByDate[p.paidTime] || statementsByDate[p.createTime];
 
                 return (
                   <div key={`${p.id}-${i}`} className="border-b border-[rgba(255,255,255,0.04)] last:border-b-0">
-                    {/* Payout row */}
                     <button
                       onClick={() => setExpandedPayout(isExpanded ? null : p.id)}
                       className="w-full px-5 py-3 flex items-center justify-between hover:bg-tt-card-hover transition-colors"
@@ -304,11 +277,10 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
                       </div>
                     </button>
 
-                    {/* Expanded breakdown */}
                     {isExpanded && (
                       <div className="px-8 pb-4 pt-1">
                         <div className="bg-white/5 rounded-xl p-4 space-y-2">
-                          <div className="text-[10px] text-tt-muted uppercase tracking-wide mb-3">Payout Breakdown</div>
+                          <div className="text-[10px] text-tt-muted uppercase tracking-wide mb-3">Breakdown</div>
                           {stmt ? (
                             <>
                               <div className="flex justify-between text-sm">
