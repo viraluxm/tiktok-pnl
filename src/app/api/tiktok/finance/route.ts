@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { fetchStatements, fetchPayments, fetchSettlements } from '@/lib/tiktok/client';
+import { fetchStatements, fetchPayments, fetchSettlements, fetchUnsettledOrders } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
 
 const SHOP_TIMEZONE = 'America/Los_Angeles';
@@ -54,11 +54,15 @@ export async function GET(request: Request) {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
-  // Fetch all three in parallel
-  const [statements, payments, settlements] = await Promise.all([
+  // Fetch all in parallel
+  const [statements, payments, settlements, unsettledRaw] = await Promise.all([
     fetchStatements(accessToken, connection.shop_cipher, startTs, endTs),
     fetchPayments(accessToken, connection.shop_cipher),
     fetchSettlements(accessToken, connection.shop_cipher, startTs, endTs),
+    fetchUnsettledOrders(accessToken, connection.shop_cipher).catch(err => {
+      console.error('[Finance] fetchUnsettledOrders error:', (err as Error).message);
+      return {} as Record<string, unknown>;
+    }),
   ]);
 
   // Debug logging for first-time API exploration
@@ -80,12 +84,22 @@ export async function GET(request: Request) {
     console.log('[Finance] No settlements returned');
   }
 
+  // Log unsettled orders data
+  if (unsettledRaw && Object.keys(unsettledRaw).length > 0) {
+    console.log('[Finance] Unsettled orders keys:', JSON.stringify(Object.keys(unsettledRaw)));
+    console.log('[Finance] Unsettled orders data:', JSON.stringify(unsettledRaw).slice(0, 1500));
+    debug.unsettledKeys = Object.keys(unsettledRaw);
+  } else {
+    console.log('[Finance] No unsettled orders data returned');
+  }
+
   console.log(`[Finance] ${statements.length} statements, ${payments.length} payments, ${settlements.length} settlements (${fromStr} to ${toStr})`);
 
   return NextResponse.json({
     statements,
     payments,
     settlements,
+    unsettled: unsettledRaw,
     debug,
   });
 }
