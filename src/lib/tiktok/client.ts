@@ -307,7 +307,9 @@ export async function fetchUnsettledOrders(
 
   const data = await shopGet(path, accessToken, {
     shop_cipher: shopCipher,
-    page_size: '10',
+    page_size: '50',
+    sort_field: 'order_create_time',
+    sort_order: 'DESC',
   });
 
   return data || {};
