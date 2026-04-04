@@ -9,16 +9,18 @@ import type { FinanceData, PaymentRecord, UnsettledSummary } from '@/hooks/useFi
 function PayoutCalendar({
   payments,
   unsettled,
+  statements,
 }: {
   payments: PaymentRecord[];
   unsettled: UnsettledSummary;
+  statements: FinanceData['statements'];
 }) {
   const today = new Date();
   const [viewYear, setViewYear] = useState(today.getFullYear());
-  const [viewMonth, setViewMonth] = useState(today.getMonth()); // 0-indexed
+  const [viewMonth, setViewMonth] = useState(today.getMonth());
   const [tooltip, setTooltip] = useState<{ key: string; label: string; x: number; y: number } | null>(null);
 
-  // Build a map of past payout amounts keyed by YYYY-MM-DD
+  // Map past payout amounts by date (from payments)
   const pastPayouts = useMemo(() => {
     const map: Record<string, number> = {};
     for (const p of payments) {
@@ -26,10 +28,16 @@ function PayoutCalendar({
         map[p.paidTime] = (map[p.paidTime] || 0) + p.amount;
       }
     }
+    // Also add statement settlement amounts by date
+    for (const s of statements) {
+      if (s.date && s.settlement > 0) {
+        map[s.date] = (map[s.date] || 0) + s.settlement;
+      }
+    }
     return map;
-  }, [payments]);
+  }, [payments, statements]);
 
-  // Build a map of projected payout amounts for the next 7 days
+  // Projected payouts for next 7 days
   const projectedPayouts = useMemo(() => {
     const map: Record<string, number> = {};
     if (unsettled.estSettlement <= 0) return map;
@@ -44,14 +52,11 @@ function PayoutCalendar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unsettled.estSettlement]);
 
-  // Calendar grid computation
   const firstOfMonth = new Date(viewYear, viewMonth, 1);
-  const startDow = firstOfMonth.getDay(); // 0=Sun
+  const startDow = firstOfMonth.getDay();
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
-
   const monthLabel = firstOfMonth.toLocaleString('default', { month: 'long', year: 'numeric' });
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
   const prevMonth = () => {
@@ -63,7 +68,6 @@ function PayoutCalendar({
     else setViewMonth(m => m + 1);
   };
 
-  // Build 6x7 grid of day numbers (0 = empty cell)
   const cells: number[] = [];
   for (let i = 0; i < startDow; i++) cells.push(0);
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
@@ -71,17 +75,11 @@ function PayoutCalendar({
 
   const handleMouseEnter = (e: React.MouseEvent, dayKey: string, amount: number, kind: string) => {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setTooltip({
-      key: dayKey,
-      label: `${kind}: ${fmt(amount)}`,
-      x: rect.left + rect.width / 2,
-      y: rect.top - 6,
-    });
+    setTooltip({ key: dayKey, label: `${kind}: ${fmt(amount)}`, x: rect.left + rect.width / 2, y: rect.top - 6 });
   };
 
   return (
     <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden mb-8">
-      {/* Header */}
       <div className="px-6 py-4 border-b border-tt-border flex items-center justify-between">
         <h2 className="text-base font-semibold text-tt-text">Payout Calendar</h2>
         <div className="flex items-center gap-3">
@@ -91,14 +89,12 @@ function PayoutCalendar({
         </div>
       </div>
 
-      {/* Day-of-week headers */}
       <div className="grid grid-cols-7 px-4 pt-3 pb-1">
         {dayNames.map(d => (
           <div key={d} className="text-center text-[10px] text-tt-muted uppercase tracking-wide font-medium">{d}</div>
         ))}
       </div>
 
-      {/* Calendar grid */}
       <div className="grid grid-cols-7 px-4 pb-4 gap-y-1">
         {cells.map((day, idx) => {
           if (day === 0) return <div key={`empty-${idx}`} />;
@@ -111,7 +107,7 @@ function PayoutCalendar({
           return (
             <div
               key={dayKey}
-              className={`relative flex flex-col items-center justify-center py-1.5 rounded-lg text-xs transition-colors ${
+              className={`relative flex flex-col items-center justify-center py-2 rounded-lg text-xs transition-colors ${
                 isToday ? 'ring-1 ring-tt-cyan/60' : ''
               } hover:bg-tt-card-hover`}
               onMouseEnter={(e) => {
@@ -121,29 +117,34 @@ function PayoutCalendar({
               onMouseLeave={() => setTooltip(null)}
             >
               <span className={`tabular-nums ${isToday ? 'text-tt-cyan font-bold' : 'text-tt-muted'}`}>{day}</span>
-              {/* Dots */}
-              <div className="flex gap-0.5 mt-0.5 h-[6px]">
-                {pastAmount && (
-                  <span className="block w-[5px] h-[5px] rounded-full bg-tt-green" />
-                )}
-                {projAmount && (
-                  <span className="block w-[5px] h-[5px] rounded-full bg-tt-cyan animate-pulse" />
-                )}
-              </div>
+              {pastAmount ? (
+                <span className="text-[9px] text-tt-green font-semibold tabular-nums mt-0.5">{fmt(pastAmount)}</span>
+              ) : projAmount ? (
+                <span className="text-[9px] text-tt-cyan/70 font-semibold tabular-nums mt-0.5 animate-pulse">~{fmt(projAmount)}</span>
+              ) : (
+                <span className="h-[14px]" />
+              )}
             </div>
           );
         })}
       </div>
 
-      {/* Tooltip (portal-less, fixed position) */}
+      {/* Legend */}
+      <div className="px-6 pb-4 flex items-center gap-5">
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-tt-green" />
+          <span className="text-[10px] text-tt-muted">Paid</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-tt-cyan animate-pulse" />
+          <span className="text-[10px] text-tt-muted">Projected</span>
+        </div>
+      </div>
+
       {tooltip && (
         <div
           className="fixed z-50 px-2.5 py-1.5 rounded-md bg-[#1a1a2e] border border-tt-border text-[11px] text-tt-text shadow-lg whitespace-nowrap pointer-events-none"
-          style={{
-            left: tooltip.x,
-            top: tooltip.y,
-            transform: 'translate(-50%, -100%)',
-          }}
+          style={{ left: tooltip.x, top: tooltip.y, transform: 'translate(-50%, -100%)' }}
         >
           {tooltip.label}
         </div>
@@ -152,12 +153,17 @@ function PayoutCalendar({
   );
 }
 
+/* ── Main CashflowTab ────────────────────────────────────────── */
+
 interface CashflowTabProps {
   data: FinanceData | undefined;
   isLoading: boolean;
 }
 
 export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
+  const [payoutsOpen, setPayoutsOpen] = useState(false);
+  const [expandedPayout, setExpandedPayout] = useState<string | null>(null);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-16 text-tt-muted">
@@ -173,19 +179,42 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
 
   const { statements, payments, unsettled } = data;
 
-  // Compute totals from statements
   const totalRevenue = statements.reduce((sum, s) => sum + s.revenue, 0);
   const totalFees = statements.reduce((sum, s) => sum + s.platformFee, 0);
   const totalShipping = statements.reduce((sum, s) => sum + s.shippingCost, 0);
   const totalSettlement = statements.reduce((sum, s) => sum + s.settlement, 0);
-
-  // Recent paid payouts
   const paidPayments = payments.filter(p => p.status === 'PAID');
   const totalPaid = paidPayments.reduce((sum, p) => sum + p.amount, 0);
 
+  // Match statements to payments by date for breakdown in payout rows
+  const statementsByDate: Record<string, typeof statements[number]> = {};
+  for (const s of statements) {
+    if (s.date) statementsByDate[s.date] = s;
+  }
+
   return (
     <div>
-      {/* Projected Payout - Hero Card */}
+      {/* 1. Summary cards (period-dependent, at top) */}
+      <div className="grid grid-cols-4 gap-5 mb-8">
+        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Net Sales</span>
+          <div className="text-[30px] font-bold text-tt-green mt-2">{fmt(totalRevenue)}</div>
+        </div>
+        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Fees</span>
+          <div className="text-[30px] font-bold text-tt-red mt-2">-{fmt(totalFees)}</div>
+        </div>
+        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Shipping</span>
+          <div className="text-[30px] font-bold text-tt-text mt-2">-{fmt(totalShipping)}</div>
+        </div>
+        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Total Settled</span>
+          <div className="text-[30px] font-bold text-tt-green mt-2">{fmt(totalSettlement)}</div>
+        </div>
+      </div>
+
+      {/* 2. Projected Payout */}
       {unsettled.totalCount > 0 && (
         <div className="mb-8">
           <div className="bg-tt-card border border-tt-cyan/30 rounded-[14px] backdrop-blur-xl overflow-hidden">
@@ -218,136 +247,117 @@ export default function CashflowTab({ data, isLoading }: CashflowTabProps) {
         </div>
       )}
 
-      {/* Payout Calendar */}
-      <PayoutCalendar payments={payments} unsettled={unsettled} />
+      {/* 3. Payout Calendar */}
+      <PayoutCalendar payments={payments} unsettled={unsettled} statements={statements} />
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-4 gap-5 mb-8">
-        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Net Sales</span>
-          <div className="text-[30px] font-bold text-tt-green mt-2">{fmt(totalRevenue)}</div>
-          <div className="text-xs text-tt-muted mt-1">from statements</div>
-        </div>
-        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Fees</span>
-          <div className="text-[30px] font-bold text-tt-red mt-2">-{fmt(totalFees)}</div>
-        </div>
-        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Shipping</span>
-          <div className="text-[30px] font-bold text-tt-text mt-2">-{fmt(totalShipping)}</div>
-        </div>
-        <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Total Settled</span>
-          <div className="text-[30px] font-bold text-tt-green mt-2">{fmt(totalSettlement)}</div>
-        </div>
-      </div>
-
-      {/* Recent Payouts */}
+      {/* 4. Payouts — collapsible, each row expandable for breakdown */}
       {payments.length > 0 && (
-        <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden mb-8">
-          <div className="px-6 py-5 border-b border-tt-border flex items-center justify-between">
-            <h2 className="text-base font-semibold text-tt-text">Recent Payouts</h2>
-            {totalPaid > 0 && (
-              <span className="text-xs text-tt-green font-semibold">{fmt(totalPaid)} total paid</span>
-            )}
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b border-tt-border">
-                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Payout ID</th>
-                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Bank Account</th>
-                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Created</th>
-                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Paid</th>
-                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Status</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payments.map((p, i) => (
-                  <tr key={`${p.id}-${i}`} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
-                    <td className="px-5 py-3 text-xs text-tt-muted font-mono">{p.id.slice(-10)}</td>
-                    <td className="px-5 py-3 text-xs text-tt-muted">{p.bankAccount}</td>
-                    <td className="px-5 py-3 text-xs text-tt-muted">{p.createTime}</td>
-                    <td className="px-5 py-3 text-xs text-tt-muted">{p.paidTime || '—'}</td>
-                    <td className="px-5 py-3">
-                      <span className={`text-[10px] font-semibold px-2 py-1 rounded-md ${
-                        p.status === 'PAID' ? 'bg-tt-green/15 text-tt-green' :
-                        p.status === 'PROCESSING' ? 'bg-tt-yellow/15 text-tt-yellow' :
-                        'bg-tt-muted/15 text-tt-muted'
-                      }`}>
-                        {p.status}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3 text-[13px] text-tt-green text-right tabular-nums font-medium">{fmt(p.amount)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Payout Breakdown */}
-      {statements.length > 0 && (
-        <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden mb-8">
-          <div className="px-6 py-5 border-b border-tt-border">
-            <h2 className="text-base font-semibold text-tt-text">Payout Breakdown</h2>
-          </div>
-          <div className="px-6 py-4">
-            <div className="space-y-3">
-              <div className="flex items-center justify-between py-2">
-                <span className="text-sm text-tt-text">Gross Sales</span>
-                <span className="text-sm text-tt-text tabular-nums">{fmt(totalRevenue)}</span>
-              </div>
-              <div className="flex items-center justify-between py-2">
-                <span className="text-sm text-tt-text">Platform Fees</span>
-                <span className="text-sm text-tt-red tabular-nums">-{fmt(totalFees)}</span>
-              </div>
-              <div className="flex items-center justify-between py-2">
-                <span className="text-sm text-tt-text">Shipping Costs</span>
-                <span className="text-sm text-tt-red tabular-nums">-{fmt(totalShipping)}</span>
-              </div>
-              <div className="border-t border-tt-border my-2" />
-              <div className="flex items-center justify-between py-2">
-                <span className="text-sm font-bold text-tt-text">Net Payout</span>
-                <span className="text-sm font-bold text-tt-green tabular-nums">{fmt(totalSettlement)}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Statements table */}
-      {statements.length > 0 && (
         <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
-          <div className="px-6 py-5 border-b border-tt-border">
-            <h2 className="text-base font-semibold text-tt-text">Statements</h2>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b border-tt-border">
-                  <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Date</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Revenue</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Fees</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Shipping</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Settlement</th>
-                </tr>
-              </thead>
-              <tbody>
-                {statements.map((s, i) => (
-                  <tr key={`${s.date}-${i}`} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
-                    <td className="px-5 py-3 text-xs text-tt-muted">{s.date}</td>
-                    <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(s.revenue)}</td>
-                    <td className="px-5 py-3 text-[13px] text-tt-red text-right tabular-nums">-{fmt(s.platformFee)}</td>
-                    <td className="px-5 py-3 text-[13px] text-tt-red text-right tabular-nums">-{fmt(s.shippingCost)}</td>
-                    <td className="px-5 py-3 text-[13px] text-tt-green text-right tabular-nums font-medium">{fmt(s.settlement)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <button
+            onClick={() => setPayoutsOpen(!payoutsOpen)}
+            className="w-full px-6 py-5 flex items-center justify-between hover:bg-tt-card-hover transition-colors"
+          >
+            <div className="flex items-center gap-3">
+              <h2 className="text-base font-semibold text-tt-text">Payouts</h2>
+              <span className="text-xs text-tt-muted">({payments.length})</span>
+            </div>
+            <div className="flex items-center gap-3">
+              {totalPaid > 0 && (
+                <span className="text-xs text-tt-green font-semibold">{fmt(totalPaid)} total</span>
+              )}
+              <svg className={`w-4 h-4 text-tt-muted transition-transform ${payoutsOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
+          </button>
+
+          {payoutsOpen && (
+            <div className="border-t border-tt-border">
+              {payments.map((p, i) => {
+                const isExpanded = expandedPayout === p.id;
+                // Find matching statement for breakdown
+                const stmt = statementsByDate[p.paidTime] || statementsByDate[p.createTime];
+
+                return (
+                  <div key={`${p.id}-${i}`} className="border-b border-[rgba(255,255,255,0.04)] last:border-b-0">
+                    {/* Payout row */}
+                    <button
+                      onClick={() => setExpandedPayout(isExpanded ? null : p.id)}
+                      className="w-full px-5 py-3 flex items-center justify-between hover:bg-tt-card-hover transition-colors"
+                    >
+                      <div className="flex items-center gap-4">
+                        <span className={`text-[10px] font-semibold px-2 py-1 rounded-md ${
+                          p.status === 'PAID' ? 'bg-tt-green/15 text-tt-green' :
+                          p.status === 'PROCESSING' ? 'bg-tt-yellow/15 text-tt-yellow' :
+                          'bg-tt-muted/15 text-tt-muted'
+                        }`}>
+                          {p.status}
+                        </span>
+                        <span className="text-xs text-tt-muted">{p.paidTime || p.createTime}</span>
+                        <span className="text-xs text-tt-muted">{p.bankAccount}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-[13px] text-tt-green font-semibold tabular-nums">{fmt(p.amount)}</span>
+                        <svg className={`w-3.5 h-3.5 text-tt-muted transition-transform ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </button>
+
+                    {/* Expanded breakdown */}
+                    {isExpanded && (
+                      <div className="px-8 pb-4 pt-1">
+                        <div className="bg-white/5 rounded-xl p-4 space-y-2">
+                          <div className="text-[10px] text-tt-muted uppercase tracking-wide mb-3">Payout Breakdown</div>
+                          {stmt ? (
+                            <>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-tt-text">Revenue</span>
+                                <span className="text-tt-text tabular-nums">{fmt(stmt.revenue)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-tt-text">Platform Fees</span>
+                                <span className="text-tt-red tabular-nums">-{fmt(stmt.platformFee)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-tt-text">Shipping</span>
+                                <span className="text-tt-red tabular-nums">-{fmt(stmt.shippingCost)}</span>
+                              </div>
+                              <div className="border-t border-tt-border my-1" />
+                              <div className="flex justify-between text-sm font-bold">
+                                <span className="text-tt-text">Net Settlement</span>
+                                <span className="text-tt-green tabular-nums">{fmt(stmt.settlement)}</span>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-tt-text">Payout ID</span>
+                                <span className="text-tt-muted font-mono text-xs">{p.id}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-tt-text">Created</span>
+                                <span className="text-tt-muted">{p.createTime}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-tt-text">Paid</span>
+                                <span className="text-tt-muted">{p.paidTime || '—'}</span>
+                              </div>
+                              <div className="border-t border-tt-border my-1" />
+                              <div className="flex justify-between text-sm font-bold">
+                                <span className="text-tt-text">Amount</span>
+                                <span className="text-tt-green tabular-nums">{fmt(p.amount)}</span>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>
