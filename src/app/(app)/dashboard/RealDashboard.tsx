@@ -370,7 +370,7 @@ export default function RealDashboard() {
 
         {/* Cashflow View */}
         {activeView === 'cashflow' && (
-          <CashflowTab data={financeData} isLoading={financeLoading} />
+          <CashflowTab data={financeData} isLoading={financeLoading} dateFrom={filters.dateFrom} dateTo={filters.dateTo} />
         )}
           </>
         )}
