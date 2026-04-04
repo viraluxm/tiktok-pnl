@@ -128,8 +128,8 @@ export default function RealDashboard() {
       roas: null,
       topProduct: null,
       productProfits: {},
-      returnsCount: t?.returnsCount || 0,
-      returnsAmount: t?.returnsAmount || 0,
+      returnsCount: returnsData?.summary?.totalReturns ?? t?.returnsCount ?? 0,
+      returnsAmount: returnsData?.summary?.totalAmount ?? t?.returnsAmount ?? 0,
       samplesCount: t?.samplesCount || 0,
     };
 
@@ -162,7 +162,7 @@ export default function RealDashboard() {
     }
 
     return result;
-  }, [orderTotals, totalProductCogs, videoMetrics, adSpendMetrics]);
+  }, [orderTotals, totalProductCogs, videoMetrics, adSpendMetrics, returnsData]);
   // Build chart data from orderTotals.byDate (synced_order_ids) instead of entries
   const chartData = useMemo((): ChartData => {
     const byDate = orderTotals?.byDate || {};
