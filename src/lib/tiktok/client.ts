@@ -313,6 +313,48 @@ export async function fetchUnsettledOrders(
   return data || {};
 }
 
+export async function fetchPayments(
+  accessToken: string,
+  shopCipher: string,
+): Promise<Array<Record<string, unknown>>> {
+  const path = '/finance/202309/payments';
+  try {
+    const data = await shopGet(path, accessToken, {
+      shop_cipher: shopCipher,
+      page_size: '20',
+      sort_field: 'create_time',
+      sort_order: 'DESC',
+    });
+    return (data?.payments || []) as Array<Record<string, unknown>>;
+  } catch (err) {
+    console.error('[Finance] fetchPayments error:', (err as Error).message);
+    return [];
+  }
+}
+
+export async function fetchSettlements(
+  accessToken: string,
+  shopCipher: string,
+  startTs: number,
+  endTs: number,
+): Promise<Array<Record<string, unknown>>> {
+  const path = '/finance/202309/settlements';
+  try {
+    const data = await shopGet(path, accessToken, {
+      shop_cipher: shopCipher,
+      page_size: '50',
+      sort_field: 'create_time',
+      sort_order: 'DESC',
+      create_time_ge: String(startTs),
+      create_time_lt: String(endTs),
+    });
+    return (data?.settlements || []) as Array<Record<string, unknown>>;
+  } catch (err) {
+    console.error('[Finance] fetchSettlements error:', (err as Error).message);
+    return [];
+  }
+}
+
 // ==================== VIDEO ANALYTICS ====================
 
 export interface ShopVideo {
