@@ -19,14 +19,14 @@ import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
 import ReturnsTab from '@/components/dashboard/ReturnsTab';
-import { useFinance } from '@/hooks/useFinance';
-import CashflowTab from '@/components/dashboard/CashflowTab';
+import LiveTrackingTab from '@/components/live/LiveTrackingTab';
+import ShippingTab from '@/components/shipping/ShippingTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'products' | 'returns' | 'cashflow';
+type ViewTab = 'dashboard' | 'inventory' | 'live' | 'shipping' | 'returns';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -79,7 +79,6 @@ export default function RealDashboard() {
   const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
   const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
   const { data: returnsData, isLoading: returnsLoading } = useReturns(filters.dateFrom, filters.dateTo);
-  const { data: financeData, isLoading: financeLoading } = useFinance(filters.dateFrom, filters.dateTo);
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -253,9 +252,10 @@ export default function RealDashboard() {
 
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
-    { label: 'Products', value: 'products' },
+    { label: 'Inventory', value: 'inventory' },
+    { label: 'Live Tracking', value: 'live' },
+    { label: 'Shipping', value: 'shipping' },
     { label: 'Returns', value: 'returns' },
-    { label: 'Cashflow', value: 'cashflow' },
   ];
 
   return (
@@ -353,8 +353,8 @@ export default function RealDashboard() {
           </>
         )}
 
-        {/* Products View */}
-        {activeView === 'products' && (
+        {/* Inventory View (interim: renders existing ProductCostTable until the local inventory_skus UI is built) */}
+        {activeView === 'inventory' && (
           <ProductCostTable
             productStats={productStats || []}
             costsMap={costsMap}
@@ -363,14 +363,19 @@ export default function RealDashboard() {
           />
         )}
 
+        {/* Live Tracking View */}
+        {activeView === 'live' && (
+          <LiveTrackingTab />
+        )}
+
+        {/* Shipping View */}
+        {activeView === 'shipping' && (
+          <ShippingTab />
+        )}
+
         {/* Returns View */}
         {activeView === 'returns' && (
           <ReturnsTab data={returnsData} isLoading={returnsLoading} />
-        )}
-
-        {/* Cashflow View */}
-        {activeView === 'cashflow' && (
-          <CashflowTab data={financeData} isLoading={financeLoading} dateFrom={filters.dateFrom} dateTo={filters.dateTo} />
         )}
           </>
         )}
