@@ -8,6 +8,8 @@ export interface InventorySku {
   sku_number: number;
   barcode: string;
   title: string;
+  thumbnail_path: string | null;
+  thumbnail_url: string | null; // public display URL derived server-side
   shortcut_letter: string | null;
   unit_cost_cents: number | null;
   qty_on_hand: number;
@@ -21,21 +23,36 @@ export interface InventorySku {
   updated_at: string;
 }
 
-export interface SkuInput {
+export interface SkuFields {
   sku_number?: number;
   title?: string;
   shortcut_letter?: string | null;
   unit_cost_cents?: number | null;
   qty_on_hand?: number;
-  weight_oz?: number | null;
-  length_in?: number | null;
-  width_in?: number | null;
-  height_in?: number | null;
-  category?: string | null;
   is_active?: boolean;
 }
 
 const KEY = 'inventory-skus';
+
+function buildForm(fields: SkuFields, opts?: { image?: File | null; removeImage?: boolean }): FormData {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined) continue;
+    fd.set(k, v === null ? '' : String(v));
+  }
+  if (opts?.image) fd.set('image', opts.image);
+  if (opts?.removeImage) fd.set('remove_image', 'true');
+  return fd;
+}
+
+async function readError(res: Response, fallback: string): Promise<string> {
+  try {
+    const json = await res.json();
+    return json.error || fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 export function useInventorySkus() {
   const { user } = useUser();
@@ -53,24 +70,11 @@ export function useInventorySkus() {
   });
 }
 
-async function readError(res: Response, fallback: string): Promise<string> {
-  try {
-    const json = await res.json();
-    return json.error || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
 export function useCreateSku() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: SkuInput) => {
-      const res = await fetch('/api/inventory/skus', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      });
+    mutationFn: async ({ fields, image }: { fields: SkuFields; image?: File | null }) => {
+      const res = await fetch('/api/inventory/skus', { method: 'POST', body: buildForm(fields, { image }) });
       if (!res.ok) throw new Error(await readError(res, 'Failed to create SKU'));
       return res.json();
     },
@@ -81,11 +85,20 @@ export function useCreateSku() {
 export function useUpdateSku() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, input }: { id: string; input: SkuInput }) => {
+    mutationFn: async ({
+      id,
+      fields,
+      image,
+      removeImage,
+    }: {
+      id: string;
+      fields: SkuFields;
+      image?: File | null;
+      removeImage?: boolean;
+    }) => {
       const res = await fetch(`/api/inventory/skus/${id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
+        body: buildForm(fields, { image, removeImage }),
       });
       if (!res.ok) throw new Error(await readError(res, 'Failed to update SKU'));
       return res.json();
