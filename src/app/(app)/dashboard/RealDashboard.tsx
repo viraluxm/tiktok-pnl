@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import SummaryCards from '@/components/dashboard/SummaryCards';
 import ForecastCard from '@/components/dashboard/ForecastCard';
-import ProductCostTable from '@/components/products/ProductCostTable';
+import InventorySection from '@/components/inventory/InventorySection';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useTikTok } from '@/hooks/useTikTok';
 import { useEntries } from '@/hooks/useEntries';
@@ -19,7 +19,7 @@ import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
 import ReturnsTab from '@/components/dashboard/ReturnsTab';
-import LiveTrackingTab from '@/components/live/LiveTrackingTab';
+import LiveSessionsPanel from '@/components/live/LiveSessionsPanel';
 import ShippingTab from '@/components/shipping/ShippingTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
@@ -71,7 +71,7 @@ export default function RealDashboard() {
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
-  const { costsMap, upsertCost } = useProductCosts();
+  const { costsMap } = useProductCosts();
   const { data: productStatsData } = useProductStats(filters.dateFrom, filters.dateTo);
   const productStats = productStatsData?.products;
   const orderTotals = productStatsData?.totals;
@@ -229,22 +229,6 @@ export default function RealDashboard() {
     [prevEntries],
   );
 
-  const handleCostChange = useCallback((productId: string, variantId: string | null, cost: number) => {
-    upsertCost.mutate({ productId, variantId, costPerUnit: cost });
-  }, [upsertCost]);
-
-  const handleInventoryChange = useCallback(async (productId: string, skuId: string, quantity: number) => {
-    try {
-      await fetch('/api/tiktok/update-inventory', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ productId, skuId, quantity }),
-      });
-    } catch (err) {
-      console.error('Inventory update failed:', err);
-    }
-  }, []);
-
   function handleQuickFilter(days: number | 'all') {
     setActiveQuickFilter(days);
     setQuickFilter(days);
@@ -353,20 +337,11 @@ export default function RealDashboard() {
           </>
         )}
 
-        {/* Inventory View (interim: renders existing ProductCostTable until the local inventory_skus UI is built) */}
-        {activeView === 'inventory' && (
-          <ProductCostTable
-            productStats={productStats || []}
-            costsMap={costsMap}
-            onCostChange={handleCostChange}
-            onInventoryChange={handleInventoryChange}
-          />
-        )}
+        {/* Inventory View */}
+        {activeView === 'inventory' && <InventorySection />}
 
         {/* Live Tracking View */}
-        {activeView === 'live' && (
-          <LiveTrackingTab />
-        )}
+        {activeView === 'live' && <LiveSessionsPanel />}
 
         {/* Shipping View */}
         {activeView === 'shipping' && (
