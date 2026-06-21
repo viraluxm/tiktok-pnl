@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import SummaryCards from '@/components/dashboard/SummaryCards';
 import ForecastCard from '@/components/dashboard/ForecastCard';
-import ProductCostTable from '@/components/products/ProductCostTable';
+import InventorySection from '@/components/inventory/InventorySection';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useTikTok } from '@/hooks/useTikTok';
 import { useEntries } from '@/hooks/useEntries';
@@ -19,14 +19,14 @@ import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
 import ReturnsTab from '@/components/dashboard/ReturnsTab';
-import { useFinance } from '@/hooks/useFinance';
-import CashflowTab from '@/components/dashboard/CashflowTab';
+import LiveSessionsPanel from '@/components/live/LiveSessionsPanel';
+import ShippingTab from '@/components/shipping/ShippingTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'products' | 'returns' | 'cashflow';
+type ViewTab = 'dashboard' | 'inventory' | 'live' | 'shipping' | 'returns';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -71,7 +71,7 @@ export default function RealDashboard() {
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
-  const { costsMap, upsertCost } = useProductCosts();
+  const { costsMap } = useProductCosts();
   const { data: productStatsData } = useProductStats(filters.dateFrom, filters.dateTo);
   const productStats = productStatsData?.products;
   const orderTotals = productStatsData?.totals;
@@ -79,7 +79,6 @@ export default function RealDashboard() {
   const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
   const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
   const { data: returnsData, isLoading: returnsLoading } = useReturns(filters.dateFrom, filters.dateTo);
-  const { data: financeData, isLoading: financeLoading } = useFinance(filters.dateFrom, filters.dateTo);
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -230,22 +229,6 @@ export default function RealDashboard() {
     [prevEntries],
   );
 
-  const handleCostChange = useCallback((productId: string, variantId: string | null, cost: number) => {
-    upsertCost.mutate({ productId, variantId, costPerUnit: cost });
-  }, [upsertCost]);
-
-  const handleInventoryChange = useCallback(async (productId: string, skuId: string, quantity: number) => {
-    try {
-      await fetch('/api/tiktok/update-inventory', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ productId, skuId, quantity }),
-      });
-    } catch (err) {
-      console.error('Inventory update failed:', err);
-    }
-  }, []);
-
   function handleQuickFilter(days: number | 'all') {
     setActiveQuickFilter(days);
     setQuickFilter(days);
@@ -253,9 +236,10 @@ export default function RealDashboard() {
 
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
-    { label: 'Products', value: 'products' },
+    { label: 'Inventory', value: 'inventory' },
+    { label: 'Live Tracking', value: 'live' },
+    { label: 'Shipping', value: 'shipping' },
     { label: 'Returns', value: 'returns' },
-    { label: 'Cashflow', value: 'cashflow' },
   ];
 
   return (
@@ -353,24 +337,20 @@ export default function RealDashboard() {
           </>
         )}
 
-        {/* Products View */}
-        {activeView === 'products' && (
-          <ProductCostTable
-            productStats={productStats || []}
-            costsMap={costsMap}
-            onCostChange={handleCostChange}
-            onInventoryChange={handleInventoryChange}
-          />
+        {/* Inventory View */}
+        {activeView === 'inventory' && <InventorySection />}
+
+        {/* Live Tracking View */}
+        {activeView === 'live' && <LiveSessionsPanel />}
+
+        {/* Shipping View */}
+        {activeView === 'shipping' && (
+          <ShippingTab />
         )}
 
         {/* Returns View */}
         {activeView === 'returns' && (
           <ReturnsTab data={returnsData} isLoading={returnsLoading} />
-        )}
-
-        {/* Cashflow View */}
-        {activeView === 'cashflow' && (
-          <CashflowTab data={financeData} isLoading={financeLoading} dateFrom={filters.dateFrom} dateTo={filters.dateTo} />
         )}
           </>
         )}
