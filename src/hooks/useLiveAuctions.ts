@@ -80,3 +80,27 @@ export function useQuickClose() {
     },
   });
 }
+
+export function useDeleteAuctionItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ sessionId, itemId }: { sessionId: string; itemId: string }) => {
+      const res = await fetch(`/api/live/sessions/${sessionId}/items/${itemId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        let msg = 'Failed to delete auction row';
+        try {
+          const j = await res.json();
+          msg = j.error || msg;
+        } catch {
+          /* ignore */
+        }
+        throw new Error(msg);
+      }
+      return res.json();
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: [KEY, vars.sessionId] });
+      qc.invalidateQueries({ queryKey: ['inventory-skus'] }); // restored stock on sold delete
+    },
+  });
+}

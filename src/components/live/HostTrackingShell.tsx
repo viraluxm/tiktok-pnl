@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useLiveSession, useEndSession } from '@/hooks/useLiveSessions';
 import { useInventorySkus, type InventorySku } from '@/hooks/useInventorySkus';
-import { useAuctionBoard, useQuickClose, type AuctionResult } from '@/hooks/useLiveAuctions';
+import { useAuctionBoard, useQuickClose, useDeleteAuctionItem, type AuctionResult } from '@/hooks/useLiveAuctions';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
 const EXPECTED_MULTIPLIER = 3;
@@ -59,14 +59,20 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
   const { data: allSkus = [] } = useInventorySkus();
   const { data: board = [] } = useAuctionBoard(sessionId);
   const quickClose = useQuickClose();
+  const deleteItem = useDeleteAuctionItem();
   const endSession = useEndSession();
 
   const [selection, setSelection] = useState<SelLine[]>([]);
   const [pending, setPending] = useState<PendingRow[]>([]);
+  const [lastBundle, setLastBundle] = useState<SelLine[] | null>(null);
   const [shortcut, setShortcut] = useState('');
   const [flash, setFlash] = useState<string | null>(null);
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const shortcutRef = useRef<HTMLInputElement | null>(null);
+  // Hard synchronous guard: a save "arms" when a selection exists and is consumed on fire,
+  // so a rapid double-click can't fire the same selection twice (independent of React timing).
+  const armedRef = useRef(false);
 
   const isLive = session?.status === 'live' || session?.status === 'draft';
   const readOnly = !!session && !isLive;
@@ -117,13 +123,19 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
         },
       ];
     });
+    armedRef.current = true;
     focusShortcut();
   }
 
-  const changeQty = (id: string, d: number) =>
+  const changeQty = (id: string, d: number) => {
+    armedRef.current = true;
     setSelection((prev) => prev.map((l) => (l.sku_id === id ? { ...l, qty: Math.max(1, l.qty + d) } : l)));
+  };
   const removeSku = (id: string) => setSelection((prev) => prev.filter((l) => l.sku_id !== id));
-  const clearSelection = () => setSelection([]);
+  const clearSelection = () => {
+    armedRef.current = false;
+    setSelection([]);
+  };
 
   function onShortcutKey(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key !== 'Enter') return;
@@ -164,8 +176,10 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
 
   // Optimistic: clear selection + show the row immediately, save in the background.
   function doClose(result: AuctionResult) {
-    if (readOnly || selection.length === 0) return;
+    if (readOnly || selection.length === 0 || !armedRef.current) return;
+    armedRef.current = false; // consume synchronously: a rapid 2nd click on the same selection is a no-op
     const skusSnap = selection;
+    setLastBundle(skusSnap); // remember for Rerun
     setSelection([]);
     focusShortcut();
     setPending((prev) => {
@@ -178,6 +192,41 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
       queueMicrotask(() => fireSave(entry));
       return [...cleaned, entry];
     });
+  }
+
+  // Rerun: repopulate Current Selection with the last logged bundle. Does NOT save.
+  // Re-resolves from current inventory and blocks if any SKU is now unavailable / out of stock.
+  function rerunLast() {
+    if (readOnly || !lastBundle) return;
+    const restored: SelLine[] = [];
+    for (const l of lastBundle) {
+      const cur = activeSkus.find((s) => s.id === l.sku_id);
+      if (!cur) {
+        setFlash(`Cannot rerun — SKU ${l.sku_number} is no longer available`);
+        return;
+      }
+      if ((cur.qty_on_hand ?? 0) <= 0) {
+        setFlash(`Cannot rerun — SKU ${cur.sku_number} is out of stock`);
+        return;
+      }
+      restored.push({
+        sku_id: cur.id,
+        sku_number: cur.sku_number,
+        title: cur.title,
+        thumbnail_url: cur.thumbnail_url,
+        shortcut_letter: cur.shortcut_letter,
+        unit_cost_cents: cur.unit_cost_cents,
+        qty: l.qty,
+      });
+    }
+    setSelection(restored); // a fresh save attempt (new idempotency key) happens on next Sold/Not Sold
+    armedRef.current = true;
+    focusShortcut();
+  }
+
+  function onConfirmDelete(itemId: string) {
+    setConfirmDeleteId(null);
+    deleteItem.mutate({ sessionId, itemId });
   }
 
   function retry(tempId: string) {
@@ -235,6 +284,7 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
         return {
           key: x.tempId,
           tempId: x.tempId,
+          itemId: undefined as string | undefined,
           number: x.number,
           status: x.result,
           itemsStr: c.itemsStr,
@@ -249,6 +299,7 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
     const s = board.map((b) => ({
       key: b.id,
       tempId: undefined as string | undefined,
+      itemId: b.id as string | undefined,
       number: b.auction_number,
       status: b.status,
       itemsStr: b.skus.map((x) => `${x.sku_number} ${x.title}${x.qty > 1 ? ` ×${x.qty}` : ''}`).join('; ') || '—',
@@ -336,29 +387,36 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
                             key={s.id}
                             onClick={() => addSku(s)}
                             disabled={oos}
-                            className={`text-left rounded-xl border overflow-hidden flex flex-col transition-colors ${oos ? 'border-tt-red/30 opacity-70 cursor-not-allowed' : 'border-tt-border bg-tt-card hover:bg-tt-card-hover cursor-pointer'}`}
+                            className={`relative block w-full aspect-[4/5] rounded-xl overflow-hidden border text-left transition-transform ${oos ? 'border-tt-red/30 opacity-60 cursor-not-allowed' : 'border-tt-border hover:-translate-y-0.5 cursor-pointer'}`}
                           >
-                            <div className="relative w-full aspect-square bg-tt-input-bg">
+                            {/* Image fills the whole tile so every card has the same footprint */}
+                            <div className="absolute inset-0 bg-tt-input-bg">
                               {s.thumbnail_url ? (
                                 // eslint-disable-next-line @next/next/no-img-element
-                                <img src={s.thumbnail_url} alt="" className="w-full h-full object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                                <img
+                                  src={s.thumbnail_url}
+                                  alt=""
+                                  className={`w-full h-full object-cover ${oos ? 'grayscale' : ''}`}
+                                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                                />
                               ) : (
                                 <div className="w-full h-full flex items-center justify-center text-tt-muted text-xs">No image</div>
                               )}
-                              {s.shortcut_letter && (
-                                <span className="absolute top-2 left-2 inline-flex items-center justify-center min-w-7 h-7 px-1.5 rounded-md bg-black/70 text-tt-cyan text-sm font-bold backdrop-blur-sm">{s.shortcut_letter}</span>
-                              )}
-                              {oos && (
-                                <span className="absolute top-2 right-2 px-2 py-0.5 rounded-md bg-tt-red/90 text-white text-[11px] font-semibold">Out of stock</span>
-                              )}
                             </div>
-                            <div className="p-3">
+
+                            {/* Shortcut badge */}
+                            {s.shortcut_letter && (
+                              <span className="absolute top-2 left-2 z-10 inline-flex items-center justify-center min-w-7 h-7 px-1.5 rounded-md bg-black/70 text-tt-cyan text-sm font-bold backdrop-blur-sm">{s.shortcut_letter}</span>
+                            )}
+
+                            {/* Bottom info panel: image felt behind via gradient + slight blur, text stays high-contrast */}
+                            <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black/90 via-black/55 to-transparent backdrop-blur-[2px]">
                               <div className="flex items-baseline justify-between gap-2">
-                                <span className="text-lg font-bold leading-none">SKU #{s.sku_number}</span>
-                                <span className={`text-xs font-medium ${oos ? 'text-tt-red' : 'text-tt-muted'}`}>{oos ? '0 left' : `${s.qty_on_hand} left`}</span>
+                                <span className="text-lg font-bold leading-none text-white">SKU #{s.sku_number}</span>
+                                <span className={`text-xs font-semibold shrink-0 ${oos ? 'text-tt-red' : 'text-white/80'}`}>{oos ? 'Out of stock' : `${s.qty_on_hand} left`}</span>
                               </div>
-                              <div className="text-sm truncate mt-1.5">{s.title || 'Untitled'}</div>
-                              <div className="text-xs text-tt-muted mt-1 tabular-nums">Cost {fmtCents(s.unit_cost_cents)}</div>
+                              <div className="text-sm text-white/90 truncate mt-1">{s.title || 'Untitled'}</div>
+                              <div className="text-[11px] text-white/55 tabular-nums mt-0.5">Cost {fmtCents(s.unit_cost_cents)}</div>
                             </div>
                           </button>
                         );
@@ -425,12 +483,19 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
                   >
                     Sold
                   </button>
-                  <div className="grid grid-cols-3 gap-2 mb-2">
-                    <ActionBtn label="Not Sold" disabled={selection.length === 0} onClick={() => doClose('not_sold')} />
-                    <ActionBtn label="Canceled" disabled={selection.length === 0} onClick={() => doClose('canceled')} />
-                    <ActionBtn label="Manual" disabled={selection.length === 0} onClick={() => doClose('manual')} />
+                  <button
+                    onClick={() => doClose('not_sold')}
+                    disabled={selection.length === 0}
+                    className="w-full mb-2 px-4 py-2.5 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-40"
+                  >
+                    Not Sold
+                  </button>
+                  <div className="flex gap-2">
+                    {lastBundle && (
+                      <button onClick={rerunLast} className="flex-1 px-4 py-2 rounded-lg text-sm text-tt-cyan cursor-pointer hover:bg-tt-card-hover transition-colors">↻ Rerun last</button>
+                    )}
+                    <button onClick={clearSelection} disabled={selection.length === 0} className="flex-1 px-4 py-2 rounded-lg text-sm text-tt-muted cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-40">Clear</button>
                   </div>
-                  <button onClick={clearSelection} disabled={selection.length === 0} className="w-full px-4 py-2 rounded-lg text-sm text-tt-muted cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-40">Clear</button>
                 </div>
               </div>
             )}
@@ -452,6 +517,7 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
                         <th className="text-right font-medium px-4 py-3">Expected</th>
                         <th className="text-right font-medium px-4 py-3 text-tt-muted">Cost</th>
                         <th className="text-right font-medium px-4 py-3">Logged</th>
+                        {!readOnly && <th className="px-4 py-3" />}
                       </tr>
                     </thead>
                     <tbody>
@@ -477,6 +543,21 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
                           <td className="px-4 py-3 text-right tabular-nums font-medium">{r.expected == null ? <span className="text-tt-muted">—</span> : fmtCents(r.expected)}</td>
                           <td className="px-4 py-3 text-right tabular-nums text-tt-muted">{r.totalCost == null ? '—' : fmtCents(r.totalCost)}</td>
                           <td className="px-4 py-3 text-right text-tt-muted text-xs whitespace-nowrap">{r.loggedAt ? new Date(r.loggedAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : '—'}</td>
+                          {!readOnly && (
+                            <td className="px-4 py-3 text-right whitespace-nowrap">
+                              {r.itemId ? (
+                                confirmDeleteId === r.itemId ? (
+                                  <span className="inline-flex items-center gap-2">
+                                    <span className="text-xs text-tt-muted">Delete this row?</span>
+                                    <button onClick={() => onConfirmDelete(r.itemId!)} className="text-xs text-tt-red font-medium cursor-pointer hover:underline">Yes</button>
+                                    <button onClick={() => setConfirmDeleteId(null)} className="text-xs text-tt-muted cursor-pointer hover:underline">No</button>
+                                  </span>
+                                ) : (
+                                  <button onClick={() => setConfirmDeleteId(r.itemId!)} className="text-xs text-tt-muted cursor-pointer hover:text-tt-red transition-colors">Delete</button>
+                                )
+                              ) : null}
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -488,13 +569,5 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
         )}
       </main>
     </div>
-  );
-}
-
-function ActionBtn({ label, onClick, disabled }: { label: string; onClick: () => void; disabled: boolean }) {
-  return (
-    <button onClick={onClick} disabled={disabled} className="px-2 py-2.5 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-40">
-      {label}
-    </button>
   );
 }
