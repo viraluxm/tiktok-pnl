@@ -261,6 +261,9 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   const updateTime = o.update_time as number;
   const updatedDate = updateTime ? toLocalDate(updateTime) : '';
   const status = String(o.status || '').toUpperCase();
+  // TikTok's combine-shipment group id (assigned at order time; groups a buyer's
+  // multiple orders into one shipment). Stored so pick-verify reads it from our DB.
+  const autoCombineGroupId = o.auto_combine_group_id != null ? String(o.auto_combine_group_id) || null : null;
   const payment = (o.payment || {}) as Record<string, unknown>;
   // TikTok GMV = Price × Items + Shipping - Seller promotions - Platform co-funding (excludes tax)
   const productPrice = toNum(payment.original_total_product_price) || toNum(payment.sub_total) || 0;
@@ -296,7 +299,7 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
     user_id: userId, order_id: orderId, order_date: date, updated_date: updatedDate,
     gmv, shipping, affiliate, platform_fee: platformFee, units,
     tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName,
-    product_name: productName, status,
+    product_name: productName, status, auto_combine_group_id: autoCombineGroupId,
   };
 }
 

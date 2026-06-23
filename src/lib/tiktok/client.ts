@@ -255,6 +255,24 @@ export async function fetchOrdersPage(
   };
 }
 
+// Read-only: fetch full order detail(s) by order id via the order-detail
+// endpoint (GET /order/202309/orders?ids=...). Accepts up to 50 ids
+// (comma-separated) and returns each order with its line items. Used to inspect
+// combined-order structure — whether a slip/parent id expands into child orders
+// or a single order with multiple line items. Pure GET; no writes.
+export async function getOrderById(
+  accessToken: string,
+  shopCipher: string,
+  orderIds: string | string[],
+): Promise<Record<string, unknown>[]> {
+  const ids = Array.isArray(orderIds) ? orderIds.join(',') : orderIds;
+  const data = await shopGet('/order/202309/orders', accessToken, {
+    shop_cipher: shopCipher,
+    ids,
+  });
+  return (data?.orders || data?.order_list || []) as Record<string, unknown>[];
+}
+
 // ==================== FINANCE ENDPOINTS ====================
 
 export interface ParsedStatement {
