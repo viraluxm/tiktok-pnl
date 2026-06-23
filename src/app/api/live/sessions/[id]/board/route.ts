@@ -21,7 +21,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const { data: items, error } = await supabase
     .from('live_auction_items')
-    .select('id, sequence, status, is_bundle, expected_price_cents, sold_price_cents, buyer_handle, closed_at, created_at')
+    .select('id, sequence, status, is_bundle, expected_price_cents, sold_price_cents, buyer_handle, client_idempotency_key, closed_at, created_at')
     .eq('session_id', id)
     .eq('user_id', user.id)
     .order('sequence', { ascending: true });
@@ -29,6 +29,33 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (error) {
     console.error('[live/board] items error:', error);
     return NextResponse.json({ error: 'Failed to load log' }, { status: 500 });
+  }
+
+  // The extension binds an auction via lensed_log_auction using the TikTok
+  // order_id as the idempotency key, and separately upserts capture_events
+  // keyed by the same order_id. So client_idempotency_key === capture_events.order_id.
+  // Join (read-only) to surface the real won price + TikTok product title.
+  const orderIds = (items ?? [])
+    .map((i) => i.client_idempotency_key)
+    .filter((k): k is string => typeof k === 'string' && k.length > 0);
+  const captureByOrderId = new Map<string, { won_price_cents: number | null; tiktok_title: string | null }>();
+  if (orderIds.length) {
+    const { data: captures, error: capErr } = await supabase
+      .from('capture_events')
+      .select('order_id, selling_price_cents, product_name')
+      .eq('user_id', user.id)
+      .in('order_id', orderIds);
+    if (capErr) {
+      // Non-fatal: the board still works without the capture join.
+      console.error('[live/board] capture_events join error:', capErr);
+    } else {
+      for (const c of captures ?? []) {
+        captureByOrderId.set(c.order_id as string, {
+          won_price_cents: (c.selling_price_cents as number | null) ?? null,
+          tiktok_title: (c.product_name as string | null) ?? null,
+        });
+      }
+    }
   }
 
   const itemIds = (items ?? []).map((i) => i.id);
@@ -64,6 +91,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       if (cost == null) totalCost = null;
       else if (totalCost != null) totalCost += cost * qty;
     }
+    const capture = it.client_idempotency_key
+      ? captureByOrderId.get(it.client_idempotency_key) ?? null
+      : null;
     return {
       id: it.id,
       auction_number: it.sequence,
@@ -71,6 +101,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       is_bundle: it.is_bundle,
       expected_price_cents: it.expected_price_cents,
       sold_price_cents: it.sold_price_cents,
+      // Real winning bid from the captured sale (item price, excl. shipping).
+      won_price_cents: capture?.won_price_cents ?? null,
+      // TikTok auction item title from the capture (e.g. "Random Electronics").
+      tiktok_title: capture?.tiktok_title ?? null,
       buyer_handle: it.buyer_handle,
       logged_at: it.closed_at ?? it.created_at,
       units,

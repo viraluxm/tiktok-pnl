@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
+import { useExtensionAuth } from '@/hooks/useExtensionAuth';
 
 export default function AppLayout({
   children,
@@ -22,6 +23,9 @@ export default function AppLayout({
       }
     });
   }, [router]);
+
+  // Relay Supabase session to Lensed Chrome extension (no-ops if not installed)
+  useExtensionAuth();
 
   if (!checked) {
     return (

@@ -9,8 +9,86 @@ import {
   useDeleteSku,
   type InventorySku,
 } from '@/hooks/useInventorySkus';
+import { code128ToSvg } from '@/lib/barcode/code128';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
+
+const escapeHtml = (s: string) =>
+  s.replace(/[<>&]/g, (c) => (c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'));
+
+// Render a single SKU's barcode as a Code 128 SVG string. The barcode ENCODES
+// inventory_skus.barcode (the value the extension scanner resolves on), never
+// the sku_number. Falls back to plain text if the value has an unencodable char.
+function skuBarcodeSvg(s: Pick<InventorySku, 'barcode'>, barHeight = 64): string {
+  try {
+    return code128ToSvg(s.barcode, { caption: '', barHeight, moduleWidth: 2 });
+  } catch {
+    return `<div style="font-family:monospace;font-size:10pt">${escapeHtml(s.barcode)}</div>`;
+  }
+}
+
+// Two physical label sizes. Both encode inventory_skus.barcode; the pallet-rack
+// label is scaled up and adds the item title.
+type LabelSize = '2x1' | '6x4';
+
+const LABEL_SPECS: Record<
+  LabelSize,
+  { w: string; h: string; pad: string; gap: string; barcodeH: string; svgBarHeight: number; skuSize: string; titleSize: string | null }
+> = {
+  // Small product label: barcode + SKU#.
+  '2x1': {
+    w: '2in', h: '1in', pad: '0.05in 0.08in', gap: '2px',
+    barcodeH: '0.6in', svgBarHeight: 64, skuSize: '11pt', titleSize: null,
+  },
+  // Large pallet-rack label: barcode + SKU# + title, scaled up.
+  '6x4': {
+    w: '6in', h: '4in', pad: '0.35in 0.45in', gap: '0.18in',
+    barcodeH: '2.4in', svgBarHeight: 140, skuSize: '40pt', titleSize: '22pt',
+  },
+};
+
+// Open a print window with one label per SKU, sized per `size`. Each label
+// shows the scannable Code 128 barcode (encoding inventory_skus.barcode) with
+// the SKU # beneath it (and the title on the 6×4). An @page rule sizes output
+// so the browser prints one correctly-dimensioned label per page.
+function printSkuLabels(list: InventorySku[], size: LabelSize = '2x1') {
+  if (!list.length) return;
+  const win = window.open('', '_blank', 'width=560,height=520');
+  if (!win) return;
+
+  const spec = LABEL_SPECS[size];
+
+  const labels = list
+    .map((s) => {
+      const title =
+        spec.titleSize && s.title ? `<div class="title">${escapeHtml(s.title)}</div>` : '';
+      return (
+        `<div class="label"><div class="bc">${skuBarcodeSvg(s, spec.svgBarHeight)}</div>` +
+        `<div class="sku">SKU ${escapeHtml(String(s.sku_number))}</div>${title}</div>`
+      );
+    })
+    .join('');
+
+  win.document.write(
+    `<!doctype html><html><head><title>SKU labels</title><style>` +
+      `@page{size:${spec.w} ${spec.h};margin:0}` +
+      `html,body{margin:0;padding:0;background:#fff}` +
+      `.label{width:${spec.w};height:${spec.h};box-sizing:border-box;padding:${spec.pad};` +
+      `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:${spec.gap};` +
+      `overflow:hidden;page-break-after:always;break-after:page}` +
+      `.label:last-child{page-break-after:auto;break-after:auto}` +
+      `.bc{display:flex;align-items:center;justify-content:center;width:100%}` +
+      `.bc svg{height:${spec.barcodeH};width:auto;max-width:100%}` +
+      `.sku{font-family:monospace;font-weight:700;font-size:${spec.skuSize};line-height:1}` +
+      (spec.titleSize
+        ? `.title{font-family:system-ui,sans-serif;font-weight:600;font-size:${spec.titleSize};` +
+          `text-align:center;max-width:100%;line-height:1.1;overflow:hidden}`
+        : '') +
+      `</style></head><body>${labels}` +
+      `<script>window.onload=function(){window.focus();window.print();}<\/script></body></html>`,
+  );
+  win.document.close();
+}
 const toCents = (dollars: string): number | null => {
   const t = dollars.trim();
   if (!t) return null;
@@ -77,6 +155,8 @@ export default function InventorySection() {
   const [form, setForm] = useState<FormState>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [labelSize, setLabelSize] = useState<LabelSize>('2x1');
 
   // Image state for the form.
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -94,6 +174,36 @@ export default function InventorySection() {
     () => (skus.length ? Math.max(...skus.map((s) => s.sku_number)) + 1 : 1),
     [skus],
   );
+
+  // SKU currently open in the edit form (for the single-label barcode preview).
+  const editingSku = useMemo(
+    () => (editingId ? skus.find((s) => s.id === editingId) ?? null : null),
+    [editingId, skus],
+  );
+  const editBarcodeSvg = useMemo(
+    () => (editingSku ? skuBarcodeSvg(editingSku, 56) : ''),
+    [editingSku],
+  );
+
+  // Bulk-print selection, in table order.
+  const selectedSkus = useMemo(
+    () => skus.filter((s) => selectedIds.has(s.id)),
+    [skus, selectedIds],
+  );
+  const allSelected = skus.length > 0 && selectedIds.size === skus.length;
+
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) => (prev.size === skus.length ? new Set() : new Set(skus.map((s) => s.id))));
+  }
 
   function clearImageState() {
     if (imagePreview) URL.revokeObjectURL(imagePreview);
@@ -175,7 +285,10 @@ export default function InventorySection() {
           setError('Enter a valid SKU number.');
           return;
         }
-        await createSku.mutateAsync({ fields: { ...fields, sku_number: n }, image: imageFile });
+        const created = await createSku.mutateAsync({ fields: { ...fields, sku_number: n }, image: imageFile });
+        // Auto-print the new SKU's label (server-generated barcode must exist).
+        const newSku = created?.sku as InventorySku | undefined;
+        if (newSku?.barcode) printSkuLabels([newSku], labelSize);
       }
       closeForm();
     } catch (e) {
@@ -209,14 +322,35 @@ export default function InventorySection() {
             {skus.length > activeSkus.length ? ` · ${skus.length - activeSkus.length} inactive` : ''}
           </div>
         </div>
-        {!showForm && (
-          <button
-            onClick={openAdd}
-            className="px-5 py-2.5 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 transition-opacity"
-          >
-            Add SKU
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-tt-muted">
+            Label
+            <select
+              value={labelSize}
+              onChange={(e) => setLabelSize(e.target.value as LabelSize)}
+              className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1.5 text-xs text-tt-text cursor-pointer outline-none"
+            >
+              <option value="2x1">2×1 (product)</option>
+              <option value="6x4">6×4 (pallet rack)</option>
+            </select>
+          </label>
+          {selectedSkus.length > 0 && (
+            <button
+              onClick={() => printSkuLabels(selectedSkus, labelSize)}
+              className="px-4 py-2.5 rounded-lg border border-tt-border text-sm font-semibold text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors"
+            >
+              Print labels ({selectedSkus.length})
+            </button>
+          )}
+          {!showForm && (
+            <button
+              onClick={openAdd}
+              className="px-5 py-2.5 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 transition-opacity"
+            >
+              Add SKU
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -270,6 +404,30 @@ export default function InventorySection() {
                 )}
               </div>
             </div>
+
+            {/* Barcode + single label print (edit only) */}
+            {editingSku && (
+              <div className="shrink-0">
+                <span className="block text-xs text-tt-muted mb-1.5">Label</span>
+                <div className="rounded-lg border border-tt-border bg-white px-3 py-2 flex flex-col items-center justify-center">
+                  <div
+                    className="[&_svg]:h-12 [&_svg]:w-auto"
+                    // eslint-disable-next-line react/no-danger
+                    dangerouslySetInnerHTML={{ __html: editBarcodeSvg }}
+                  />
+                  <span className="mt-1 font-mono text-xs font-bold text-black">
+                    SKU {editingSku.sku_number}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => printSkuLabels([editingSku], labelSize)}
+                  className="mt-2 w-full px-3 py-1.5 rounded-lg border border-tt-border text-xs text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors"
+                >
+                  Print label
+                </button>
+              </div>
+            )}
 
             {/* Fields */}
             <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-3 content-start">
@@ -381,6 +539,16 @@ export default function InventorySection() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
+                <th className="px-4 py-3 w-px">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleSelectAll}
+                    aria-label="Select all SKUs"
+                    title="Select all"
+                    className="accent-tt-cyan align-middle cursor-pointer"
+                  />
+                </th>
                 <th className="text-left font-medium px-4 py-3">SKU</th>
                 <th className="text-left font-medium px-4 py-3">Shortcut</th>
                 <th className="text-left font-medium px-4 py-3">Item</th>
@@ -396,6 +564,15 @@ export default function InventorySection() {
                   key={s.id}
                   className={`border-b border-tt-border last:border-0 ${s.is_active ? '' : 'opacity-50'}`}
                 >
+                  <td className="px-4 py-3 w-px">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(s.id)}
+                      onChange={() => toggleSelected(s.id)}
+                      aria-label={`Select SKU ${s.sku_number}`}
+                      className="accent-tt-cyan align-middle cursor-pointer"
+                    />
+                  </td>
                   <td className="px-4 py-3 font-mono text-tt-muted">{s.sku_number}</td>
                   <td className="px-4 py-3">
                     {s.shortcut_letter ? (

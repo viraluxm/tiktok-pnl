@@ -20,6 +20,8 @@ export interface AuctionItem {
   is_bundle: boolean;
   expected_price_cents: number | null;
   sold_price_cents: number | null;
+  won_price_cents: number | null; // real winning bid, joined from capture_events
+  tiktok_title: string | null;    // TikTok product_name, joined from capture_events
   buyer_handle: string | null;
   logged_at: string;
   units: number;
