@@ -1,8 +1,19 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLiveSessions, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
 import { useAuctionBoard, type AuctionItem } from '@/hooks/useLiveAuctions';
+import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
+
+interface UnboundOrder {
+  order_id: string;
+  buyer: string;
+  won_price_cents: number | null;
+  seller_sku: string;
+  quantity: number;
+  status: string;
+}
 
 // ── Read-only "Shows" tab ──────────────────────────────────────────────
 // Surfaces the user's live sessions and the sales captured in each, built
@@ -30,6 +41,7 @@ function wonCents(it: AuctionItem): number | null {
 
 interface ShowSummary {
   itemsSold: number;
+  unitsSold: number;
   saleCents: number;
   costCents: number;
   profitCents: number;
@@ -37,18 +49,27 @@ interface ShowSummary {
 
 // P&L summary over SOLD items only, using the REAL won price (not the ASP goal):
 // sale value = Σ won price, cost from inventory_skus, gross profit = sale − cost.
+// itemsSold = sold auction-item ROWS; unitsSold = Σ units (qty across SKU lines)
+// so a bundled win counts each unit (added alongside the existing row count).
 function summarize(items: AuctionItem[]): ShowSummary {
   let itemsSold = 0;
+  let unitsSold = 0;
   let sale = 0;
   let cost = 0;
   for (const it of items) {
     if (it.status === 'sold') {
       itemsSold += 1;
+      unitsSold += it.units ?? 0;
       sale += wonCents(it) ?? 0;
       cost += it.total_cost_cents ?? 0;
     }
   }
-  return { itemsSold, saleCents: sale, costCents: cost, profitCents: sale - cost };
+  return { itemsSold, unitsSold, saleCents: sale, costCents: cost, profitCents: sale - cost };
+}
+
+// ASP per UNIT = realized sale value ÷ units sold (not per-auction). 0 when no units.
+function aspPerUnitCents(s: ShowSummary): number {
+  return s.unitsSold > 0 ? Math.round(s.saleCents / s.unitsSold) : 0;
 }
 
 function StatusBadge({ status }: { status: SessionStatus }) {
@@ -67,6 +88,22 @@ function StatusBadge({ status }: { status: SessionStatus }) {
 
 function profitClass(cents: number) {
   return cents > 0 ? 'text-tt-green' : cents < 0 ? 'text-tt-red' : 'text-tt-text';
+}
+
+// "2h 14m" / "47m" from a duration in ms (null when unknown).
+function fmtDuration(ms: number | null | undefined): string | null {
+  if (ms == null || ms < 0) return null;
+  const mins = Math.round(ms / 60000);
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+// Exact out-of-stock bind wording (shared by the in-app confirm modal).
+function shortConfirmMessage(short: { n: number; cur: number; qty: number }[]): string {
+  return short.length === 1
+    ? `#${short[0].n} has ${short[0].cur} in stock — binding ${short[0].qty} takes it to ${short[0].cur - short[0].qty}. This usually means the count was off or you oversold. Bind anyway?`
+    : `These SKUs don't have enough stock:\n${short.map((s) => `  #${s.n}: ${s.cur} in stock, binding ${s.qty} → ${s.cur - s.qty}`).join('\n')}\n\nThis usually means the count was off or you oversold. Bind anyway?`;
 }
 
 export default function ShowsTab() {
@@ -110,6 +147,7 @@ export default function ShowsTab() {
             <th className="text-left font-medium px-4 py-3">Show</th>
             <th className="text-left font-medium px-4 py-3">Status</th>
             <th className="text-right font-medium px-4 py-3">Items sold</th>
+            <th className="text-right font-medium px-4 py-3">Units sold</th>
             <th className="text-right font-medium px-4 py-3">Sale value</th>
             <th className="text-right font-medium px-4 py-3">Cost</th>
             <th className="text-right font-medium px-4 py-3">Gross profit</th>
@@ -144,6 +182,7 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
         <StatusBadge status={session.status} />
       </td>
       <td className="px-4 py-3 text-right tabular-nums">{isLoading ? '…' : sum.itemsSold}</td>
+      <td className="px-4 py-3 text-right tabular-nums">{isLoading ? '…' : sum.unitsSold}</td>
       <td className="px-4 py-3 text-right tabular-nums">{isLoading ? '…' : money(sum.saleCents)}</td>
       <td className="px-4 py-3 text-right tabular-nums">{isLoading ? '…' : money(sum.costCents)}</td>
       <td className={`px-4 py-3 text-right tabular-nums font-medium ${isLoading ? '' : profitClass(sum.profitCents)}`}>
@@ -156,6 +195,233 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
 function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => void }) {
   const { data: items = [], isLoading } = useAuctionBoard(session.id);
   const sum = useMemo(() => summarize(items), [items]);
+  // Net profit (so far) + its cost base, over costed sold items that HAVE a
+  // payout figure (orders without a payout are excluded, not zeroed). The same
+  // restricted set drives ROI so numerator and denominator stay aligned.
+  const { netProfitTotal, netCostBase } = useMemo(() => {
+    let netProfitTotal = 0, netCostBase = 0;
+    for (const it of items) {
+      if (it.status === 'sold' && it.net_payout_cents != null && it.total_cost_cents != null) {
+        netProfitTotal += it.net_payout_cents - it.total_cost_cents;
+        netCostBase += it.total_cost_cents;
+      }
+    }
+    return { netProfitTotal, netCostBase };
+  }, [items]);
+  // ROI (net) = net profit ÷ cost × 100, over costed-with-payout orders only.
+  // Blank until there's a cost base (i.e. payout data exists for costed orders).
+  const roiNet = netCostBase > 0 ? (netProfitTotal / netCostBase) * 100 : null;
+
+  // Active-selling duration (last capture − start, or a sane ended_at). Header only.
+  const { data: duration } = useQuery<{ duration_ms: number | null; source: string } | null>({
+    queryKey: ['show-duration', session.id],
+    queryFn: async () => {
+      const r = await fetch(`/api/live/sessions/${session.id}/duration`);
+      return r.ok ? r.json() : null;
+    },
+    staleTime: 60_000,
+  });
+  const durationLabel = fmtDuration(duration?.duration_ms);
+
+  const qc = useQueryClient();
+  const { data: invSkus = [] } = useInventorySkus();
+  const createSku = useCreateSku();
+  // SKUs created inline via "+ New SKU" — merged in immediately so they're
+  // selectable before the inventory list refetch lands (deduped once it does).
+  const [newSkus, setNewSkus] = useState<InventorySku[]>([]);
+  const allSkus = useMemo(() => {
+    const have = new Set(invSkus.map((s) => s.id));
+    return [...invSkus, ...newSkus.filter((n) => !have.has(n.id))];
+  }, [invSkus, newSkus]);
+  // Inline quick-add form: which (order, line) it's attached to + its inputs.
+  const [quickAdd, setQuickAdd] = useState<{ orderId: string; idx: number } | null>(null);
+  const [qaName, setQaName] = useState('');
+  const [qaCost, setQaCost] = useState('');
+  const [qaSaving, setQaSaving] = useState(false);
+  const [qaError, setQaError] = useState<string | null>(null);
+  // One visible outcome for every bind attempt (success or the route's error) —
+  // never a dead button.
+  const [bindNotice, setBindNotice] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [reconciling, setReconciling] = useState(false);
+  const [recon, setRecon] = useState<{ flipped_count: number; revenue_cents: number; revenue_count: number; costed_count: number; unbound: UnboundOrder[] } | null>(null);
+  // Payouts are a separate, slower action (pages the shop's unsettled list) —
+  // this holds the most recent "Refresh payouts" response (authoritative totals
+  // across ALL session orders, incl. unbound). Gates the payout summary display.
+  const [refreshingPayouts, setRefreshingPayouts] = useState(false);
+  const [payout, setPayout] = useState<{ net_payout_cents_total: number; payout_count: number; settled_count: number; estimate_count: number } | null>(null);
+  // order_id -> SKU lines the host is assigning (multi-SKU / multi-qty bundles)
+  const [lines, setLines] = useState<Record<string, { sku_id: string; qty: number }[]>>({});
+  const [bindingId, setBindingId] = useState<string | null>(null);
+  // In-app (themed) out-of-stock confirm — replaces window.confirm. Holds the
+  // pending bind until the user confirms (→ allow_negative) or cancels (→ abort).
+  const [bindConfirm, setBindConfirm] = useState<{ u: UnboundOrder; orderLines: { sku_id: string; qty: number }[]; short: { n: number; cur: number; qty: number }[] } | null>(null);
+
+  function setLinesFor(orderId: string, next: { sku_id: string; qty: number }[]) {
+    setLines((l) => ({ ...l, [orderId]: next }));
+  }
+  function updateLine(orderId: string, idx: number, patch: Partial<{ sku_id: string; qty: number }>) {
+    setLines((l) => ({ ...l, [orderId]: (l[orderId] ?? []).map((ln, i) => (i === idx ? { ...ln, ...patch } : ln)) }));
+  }
+  function addLine(orderId: string) {
+    setLines((l) => ({ ...l, [orderId]: [...(l[orderId] ?? []), { sku_id: '', qty: 1 }] }));
+  }
+  function removeLine(orderId: string, idx: number) {
+    setLines((l) => ({ ...l, [orderId]: (l[orderId] ?? []).filter((_, i) => i !== idx) }));
+  }
+
+  // Post-show reconcile: flip stuck paid orders + compute revenue + detect unbound orders.
+  async function reconcile() {
+    setReconciling(true);
+    try {
+      const res = await fetch(`/api/live/sessions/${session.id}/reconcile`, { method: 'POST' });
+      if (!res.ok) return;
+      const json = await res.json();
+      setRecon({
+        flipped_count: json.flipped_count, revenue_cents: json.revenue_cents,
+        revenue_count: json.revenue_count, costed_count: json.costed_count, unbound: json.unbound,
+      });
+      // Seed one SKU line per order, pre-picked when seller_sku matches an inventory sku_number (hint only).
+      const pre: Record<string, { sku_id: string; qty: number }[]> = {};
+      for (const u of json.unbound as UnboundOrder[]) {
+        const m = invSkus.find((s) => String(s.sku_number) === u.seller_sku);
+        pre[u.order_id] = [{ sku_id: m?.id ?? '', qty: u.quantity || 1 }];
+      }
+      setLines((l) => ({ ...pre, ...l }));
+      if (json.flipped_count > 0) qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
+    } finally {
+      setReconciling(false);
+    }
+  }
+
+  // Refresh per-order true payouts (TikTok Finance). Independent of Reconcile —
+  // slow, because it pages the shop's unsettled list. On completion, invalidate
+  // the board so the ACTUAL PAYOUT / NET PROFIT columns repopulate from the join.
+  async function refreshPayouts() {
+    setRefreshingPayouts(true);
+    try {
+      const res = await fetch(`/api/live/sessions/${session.id}/payouts`, { method: 'POST' });
+      if (!res.ok) return;
+      const json = await res.json();
+      setPayout({
+        net_payout_cents_total: json.net_payout_cents_total ?? 0,
+        payout_count: json.payout_count ?? 0,
+        settled_count: json.settled_count ?? 0,
+        estimate_count: json.estimate_count ?? 0,
+      });
+      qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
+    } finally {
+      setRefreshingPayouts(false);
+    }
+  }
+
+  // Create a brand-new SKU inline (NAME + COST only, 0 starting stock) and select
+  // it into the line the host is working in. sku_number is app-assigned, so we
+  // auto-pick the next number (retrying on the rare race). Binding a sale against
+  // its 0 stock goes negative via the same confirm path — no special-casing.
+  async function submitQuickAdd() {
+    if (!quickAdd) return;
+    const name = qaName.trim();
+    if (!name) { setQaError('Name is required'); return; }
+    const costStr = qaCost.trim();
+    const costCents = costStr === '' ? null : Math.round(Number(costStr) * 100);
+    if (costCents != null && !Number.isFinite(costCents)) { setQaError('Cost must be a number'); return; }
+    setQaSaving(true); setQaError(null);
+    try {
+      let n = allSkus.reduce((m, s) => Math.max(m, s.sku_number), 0) + 1;
+      let created: InventorySku | null = null;
+      for (let attempt = 0; attempt < 3 && !created; attempt++) {
+        try {
+          const json = await createSku.mutateAsync({ fields: { sku_number: n, title: name, unit_cost_cents: costCents, qty_on_hand: 0 } });
+          created = json.sku as InventorySku;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : '';
+          if (/already exists/i.test(msg)) { n += 1; continue; } // sku_number race → bump + retry
+          throw e;
+        }
+      }
+      if (!created) { setQaError('Could not assign a SKU number — try again'); return; }
+      setNewSkus((arr) => [...arr, created!]);
+      updateLine(quickAdd.orderId, quickAdd.idx, { sku_id: created.id });
+      setQuickAdd(null); setQaName(''); setQaCost('');
+    } catch (e) {
+      setQaError(e instanceof Error ? e.message : 'Failed to create SKU');
+    } finally {
+      setQaSaving(false);
+    }
+  }
+
+  // Retroactive manual bind of one unbound order to its chosen SKU line(s).
+  // A bind is a real sale that already happened, so insufficient stock is a
+  // miscount, not a blocker: confirm, then allow inventory to go negative.
+  async function bindOne(u: UnboundOrder) {
+    const orderLines = (lines[u.order_id] ?? []).filter((x) => x.sku_id);
+    if (orderLines.length === 0) return;
+    setBindNotice(null);
+
+    // Collapse by SKU (mirrors the server) and check stock for the confirm prompt.
+    const collapsed = new Map<string, number>();
+    for (const l of orderLines) collapsed.set(l.sku_id, (collapsed.get(l.sku_id) ?? 0) + Math.max(1, l.qty || 1));
+    const short: { n: number; cur: number; qty: number }[] = [];
+    for (const [sku_id, qty] of collapsed) {
+      const s = allSkus.find((x) => x.id === sku_id);
+      const cur = s?.qty_on_hand ?? 0;
+      if (cur < qty) short.push({ n: s?.sku_number ?? 0, cur, qty });
+    }
+    if (short.length > 0) {
+      // Defer to the in-app confirm modal; it calls executeBind on confirm.
+      setBindConfirm({ u, orderLines, short });
+      return;
+    }
+    await executeBind(u, orderLines, false);
+  }
+
+  // The actual bind request + outcome handling. allowNegative is true only when
+  // the user confirmed an out-of-stock bind via the modal.
+  async function executeBind(u: UnboundOrder, orderLines: { sku_id: string; qty: number }[], allowNegative: boolean) {
+    setBindingId(u.order_id);
+    try {
+      const res = await fetch(`/api/live/sessions/${session.id}/bind`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: u.order_id, lines: orderLines, allow_negative: allowNegative }),
+      });
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (res.ok) {
+        setRecon((r) => (r ? { ...r, unbound: r.unbound.filter((x) => x.order_id !== u.order_id) } : r));
+        qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
+        qc.invalidateQueries({ queryKey: ['inventory-skus'] });
+        setBindNotice({ type: 'success', msg: `Bound order ${u.order_id} to inventory${allowNegative ? ' — stock went negative (recount flagged).' : '.'}` });
+      } else {
+        setBindNotice({ type: 'error', msg: `Bind failed for order ${u.order_id}: ${json.error || 'Unknown error'}` });
+      }
+    } catch {
+      setBindNotice({ type: 'error', msg: `Bind failed for order ${u.order_id}: network error` });
+    } finally {
+      setBindingId(null);
+    }
+  }
+
+  // Download a CSV of this show's auction items (server builds it; filename =
+  // show title + local start date, e.g. tiktok-live_2026-06-22.csv).
+  async function exportCsv() {
+    try {
+      const res = await fetch(`/api/live/sessions/${session.id}/export`);
+      if (!res.ok) return;
+      const { title, started_at, csv } = await res.json();
+      const slug = (title || 'show').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const d = started_at ? new Date(started_at) : new Date();
+      const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${slug}_${date}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* ignore */
+    }
+  }
 
   return (
     <div>
@@ -172,21 +438,183 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           <div className="text-sm text-tt-muted mt-1 flex items-center gap-3">
             <span>{fmtDate(session.started_at)}</span>
             <StatusBadge status={session.status} />
+            {durationLabel && (
+              <span title={`Active selling time (source: ${duration?.source === 'ended_at' ? 'session end' : 'last sale'})`}>
+                Duration {durationLabel}
+              </span>
+            )}
           </div>
+        </div>
+        <div className="shrink-0 flex items-center gap-2">
+          <button
+            onClick={reconcile}
+            disabled={reconciling}
+            className="px-4 py-2 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
+          >
+            {reconciling ? 'Reconciling…' : 'Reconcile orders'}
+          </button>
+          <button
+            onClick={refreshPayouts}
+            disabled={refreshingPayouts}
+            className="px-4 py-2 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
+          >
+            {refreshingPayouts ? 'Refreshing payouts…' : 'Refresh payouts'}
+          </button>
+          <button
+            onClick={exportCsv}
+            className="px-4 py-2 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors"
+          >
+            Export CSV
+          </button>
         </div>
       </div>
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      {/* Reconciliation results */}
+      {recon && (
+        <div className="mb-5 space-y-3">
+          {bindNotice && (
+            <div className={`rounded-lg px-4 py-2.5 text-sm ${bindNotice.type === 'success' ? 'border border-tt-green/40 bg-tt-green/10 text-tt-green' : 'border border-tt-red/40 bg-tt-red/10 text-tt-red'}`}>
+              {bindNotice.msg}
+            </div>
+          )}
+          {recon.flipped_count > 0 && (
+            <div className="rounded-lg border border-tt-green/40 bg-tt-green/10 px-4 py-2.5 text-sm text-tt-green">
+              Flipped {recon.flipped_count} order{recon.flipped_count === 1 ? '' : 's'} to sold (paid after capture).
+            </div>
+          )}
+          {recon.unbound.length > 0 && (
+            <div className="rounded-2xl border border-tt-red/40 bg-tt-red/10 p-4">
+              <div className="text-sm font-semibold text-tt-red mb-3">
+                {recon.unbound.length} order{recon.unbound.length === 1 ? '' : 's'} need inventory (P&amp;L incomplete)
+              </div>
+              <div className="space-y-3">
+                {recon.unbound.map((u) => (
+                  <div key={u.order_id} className="flex flex-wrap items-start gap-3 text-sm border-t border-tt-red/20 pt-3 first:border-0 first:pt-0">
+                    <div className="min-w-[12rem]">
+                      <div><span className="font-mono text-tt-muted">{u.order_id}</span> <span className="text-tt-text">@{u.buyer || '—'}</span></div>
+                      <div className="text-xs text-tt-muted">
+                        {u.won_price_cents == null ? '—' : `$${(u.won_price_cents / 100).toFixed(2)}`} · seller_sku hint: <span className="font-mono text-tt-text">{u.seller_sku || '—'}</span>
+                      </div>
+                    </div>
+                    <div className="flex-1 space-y-1.5">
+                      {(lines[u.order_id] ?? []).map((ln, idx) => (
+                        <div key={idx}>
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={ln.sku_id}
+                              onChange={(e) => updateLine(u.order_id, idx, { sku_id: e.target.value })}
+                              className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none"
+                            >
+                              <option value="">Pick SKU…</option>
+                              {allSkus.map((s) => (
+                                <option key={s.id} value={s.id}>#{s.sku_number} {s.title}</option>
+                              ))}
+                            </select>
+                            <input
+                              type="number" min={1} value={ln.qty}
+                              onChange={(e) => updateLine(u.order_id, idx, { qty: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })}
+                              className="w-16 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none tabular-nums"
+                              aria-label="Quantity"
+                            />
+                            <button
+                              onClick={() => { setQuickAdd({ orderId: u.order_id, idx }); setQaName(''); setQaCost(''); setQaError(null); }}
+                              className="text-xs text-tt-cyan cursor-pointer hover:underline px-1"
+                              title="Create a new inventory SKU"
+                            >+ New SKU</button>
+                            {(lines[u.order_id]?.length ?? 0) > 1 && (
+                              <button onClick={() => removeLine(u.order_id, idx)} className="text-tt-muted hover:text-tt-red text-xs px-1" aria-label="Remove line">✕</button>
+                            )}
+                          </div>
+                          {quickAdd?.orderId === u.order_id && quickAdd?.idx === idx && (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-tt-border bg-tt-input-bg/40 p-2">
+                              <input
+                                autoFocus placeholder="New SKU name" value={qaName}
+                                onChange={(e) => setQaName(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') submitQuickAdd(); if (e.key === 'Escape') setQuickAdd(null); }}
+                                className="flex-1 min-w-[10rem] rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none"
+                              />
+                              <input
+                                placeholder="Cost $" inputMode="decimal" value={qaCost}
+                                onChange={(e) => setQaCost(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') submitQuickAdd(); if (e.key === 'Escape') setQuickAdd(null); }}
+                                className="w-24 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none tabular-nums"
+                              />
+                              <button
+                                onClick={submitQuickAdd}
+                                disabled={qaSaving || !qaName.trim()}
+                                className="px-2.5 py-1 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                              >{qaSaving ? 'Creating…' : 'Create & select'}</button>
+                              <button onClick={() => setQuickAdd(null)} className="text-tt-muted hover:text-tt-text text-xs px-1">Cancel</button>
+                              {qaError && <span className="text-tt-red text-xs w-full">{qaError}</span>}
+                              <span className="text-[10px] text-tt-muted w-full">Creates at 0 stock — add a picture later in Inventory. Binding a sale will take it negative (you&apos;ll confirm).</span>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      <button onClick={() => addLine(u.order_id)} className="text-xs text-tt-cyan cursor-pointer hover:underline">+ add SKU</button>
+                    </div>
+                    <button
+                      onClick={() => bindOne(u)}
+                      disabled={!(lines[u.order_id] ?? []).some((x) => x.sku_id) || bindingId === u.order_id}
+                      className="px-3 py-1 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                    >
+                      {bindingId === u.order_id ? 'Binding…' : 'Bind'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Summary cards. Before reconcile: normal board figures. After reconcile:
+          "Sale value" becomes capture-based Revenue (all paid wins) + a completeness caption. */}
+      <div className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 ${recon || payout ? 'mb-2' : 'mb-6'}`}>
         <SummaryCard label="Items sold" value={isLoading ? '…' : String(sum.itemsSold)} />
-        <SummaryCard label="Sale value" value={isLoading ? '…' : money(sum.saleCents)} />
+        <SummaryCard label="Units sold" value={isLoading ? '…' : String(sum.unitsSold)} />
+        {recon ? (
+          <SummaryCard label="Revenue (all wins)" value={money(recon.revenue_cents)} />
+        ) : (
+          <SummaryCard label="Sale value" value={isLoading ? '…' : money(sum.saleCents)} />
+        )}
+        <SummaryCard label="ASP / unit" value={isLoading ? '…' : money(aspPerUnitCents(sum))} />
         <SummaryCard label="Cost" value={isLoading ? '…' : money(sum.costCents)} />
         <SummaryCard
-          label="Gross profit"
+          label={recon ? 'Gross profit (so far)' : 'Gross profit'}
           value={isLoading ? '…' : money(sum.profitCents)}
           valueClass={isLoading ? '' : profitClass(sum.profitCents)}
         />
+        {/* Payout summary is driven by the "Refresh payouts" response (authoritative
+            totals across ALL session orders, incl. unbound), shown only once a
+            payout pull has run — never a half-state. Net profit (payout−cost) is
+            board-derived (costed orders only). */}
+        {payout && (
+          <>
+            <SummaryCard label="Net payout (so far)" value={money(payout.net_payout_cents_total)} />
+            <SummaryCard label="Net profit (so far)" value={money(netProfitTotal)} valueClass={profitClass(netProfitTotal)} />
+            <SummaryCard
+              label="ROI (net)"
+              value={roiNet == null ? '—' : `${roiNet.toFixed(0)}%`}
+              valueClass={roiNet == null ? '' : profitClass(roiNet)}
+            />
+          </>
+        )}
       </div>
+      {recon && (
+        <div className={`text-xs text-tt-muted ${payout ? 'mb-2' : 'mb-6'}`}>
+          Revenue {money(recon.revenue_cents)} is final (all {recon.revenue_count} paid wins).
+          {' '}P&amp;L complete for {recon.costed_count} of {recon.revenue_count} orders
+          {recon.unbound.length > 0 ? ` — ${recon.unbound.length} still need inventory` : ''}. Gross profit covers costed orders only.
+        </div>
+      )}
+      {payout && (
+        <div className="text-xs text-tt-muted mb-6">
+          Payouts in for {payout.payout_count}{recon ? ` of ${recon.revenue_count}` : ''} orders
+          ({payout.settled_count} actual, {payout.estimate_count} est).
+          Net payout/profit reflect TikTok fees; estimates until settled.
+        </div>
+      )}
 
       {/* Items table */}
       {isLoading ? (
@@ -210,8 +638,9 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 <th className="text-right font-medium px-4 py-3">ASP Goal</th>
                 <th className="text-right font-medium px-4 py-3">Won price</th>
                 <th className="text-right font-medium px-4 py-3">Cost</th>
-                <th className="text-right font-medium px-4 py-3">Profit</th>
+                <th className="text-right font-medium px-4 py-3">Profit<span className="normal-case text-tt-muted"> (won−cost)</span></th>
                 <th className="text-right font-medium px-4 py-3">Actual payout</th>
+                <th className="text-right font-medium px-4 py-3">Net profit<span className="normal-case text-tt-muted"> (payout−cost)</span></th>
               </tr>
             </thead>
             <tbody>
@@ -221,6 +650,9 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 const cost = it.total_cost_cents;
                 // Profit is the REAL outcome: won price − cost (never ASP goal).
                 const profit = sold && won != null ? won - (cost ?? 0) : null;
+                // Net profit = true payout − cost (after TikTok fees). Blank (not 0)
+                // until a payout figure exists; needs a cost basis too.
+                const netProfit = sold && it.net_payout_cents != null && cost != null ? it.net_payout_cents - cost : null;
                 return (
                   <tr key={it.id} className="border-b border-tt-border last:border-0">
                     <td className="px-4 py-3 text-tt-muted tabular-nums">{it.auction_number}</td>
@@ -244,8 +676,12 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums">{it.units}</td>
                     <td className="px-4 py-3 text-center">
-                      <span className={`text-xs font-medium ${sold ? 'text-tt-green' : 'text-tt-muted'}`}>
-                        {sold ? 'Sold' : 'Not sold'}
+                      <span
+                        className={`text-xs font-medium ${
+                          sold ? 'text-tt-green' : it.payment_failed ? 'text-tt-red' : 'text-tt-muted'
+                        }`}
+                      >
+                        {sold ? 'Sold' : it.payment_failed ? 'Payment failed' : 'Not sold'}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums text-tt-muted">{money(it.expected_price_cents)}</td>
@@ -254,13 +690,59 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                     <td className={`px-4 py-3 text-right tabular-nums ${profit == null ? 'text-tt-muted' : profitClass(profit)}`}>
                       {profit == null ? '—' : money(profit)}
                     </td>
-                    {/* Placeholder: TikTok Finance payouts not wired in yet. */}
-                    <td className="px-4 py-3 text-right text-tt-muted">—</td>
+                    {/* ACTUAL PAYOUT — net (estimate or settled); "est" tag until settled; blank if none. */}
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {it.net_payout_cents == null ? (
+                        <span className="text-tt-muted">—</span>
+                      ) : (
+                        <>
+                          {money(it.net_payout_cents)}
+                          {!it.payout_settled && <span className="ml-1 text-[10px] uppercase text-tt-muted">est</span>}
+                        </>
+                      )}
+                    </td>
+                    {/* NET PROFIT = payout − cost; blank (not 0) when no payout/cost. */}
+                    <td className={`px-4 py-3 text-right tabular-nums ${netProfit == null ? 'text-tt-muted' : profitClass(netProfit)}`}>
+                      {netProfit == null ? '—' : money(netProfit)}
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* In-app (themed) out-of-stock bind confirm — replaces window.confirm.
+          Same wording + behavior: Cancel aborts, "Bind anyway" sends allow_negative. */}
+      {bindConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setBindConfirm(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-tt-border bg-tt-card p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-semibold text-tt-text mb-2">Not enough stock</div>
+            <div className="text-sm text-tt-muted whitespace-pre-line mb-4">{shortConfirmMessage(bindConfirm.short)}</div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setBindConfirm(null)}
+                className="px-4 py-2 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { const c = bindConfirm; setBindConfirm(null); void executeBind(c.u, c.orderLines, true); }}
+                className="px-4 py-2 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 transition-opacity"
+              >
+                Bind anyway
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

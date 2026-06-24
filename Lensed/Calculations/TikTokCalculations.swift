@@ -20,18 +20,16 @@ enum TikTokCalculations {
         let ads = entry.ads
         let unitsSold = Double(entry.unitsSold ?? 0)
 
-        // Platform fee is always 6%
-        let platformFee = gmv * 0.06
+        let platformFee = entry.platformFee ?? (gmv * 0.06)
 
-        // Look up user-entered cost per unit
         var costPerUnit: Double = 0
-        if let costsMap {
+        if let costsMap, let productId = entry.productId {
             if let variantId = entry.variantId {
-                costPerUnit = costsMap["\(entry.productId)-\(variantId)"]
-                    ?? costsMap[entry.productId.uuidString]
+                costPerUnit = costsMap["\(productId)-\(variantId)"]
+                    ?? costsMap[productId.uuidString]
                     ?? 0
             } else {
-                costPerUnit = costsMap[entry.productId.uuidString] ?? 0
+                costPerUnit = costsMap[productId.uuidString] ?? 0
             }
         }
 
@@ -140,15 +138,14 @@ enum TikTokCalculations {
             let gmv = e.gmv
             let unitsSold = Double(e.unitsSold ?? 0)
 
-            // Calculate user COGS separately for breakdown
             var costPerUnit: Double = 0
-            if let costsMap {
+            if let costsMap, let productId = e.productId {
                 if let variantId = e.variantId {
-                    costPerUnit = costsMap["\(e.productId)-\(variantId)"]
-                        ?? costsMap[e.productId.uuidString]
+                    costPerUnit = costsMap["\(productId)-\(variantId)"]
+                        ?? costsMap[productId.uuidString]
                         ?? 0
                 } else {
-                    costPerUnit = costsMap[e.productId.uuidString] ?? 0
+                    costPerUnit = costsMap[productId.uuidString] ?? 0
                 }
             }
             let userCogs = costPerUnit * unitsSold

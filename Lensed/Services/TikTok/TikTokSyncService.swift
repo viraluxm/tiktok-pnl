@@ -1,13 +1,13 @@
 import Foundation
 
 struct TikTokSyncResult: Codable, Sendable {
+    let isCaughtUp: Bool
+    let totalUniqueOrders: Int
+    let ordersThisBatch: Int
     let entriesCreated: Int
-    let entriesUpdated: Int
-
-    enum CodingKeys: String, CodingKey {
-        case entriesCreated = "entries_created"
-        case entriesUpdated = "entries_updated"
-    }
+    let daysProcessed: Int
+    let currentDay: String
+    let elapsedMs: Int
 }
 
 struct SyncResponse<T: Codable>: Codable {

@@ -215,13 +215,59 @@ struct ProductsView: View {
         defer { isLoading = false }
 
         do {
-            let entries = try await dataService.fetchEntries()
-            let costs = try await dataService.fetchProductCosts()
-            let costsMap = dataService.buildCostsMap(from: costs)
+            async let ordersTask = dataService.fetchSyncedOrders()
+            async let productsTask = dataService.fetchProducts()
+            async let costsTask = dataService.fetchProductCosts()
 
-            let metrics = TikTokCalculations.computeMetrics(entries, costsMap: costsMap)
-            productProfits = metrics.productProfits
-            products = try await dataService.fetchProducts()
+            let (orders, fetchedProducts, fetchedCosts) = try await (ordersTask, productsTask, costsTask)
+            products = fetchedProducts
+            let costsMap = dataService.buildCostsMap(from: fetchedCosts)
+
+            let productLookup = Dictionary(
+                uniqueKeysWithValues: fetchedProducts.compactMap { p in
+                    p.tiktokProductId.map { ($0, p) }
+                }
+            )
+
+            var profitsByName: [String: ProductProfitData] = [:]
+            for order in orders {
+                let pid = order.tiktokProductId ?? "unknown"
+                let productName = productLookup[pid]?.name ?? "Unknown"
+                let unitsSold = order.units
+                let gmv = order.gmv
+                let platformFee = order.platformFee
+                let shipping = order.shipping
+                let affiliate = order.affiliate
+
+                var costPerUnit: Double = 0
+                if let product = productLookup[pid] {
+                    if let skuId = order.skuId {
+                        costPerUnit = costsMap["\(product.id)-\(skuId)"]
+                            ?? costsMap[product.id.uuidString]
+                            ?? 0
+                    } else {
+                        costPerUnit = costsMap[product.id.uuidString] ?? 0
+                    }
+                }
+                let cogs = costPerUnit * Double(unitsSold)
+                let profit = gmv - platformFee - shipping - affiliate - cogs
+
+                var pp = profitsByName[productName] ?? ProductProfitData()
+                pp.gmv += gmv
+                pp.profit += profit
+                pp.unitsSold += unitsSold
+                pp.revenue += gmv
+                pp.orders += 1
+
+                if let skuId = order.skuId,
+                   let variant = productLookup[pid]?.variants?.first(where: { $0.id == skuId }) {
+                    pp.variantUnits[variant.name, default: 0] += unitsSold
+                }
+
+                profitsByName[productName] = pp
+            }
+
+            productProfits = profitsByName
         } catch {
             // Will show demo products
         }

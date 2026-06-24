@@ -43,7 +43,7 @@ final class TikTokDashboardViewModel {
                 guard let entryDate = Date.fromISO(entry.date), entryDate <= to else { return false }
             }
             if filterProductId != "all" {
-                guard entry.productId.uuidString == filterProductId else { return false }
+                guard entry.productId?.uuidString == filterProductId else { return false }
             }
             return true
         }
@@ -128,7 +128,7 @@ final class TikTokDashboardViewModel {
 
         do {
             let result = try await syncService.sync()
-            syncMessage = "Synced: \(result.entriesCreated) new, \(result.entriesUpdated) updated"
+            syncMessage = "Synced \(result.ordersThisBatch) orders, \(result.entriesCreated) entries"
             await loadData()
         } catch {
             syncMessage = "Sync failed: \(error.localizedDescription)"

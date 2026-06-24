@@ -52,7 +52,6 @@ final class AccountViewModel {
         do {
             let client = SupabaseService.shared.client
 
-            // Fetch profile
             let profiles: [Profile] = try await client
                 .from("profiles")
                 .select()
@@ -61,15 +60,16 @@ final class AccountViewModel {
                 .value
             profile = profiles.first
 
-            // Fetch connections in parallel
-            async let tiktokTask = tiktokDataService.fetchConnection()
-            async let whatnotTask = whatnotDataService.fetchConnection()
-
-            let (tiktok, whatnot) = try await (tiktokTask, whatnotTask)
-            tiktokConnection = tiktok
-            whatnotConnection = whatnot
+            tiktokConnection = try await tiktokDataService.fetchConnection()
         } catch {
             errorMessage = error.localizedDescription
+        }
+
+        // Whatnot tables may not exist yet — fetch separately so it can't break TikTok
+        do {
+            whatnotConnection = try await whatnotDataService.fetchConnection()
+        } catch {
+            whatnotConnection = nil
         }
     }
 }

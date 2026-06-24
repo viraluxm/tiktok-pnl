@@ -38,11 +38,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const orderIds = (items ?? [])
     .map((i) => i.client_idempotency_key)
     .filter((k): k is string => typeof k === 'string' && k.length > 0);
-  const captureByOrderId = new Map<string, { won_price_cents: number | null; tiktok_title: string | null }>();
+  const captureByOrderId = new Map<
+    string,
+    { won_price_cents: number | null; tiktok_title: string | null; payment_failed: boolean }
+  >();
   if (orderIds.length) {
     const { data: captures, error: capErr } = await supabase
       .from('capture_events')
-      .select('order_id, selling_price_cents, product_name')
+      .select('order_id, selling_price_cents, product_name, is_payment_successful')
       .eq('user_id', user.id)
       .in('order_id', orderIds);
     if (capErr) {
@@ -53,6 +56,28 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         captureByOrderId.set(c.order_id as string, {
           won_price_cents: (c.selling_price_cents as number | null) ?? null,
           tiktok_title: (c.product_name as string | null) ?? null,
+          // Only an explicit false means the payment failed (null/true = ok).
+          payment_failed: c.is_payment_successful === false,
+        });
+      }
+    }
+  }
+
+  // Join true payout (estimate or settled) by order_id, populated by Reconcile.
+  const payoutByOrderId = new Map<string, { net_payout_cents: number | null; payout_settled: boolean }>();
+  if (orderIds.length) {
+    const { data: payouts, error: poErr } = await supabase
+      .from('order_payouts')
+      .select('order_id, net_payout_cents, settled')
+      .eq('user_id', user.id)
+      .in('order_id', orderIds);
+    if (poErr) {
+      console.error('[live/board] order_payouts join error:', poErr);
+    } else {
+      for (const p of payouts ?? []) {
+        payoutByOrderId.set(p.order_id as string, {
+          net_payout_cents: (p.net_payout_cents as number | null) ?? null,
+          payout_settled: !!p.settled,
         });
       }
     }
@@ -94,6 +119,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     const capture = it.client_idempotency_key
       ? captureByOrderId.get(it.client_idempotency_key) ?? null
       : null;
+    const payout = it.client_idempotency_key
+      ? payoutByOrderId.get(it.client_idempotency_key) ?? null
+      : null;
     return {
       id: it.id,
       auction_number: it.sequence,
@@ -105,6 +133,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       won_price_cents: capture?.won_price_cents ?? null,
       // TikTok auction item title from the capture (e.g. "Random Electronics").
       tiktok_title: capture?.tiktok_title ?? null,
+      // True when the captured sale had a failed payment (logged as not_sold).
+      payment_failed: capture?.payment_failed ?? false,
+      // True net payout (estimate or settled), joined from order_payouts (Reconcile).
+      net_payout_cents: payout?.net_payout_cents ?? null,
+      payout_settled: payout?.payout_settled ?? false,
       buyer_handle: it.buyer_handle,
       logged_at: it.closed_at ?? it.created_at,
       units,

@@ -22,6 +22,9 @@ export interface AuctionItem {
   sold_price_cents: number | null;
   won_price_cents: number | null; // real winning bid, joined from capture_events
   tiktok_title: string | null;    // TikTok product_name, joined from capture_events
+  payment_failed: boolean;        // captured sale had a failed payment (logged not_sold)
+  net_payout_cents: number | null; // true net payout (estimate or settled), from order_payouts
+  payout_settled: boolean;        // true = settled actual, false = estimate (or no payout)
   buyer_handle: string | null;
   logged_at: string;
   units: number;

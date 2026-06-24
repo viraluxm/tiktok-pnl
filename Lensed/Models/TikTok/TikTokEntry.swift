@@ -4,6 +4,8 @@ struct TikTokProduct: Codable, Identifiable, Sendable {
     let id: UUID
     let userId: UUID
     let name: String
+    let tiktokProductId: String?
+    let imageUrl: String?
     let variants: [TikTokProductVariant]?
     let createdAt: Date
 
@@ -11,8 +13,32 @@ struct TikTokProduct: Codable, Identifiable, Sendable {
         case id
         case userId = "user_id"
         case name
+        case tiktokProductId = "tiktok_product_id"
+        case imageUrl = "image_url"
         case variants
         case createdAt = "created_at"
+    }
+}
+
+struct SyncedOrder: Codable, Sendable {
+    let tiktokProductId: String?
+    let skuId: String?
+    let skuName: String?
+    let gmv: Double
+    let shipping: Double
+    let affiliate: Double
+    let platformFee: Double
+    let units: Int
+    let orderDate: String
+
+    enum CodingKeys: String, CodingKey {
+        case tiktokProductId = "tiktok_product_id"
+        case skuId = "sku_id"
+        case skuName = "sku_name"
+        case gmv, shipping, affiliate
+        case platformFee = "platform_fee"
+        case units
+        case orderDate = "order_date"
     }
 }
 
@@ -25,7 +51,7 @@ struct TikTokProductVariant: Codable, Identifiable, Sendable {
 struct TikTokEntry: Codable, Identifiable, Sendable {
     let id: UUID
     let userId: UUID
-    let productId: UUID
+    let productId: UUID?
     let date: String
     let gmv: Double
     let videosPosted: Int
@@ -33,6 +59,7 @@ struct TikTokEntry: Codable, Identifiable, Sendable {
     let shipping: Double
     let affiliate: Double
     let ads: Double
+    let platformFee: Double?
     let unitsSold: Int?
     let variantId: String?
     let source: String?
@@ -47,6 +74,7 @@ struct TikTokEntry: Codable, Identifiable, Sendable {
         case date, gmv
         case videosPosted = "videos_posted"
         case views, shipping, affiliate, ads
+        case platformFee = "platform_fee"
         case unitsSold = "units_sold"
         case variantId = "variant_id"
         case source

@@ -215,31 +215,31 @@ export default function ShippingTab() {
 
           {/* SKU blocks */}
           {box.skus.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 auto-rows-fr mb-6">
               {box.skus.map((s) => {
                 const have = counts[s.inventory_sku_id] ?? 0;
                 const done = have >= s.required_qty;
                 return (
                   <div
                     key={s.inventory_sku_id}
-                    className={`rounded-xl border p-3 flex items-center gap-3 transition-colors ${
+                    className={`rounded-2xl border-2 p-6 flex flex-wrap items-center gap-6 transition-colors ${
                       done ? 'border-tt-green/50 bg-tt-green/10' : 'border-tt-red/50 bg-tt-red/10'
                     }`}
                   >
-                    <div className="w-14 h-14 shrink-0 rounded-lg border border-tt-border bg-tt-input-bg overflow-hidden flex items-center justify-center">
+                    <div className="w-60 h-60 shrink-0 rounded-xl border border-tt-border bg-tt-input-bg overflow-hidden flex items-center justify-center">
                       {s.thumbnail_url ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img src={s.thumbnail_url} alt="" className="w-full h-full object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
                       ) : (
-                        <span className="text-tt-muted text-[10px]">no img</span>
+                        <span className="text-tt-muted text-sm">no img</span>
                       )}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-bold text-tt-text">#{s.sku_number}</span>
-                        <span className={`text-xs font-bold ${done ? 'text-tt-green' : 'text-tt-red'}`}>{done ? '✓' : ''} {have} of {s.required_qty}</span>
+                    <div className="flex-1 min-w-[14rem]">
+                      <div className="flex items-baseline gap-3 flex-wrap">
+                        <span className="font-mono text-8xl font-bold text-tt-text">#{s.sku_number}</span>
+                        <span className={`text-2xl font-bold ${done ? 'text-tt-green' : 'text-tt-red'}`}>{done ? '✓ ' : ''}{have} of {s.required_qty}</span>
                       </div>
-                      <div className="text-sm text-tt-text truncate">{s.title}</div>
+                      <div className="mt-2 text-2xl font-semibold leading-tight text-tt-text break-words">{s.title}</div>
                     </div>
                   </div>
                 );

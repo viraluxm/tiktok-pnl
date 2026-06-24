@@ -52,6 +52,26 @@ final class TikTokDataService: Sendable {
         return logs.first
     }
 
+    func fetchSyncedOrders() async throws -> [SyncedOrder] {
+        let pageSize = 1000
+        var allOrders: [SyncedOrder] = []
+        var offset = 0
+
+        while true {
+            let page: [SyncedOrder] = try await client
+                .from("synced_order_ids")
+                .select("tiktok_product_id, sku_id, sku_name, gmv, shipping, affiliate, platform_fee, units, order_date")
+                .range(from: offset, to: offset + pageSize - 1)
+                .execute()
+                .value
+            allOrders.append(contentsOf: page)
+            if page.count < pageSize { break }
+            offset += pageSize
+        }
+
+        return allOrders
+    }
+
     /// Build a costs map from product costs: "productId" or "productId-variantId" → costPerUnit
     func buildCostsMap(from costs: [TikTokProductCost]) -> [String: Double] {
         var map: [String: Double] = [:]
