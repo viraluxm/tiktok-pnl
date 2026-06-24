@@ -19,7 +19,6 @@ import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
 import ReturnsTab from '@/components/dashboard/ReturnsTab';
-import LiveSessionsPanel from '@/components/live/LiveSessionsPanel';
 import ShowsTab from '@/components/shows/ShowsTab';
 import ShippingTab from '@/components/shipping/ShippingTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
@@ -27,7 +26,7 @@ import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'inventory' | 'live' | 'shows' | 'shipping' | 'returns';
+type ViewTab = 'dashboard' | 'inventory' | 'shows' | 'shipping' | 'returns';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -238,7 +237,6 @@ export default function RealDashboard() {
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
     { label: 'Inventory', value: 'inventory' },
-    { label: 'Live Tracking', value: 'live' },
     { label: 'Shows', value: 'shows' },
     { label: 'Shipping', value: 'shipping' },
     { label: 'Returns', value: 'returns' },
@@ -341,9 +339,6 @@ export default function RealDashboard() {
 
         {/* Inventory View */}
         {activeView === 'inventory' && <InventorySection />}
-
-        {/* Live Tracking View */}
-        {activeView === 'live' && <LiveSessionsPanel />}
 
         {/* Shows View */}
         {activeView === 'shows' && <ShowsTab />}

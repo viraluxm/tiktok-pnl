@@ -146,7 +146,7 @@ export default function ShowsTab() {
           <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
             <th className="text-left font-medium px-4 py-3">Show</th>
             <th className="text-left font-medium px-4 py-3">Status</th>
-            <th className="text-right font-medium px-4 py-3">Items sold</th>
+            <th className="text-right font-medium px-4 py-3">Auctions won</th>
             <th className="text-right font-medium px-4 py-3">Units sold</th>
             <th className="text-right font-medium px-4 py-3">Sale value</th>
             <th className="text-right font-medium px-4 py-3">Cost</th>
@@ -222,6 +222,14 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     staleTime: 60_000,
   });
   const durationLabel = fmtDuration(duration?.duration_ms);
+  // Units / hr = units sold ÷ active-selling hours. Null when duration unknown.
+  const unitsPerHr = duration?.duration_ms && duration.duration_ms > 0
+    ? sum.unitsSold / (duration.duration_ms / 3_600_000)
+    : null;
+  // Whether any sold row has a payout figure → the Profit column/card upgrades
+  // from provisional (won−cost) to net (payout−cost, after fees). Works on a
+  // fresh reload too (board-derived), not only right after a refresh click.
+  const anyPayout = useMemo(() => items.some((it) => it.net_payout_cents != null), [items]);
 
   const qc = useQueryClient();
   const { data: invSkus = [] } = useInventorySkus();
@@ -571,8 +579,12 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
       {/* Summary cards. Before reconcile: normal board figures. After reconcile:
           "Sale value" becomes capture-based Revenue (all paid wins) + a completeness caption. */}
       <div className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 ${recon || payout ? 'mb-2' : 'mb-6'}`}>
-        <SummaryCard label="Items sold" value={isLoading ? '…' : String(sum.itemsSold)} />
+        <SummaryCard label="Auctions won" value={isLoading ? '…' : String(sum.itemsSold)} />
         <SummaryCard label="Units sold" value={isLoading ? '…' : String(sum.unitsSold)} />
+        <SummaryCard
+          label="Units / hr"
+          value={isLoading ? '…' : unitsPerHr == null ? '—' : unitsPerHr >= 10 ? String(Math.round(unitsPerHr)) : unitsPerHr.toFixed(1)}
+        />
         {recon ? (
           <SummaryCard label="Revenue (all wins)" value={money(recon.revenue_cents)} />
         ) : (
@@ -580,19 +592,23 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         )}
         <SummaryCard label="ASP / unit" value={isLoading ? '…' : money(aspPerUnitCents(sum))} />
         <SummaryCard label="Cost" value={isLoading ? '…' : money(sum.costCents)} />
-        <SummaryCard
-          label={recon ? 'Gross profit (so far)' : 'Gross profit'}
-          value={isLoading ? '…' : money(sum.profitCents)}
-          valueClass={isLoading ? '' : profitClass(sum.profitCents)}
-        />
-        {/* Payout summary is driven by the "Refresh payouts" response (authoritative
-            totals across ALL session orders, incl. unbound), shown only once a
-            payout pull has run — never a half-state. Net profit (payout−cost) is
-            board-derived (costed orders only). */}
+        {/* ONE adaptive Profit card: provisional won−cost total until payout data
+            exists, then the true net (payout−cost) total — label tracks the state. */}
+        {anyPayout ? (
+          <SummaryCard label="Profit (net, after fees)" value={isLoading ? '…' : money(netProfitTotal)} valueClass={isLoading ? '' : profitClass(netProfitTotal)} />
+        ) : (
+          <SummaryCard
+            label={recon ? 'Profit (won−cost), so far' : 'Profit (won−cost)'}
+            value={isLoading ? '…' : money(sum.profitCents)}
+            valueClass={isLoading ? '' : profitClass(sum.profitCents)}
+          />
+        )}
+        {/* Payout-only extras (after a "Refresh payouts" run): authoritative net
+            payout across ALL orders incl. unbound, and ROI. Net profit itself is
+            folded into the adaptive Profit card above. */}
         {payout && (
           <>
             <SummaryCard label="Net payout (so far)" value={money(payout.net_payout_cents_total)} />
-            <SummaryCard label="Net profit (so far)" value={money(netProfitTotal)} valueClass={profitClass(netProfitTotal)} />
             <SummaryCard
               label="ROI (net)"
               value={roiNet == null ? '—' : `${roiNet.toFixed(0)}%`}
@@ -638,9 +654,10 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 <th className="text-right font-medium px-4 py-3">ASP Goal</th>
                 <th className="text-right font-medium px-4 py-3">Won price</th>
                 <th className="text-right font-medium px-4 py-3">Cost</th>
-                <th className="text-right font-medium px-4 py-3">Profit<span className="normal-case text-tt-muted"> (won−cost)</span></th>
+                <th className="text-right font-medium px-4 py-3">
+                  Profit<span className="normal-case text-tt-muted"> {anyPayout ? '(net, after fees)' : '(won−cost)'}</span>
+                </th>
                 <th className="text-right font-medium px-4 py-3">Actual payout</th>
-                <th className="text-right font-medium px-4 py-3">Net profit<span className="normal-case text-tt-muted"> (payout−cost)</span></th>
               </tr>
             </thead>
             <tbody>
@@ -648,11 +665,15 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 const sold = it.status === 'sold';
                 const won = wonCents(it); // real winning bid (sold items only)
                 const cost = it.total_cost_cents;
-                // Profit is the REAL outcome: won price − cost (never ASP goal).
-                const profit = sold && won != null ? won - (cost ?? 0) : null;
-                // Net profit = true payout − cost (after TikTok fees). Blank (not 0)
-                // until a payout figure exists; needs a cost basis too.
-                const netProfit = sold && it.net_payout_cents != null && cost != null ? it.net_payout_cents - cost : null;
+                // ONE adaptive profit figure (always the best available), blank-not-zero:
+                //   payout present → payout − cost (true, after fees)
+                //   else won present → won − cost (provisional)
+                //   no cost → '—'.
+                let profit: number | null = null;
+                if (sold && cost != null) {
+                  if (it.net_payout_cents != null) profit = it.net_payout_cents - cost;
+                  else if (won != null) profit = won - cost;
+                }
                 return (
                   <tr key={it.id} className="border-b border-tt-border last:border-0">
                     <td className="px-4 py-3 text-tt-muted tabular-nums">{it.auction_number}</td>
@@ -697,13 +718,14 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                       ) : (
                         <>
                           {money(it.net_payout_cents)}
-                          {!it.payout_settled && <span className="ml-1 text-[10px] uppercase text-tt-muted">est</span>}
+                          {!it.payout_settled && (
+                            <span
+                              className="ml-1 text-[10px] uppercase text-tt-muted cursor-help"
+                              title="TikTok's estimate until the order settles."
+                            >est</span>
+                          )}
                         </>
                       )}
-                    </td>
-                    {/* NET PROFIT = payout − cost; blank (not 0) when no payout/cost. */}
-                    <td className={`px-4 py-3 text-right tabular-nums ${netProfit == null ? 'text-tt-muted' : profitClass(netProfit)}`}>
-                      {netProfit == null ? '—' : money(netProfit)}
                     </td>
                   </tr>
                 );
