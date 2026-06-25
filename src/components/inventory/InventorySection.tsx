@@ -7,6 +7,8 @@ import {
   useUpdateSku,
   useToggleSkuActive,
   useDeleteSku,
+  useAddBatch,
+  useSettleBatch,
   type InventorySku,
 } from '@/hooks/useInventorySkus';
 import { code128ToSvg } from '@/lib/barcode/code128';
@@ -149,6 +151,13 @@ export default function InventorySection() {
   const updateSku = useUpdateSku();
   const toggleActive = useToggleSkuActive();
   const deleteSku = useDeleteSku();
+  const addBatch = useAddBatch();
+  const settleBatch = useSettleBatch();
+
+  // Add-batch form inputs (lives in the Edit panel; the SKU is `editingId`).
+  const [batchQty, setBatchQty] = useState('');
+  const [batchCost, setBatchCost] = useState('');
+  const [batchErr, setBatchErr] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -226,6 +235,7 @@ export default function InventorySection() {
     setAdding(false);
     setError(null);
     clearImageState();
+    setBatchQty(''); setBatchCost(''); setBatchErr(null);
     setExistingThumbUrl(s.thumbnail_url);
     setEditingId(s.id);
     setForm({
@@ -244,6 +254,7 @@ export default function InventorySection() {
     setEditingId(null);
     setForm(EMPTY);
     setError(null);
+    setBatchQty(''); setBatchCost(''); setBatchErr(null);
   }
 
   async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
@@ -269,23 +280,33 @@ export default function InventorySection() {
 
   async function submitForm() {
     setError(null);
-    const fields = {
+    // Shared editable fields. qty_on_hand and unit cost are NOT here for edits —
+    // under FIFO they're batch-derived (qty = Σ layers, cost is per-layer), so
+    // writing them directly would desync from Σ batches. They're managed via
+    // Add batch / Settle. They ARE sent on create, to seed the SKU's first batch.
+    const common = {
       title: form.title.trim(),
       shortcut_letter: form.shortcut_letter.trim() || null,
-      unit_cost_cents: toCents(form.unit_cost),
-      qty_on_hand: form.qty_on_hand.trim() ? Math.trunc(Number(form.qty_on_hand)) : 0,
       is_active: form.is_active,
     };
     try {
       if (editingId) {
-        await updateSku.mutateAsync({ id: editingId, fields, image: imageFile, removeImage });
+        await updateSku.mutateAsync({ id: editingId, fields: common, image: imageFile, removeImage });
       } else {
         const n = Math.trunc(Number(form.sku_number));
         if (!Number.isFinite(n) || n <= 0) {
           setError('Enter a valid SKU number.');
           return;
         }
-        const created = await createSku.mutateAsync({ fields: { ...fields, sku_number: n }, image: imageFile });
+        const created = await createSku.mutateAsync({
+          fields: {
+            ...common,
+            sku_number: n,
+            unit_cost_cents: toCents(form.unit_cost),
+            qty_on_hand: form.qty_on_hand.trim() ? Math.trunc(Number(form.qty_on_hand)) : 0,
+          },
+          image: imageFile,
+        });
         // Auto-print the new SKU's label (server-generated barcode must exist).
         const newSku = created?.sku as InventorySku | undefined;
         if (newSku?.barcode) printSkuLabels([newSku], labelSize);
@@ -304,6 +325,29 @@ export default function InventorySection() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to delete SKU.');
       setConfirmDeleteId(null);
+    }
+  }
+
+  async function submitAddBatch(skuId: string) {
+    const qty = Math.trunc(Number(batchQty));
+    if (!Number.isFinite(qty) || qty < 0) { setBatchErr('Qty must be a non-negative whole number'); return; }
+    const cost = batchCost.trim() === '' ? null : Math.round(Number(batchCost) * 100);
+    if (cost != null && !Number.isFinite(cost)) { setBatchErr('Cost must be a number'); return; }
+    setBatchErr(null);
+    try {
+      await addBatch.mutateAsync({ skuId, qty, unit_cost_cents: cost });
+      setBatchQty(''); setBatchCost('');
+    } catch (e) {
+      setBatchErr(e instanceof Error ? e.message : 'Failed to add batch');
+    }
+  }
+
+  async function onSettle(skuId: string, batchId: string) {
+    setBatchErr(null);
+    try {
+      await settleBatch.mutateAsync({ skuId, batchId });
+    } catch (e) {
+      setBatchErr(e instanceof Error ? e.message : 'Failed to settle batch');
     }
   }
 
@@ -457,25 +501,105 @@ export default function InventorySection() {
                   className="input"
                 />
               </Field>
-              <Field label="Unit cost ($)">
-                <input
-                  value={form.unit_cost}
-                  onChange={(e) => setForm((f) => ({ ...f, unit_cost: e.target.value }))}
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  className="input tabular-nums"
-                />
-              </Field>
-              <Field label="Qty on hand">
-                <input
-                  value={form.qty_on_hand}
-                  onChange={(e) => setForm((f) => ({ ...f, qty_on_hand: e.target.value }))}
-                  inputMode="numeric"
-                  className="input tabular-nums"
-                />
-              </Field>
+              {editingId ? (
+                <>
+                  {/* FIFO: cost is per-layer and qty = Σ layers — both read-only here,
+                      managed via the cost layers below. */}
+                  <Field label="Unit cost">
+                    <div className="input flex items-center text-tt-muted" title="Cost is tracked per layer — see Cost layers below">
+                      Per layer ↓
+                    </div>
+                  </Field>
+                  <Field label="Qty on hand (Σ layers)">
+                    <div className={`input flex items-center justify-end tabular-nums ${(editingSku?.qty_on_hand ?? 0) < 0 ? 'text-tt-red font-semibold' : 'text-tt-muted'}`}>
+                      {editingSku?.qty_on_hand ?? 0}
+                    </div>
+                  </Field>
+                </>
+              ) : (
+                <>
+                  <Field label="Unit cost ($)">
+                    <input
+                      value={form.unit_cost}
+                      onChange={(e) => setForm((f) => ({ ...f, unit_cost: e.target.value }))}
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      className="input tabular-nums"
+                    />
+                  </Field>
+                  <Field label="Starting qty">
+                    <input
+                      value={form.qty_on_hand}
+                      onChange={(e) => setForm((f) => ({ ...f, qty_on_hand: e.target.value }))}
+                      inputMode="numeric"
+                      className="input tabular-nums"
+                    />
+                  </Field>
+                </>
+              )}
             </div>
           </div>
+
+          {/* Cost layers (FIFO) — the home for managing a SKU's stock + cost. */}
+          {editingSku && (
+            <div className="mt-5 rounded-xl border border-tt-border bg-tt-bg/40 p-4">
+              <div className="flex items-baseline justify-between mb-2">
+                <span className="text-xs font-semibold text-tt-text">Cost layers (FIFO)</span>
+                <span className="text-[11px] text-tt-muted">a sale draws fully from the oldest layer that can cover it · total = Σ layers = {editingSku.qty_on_hand ?? 0}</span>
+              </div>
+              <div className="space-y-1.5 mb-3">
+                {editingSku.batches.length === 0 ? (
+                  <div className="text-xs text-tt-muted">No layers.</div>
+                ) : (
+                  editingSku.batches.map((b) => (
+                    <div key={b.id} className="flex items-center gap-3 text-sm">
+                      <span className="text-tt-muted tabular-nums w-8">#{b.sequence}</span>
+                      <span className={`tabular-nums w-16 text-right ${b.qty_remaining < 0 ? 'text-tt-red font-semibold' : 'text-tt-text'}`}>{b.qty_remaining}</span>
+                      <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>
+                      {b.qty_remaining < 0 && (
+                        <button
+                          type="button"
+                          onClick={() => onSettle(editingSku.id, b.id)}
+                          disabled={settleBatch.isPending}
+                          className="ml-1 px-2 py-0.5 rounded-md border border-tt-red/50 text-tt-red text-xs font-medium cursor-pointer hover:bg-tt-red/10 disabled:opacity-50"
+                          title={`Add ${-b.qty_remaining} unit(s) to bring this layer to 0 — quantity only, never changes a recorded sale cost`}
+                        >
+                          Settle ({-b.qty_remaining} → 0)
+                        </button>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="flex flex-wrap items-end gap-2 border-t border-tt-border pt-3">
+                <div className="flex flex-col">
+                  <span className="text-[10px] uppercase tracking-wide text-tt-muted mb-0.5">Add batch — new purchased stock</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number" min={0} placeholder="Qty" value={batchQty}
+                      onChange={(e) => setBatchQty(e.target.value)}
+                      className="w-20 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
+                    />
+                    <input
+                      inputMode="decimal" placeholder="Unit cost $" value={batchCost}
+                      onChange={(e) => setBatchCost(e.target.value)}
+                      className="w-28 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => submitAddBatch(editingSku.id)}
+                      disabled={addBatch.isPending || batchQty.trim() === ''}
+                      className="px-3 py-1 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                    >
+                      {addBatch.isPending ? 'Adding…' : 'Add batch'}
+                    </button>
+                  </div>
+                </div>
+                <span className="text-[10px] text-tt-muted">Add batch = new stock at a price (adds units). Settle = zero a negative layer (adds the deficit only, never changes cost).</span>
+                {batchErr && <span className="text-tt-red text-xs w-full">{batchErr}</span>}
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center gap-3 mt-4">
             <label className="flex items-center gap-2 text-sm text-tt-muted cursor-pointer">
@@ -592,7 +716,17 @@ export default function InventorySection() {
                     </div>
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums">{fmtCents(s.unit_cost_cents)}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{s.qty_on_hand ?? 0}</td>
+                  <td className="px-4 py-3 text-right tabular-nums">
+                    {(() => {
+                      const negative = (s.qty_on_hand ?? 0) < 0 || s.batches.some((b) => b.qty_remaining < 0);
+                      return (
+                        <span className={negative ? 'text-tt-red font-semibold' : 'text-tt-text'}>
+                          {s.qty_on_hand ?? 0}
+                          <span className="ml-1.5 text-[10px] font-normal text-tt-muted" title="cost layers — manage in Edit">{s.batches.length}L</span>
+                        </span>
+                      );
+                    })()}
+                  </td>
                   <td className="px-4 py-3 text-center">
                     <button
                       onClick={() => toggleActive.mutate({ id: s.id, is_active: !s.is_active })}

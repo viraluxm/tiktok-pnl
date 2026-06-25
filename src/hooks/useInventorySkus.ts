@@ -3,6 +3,13 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useUser } from './useUser';
 
+export interface SkuBatch {
+  id: string;
+  sequence: number;
+  qty_remaining: number; // may be negative (oversell)
+  unit_cost_cents: number | null;
+}
+
 export interface InventorySku {
   id: string;
   sku_number: number;
@@ -21,6 +28,7 @@ export interface InventorySku {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  batches: SkuBatch[]; // FIFO cost layers, oldest first
 }
 
 export interface SkuFields {
@@ -117,6 +125,36 @@ export function useToggleSkuActive() {
         body: JSON.stringify({ is_active }),
       });
       if (!res.ok) throw new Error(await readError(res, 'Failed to update SKU'));
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+// Append a genuine new purchased cost layer (qty @ unit cost). NOT settle.
+export function useAddBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ skuId, qty, unit_cost_cents }: { skuId: string; qty: number; unit_cost_cents: number | null }) => {
+      const res = await fetch(`/api/inventory/skus/${skuId}/batches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ qty, unit_cost_cents }),
+      });
+      if (!res.ok) throw new Error(await readError(res, 'Failed to add batch'));
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+// Zero a negative cost layer (quantity-only; never touches recorded costs).
+export function useSettleBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ skuId, batchId }: { skuId: string; batchId: string }) => {
+      const res = await fetch(`/api/inventory/skus/${skuId}/batches/${batchId}/settle`, { method: 'POST' });
+      if (!res.ok) throw new Error(await readError(res, 'Failed to settle batch'));
       return res.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),

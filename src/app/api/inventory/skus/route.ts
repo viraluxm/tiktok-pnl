@@ -68,7 +68,29 @@ export async function GET() {
     console.error('[inventory/skus] list error:', error);
     return NextResponse.json({ error: 'Failed to load inventory' }, { status: 500 });
   }
-  return NextResponse.json({ skus: (data ?? []).map((r) => withThumb(supabase, r)) });
+
+  // Attach FIFO cost layers (oldest first) per SKU so the UI can show the
+  // breakdown and the bind flow can detect Option-X oversell client-side.
+  const { data: batchRows } = await supabase
+    .from('sku_batches')
+    .select('id, sku_id, sequence, qty_remaining, unit_cost_cents')
+    .eq('user_id', user.id)
+    .order('sequence', { ascending: true });
+  const batchesBySku = new Map<string, Record<string, unknown>[]>();
+  for (const b of batchRows ?? []) {
+    const k = b.sku_id as string;
+    if (!batchesBySku.has(k)) batchesBySku.set(k, []);
+    batchesBySku.get(k)!.push({
+      id: b.id, sequence: b.sequence,
+      qty_remaining: b.qty_remaining, unit_cost_cents: b.unit_cost_cents,
+    });
+  }
+  return NextResponse.json({
+    skus: (data ?? []).map((r) => ({
+      ...withThumb(supabase, r),
+      batches: batchesBySku.get(r.id as string) ?? [],
+    })),
+  });
 }
 
 export async function POST(req: Request) {
@@ -143,6 +165,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Could not allocate a unique barcode, try again' }, { status: 500 });
   }
 
+  // FIFO: every SKU must have a cost layer. Create the seq-1 batch = the entered
+  // qty @ cost (quick-add sends qty 0 → a 0-qty layer that goes negative on the
+  // first oversell bind). On failure, compensate by removing the orphan SKU so a
+  // SKU never exists without a batch.
+  const { data: firstBatch, error: batchErr } = await supabase.from('sku_batches').insert({
+    user_id: user.id,
+    sku_id: created.id as string,
+    qty_remaining: (created.qty_on_hand as number | null) ?? 0,
+    unit_cost_cents: (created.unit_cost_cents as number | null) ?? null,
+    sequence: 1,
+  }).select('id, sequence, qty_remaining, unit_cost_cents').single();
+  if (batchErr || !firstBatch) {
+    await supabase.from('inventory_skus').delete().eq('id', created.id as string).eq('user_id', user.id);
+    console.error('[inventory/skus] initial batch insert failed:', batchErr);
+    return NextResponse.json({ error: 'Failed to create SKU cost layer' }, { status: 500 });
+  }
+  const batches = [firstBatch];
+
   // Upload the image (if any) to the user's own folder, then save its path.
   if (image) {
     const path = `${user.id}/skus/${created.id}.${extFor(image.type)}`;
@@ -153,7 +193,7 @@ export async function POST(req: Request) {
     if (upErr) {
       console.error('[inventory/skus] image upload failed (non-fatal):', upErr);
       // SKU is created; just return it without a thumbnail.
-      return NextResponse.json({ sku: withThumb(supabase, created), imageError: 'Image upload failed' }, { status: 201 });
+      return NextResponse.json({ sku: { ...withThumb(supabase, created), batches }, imageError: 'Image upload failed' }, { status: 201 });
     }
     const { data: updated } = await supabase
       .from('inventory_skus')
@@ -165,5 +205,5 @@ export async function POST(req: Request) {
     created = updated ?? { ...created, thumbnail_path: path };
   }
 
-  return NextResponse.json({ sku: withThumb(supabase, created) }, { status: 201 });
+  return NextResponse.json({ sku: { ...withThumb(supabase, created), batches } }, { status: 201 });
 }

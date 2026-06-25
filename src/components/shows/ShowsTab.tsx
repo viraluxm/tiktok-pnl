@@ -99,11 +99,21 @@ function fmtDuration(ms: number | null | undefined): string | null {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-// Exact out-of-stock bind wording (shared by the in-app confirm modal).
-function shortConfirmMessage(short: { n: number; cur: number; qty: number }[]): string {
+// Out-of-stock / oversell bind wording (shared by the in-app confirm modal).
+// Two cases per SKU: a true total shortfall (cur < qty), or Option-X — enough
+// total stock but no single batch (cost layer) is large enough, so the newest
+// layer goes negative. Both end with the going-negative warning.
+function shortLine(s: { n: number; cur: number; qty: number; largest: number }): string {
+  if (s.cur < s.qty) {
+    return `#${s.n} has ${s.cur} in stock — binding ${s.qty} takes it to ${s.cur - s.qty}`;
+  }
+  return `#${s.n} has ${s.cur} in stock but no single cost layer covers ${s.qty} (largest layer is ${s.largest}) — binding oversells the newest layer into the negative`;
+}
+function shortConfirmMessage(short: { n: number; cur: number; qty: number; largest: number }[]): string {
+  const tail = ' This usually means the count was off, stock is split across layers, or you oversold. Bind anyway?';
   return short.length === 1
-    ? `#${short[0].n} has ${short[0].cur} in stock — binding ${short[0].qty} takes it to ${short[0].cur - short[0].qty}. This usually means the count was off or you oversold. Bind anyway?`
-    : `These SKUs don't have enough stock:\n${short.map((s) => `  #${s.n}: ${s.cur} in stock, binding ${s.qty} → ${s.cur - s.qty}`).join('\n')}\n\nThis usually means the count was off or you oversold. Bind anyway?`;
+    ? `${shortLine(short[0])}.${tail}`
+    : `These SKUs will go negative:\n${short.map((s) => `  ${shortLine(s)}`).join('\n')}\n\n${tail.trim()}`;
 }
 
 export default function ShowsTab() {
@@ -262,7 +272,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   const [bindingId, setBindingId] = useState<string | null>(null);
   // In-app (themed) out-of-stock confirm — replaces window.confirm. Holds the
   // pending bind until the user confirms (→ allow_negative) or cancels (→ abort).
-  const [bindConfirm, setBindConfirm] = useState<{ u: UnboundOrder; orderLines: { sku_id: string; qty: number }[]; short: { n: number; cur: number; qty: number }[] } | null>(null);
+  const [bindConfirm, setBindConfirm] = useState<{ u: UnboundOrder; orderLines: { sku_id: string; qty: number }[]; short: { n: number; cur: number; qty: number; largest: number }[] } | null>(null);
 
   function setLinesFor(orderId: string, next: { sku_id: string; qty: number }[]) {
     setLines((l) => ({ ...l, [orderId]: next }));
@@ -367,13 +377,17 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     setBindNotice(null);
 
     // Collapse by SKU (mirrors the server) and check stock for the confirm prompt.
+    // Option X: an oversell is when NO SINGLE batch covers the whole qty — which
+    // can happen even with enough TOTAL stock (split across layers). We must use
+    // batch-level data to fire the confirm, not total qty_on_hand.
     const collapsed = new Map<string, number>();
     for (const l of orderLines) collapsed.set(l.sku_id, (collapsed.get(l.sku_id) ?? 0) + Math.max(1, l.qty || 1));
-    const short: { n: number; cur: number; qty: number }[] = [];
+    const short: { n: number; cur: number; qty: number; largest: number }[] = [];
     for (const [sku_id, qty] of collapsed) {
       const s = allSkus.find((x) => x.id === sku_id);
       const cur = s?.qty_on_hand ?? 0;
-      if (cur < qty) short.push({ n: s?.sku_number ?? 0, cur, qty });
+      const largest = (s?.batches ?? []).reduce((m, b) => Math.max(m, b.qty_remaining), 0);
+      if (largest < qty) short.push({ n: s?.sku_number ?? 0, cur, qty, largest });
     }
     if (short.length > 0) {
       // Defer to the in-app confirm modal; it calls executeBind on confirm.
