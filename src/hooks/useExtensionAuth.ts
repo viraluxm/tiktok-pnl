@@ -10,11 +10,13 @@ import { createClient } from '@/lib/supabase/client';
  * Silently no-ops if the extension isn't installed or the ID doesn't match.
  *
  * ─── IMPORTANT ───
- * LENSED_EXTENSION_ID must match the extension's ID shown on chrome://extensions
- * after loading unpacked. A mismatch makes the relay silently fail.
- * In production this would come from an env var; hardcoded here for dev.
+ * LENSED_EXTENSION_ID must match the extension's ID. The extension now pins a
+ * fixed ID via a `key` in manifest.json, so every unpacked install derives the
+ * SAME id below — the relay reaches all members, not just the owner's original
+ * install. Override per-environment with NEXT_PUBLIC_LENSED_EXTENSION_ID.
  */
-const LENSED_EXTENSION_ID = 'lmmlohbjhdagndahchljlckannhhlngk';
+const LENSED_EXTENSION_ID =
+  process.env.NEXT_PUBLIC_LENSED_EXTENSION_ID || 'mdfjfepjpnhidnfpeghkpgdjpcjehbpg';
 
 function sendToExtension(accessToken: string, refreshToken: string) {
   try {
@@ -22,8 +24,16 @@ function sendToExtension(accessToken: string, refreshToken: string) {
     chrome.runtime.sendMessage(
       LENSED_EXTENSION_ID,
       { type: 'LENSED_AUTH', accessToken, refreshToken },
-      // Callback swallows errors (extension not installed, ID wrong, etc.)
-      () => { if (chrome.runtime.lastError) { /* expected if extension absent */ } }
+      // Surface failures instead of swallowing them — a wrong ID / non-matching
+      // domain shows "Could not establish connection. Receiving end does not
+      // exist." rather than a silent "Not connected".
+      () => {
+        if (chrome.runtime.lastError) {
+          console.warn('[Lensed→extension] relay failed:', chrome.runtime.lastError.message, '(id ' + LENSED_EXTENSION_ID + ')');
+        } else {
+          console.log('[Lensed→extension] session relayed to', LENSED_EXTENSION_ID);
+        }
+      }
     );
   } catch (_) {
     // Not a Chrome browser, or extension API unavailable — ignore.
