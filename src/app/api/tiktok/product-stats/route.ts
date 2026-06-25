@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { getOrgId } from '@/lib/org';
 
 export async function GET(request: Request) {
   const supabase = await createClient();
@@ -79,8 +80,10 @@ export async function GET(request: Request) {
   }
 
   // Merge current catalog variants (from products.variants) so current SKUs
-  // with 0 sales still appear — but NOT old/inactive variations from order history
-  const { data: prods } = await admin.from('products').select('tiktok_product_id, name, image_url, variants').eq('user_id', data.user.id);
+  // with 0 sales still appear — but NOT old/inactive variations from order history.
+  // SHARED catalog: scope by org (admin bypasses RLS, so filter explicitly).
+  const orgId = await getOrgId(admin, data.user.id);
+  const { data: prods } = await admin.from('products').select('tiktok_product_id, name, image_url, variants').eq('org_id', orgId);
   const productsData: Record<string, unknown>[] = prods || [];
 
   const productLookup = new Map<string, { name: string; image_url: string | null }>();

@@ -51,11 +51,13 @@ export function useProductCosts() {
 
       console.log('[CostSave] productId:', productId, '→ dbProductId:', dbProductId, 'variant:', variantId, 'cost:', costPerUnit);
 
-      // Delete existing then insert (avoids NULL variant_id unique constraint issues)
+      // Delete existing then insert (avoids NULL variant_id unique constraint issues).
+      // SHARED catalog cost: scope by org via RLS (drop user_id) so the org keeps
+      // ONE cost per (product, variant) regardless of which member set it.
       if (variantId) {
-        await supabase.from('product_costs').delete().eq('user_id', user!.id).eq('product_id', dbProductId).eq('variant_id', variantId);
+        await supabase.from('product_costs').delete().eq('product_id', dbProductId).eq('variant_id', variantId);
       } else {
-        await supabase.from('product_costs').delete().eq('user_id', user!.id).eq('product_id', dbProductId).is('variant_id', null);
+        await supabase.from('product_costs').delete().eq('product_id', dbProductId).is('variant_id', null);
       }
 
       const { data, error } = await supabase

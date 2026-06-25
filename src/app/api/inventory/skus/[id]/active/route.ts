@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { getOrgId } from '@/lib/org';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,11 +21,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     return NextResponse.json({ error: 'is_active (boolean) required' }, { status: 400 });
   }
 
+  // SHARED inventory: any org member can toggle the shared SKU.
+  const orgId = await getOrgId(supabase, user.id);
   const { data, error } = await supabase
     .from('inventory_skus')
     .update({ is_active: body.is_active })
     .eq('id', id)
-    .eq('user_id', user.id)
+    .eq('org_id', orgId)
     .select('id, is_active')
     .maybeSingle();
 

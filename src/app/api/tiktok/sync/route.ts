@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
+import { getOrgId } from '@/lib/org';
 
 const BACKFILL_DAYS = 365;
 const TIME_BUDGET_MS = 50_000; // 50s for fetching, rest for DB work
@@ -28,6 +29,9 @@ export async function POST() {
   const userId = data.user.id;
 
   const admin = createAdminClient();
+  // SHARED catalog: products is org-owned. Service-role inserts (auth.uid()=NULL)
+  // must stamp org_id explicitly — the auto-fill trigger can't fire here.
+  const orgId = await getOrgId(admin, userId);
   const { data: connection, error: connError } = await admin.from('tiktok_connections').select('*').eq('user_id', userId).single();
   if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection' }, { status: 404 });
   if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher' }, { status: 400 });
@@ -62,6 +66,7 @@ export async function POST() {
       const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku, inventory: s.inventory }));
       const { error: catErr } = await admin.from('products').upsert({
         user_id: userId,
+        org_id: orgId,
         tiktok_product_id: cp.product_id,
         name: cp.product_name || `Product ${cp.product_id.slice(-6)}`,
         image_url: cp.image_url,
@@ -141,7 +146,7 @@ export async function POST() {
               if (pid && !products.has(pid)) {
                 const name = String(row.product_name || '') || String(row.sku_name || '') || `Product ${pid.slice(-6)}`;
                 const hasRealName = !!String(row.product_name || '');
-                products.set(pid, { user_id: userId, tiktok_product_id: pid, name, _hasRealName: hasRealName });
+                products.set(pid, { user_id: userId, org_id: orgId, tiktok_product_id: pid, name, _hasRealName: hasRealName });
               }
             }
             for (const [, prod] of products) {
@@ -306,8 +311,9 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
 async function getOrCreateProduct(admin: AdminClient, userId: string, shopName: string) {
   const { data: existing } = await admin.from('products').select('*').eq('user_id', userId).eq('name', shopName).single();
   if (existing) return existing;
+  const orgId = await getOrgId(admin, userId); // SHARED catalog: stamp org_id (service-role)
   const { data: created, error } = await admin.from('products').upsert(
-    { user_id: userId, name: shopName },
+    { user_id: userId, org_id: orgId, name: shopName },
     { onConflict: 'user_id,name' }
   ).select().single();
   if (error) {

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { getOrgId } from '@/lib/org';
 
 export const dynamic = 'force-dynamic';
 
@@ -61,11 +62,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     return NextResponse.json({ error: 'Expected multipart form data' }, { status: 400 });
   }
 
+  // SHARED inventory: scope by org so any member can edit the shared SKU.
+  const orgId = await getOrgId(supabase, user.id);
   const { data: existing } = await supabase
     .from('inventory_skus')
     .select('id, thumbnail_path')
     .eq('id', id)
-    .eq('user_id', user.id)
+    .eq('org_id', orgId)
     .maybeSingle();
   if (!existing) return NextResponse.json({ error: 'SKU not found' }, { status: 404 });
 
@@ -122,7 +125,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     .from('inventory_skus')
     .update(patch)
     .eq('id', id)
-    .eq('user_id', user.id)
+    .eq('org_id', orgId)
     .select(SELECT_COLS)
     .maybeSingle();
 
@@ -147,13 +150,17 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  // SHARED inventory: scope by org so any member can delete the shared SKU.
+  const orgId = await getOrgId(supabase, user.id);
   const { data: existing } = await supabase
     .from('inventory_skus')
     .select('thumbnail_path')
     .eq('id', id)
-    .eq('user_id', user.id)
+    .eq('org_id', orgId)
     .maybeSingle();
 
+  // Friendly pre-check (caller's own usage; operations table stays user-scoped).
+  // The FK RESTRICT is the authoritative guard across ALL members' auctions.
   const { data: refs } = await supabase
     .from('live_auction_item_skus')
     .select('id')
@@ -172,7 +179,7 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     .from('inventory_skus')
     .delete()
     .eq('id', id)
-    .eq('user_id', user.id);
+    .eq('org_id', orgId);
 
   if (error) {
     if (error.code === '23503') {

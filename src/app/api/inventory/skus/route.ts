@@ -58,10 +58,11 @@ export async function GET() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  // SHARED inventory: scope to the org via RLS (org-membership), not user_id, so
+  // every member sees the same pool. RLS already restricts to the caller's org.
   const { data, error } = await supabase
     .from('inventory_skus')
     .select(SELECT_COLS)
-    .eq('user_id', user.id)
     .order('sku_number', { ascending: true });
 
   if (error) {
@@ -74,7 +75,6 @@ export async function GET() {
   const { data: batchRows } = await supabase
     .from('sku_batches')
     .select('id, sku_id, sequence, qty_remaining, unit_cost_cents')
-    .eq('user_id', user.id)
     .order('sequence', { ascending: true });
   const batchesBySku = new Map<string, Record<string, unknown>[]>();
   for (const b of batchRows ?? []) {
