@@ -1,13 +1,23 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import TrainerPreviewOverlay, { type PreviewAuction } from './TrainerPreviewOverlay';
+import type { LiveComment } from './simulatorData';
 
 type VideoStatus = 'connecting' | 'waiting' | 'live' | 'error';
 
 // Trainer-side viewer: subscribes to the host's published camera track over
 // LiveKit and shows it in a phone-shaped preview. Best-effort and self-contained
 // — failure shows "Video unavailable" and never affects the Supabase controls.
-export default function TrainerVideoView({ sessionId }: { sessionId: string }) {
+export default function TrainerVideoView({
+  sessionId,
+  comments = [],
+  auction,
+}: {
+  sessionId: string;
+  comments?: LiveComment[];
+  auction?: PreviewAuction;
+}) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [status, setStatus] = useState<VideoStatus>('connecting');
 
@@ -96,10 +106,8 @@ export default function TrainerVideoView({ sessionId }: { sessionId: string }) {
               : 'Video unavailable'}
         </div>
       )}
-      {status === 'live' && (
-        <span className="absolute left-2 top-2 rounded-full bg-[#FE2C55] px-2 py-0.5 text-[10px] font-bold uppercase text-white">
-          Live
-        </span>
+      {status === 'live' && auction && (
+        <TrainerPreviewOverlay comments={comments} auction={auction} />
       )}
     </div>
   );

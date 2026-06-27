@@ -1,31 +1,107 @@
 'use client';
 
-import { useState } from 'react';
-import { COMMENTS } from './simulatorData';
+import { useEffect, useRef, useState } from 'react';
+import { COMMENTS, type LiveComment } from './simulatorData';
 import { randomUsername, type TrainerEvent } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import TrainerVideoView from './TrainerVideoView';
 
 export default function ControlClient({ sessionId }: { sessionId: string }) {
   const [customText, setCustomText] = useState('');
-  const [auctionRunning, setAuctionRunning] = useState(false);
+  const [previewPhase, setPreviewPhase] = useState<'idle' | 'running' | 'ended'>('idle');
   const [currentBid, setCurrentBid] = useState(0);
   const [currentWinner, setCurrentWinner] = useState<string | null>(null);
+  const [previewSeconds, setPreviewSeconds] = useState(0);
+  const [previewSoldAt, setPreviewSoldAt] = useState<number | null>(null);
+  const [previewComments, setPreviewComments] = useState<LiveComment[]>([]);
 
+  const secondsRef = useRef(0);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const endedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const commentIdRef = useRef(0);
+
+  const auctionRunning = previewPhase === 'running';
+
+  function stopCountdown() {
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+  }
+
+  function startCountdown(secs: number) {
+    stopCountdown();
+    secondsRef.current = secs;
+    setPreviewSeconds(secs);
+    countdownRef.current = setInterval(() => {
+      secondsRef.current -= 1;
+      setPreviewSeconds(Math.max(0, secondsRef.current));
+      if (secondsRef.current <= 0) stopCountdown();
+    }, 1000);
+  }
+
+  function clearEndedTimer() {
+    if (endedTimerRef.current) {
+      clearTimeout(endedTimerRef.current);
+      endedTimerRef.current = null;
+    }
+  }
+
+  // Mirror the host auction state for the read-only video overlay. Derived
+  // entirely from the existing auctionState broadcasts (no realtime changes):
+  // a local countdown approximates the host timer; bid 0 => start (10s),
+  // bid > 0 => a bid landed (7s); !running with bid > 0 => sold, else idle.
   const { status, peerPresent, send } = useSessionChannel(sessionId, 'controller', (event: TrainerEvent) => {
-    if (event.action === 'auctionState') {
-      setAuctionRunning(event.running);
+    if (event.action !== 'auctionState') return;
+    if (event.running) {
+      clearEndedTimer();
+      setPreviewPhase('running');
       setCurrentBid(event.bid);
       setCurrentWinner(event.winner);
+      setPreviewSoldAt(null);
+      startCountdown(event.bid > 0 ? 7 : 10);
+    } else {
+      stopCountdown();
+      if (event.bid > 0) {
+        setPreviewPhase('ended');
+        setCurrentBid(event.bid);
+        setPreviewSoldAt(event.bid);
+        clearEndedTimer();
+        endedTimerRef.current = setTimeout(() => {
+          setPreviewPhase('idle');
+          setCurrentBid(0);
+          setCurrentWinner(null);
+          setPreviewSoldAt(null);
+        }, 2800);
+      } else {
+        setPreviewPhase('idle');
+        setCurrentBid(0);
+        setCurrentWinner(null);
+        setPreviewSoldAt(null);
+      }
     }
   });
 
   const connected = status === 'connected';
 
+  // Stop the local timers on unmount (refs only — no reactive deps).
+  useEffect(() => {
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current);
+      if (endedTimerRef.current) clearTimeout(endedTimerRef.current);
+    };
+  }, []);
+
   function sendComment(text: string) {
     const trimmed = text.trim();
     if (!trimmed || !connected) return;
-    send({ action: 'comment', username: randomUsername(), text: trimmed });
+    const username = randomUsername();
+    send({ action: 'comment', username, text: trimmed });
+    // Mirror the sent comment into the read-only preview feed (last few).
+    commentIdRef.current += 1;
+    setPreviewComments((prev) =>
+      [...prev, { id: commentIdRef.current, username, text: trimmed }].slice(-4),
+    );
   }
 
   function handleCustomSend() {
@@ -58,7 +134,17 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
         <div className="mt-4 grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)] lg:items-start">
           {/* Live host camera preview */}
           <div className="mx-auto w-full max-w-[260px] lg:mx-0 lg:max-w-none">
-            <TrainerVideoView sessionId={sessionId} />
+            <TrainerVideoView
+              sessionId={sessionId}
+              comments={previewComments}
+              auction={{
+                phase: previewPhase,
+                bid: currentBid,
+                seconds: previewSeconds,
+                winner: currentWinner,
+                soldAt: previewSoldAt,
+              }}
+            />
           </div>
 
           {/* Controls */}
