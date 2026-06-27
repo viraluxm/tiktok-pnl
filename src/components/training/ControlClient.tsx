@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { COMMENTS } from './simulatorData';
 import { randomUsername, type TrainerEvent } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
+import TrainerVideoView from './TrainerVideoView';
 
 export default function ControlClient({ sessionId }: { sessionId: string }) {
   const [customText, setCustomText] = useState('');
@@ -45,7 +46,7 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="min-h-[100dvh] bg-tt-bg px-4 py-6 text-tt-text">
-      <div className="mx-auto w-full max-w-md space-y-4">
+      <div className="mx-auto w-full max-w-md lg:max-w-4xl">
         <header className="flex items-center justify-between">
           <h1 className="text-lg font-bold">Practice Controller</h1>
           <span className={`flex items-center gap-1.5 text-[13px] font-medium ${connColor}`}>
@@ -54,7 +55,15 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
           </span>
         </header>
 
-        {/* Auction controls */}
+        <div className="mt-4 grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)] lg:items-start">
+          {/* Live host camera preview */}
+          <div className="mx-auto w-full max-w-[260px] lg:mx-0 lg:max-w-none">
+            <TrainerVideoView sessionId={sessionId} />
+          </div>
+
+          {/* Controls */}
+          <div className="space-y-4">
+            {/* Auction controls */}
         <section className="space-y-3 rounded-2xl border border-tt-border bg-tt-card p-4 backdrop-blur-xl">
           <div className="flex items-center justify-between">
             <span className="text-sm font-semibold">Auction</span>
@@ -137,6 +146,8 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
             ))}
           </div>
         </section>
+          </div>
+        </div>
       </div>
     </div>
   );
