@@ -27,6 +27,18 @@ function pickAuctionTarget(): number {
   return AUCTION_MAX_BID;
 }
 
+function randomInRange(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
+function chance(probability: number): boolean {
+  return Math.random() < probability;
+}
+
+function jitter(magnitude: number): number {
+  return Math.round((Math.random() - 0.5) * magnitude);
+}
+
 function formatClock(totalSeconds: number): string {
   const safe = Math.max(0, totalSeconds);
   const m = Math.floor(safe / 60);
@@ -82,6 +94,11 @@ export default function LiveSimulator() {
   const auctionSecondsRef = useRef(AUCTION_START_SECONDS);
   const auctionActiveRef = useRef(false);
 
+  // Moderation (block/remove) — session-only, in-memory
+  const blockedRef = useRef<Set<string>>(new Set());
+  const [toast, setToast] = useState<string | null>(null);
+  const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Attaches the live stream whenever the <video> mounts/remounts.
   function setVideoRef(el: HTMLVideoElement | null) {
     if (el && streamRef.current && el.srcObject !== streamRef.current) {
@@ -111,19 +128,35 @@ export default function LiveSimulator() {
 
   // ---- Comments: roughly 1-2/min with occasional quiet gaps ----
   function addComment() {
+    const available = USERNAMES.filter((u) => !blockedRef.current.has(u));
+    if (available.length === 0) return; // everyone blocked — stay quiet
     commentIdRef.current += 1;
     const next: LiveComment = {
       id: commentIdRef.current,
-      username: pick(USERNAMES),
+      username: pick(available),
       text: pick(COMMENTS),
     };
     setComments((prev) => [...prev, next].slice(-4));
   }
 
+  function showToast(message: string) {
+    clearTimeoutRef(toastRef);
+    setToast(message);
+    toastRef.current = setTimeout(() => setToast(null), 1800);
+  }
+
+  // Block/remove a commenter: drop their visible comments and silence them for
+  // the rest of this practice session (reset on restart / reload).
+  function blockUser(comment: LiveComment) {
+    blockedRef.current.add(comment.username);
+    setComments((prev) => prev.filter((c) => c.username !== comment.username));
+    showToast('User blocked');
+  }
+
   function scheduleComment() {
     clearTimeoutRef(commentTimeoutRef);
-    let delay = 18000 + Math.random() * 26000; // 18-44s
-    if (Math.random() < 0.25) delay += 12000; // occasional longer quiet gap
+    let delay = randomInRange(18000, 44000); // 18-44s
+    if (chance(0.25)) delay += 12000; // occasional longer quiet gap
     commentTimeoutRef.current = setTimeout(() => {
       addComment();
       scheduleComment();
@@ -140,7 +173,7 @@ export default function LiveSimulator() {
       const t = (elapsed - 120) / 120;
       v = Math.round(10 + t * t * 250); // ~10 -> ~260 (accelerating)
     } else {
-      v = viewersRef.current + Math.round((Math.random() - 0.5) * 110); // wander
+      v = viewersRef.current + jitter(110); // wander
     }
     const minV = elapsed < 240 ? 1 : 200;
     v = Math.min(800, Math.max(minV, v));
@@ -151,7 +184,7 @@ export default function LiveSimulator() {
   // ---- Auction ----
   function scheduleBid() {
     clearTimeoutRef(bidTimeoutRef);
-    const delay = 1500 + Math.random() * 2700; // 1.5-4.2s between bid attempts
+    const delay = randomInRange(1500, 4200); // 1.5-4.2s between bid attempts
     bidTimeoutRef.current = setTimeout(() => {
       if (!auctionActiveRef.current) return;
       if (
@@ -222,6 +255,9 @@ export default function LiveSimulator() {
     viewersRef.current = 0;
     setViewers(0);
     setComments([]);
+    blockedRef.current = new Set();
+    clearTimeoutRef(toastRef);
+    setToast(null);
 
     auctionActiveRef.current = false;
     setAuctionPhase('idle');
@@ -299,6 +335,7 @@ export default function LiveSimulator() {
     return () => {
       stopSessionTimers();
       stopAuctionTimers();
+      clearTimeoutRef(toastRef);
       stopStream();
     };
   }, []);
@@ -364,6 +401,8 @@ export default function LiveSimulator() {
           soldAt: auctionSoldAt,
         }}
         onStartAuction={startAuction}
+        onBlockUser={blockUser}
+        toast={toast}
       />
 
       {sessionState === 'complete' && (

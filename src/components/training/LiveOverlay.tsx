@@ -1,3 +1,6 @@
+'use client';
+
+import { useState } from 'react';
 import type { LiveComment } from './simulatorData';
 
 interface AuctionView {
@@ -15,6 +18,8 @@ interface LiveOverlayProps {
   comments: LiveComment[];
   auction: AuctionView;
   onStartAuction: () => void;
+  onBlockUser: (comment: LiveComment) => void;
+  toast: string | null;
 }
 
 const RED = '#FE2C55';
@@ -208,7 +213,11 @@ export default function LiveOverlay({
   comments,
   auction,
   onStartAuction,
+  onBlockUser,
+  toast,
 }: LiveOverlayProps) {
+  const [selected, setSelected] = useState<LiveComment | null>(null);
+
   const initials = hostName
     .split(' ')
     .slice(0, 2)
@@ -267,15 +276,21 @@ export default function LiveOverlay({
       {/* Bottom stack */}
       <div className="flex flex-col gap-3">
         {/* Comment feed (latest few) */}
-        <div className="flex max-w-[82%] flex-col gap-1.5">
+        <div className="flex max-w-[82%] flex-col items-start gap-1.5">
           {comments.map((c) => (
-            <div key={c.id} className="flex items-start gap-2 motion-safe:animate-[fadeIn_0.3s_ease]">
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => setSelected(c)}
+              aria-label={`Moderate comment from ${c.username}`}
+              className="flex w-fit max-w-full cursor-pointer items-start gap-2 rounded-2xl text-left transition-opacity duration-150 active:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60 motion-safe:animate-[fadeIn_0.3s_ease]"
+            >
               <Avatar name={c.username} className="h-6 w-6 text-[11px]" />
               <div className="rounded-2xl bg-black/35 px-2.5 py-1.5 backdrop-blur-sm">
                 <span className="text-[12px] font-semibold text-white/70">{c.username}</span>{' '}
                 <span className="text-[13px] text-white">{c.text}</span>
               </div>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -305,6 +320,56 @@ export default function LiveOverlay({
           </div>
         </div>
       </div>
+
+      {/* "User blocked" toast */}
+      {toast && (
+        <div className="pointer-events-none fixed left-1/2 top-[15%] z-30 -translate-x-1/2 rounded-full bg-black/75 px-4 py-2 text-[13px] font-medium text-white backdrop-blur-md motion-safe:animate-[fadeIn_0.2s_ease]">
+          {toast}
+        </div>
+      )}
+
+      {/* Comment moderation bottom sheet */}
+      {selected && (
+        <div className="fixed inset-0 z-30 flex flex-col justify-end">
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={() => setSelected(null)}
+            className="absolute inset-0 cursor-pointer bg-black/55 motion-safe:animate-[fadeIn_0.15s_ease]"
+          />
+          <div
+            className="relative z-10 w-full rounded-t-3xl bg-[#1c1c1e] px-4 pt-2.5 motion-safe:animate-[fadeIn_0.2s_ease]"
+            style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 12px)' }}
+          >
+            <div className="mx-auto mb-3 h-1 w-9 rounded-full bg-white/25" />
+            <div className="mb-4 flex items-start gap-2.5">
+              <Avatar name={selected.username} className="h-9 w-9 text-[13px]" />
+              <div className="min-w-0">
+                <div className="text-[14px] font-semibold text-white">{selected.username}</div>
+                <div className="truncate text-[13px] text-white/60">{selected.text}</div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                onBlockUser(selected);
+                setSelected(null);
+              }}
+              className="mb-2 flex min-h-[50px] w-full cursor-pointer items-center justify-center rounded-xl text-[16px] font-semibold text-white transition-[filter] duration-200 hover:brightness-110 active:brightness-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+              style={{ backgroundColor: RED }}
+            >
+              Block user
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelected(null)}
+              className="flex min-h-[50px] w-full cursor-pointer items-center justify-center rounded-xl bg-white/10 text-[16px] font-medium text-white transition-colors duration-200 hover:bg-white/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
