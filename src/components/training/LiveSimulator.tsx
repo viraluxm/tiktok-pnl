@@ -6,6 +6,7 @@ import LiveOverlay from './LiveOverlay';
 import { HOST_NAME, type LiveComment } from './simulatorData';
 import { type TrainerEvent } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
+import { useVideoPublish } from '@/lib/training/useVideoPublish';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
 type AuctionPhase = 'idle' | 'running' | 'ended';
@@ -82,6 +83,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // the handlers below; handleEvent is hoisted.
   const { send: channelSend } = useSessionChannel(sessionId, 'host', handleEvent);
 
+  // Best-effort: publish the existing camera track to LiveKit for the trainer preview.
+  const { publish: publishVideo, stop: stopVideo } = useVideoPublish(sessionId);
+
   function handleEvent(event: TrainerEvent) {
     switch (event.action) {
       case 'comment':
@@ -125,6 +129,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   }
 
   function stopStream() {
+    // Tear down the LiveKit publish BEFORE stopping the local tracks so the
+    // trainer doesn't see a frozen last frame.
+    void stopVideo();
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -305,6 +312,8 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       streamRef.current = stream;
       setSessionState('running');
       startRuntime();
+      // Best-effort video publish of the existing track (no second getUserMedia).
+      void publishVideo(stream.getVideoTracks()[0]);
     } catch (err) {
       stopStream();
       const name = err instanceof DOMException ? err.name : '';
@@ -339,8 +348,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       stopAuctionTimers();
       clearTimeoutRef(toastRef);
       clearTimeoutRef(bidBumpTimerRef);
-      stopStream();
+      stopStream(); // also tears down the LiveKit publish (calls stopVideo)
     };
+    // unmount-only teardown; stopStream is intentionally not a dependency
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ---- Render ----
