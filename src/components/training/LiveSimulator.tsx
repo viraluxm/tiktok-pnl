@@ -304,28 +304,41 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       return;
     }
     setSessionState('requesting');
+
+    // Prefer camera + microphone (so the trainer can hear the host); fall back
+    // to video-only if the mic is denied/unavailable so the simulator still works.
+    let stream: MediaStream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user' },
-        audio: false,
+        audio: true,
       });
-      streamRef.current = stream;
-      setSessionState('running');
-      startRuntime();
-      // Best-effort video publish of the existing track (no second getUserMedia).
-      void publishVideo(stream.getVideoTracks()[0]);
-    } catch (err) {
-      stopStream();
-      const name = err instanceof DOMException ? err.name : '';
-      setErrorMsg(
-        name === 'NotAllowedError' || name === 'SecurityError'
-          ? 'Camera access was blocked. Allow camera access, then try again.'
-          : name === 'NotFoundError'
-            ? 'No camera was found on this device.'
-            : 'Could not start the camera. Please try again.',
-      );
-      setSessionState('denied');
+    } catch {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' },
+          audio: false,
+        });
+      } catch (err) {
+        stopStream();
+        const name = err instanceof DOMException ? err.name : '';
+        setErrorMsg(
+          name === 'NotAllowedError' || name === 'SecurityError'
+            ? 'Camera access was blocked. Allow camera access, then try again.'
+            : name === 'NotFoundError'
+              ? 'No camera was found on this device.'
+              : 'Could not start the camera. Please try again.',
+        );
+        setSessionState('denied');
+        return;
+      }
     }
+
+    streamRef.current = stream;
+    setSessionState('running');
+    startRuntime();
+    // Best-effort publish of the existing camera (+ mic) tracks (no second getUserMedia).
+    void publishVideo(stream);
   }
 
   function restartPractice() {

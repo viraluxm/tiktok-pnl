@@ -23,12 +23,13 @@ export function useVideoPublish(sessionId: string) {
   }, []);
 
   const publish = useCallback(
-    async (track: MediaStreamTrack) => {
-      if (!track) return;
+    async (stream: MediaStream) => {
+      const videoTrack = stream.getVideoTracks()[0];
+      if (!videoTrack) return;
       // Avoid duplicate rooms/connections if called again while connected.
       if (roomRef.current) await stop();
       try {
-        const { Room, LocalVideoTrack, Track } = await import('livekit-client');
+        const { Room, LocalVideoTrack, LocalAudioTrack, Track } = await import('livekit-client');
 
         const res = await fetch('/api/training/video-token', {
           method: 'POST',
@@ -43,13 +44,27 @@ export function useVideoPublish(sessionId: string) {
         roomRef.current = room;
         await room.connect(url, token);
 
-        // Reuse the existing track; userProvidedTrack=true keeps device ownership
-        // with the simulator (LiveKit won't stop/reacquire it).
-        const localTrack = new LocalVideoTrack(track, undefined, true);
-        await room.localParticipant.publishTrack(localTrack, {
+        // Reuse the existing tracks; userProvidedTrack=true keeps device ownership
+        // with the simulator (LiveKit won't stop/reacquire them).
+        const localVideo = new LocalVideoTrack(videoTrack, undefined, true);
+        await room.localParticipant.publishTrack(localVideo, {
           source: Track.Source.Camera,
           name: 'host-camera',
         });
+
+        // Publish the existing mic track too, if present — best-effort / non-fatal.
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          try {
+            const localAudio = new LocalAudioTrack(audioTrack, undefined, true);
+            await room.localParticipant.publishTrack(localAudio, {
+              source: Track.Source.Microphone,
+              name: 'host-mic',
+            });
+          } catch {
+            /* audio is best-effort; video already published */
+          }
+        }
       } catch {
         // Video is non-fatal — ensure we don't leak a half-open room.
         await stop();
