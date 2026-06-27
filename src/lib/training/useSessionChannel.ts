@@ -55,7 +55,7 @@ export function useSessionChannel(
       });
 
     return () => {
-      void supabase.removeChannel(channel);
+      void channel.unsubscribe();
       channelRef.current = null;
     };
   }, [sessionId, role]);
