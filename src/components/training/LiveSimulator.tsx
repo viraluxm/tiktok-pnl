@@ -3,7 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import LiveOverlay from './LiveOverlay';
-import { COMMENTS, HOST_NAME, USERNAMES, type LiveComment } from './simulatorData';
+import { HOST_NAME, USERNAMES, type LiveComment } from './simulatorData';
+import { type TrainerEvent } from './trainerEvents';
+import { useSessionChannel } from '@/lib/training/useSessionChannel';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
 type AuctionPhase = 'idle' | 'running' | 'ended';
@@ -15,24 +17,6 @@ const AUCTION_MAX_BID = 4;
 
 function pick<T>(arr: readonly T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-// Weighted final price so auctions vary: most end at $2-$3, occasionally $4,
-// sometimes just $1. The goal is pacing practice, not pricing realism.
-function pickAuctionTarget(): number {
-  const r = Math.random();
-  if (r < 0.2) return 1;
-  if (r < 0.5) return 2;
-  if (r < 0.8) return 3;
-  return AUCTION_MAX_BID;
-}
-
-function randomInRange(min: number, max: number): number {
-  return min + Math.random() * (max - min);
-}
-
-function chance(probability: number): boolean {
-  return Math.random() < probability;
 }
 
 function jitter(magnitude: number): number {
@@ -60,7 +44,7 @@ function clearTimeoutRef(ref: MutableRefObject<ReturnType<typeof setTimeout> | n
   }
 }
 
-export default function LiveSimulator() {
+export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const [sessionState, setSessionState] = useState<SessionState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -80,17 +64,14 @@ export default function LiveSimulator() {
   // Timers
   const sessionTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const viewerTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const commentTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const auctionTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const bidTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endedResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Mutable runtime values (kept in refs so timer callbacks never read stale state)
+  // Mutable runtime values (kept in refs so timer/channel callbacks never read stale state)
   const sessionSecondsRef = useRef(SESSION_SECONDS);
   const viewersRef = useRef(0);
   const commentIdRef = useRef(0);
   const auctionBidRef = useRef(0);
-  const auctionTargetRef = useRef(0);
   const auctionSecondsRef = useRef(AUCTION_START_SECONDS);
   const auctionActiveRef = useRef(false);
 
@@ -98,6 +79,35 @@ export default function LiveSimulator() {
   const blockedRef = useRef<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Realtime: receive trainer commands. Comments/bids are driven by the
+  // controller (no automation). Declared early so channelSend is available to
+  // the handlers below; handleEvent is hoisted.
+  const { send: channelSend } = useSessionChannel(sessionId, 'host', handleEvent);
+
+  function handleEvent(event: TrainerEvent) {
+    switch (event.action) {
+      case 'comment':
+        addComment(event.username, event.text);
+        break;
+      case 'placeBid':
+        placeBid(event.username);
+        break;
+      case 'startAuction':
+        startAuction();
+        break;
+      case 'resetAuction':
+        resetAuction();
+        break;
+      default:
+        // 'auctionState' is host->controller only; ignored here.
+        break;
+    }
+  }
+
+  function broadcastAuctionState(running: boolean, bid: number, winner: string | null) {
+    channelSend({ action: 'auctionState', running, bid, winner });
+  }
 
   // Attaches the live stream whenever the <video> mounts/remounts.
   function setVideoRef(el: HTMLVideoElement | null) {
@@ -110,12 +120,10 @@ export default function LiveSimulator() {
   function stopSessionTimers() {
     clearIntervalRef(sessionTickRef);
     clearIntervalRef(viewerTickRef);
-    clearTimeoutRef(commentTimeoutRef);
   }
 
   function stopAuctionTimers() {
     clearIntervalRef(auctionTickRef);
-    clearTimeoutRef(bidTimeoutRef);
     clearTimeoutRef(endedResetRef);
   }
 
@@ -126,16 +134,11 @@ export default function LiveSimulator() {
     }
   }
 
-  // ---- Comments: roughly 1-2/min with occasional quiet gaps ----
-  function addComment() {
-    const available = USERNAMES.filter((u) => !blockedRef.current.has(u));
-    if (available.length === 0) return; // everyone blocked — stay quiet
+  // ---- Comments: driven by the trainer controller ----
+  function addComment(username: string, text: string) {
+    if (blockedRef.current.has(username)) return; // blocked user suppressed
     commentIdRef.current += 1;
-    const next: LiveComment = {
-      id: commentIdRef.current,
-      username: pick(available),
-      text: pick(COMMENTS),
-    };
+    const next: LiveComment = { id: commentIdRef.current, username, text };
     setComments((prev) => [...prev, next].slice(-4));
   }
 
@@ -151,16 +154,6 @@ export default function LiveSimulator() {
     blockedRef.current.add(comment.username);
     setComments((prev) => prev.filter((c) => c.username !== comment.username));
     showToast('User blocked');
-  }
-
-  function scheduleComment() {
-    clearTimeoutRef(commentTimeoutRef);
-    let delay = randomInRange(18000, 44000); // 18-44s
-    if (chance(0.25)) delay += 12000; // occasional longer quiet gap
-    commentTimeoutRef.current = setTimeout(() => {
-      addComment();
-      scheduleComment();
-    }, delay);
   }
 
   // ---- Viewer ramp: slow trickle, then accelerate, then fluctuate 200-800 ----
@@ -181,55 +174,18 @@ export default function LiveSimulator() {
     setViewers(v);
   }
 
-  // ---- Auction ----
-  function scheduleBid() {
-    clearTimeoutRef(bidTimeoutRef);
-    const delay = randomInRange(1500, 4200); // 1.5-4.2s between bid attempts
-    bidTimeoutRef.current = setTimeout(() => {
-      if (!auctionActiveRef.current) return;
-      if (
-        auctionBidRef.current < auctionTargetRef.current &&
-        auctionBidRef.current < AUCTION_MAX_BID &&
-        auctionSecondsRef.current > 0
-      ) {
-        auctionBidRef.current += 1;
-        setAuctionBid(auctionBidRef.current);
-        setAuctionWinner(pick(USERNAMES));
-        auctionSecondsRef.current = AUCTION_BID_RESET_SECONDS;
-        setAuctionSeconds(AUCTION_BID_RESET_SECONDS);
-        scheduleBid();
-      }
-      // else: target reached -> let the countdown run out and sell.
-    }, delay);
-  }
-
-  function endAuction() {
-    auctionActiveRef.current = false;
-    clearIntervalRef(auctionTickRef);
-    clearTimeoutRef(bidTimeoutRef);
-    setAuctionSoldAt(auctionBidRef.current);
-    setAuctionPhase('ended');
-    // Briefly show the sold state, then reset the card to ready.
-    endedResetRef.current = setTimeout(() => {
-      setAuctionPhase('idle');
-      setAuctionWinner(null);
-      setAuctionBid(0);
-      setAuctionSoldAt(null);
-      setAuctionSeconds(AUCTION_START_SECONDS);
-    }, 2800);
-  }
-
+  // ---- Auction (rules live here; the controller sends commands) ----
   function startAuction() {
     if (auctionActiveRef.current) return;
     stopAuctionTimers();
 
-    auctionTargetRef.current = pickAuctionTarget();
     auctionBidRef.current = 1; // opening bid $1.00
     auctionSecondsRef.current = AUCTION_START_SECONDS; // starts at 10s
     auctionActiveRef.current = true;
 
+    const winner = pick(USERNAMES);
     setAuctionBid(1);
-    setAuctionWinner(pick(USERNAMES));
+    setAuctionWinner(winner);
     setAuctionSeconds(AUCTION_START_SECONDS);
     setAuctionSoldAt(null);
     setAuctionPhase('running');
@@ -242,7 +198,53 @@ export default function LiveSimulator() {
       }
     }, 1000);
 
-    scheduleBid();
+    broadcastAuctionState(true, 1, winner);
+  }
+
+  // A manual fake bid from the controller: +$1, new winner, reset to 7s, cap $4.
+  function placeBid(username: string) {
+    if (!auctionActiveRef.current) return;
+    if (auctionBidRef.current >= AUCTION_MAX_BID) return;
+    if (auctionSecondsRef.current <= 0) return;
+
+    auctionBidRef.current += 1;
+    setAuctionBid(auctionBidRef.current);
+    setAuctionWinner(username);
+    auctionSecondsRef.current = AUCTION_BID_RESET_SECONDS;
+    setAuctionSeconds(AUCTION_BID_RESET_SECONDS);
+
+    broadcastAuctionState(true, auctionBidRef.current, username);
+  }
+
+  function endAuction() {
+    auctionActiveRef.current = false;
+    clearIntervalRef(auctionTickRef);
+    setAuctionSoldAt(auctionBidRef.current);
+    setAuctionPhase('ended');
+    broadcastAuctionState(false, auctionBidRef.current, null);
+    // Briefly show the sold state, then reset the card to ready.
+    clearTimeoutRef(endedResetRef);
+    endedResetRef.current = setTimeout(() => {
+      setAuctionPhase('idle');
+      setAuctionWinner(null);
+      setAuctionBid(0);
+      setAuctionSoldAt(null);
+      setAuctionSeconds(AUCTION_START_SECONDS);
+    }, 2800);
+  }
+
+  // Manual reset from the controller: clear the auction back to ready immediately.
+  function resetAuction() {
+    auctionActiveRef.current = false;
+    stopAuctionTimers();
+    auctionBidRef.current = 0;
+    auctionSecondsRef.current = AUCTION_START_SECONDS;
+    setAuctionPhase('idle');
+    setAuctionBid(0);
+    setAuctionWinner(null);
+    setAuctionSoldAt(null);
+    setAuctionSeconds(AUCTION_START_SECONDS);
+    broadcastAuctionState(false, 0, null);
   }
 
   // ---- Session lifecycle ----
@@ -260,6 +262,7 @@ export default function LiveSimulator() {
     setToast(null);
 
     auctionActiveRef.current = false;
+    auctionBidRef.current = 0;
     setAuctionPhase('idle');
     setAuctionWinner(null);
     setAuctionBid(0);
@@ -276,7 +279,6 @@ export default function LiveSimulator() {
 
     viewerTickRef.current = setInterval(updateViewers, 2500);
     updateViewers();
-    scheduleComment();
   }
 
   function completePractice() {
