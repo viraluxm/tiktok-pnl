@@ -20,6 +20,7 @@ interface LiveOverlayProps {
   onStartAuction: () => void;
   onBlockUser: (comment: LiveComment) => void;
   toast: string | null;
+  showBidBump: boolean;
 }
 
 const RED = '#FE2C55';
@@ -178,12 +179,16 @@ function AuctionCard({ auction, onStartAuction }: { auction: AuctionView; onStar
           <span className="shrink-0 text-[22px] font-extrabold leading-none text-black">
             ${bid.toFixed(2)}
           </span>
-          <span className="flex min-w-0 items-center gap-1.5">
-            {winner && <Avatar name={winner} className="h-5 w-5 text-[10px]" />}
-            <span className="truncate text-[13px] text-black">
-              <span className="font-semibold">{winner}</span> is winning.
+          {winner ? (
+            <span className="flex min-w-0 items-center gap-1.5">
+              <Avatar name={winner} className="h-5 w-5 text-[10px]" />
+              <span className="truncate text-[13px] text-black">
+                <span className="font-semibold">{winner}</span> is winning.
+              </span>
             </span>
-          </span>
+          ) : (
+            <span className="truncate text-[13px] text-black/50">No bids yet</span>
+          )}
         </div>
       )}
 
@@ -215,6 +220,7 @@ export default function LiveOverlay({
   onStartAuction,
   onBlockUser,
   toast,
+  showBidBump,
 }: LiveOverlayProps) {
   const [selected, setSelected] = useState<LiveComment | null>(null);
 
@@ -294,8 +300,16 @@ export default function LiveOverlay({
           ))}
         </div>
 
-        {/* Auction status card */}
-        <AuctionCard auction={auction} onStartAuction={onStartAuction} />
+        {/* Auction status card (+7s badge sits above it without affecting layout) */}
+        <div className="relative">
+          <div
+            aria-hidden="true"
+            className={`pointer-events-none absolute -top-7 left-3.5 rounded-full bg-gradient-to-br from-[#9A4DFF] to-[#6E29F0] px-2.5 py-1 text-[12px] font-bold text-white shadow-lg shadow-black/30 transition-all duration-300 motion-reduce:transition-none ${showBidBump ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'}`}
+          >
+            +7s
+          </div>
+          <AuctionCard auction={auction} onStartAuction={onStartAuction} />
+        </div>
 
         {/* Decorative host control row (inspired by the live UI) */}
         <div className="flex items-center justify-between">

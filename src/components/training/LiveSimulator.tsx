@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import LiveOverlay from './LiveOverlay';
-import { HOST_NAME, USERNAMES, type LiveComment } from './simulatorData';
+import { HOST_NAME, type LiveComment } from './simulatorData';
 import { type TrainerEvent } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 
@@ -13,11 +13,6 @@ type AuctionPhase = 'idle' | 'running' | 'ended';
 const SESSION_SECONDS = 20 * 60; // 20-minute practice session
 const AUCTION_START_SECONDS = 10;
 const AUCTION_BID_RESET_SECONDS = 7;
-const AUCTION_MAX_BID = 4;
-
-function pick<T>(arr: readonly T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
 
 function jitter(magnitude: number): number {
   return Math.round((Math.random() - 0.5) * magnitude);
@@ -57,6 +52,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const [auctionSeconds, setAuctionSeconds] = useState(AUCTION_START_SECONDS);
   const [auctionWinner, setAuctionWinner] = useState<string | null>(null);
   const [auctionSoldAt, setAuctionSoldAt] = useState<number | null>(null);
+  const [showBidBump, setShowBidBump] = useState(false); // brief +7s indicator when a bid resets the timer
 
   // Media
   const streamRef = useRef<MediaStream | null>(null);
@@ -79,6 +75,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const blockedRef = useRef<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bidBumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Realtime: receive trainer commands. Comments/bids are driven by the
   // controller (no automation). Declared early so channelSend is available to
@@ -179,13 +176,12 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     if (auctionActiveRef.current) return;
     stopAuctionTimers();
 
-    auctionBidRef.current = 1; // opening bid $1.00
+    auctionBidRef.current = 0; // no bids yet at start
     auctionSecondsRef.current = AUCTION_START_SECONDS; // starts at 10s
     auctionActiveRef.current = true;
 
-    const winner = pick(USERNAMES);
-    setAuctionBid(1);
-    setAuctionWinner(winner);
+    setAuctionBid(0);
+    setAuctionWinner(null);
     setAuctionSeconds(AUCTION_START_SECONDS);
     setAuctionSoldAt(null);
     setAuctionPhase('running');
@@ -198,13 +194,12 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       }
     }, 1000);
 
-    broadcastAuctionState(true, 1, winner);
+    broadcastAuctionState(true, 0, null);
   }
 
-  // A manual fake bid from the controller: +$1, new winner, reset to 7s, cap $4.
+  // A manual fake bid from the controller: +$1, new winner, reset to 7s (no max).
   function placeBid(username: string) {
     if (!auctionActiveRef.current) return;
-    if (auctionBidRef.current >= AUCTION_MAX_BID) return;
     if (auctionSecondsRef.current <= 0) return;
 
     auctionBidRef.current += 1;
@@ -212,6 +207,11 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     setAuctionWinner(username);
     auctionSecondsRef.current = AUCTION_BID_RESET_SECONDS;
     setAuctionSeconds(AUCTION_BID_RESET_SECONDS);
+
+    // Trigger the brief +7s indicator on the host.
+    setShowBidBump(true);
+    clearTimeoutRef(bidBumpTimerRef);
+    bidBumpTimerRef.current = setTimeout(() => setShowBidBump(false), 1000);
 
     broadcastAuctionState(true, auctionBidRef.current, username);
   }
@@ -338,6 +338,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       stopSessionTimers();
       stopAuctionTimers();
       clearTimeoutRef(toastRef);
+      clearTimeoutRef(bidBumpTimerRef);
       stopStream();
     };
   }, []);
@@ -405,6 +406,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         onStartAuction={startAuction}
         onBlockUser={blockUser}
         toast={toast}
+        showBidBump={showBidBump}
       />
 
       {sessionState === 'complete' && (
