@@ -1,10 +1,12 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLiveSessions, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
 import { useAuctionBoard, type AuctionItem } from '@/hooks/useLiveAuctions';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
+import { useUser } from '@/hooks/useUser';
 
 interface UnboundOrder {
   order_id: string;
@@ -118,6 +120,8 @@ function shortConfirmMessage(short: { n: number; cur: number; qty: number; large
 
 export default function ShowsTab() {
   const { data: sessions = [], isLoading } = useLiveSessions();
+  const { user } = useUser();
+  const isAdmin = user?.app_metadata?.role === 'admin';
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const selected = useMemo(
@@ -125,50 +129,67 @@ export default function ShowsTab() {
     [sessions, selectedId],
   );
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-16 text-tt-muted">
-        <div className="w-5 h-5 border-2 border-tt-muted border-t-transparent rounded-full animate-spin mr-3" />
-        Loading shows…
-      </div>
-    );
-  }
-
+  // Drill-in detail view has its own layout — no Practice Mode card here.
   if (selected) {
     return <ShowDetail session={selected} onBack={() => setSelectedId(null)} />;
   }
 
-  if (sessions.length === 0) {
-    return (
-      <div className="rounded-2xl border border-tt-border bg-tt-card py-16 text-center">
-        <div className="text-tt-text font-medium">No shows yet</div>
-        <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
-          When you run a live auction, each session and the sales captured in it will appear here.
-        </p>
-      </div>
-    );
-  }
-
   return (
-    <div className="rounded-2xl border border-tt-border bg-tt-card overflow-hidden">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
-            <th className="text-left font-medium px-4 py-3">Show</th>
-            <th className="text-left font-medium px-4 py-3">Status</th>
-            <th className="text-right font-medium px-4 py-3">Auctions won</th>
-            <th className="text-right font-medium px-4 py-3">Units sold</th>
-            <th className="text-right font-medium px-4 py-3">Sale value</th>
-            <th className="text-right font-medium px-4 py-3">Cost</th>
-            <th className="text-right font-medium px-4 py-3">Gross profit</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sessions.map((s) => (
-            <ShowRow key={s.id} session={s} onOpen={setSelectedId} />
-          ))}
-        </tbody>
-      </table>
+    <div className="space-y-4">
+      {isAdmin && <PracticeModeCard />}
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-16 text-tt-muted">
+          <div className="w-5 h-5 border-2 border-tt-muted border-t-transparent rounded-full animate-spin mr-3" />
+          Loading shows…
+        </div>
+      ) : sessions.length === 0 ? (
+        <div className="rounded-2xl border border-tt-border bg-tt-card py-16 text-center">
+          <div className="text-tt-text font-medium">No shows yet</div>
+          <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
+            When you run a live auction, each session and the sales captured in it will appear here.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-2xl border border-tt-border bg-tt-card overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
+                <th className="text-left font-medium px-4 py-3">Show</th>
+                <th className="text-left font-medium px-4 py-3">Status</th>
+                <th className="text-right font-medium px-4 py-3">Auctions won</th>
+                <th className="text-right font-medium px-4 py-3">Units sold</th>
+                <th className="text-right font-medium px-4 py-3">Sale value</th>
+                <th className="text-right font-medium px-4 py-3">Cost</th>
+                <th className="text-right font-medium px-4 py-3">Gross profit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.map((s) => (
+                <ShowRow key={s.id} session={s} onOpen={setSelectedId} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Admin-only entry into the internal training simulator.
+function PracticeModeCard() {
+  return (
+    <div className="flex flex-col gap-3 rounded-2xl border border-tt-border bg-tt-card p-4 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <div className="text-sm font-semibold text-tt-text">Practice Mode</div>
+        <p className="text-[13px] text-tt-muted">Train live auction hosts before a real live.</p>
+      </div>
+      <Link
+        href="/admin/training/practice-mode"
+        className="inline-flex min-h-[40px] shrink-0 items-center justify-center rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] px-5 text-sm font-semibold text-black transition-opacity hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/50"
+      >
+        Open Practice Mode
+      </Link>
     </div>
   );
 }
