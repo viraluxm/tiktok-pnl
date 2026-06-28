@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Lensed — TikTok LIVE Capture",
+  "version": "0.2.0",
+  "description": "Captures TikTok LIVE auction sales for Lensed analytics.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoEeoqQN76tc4/5gIGR4G+dF6qZ1dOTStI2XIAcVDQo06Ht/DzoYNJ8jNoNE3si8Cy2pdCABm2KyMXwoEhtFYbj0Ec7/c3qdrOxTXO2cZQxlJtsNvjn3fAMcE4D7UdyDkEMkI9baNkJxy9gT7B8/pTJtzOwlYOKZbtZNNl2IBKLOht5OJ2JdWXf+zQjCe+7UoIA37aaC8bYDsLTl2D6LJZcRzjMeOPD2Qw1BXfwok8CLrcyoWK2NfIFNqmQtJuU2lD6UXyKWlMu27Tf7KAqQr3XF5iJwfu4MW4TF9dVv3eNQRyqSKp5wnCA1fDFVFGIOXyRMzkKCEMoAqanMjou1YbQIDAQAB",
+  "minimum_chrome_version": "114",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://shop.tiktok.com/*"
+  ],
+  "externally_connectable": {
+    "matches": [
+      "https://*.lensed.io/*",
+      "https://lensed.io/*",
+      "http://localhost:3000/*"
+    ]
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://shop.tiktok.com/*"],
+      "js": ["tiktok-inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://shop.tiktok.com/*"],
+      "js": ["tiktok-content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  }
+}
