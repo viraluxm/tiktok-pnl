@@ -10,7 +10,19 @@ const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_BYTES = 5 * 1024 * 1024;
 
 const SELECT_COLS =
-  'id, sku_number, barcode, title, thumbnail_path, shortcut_letter, unit_cost_cents, qty_on_hand, weight_oz, length_in, width_in, height_in, category, is_active, created_at, updated_at';
+  'id, sku_number, barcode, title, thumbnail_path, shortcut_letter, unit_cost_cents, qty_on_hand, weight_oz, length_in, width_in, height_in, category, is_active, live_seller_notes, created_at, updated_at';
+
+// Live seller talking points: a textarea (one bullet per line) -> text[].
+// Trim, drop blanks, and cap defensively (≤20 bullets, ≤200 chars each).
+function parseNotes(v: unknown): string[] {
+  if (typeof v !== 'string') return [];
+  return v
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((s) => s.slice(0, 200));
+}
 
 function extFor(type: string): string {
   if (type === 'image/png') return 'png';
@@ -89,6 +101,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (fd.has('height_in')) patch.height_in = numOrNull(str('height_in'));
   if (fd.has('category')) patch.category = str('category').trim() ? str('category').trim() : null;
   if (fd.has('is_active')) patch.is_active = str('is_active') === 'true';
+  if (fd.has('live_seller_notes')) patch.live_seller_notes = parseNotes(str('live_seller_notes'));
 
   // Image: replace with a new upload, or remove.
   const newImage = fileFrom(fd, 'image');

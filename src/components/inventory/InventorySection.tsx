@@ -134,6 +134,7 @@ interface FormState {
   unit_cost: string; // dollars
   qty_on_hand: string;
   is_active: boolean;
+  live_seller_notes: string; // textarea, one bullet per line
 }
 
 const EMPTY: FormState = {
@@ -143,6 +144,7 @@ const EMPTY: FormState = {
   unit_cost: '',
   qty_on_hand: '0',
   is_active: true,
+  live_seller_notes: '',
 };
 
 export default function InventorySection() {
@@ -245,6 +247,7 @@ export default function InventorySection() {
       unit_cost: s.unit_cost_cents != null ? (s.unit_cost_cents / 100).toFixed(2) : '',
       qty_on_hand: String(s.qty_on_hand ?? 0),
       is_active: s.is_active,
+      live_seller_notes: (s.live_seller_notes ?? []).join('\n'),
     });
   }
 
@@ -288,6 +291,7 @@ export default function InventorySection() {
       title: form.title.trim(),
       shortcut_letter: form.shortcut_letter.trim() || null,
       is_active: form.is_active,
+      live_seller_notes: form.live_seller_notes,
     };
     try {
       if (editingId) {
@@ -537,6 +541,15 @@ export default function InventorySection() {
                   </Field>
                 </>
               )}
+              <Field label="Live seller talking points" className="col-span-2 md:col-span-4">
+                <textarea
+                  value={form.live_seller_notes}
+                  onChange={(e) => setForm((f) => ({ ...f, live_seller_notes: e.target.value }))}
+                  rows={3}
+                  placeholder="One bullet per line — shown in the live overlay when this SKU is scanned"
+                  className="input resize-y"
+                />
+              </Field>
             </div>
           </div>
 
