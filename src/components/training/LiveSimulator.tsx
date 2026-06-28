@@ -57,6 +57,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
 
   // Media
   const streamRef = useRef<MediaStream | null>(null);
+  // Tracks whether the host component is still mounted, so an in-flight
+  // getUserMedia that resolves after unmount can't start the camera/LiveKit.
+  const mountedRef = useRef(true);
 
   // Timers
   const sessionTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -314,6 +317,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         audio: true,
       });
     } catch {
+      // Bail if the host navigated away during the first permission prompt —
+      // don't re-acquire the camera on an unmounted component.
+      if (!mountedRef.current) return;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'user' },
@@ -321,6 +327,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         });
       } catch (err) {
         stopStream();
+        if (!mountedRef.current) return; // no setState after unmount
         const name = err instanceof DOMException ? err.name : '';
         setErrorMsg(
           name === 'NotAllowedError' || name === 'SecurityError'
@@ -332,6 +339,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         setSessionState('denied');
         return;
       }
+    }
+
+    // If the component unmounted while the permission prompt was open, the
+    // promise can resolve after cleanup — stop the orphaned tracks and bail
+    // (no streamRef assignment, no LiveKit publish, no state update).
+    if (!mountedRef.current) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
     }
 
     streamRef.current = stream;
@@ -356,7 +371,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
 
   // Clean up everything on unmount.
   useEffect(() => {
+    mountedRef.current = true; // re-arm on (re)mount, incl. StrictMode setup->cleanup->setup
     return () => {
+      mountedRef.current = false;
       stopSessionTimers();
       stopAuctionTimers();
       clearTimeoutRef(toastRef);
