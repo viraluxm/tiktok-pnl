@@ -26,6 +26,7 @@ export interface InventorySku {
   height_in: number | null;
   category: string | null;
   is_active: boolean;
+  live_seller_notes: string[]; // bullets shown live in the extension overlay
   created_at: string;
   updated_at: string;
   batches: SkuBatch[]; // FIFO cost layers, oldest first
@@ -38,6 +39,9 @@ export interface SkuFields {
   unit_cost_cents?: number | null;
   qty_on_hand?: number;
   is_active?: boolean;
+  // Write shape is the raw textarea string (one bullet per line); the server
+  // canonicalizes to text[]. Read shape on InventorySku is string[].
+  live_seller_notes?: string;
 }
 
 const KEY = 'inventory-skus';

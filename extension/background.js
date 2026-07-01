@@ -261,7 +261,7 @@ function isAuthenticated() {
 
 // ─── Real Supabase calls ─────────────────────────────────────────────
 
-var SKU_COLS = 'select=id,sku_number,barcode,title,unit_cost_cents,qty_on_hand';
+var SKU_COLS = 'select=id,sku_number,barcode,title,unit_cost_cents,qty_on_hand,live_seller_notes';
 
 // Resolve a typed-or-scanned term: match barcode first (scanner path), then
 // fall back to sku_number (typed path). Term may be alphanumeric (a barcode).

@@ -25,6 +25,7 @@
   var salesListEl = null;
   var countEl = null;
   var stagedListEl = null;
+  var notesListEl = null;        // grouped talking-points block under the pills
   var skuInputEl = null;
   var resolvedLabelEl = null;   // transient resolve confirmation line (✓ / errors)
   var stagedCountEl = null;     // always-on "N unit(s) staged" line
@@ -159,6 +160,33 @@
     }\
     .lensed-session-status.active { color: #34d399; }\
     \
+    /* Talking points (grouped per staged SKU) */\
+    .lensed-notes {\
+      margin-top: 8px; padding-top: 8px; border-top: 1px solid #2a2a2e;\
+      max-height: 200px; overflow-y: auto;\
+    }\
+    .lensed-notes:empty { display: none; }\
+    .lensed-notes-head {\
+      font-size: 9px; font-weight: 700; letter-spacing: 0.6px;\
+      text-transform: uppercase; color: #777; margin-bottom: 6px;\
+    }\
+    .lensed-note-group { margin-bottom: 8px; }\
+    .lensed-note-group:last-child { margin-bottom: 0; }\
+    .lensed-note-sku {\
+      font-size: 12px; font-weight: 700; color: #a5a5ff; margin-bottom: 3px;\
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
+    }\
+    .lensed-note {\
+      font-size: 13px; color: #d4d4d8; line-height: 1.35; padding-left: 12px;\
+      position: relative; margin-bottom: 1px;\
+    }\
+    .lensed-note::before {\
+      content: "\\2022"; position: absolute; left: 2px; color: #6366f1;\
+    }\
+    .lensed-note-more {\
+      font-size: 11px; color: #777; padding-left: 12px; margin-top: 1px;\
+    }\
+    \
     /* Sales list */\
     .lensed-empty {\
       padding: 24px 12px; text-align: center; color: #555; font-size: 12px;\
@@ -290,6 +318,47 @@
       stagedListEl.appendChild(pill);
     }
     updateAspGoal();
+    renderTalkingPoints();
+  }
+
+  // Max bullets shown per SKU before collapsing to "+N more".
+  var MAX_NOTES_PER_SKU = 3;
+
+  // Talking points grouped by unique staged SKU. stagedSkus already holds one
+  // entry per distinct SKU (with qty), so each SKU appears once. SKUs without
+  // notes are skipped; if none have notes the whole block stays empty/hidden.
+  // textContent only — never innerHTML — for seller-authored text.
+  function renderTalkingPoints() {
+    if (!notesListEl) return;
+    notesListEl.innerHTML = '';
+
+    var anyNotes = false;
+    for (var i = 0; i < stagedSkus.length; i++) {
+      var s = stagedSkus[i];
+      var notes = Array.isArray(s.live_seller_notes) ? s.live_seller_notes : [];
+      if (notes.length === 0) continue;
+
+      if (!anyNotes) {
+        notesListEl.appendChild(el('div', 'lensed-notes-head', 'Talking points'));
+        anyNotes = true;
+      }
+
+      var group = el('div', 'lensed-note-group');
+      // Header: "2× #12 iPad 9th Gen" (qty always shown, even 1×).
+      var qty = s.qty || 1;
+      var head = qty + '× #' + s.sku_number + (s.title ? ' ' + s.title : '');
+      group.appendChild(el('div', 'lensed-note-sku', head));
+
+      var shown = Math.min(notes.length, MAX_NOTES_PER_SKU);
+      for (var j = 0; j < shown; j++) {
+        group.appendChild(el('div', 'lensed-note', notes[j]));
+      }
+      if (notes.length > MAX_NOTES_PER_SKU) {
+        group.appendChild(el('div', 'lensed-note-more', '+' + (notes.length - MAX_NOTES_PER_SKU) + ' more'));
+      }
+      notesListEl.appendChild(group);
+    }
+    // notesListEl is empty when no staged SKU has notes -> :empty CSS hides it.
   }
 
   // Break-even = Σ (unit_cost_cents × qty) — the true $0-profit price (no markup).
@@ -347,6 +416,7 @@
       existing.qty = currentQty + 1;
       existing.qty_on_hand = cap; // refresh with latest stock
       existing.unit_cost_cents = pendingResolve.unit_cost_cents;
+      existing.live_seller_notes = pendingResolve.live_seller_notes || [];
     } else {
       stagedSkus.push({
         id: pendingResolve.id,
@@ -355,6 +425,7 @@
         qty: 1,
         qty_on_hand: cap,
         unit_cost_cents: pendingResolve.unit_cost_cents,
+        live_seller_notes: pendingResolve.live_seller_notes || [],
       });
     }
     renderStagedPills();
@@ -396,7 +467,7 @@
     // Deep-copy so later qty edits don't mutate the saved set. The previous set was
     // already within stock when it bound, so it stays valid on re-stage.
     stagedSkus = previousSkus.map(function (s) {
-      return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents };
+      return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
     });
     renderStagedPills();
     clearResolveLine();
@@ -462,16 +533,21 @@
     if (boundOrderStatus.get(sale.orderId) === token) return [];
     boundOrderStatus.set(sale.orderId, token);
 
-    // Snapshot staged SKUs for this bind (deep-copy so qty edits can't reach the snapshot)
+    // Snapshot staged SKUs for this bind (deep-copy so qty edits can't reach the
+    // snapshot). This is the AUTO_BIND payload — kept to exactly the fields the
+    // background/RPC use; live_seller_notes is display-only and intentionally NOT
+    // included here so the bind payload is unchanged.
     var skusForBind = stagedSkus.map(function (s) {
       return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents };
     });
 
-    if (skusForBind.length > 0) {
-      // Save as previousSkus for re-run (independent copy). Persists across the
-      // auto-clear below so the ↻ button can re-stage the last bound set.
-      previousSkus = skusForBind.map(function (s) {
-        return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents };
+    if (stagedSkus.length > 0) {
+      // Save the staged set for re-run (independent copy, WITH notes so the ↻
+      // button re-stages talking points too). Sourced from stagedSkus — not the
+      // bind payload — so it carries live_seller_notes. Persists across the
+      // auto-clear below.
+      previousSkus = stagedSkus.map(function (s) {
+        return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
       });
     }
 
@@ -609,6 +685,7 @@
     resolvedLabelEl = el('div', 'lensed-resolved', '');
     stagedCountEl = el('div', 'lensed-staged-count', '0 unit(s) staged');
     stagedListEl = el('div', 'lensed-staged');
+    notesListEl = el('div', 'lensed-notes');
     sessionStatusEl = el('div', 'lensed-session-status', 'Connecting\u2026');
 
     // Left column: input row + transient resolve line + always-on staged count
@@ -618,6 +695,7 @@
     skuMain.appendChild(resolvedLabelEl);
     skuMain.appendChild(stagedCountEl);
     skuMain.appendChild(stagedListEl);
+    skuMain.appendChild(notesListEl);
     skuMain.appendChild(sessionStatusEl);
 
     // Right column: large live ASP goal + smaller break-even underneath

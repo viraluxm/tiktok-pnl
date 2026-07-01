@@ -62,6 +62,11 @@ status is logged once; a `failed → paid` flip is allowed through once.
 - Staged SKUs are held **in memory** in the content script (no persistence). When
   a sale arrives, the currently‑staged SKU(s) are bound to that order; a
   successful paid sale clears the staging for the next item.
+- **Live seller talking points:** each SKU carries `inventory_skus.live_seller_notes`
+  (`text[]`, edited in the Lensed inventory UI). When a SKU is staged, the overlay
+  shows its bullets grouped per SKU (`"2× #12 Title"` + up to 3 bullets, then
+  `+N more`). Display‑only — notes are not part of the sale‑bind / `AUTO_BIND`
+  payload and never reach `lensed_log_auction` or `capture_events`.
 
 ## Auth (how it receives the Lensed session)
 
