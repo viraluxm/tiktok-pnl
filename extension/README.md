@@ -59,14 +59,54 @@ status is logged once; a `failed → paid` flip is allowed through once.
   **keyboard‑wedge**; a timing heuristic distinguishes a fast scan burst from
   manual typing. Lookup resolves against `inventory_skus` by **`barcode` first,
   `sku_number` as fallback** (`is_active = true`).
+- A **global keyboard‑wedge** listener also captures fast scan bursts when the SKU
+  input isn't focused (e.g. right after clicking a button or after a sale clears),
+  staging via the same RESOLVE_SKU path. It ignores host editable fields (TikTok
+  chat, textareas, contenteditable) and normal typing, and defers to the `+`/`−`/`*`
+  shortcuts only for standalone presses so a barcode's `-` isn't read as "remove".
+  The SKU input is refocused after binds and overlay actions (guarded so it never
+  steals focus from a host field).
 - Staged SKUs are held **in memory** in the content script (no persistence). When
-  a sale arrives, the currently‑staged SKU(s) are bound to that order; a
-  successful paid sale clears the staging for the next item.
+  a sale arrives, the currently‑staged SKU(s) are bound to that order and the
+  staging then clears for the next item — for **both** a paid sale and a failed
+  payment (`is_payment_successful === false`). A failed payment is still bound and
+  logged as `not_sold` (the `AUTO_BIND` message still fires); it just no longer
+  carries the same SKUs into the next order. Use the ↻ button to re‑stage the last
+  bound set manually.
+- Staged SKUs display as `qty× Title · #number` (e.g. `1× iPad 9th Gen · #14`) in
+  the pills, the talking‑points headers, and the recent‑order item lines — one
+  shared label helper keeps the three consistent.
 - **Live seller talking points:** each SKU carries `inventory_skus.live_seller_notes`
   (`text[]`, edited in the Lensed inventory UI). When a SKU is staged, the overlay
-  shows its bullets grouped per SKU (`"2× #12 Title"` + up to 3 bullets, then
+  shows its bullets grouped per SKU (`"2× Title · #12"` + up to 3 bullets, then
   `+N more`). Display‑only — notes are not part of the sale‑bind / `AUTO_BIND`
   payload and never reach `lensed_log_auction` or `capture_events`.
+
+## Overlay UI
+
+- **Opens expanded by default** so the controls are visible. The header reads
+  **`Lensed — Next order [N]`**, where `[N]` is a prominent circled current/next
+  order number. A muted runtime version marker sits in the bottom‑left corner
+  (read from `chrome.runtime.getManifest()`) — unobtrusive, for testing only.
+- **Resizable:** drag the visible grip in the **bottom‑right** corner; the chosen
+  size is persisted to `chrome.storage.local` (`lensed_overlay_size`) and restored
+  on reload / SPA re‑inject. Min/max bounds keep it usable; header‑drag /
+  scanner‑input focus are unaffected.
+- **ASP goal / break-even** sit in a compact right‑hand column of the stage
+  section (next to the SKU input + staged list) — visible but sized so they don't
+  overpower the staged SKUs. Resizing is via the corner grip only.
+- Three separate controls: **`−`/`+`** hides/shows the **Recent Orders section
+  only** (`lensed_overlay_orders_hidden`) — the rest of the overlay stays open and
+  resizable; the **corner grip** resizes at any time; and **`✕`** hides the whole
+  overlay (`lensed_overlay_hidden`) and shows a floating **“Lensed”** reopen tab
+  that always restores it — the host can never get stuck hidden.
+- Priority when resized larger: the **stage section grows** (talking points gain
+  the extra space); Recent Orders stays a bounded, scrollable section.
+- **Recent orders** are **text‑first** (no product thumbnails): line 1 is
+  `#order · @buyer · price · Paid|Unpaid`; for orders bound during the current page
+  session, item lines (`qty× Title · #number`) follow. Bound‑item lines come from a
+  session‑only in‑memory map — older orders from before the page loaded show
+  order/buyer/price/status only. All row text is set via `textContent`.
 
 ## Auth (how it receives the Lensed session)
 
@@ -133,5 +173,8 @@ npm run build      # runs build.sh: minify → validate → produce dist/ + lens
 `validate-build.mjs` (acorn strict parse + shadowing scan), then zips `dist/`.
 `dist/` and the generated `*.zip` are git‑ignored.
 
-> The manifest `version` is `0.2.0`; `package.json` `version` is `0.1.0` (build
-> tooling only). Left as‑is on import — not changed.
+> The manifest `version` is `0.2.8` (overlay UI polish + resize grip + close/reopen
+> + failed‑payment stage‑clear; ASP metrics on the right, no size toggle);
+> `package.json` `version` is `0.1.0` (build
+> tooling only). The extension ID is derived from `key`, not `version`, so the ID
+> is unchanged.
