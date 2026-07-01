@@ -134,7 +134,7 @@ interface FormState {
   unit_cost: string; // dollars
   qty_on_hand: string;
   is_active: boolean;
-  live_seller_notes: string; // textarea, one bullet per line
+  live_seller_notes: string[]; // one entry per bullet input row
 }
 
 const EMPTY: FormState = {
@@ -144,7 +144,7 @@ const EMPTY: FormState = {
   unit_cost: '',
   qty_on_hand: '0',
   is_active: true,
-  live_seller_notes: '',
+  live_seller_notes: [],
 };
 
 export default function InventorySection() {
@@ -247,7 +247,7 @@ export default function InventorySection() {
       unit_cost: s.unit_cost_cents != null ? (s.unit_cost_cents / 100).toFixed(2) : '',
       qty_on_hand: String(s.qty_on_hand ?? 0),
       is_active: s.is_active,
-      live_seller_notes: (s.live_seller_notes ?? []).join('\n'),
+      live_seller_notes: [...(s.live_seller_notes ?? [])], // one row per existing note
     });
   }
 
@@ -291,7 +291,8 @@ export default function InventorySection() {
       title: form.title.trim(),
       shortcut_letter: form.shortcut_letter.trim() || null,
       is_active: form.is_active,
-      live_seller_notes: form.live_seller_notes,
+      // Drop empty rows and send as newline text; the API canonicalizes to text[].
+      live_seller_notes: form.live_seller_notes.map((s) => s.trim()).filter(Boolean).join('\n'),
     };
     try {
       if (editingId) {
@@ -542,13 +543,48 @@ export default function InventorySection() {
                 </>
               )}
               <Field label="Live seller talking points" className="col-span-2 md:col-span-4">
-                <textarea
-                  value={form.live_seller_notes}
-                  onChange={(e) => setForm((f) => ({ ...f, live_seller_notes: e.target.value }))}
-                  rows={3}
-                  placeholder="One bullet per line — shown in the live overlay when this SKU is scanned"
-                  className="input resize-y"
-                />
+                <span className="block text-[11px] text-tt-muted -mt-1 mb-1.5">
+                  Shown in the live overlay when this SKU is scanned
+                </span>
+                <div className="space-y-1.5">
+                  {form.live_seller_notes.map((note, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        value={note}
+                        onChange={(e) =>
+                          setForm((f) => {
+                            const notes = [...f.live_seller_notes];
+                            notes[i] = e.target.value;
+                            return { ...f, live_seller_notes: notes };
+                          })
+                        }
+                        placeholder={`Talking point ${i + 1}`}
+                        className="input flex-1"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setForm((f) => ({
+                            ...f,
+                            live_seller_notes: f.live_seller_notes.filter((_, j) => j !== i),
+                          }))
+                        }
+                        title="Remove line"
+                        aria-label="Remove talking point"
+                        className="shrink-0 w-8 h-8 rounded-lg border border-tt-border text-tt-muted cursor-pointer hover:bg-tt-card-hover hover:text-tt-red transition-colors"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setForm((f) => ({ ...f, live_seller_notes: [...f.live_seller_notes, ''] }))}
+                    className="text-xs text-tt-cyan cursor-pointer hover:underline"
+                  >
+                    + Add line
+                  </button>
+                </div>
               </Field>
             </div>
           </div>
