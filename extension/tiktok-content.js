@@ -32,8 +32,17 @@
   var sessionStatusEl = null;
   var aspValueEl = null;
   var breakEvenValueEl = null;
-  var collapsed = true;
+  var ordersHidden = false; // "−" hides only the Recent Orders section, not the whole overlay; persisted
+  var hidden = false;       // ✕ hides the whole overlay; a floating tab reopens it; persisted
+  var prefsLoaded = false;  // read chrome.storage prefs only once per page load
   var salesCount = 0;
+
+  // Persisted overlay size (chrome.storage.local key `lensed_overlay_size`), set
+  // only by the bottom-right resize grip. Cached in memory so SPA re-injects
+  // re-apply instantly. Min/max are enforced in JS.
+  var overlaySize = null;
+  var OVERLAY_MIN_W = 300, OVERLAY_MAX_W = 720;
+  var OVERLAY_MIN_H = 240, OVERLAY_MAX_H = 900;
 
   // SKU staging
   var stagedSkus = [];       // [{id, sku_number, title, qty}, ...] — one entry per distinct SKU
@@ -45,6 +54,12 @@
   // status (not order_id alone) so a payment FLIP (failed→paid) forwards a second
   // AUTO_BIND, while an identical repeat (same order_id + same status) is skipped.
   var boundOrderStatus = new Map();
+
+  // order_id → the SKU set bound to it during THIS page session ([{sku_number,
+  // title, qty}, ...]). Session-only (never persisted) — lets a recent-order row
+  // render its bound item lines reliably on re-render. Orders from before this
+  // page load aren't here and show order/buyer/price/status only.
+  var sessionBoundSkus = new Map();
 
   // Payment token mirrors the downstream sold/not_sold split.
   function saleStatusToken(sale) {
@@ -64,57 +79,94 @@
       box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: flex; flex-direction: column;\
       overflow: hidden; user-select: none;\
     }\
-    .lensed-panel.collapsed { width: auto; max-height: none; border-radius: 8px; }\
+    /* Resize grip — visible diagonal grip in the bottom-right corner */\
+    .lensed-resize-handle {\
+      position: absolute; right: 0; bottom: 0; width: 26px; height: 26px;\
+      cursor: nwse-resize; z-index: 6;\
+      background: linear-gradient(135deg, transparent 50%, #6366f1 50%);\
+      border-bottom-right-radius: 10px;\
+    }\
+    .lensed-resize-handle::before {\
+      content: ""; position: absolute; right: 3px; bottom: 3px; width: 12px; height: 12px;\
+      background: repeating-linear-gradient(135deg, #fff 0 1.5px, transparent 1.5px 4px);\
+      opacity: 0.85;\
+    }\
+    .lensed-resize-handle:hover { background: linear-gradient(135deg, transparent 50%, #818cf8 50%); }\
+    /* Floating reopen tab shown when the overlay is hidden via the X */\
+    .lensed-reopen-tab {\
+      position: fixed; bottom: 16px; right: 16px; z-index: 2147483647;\
+      background: #4f46e5; color: #fff; font-size: 12px; font-weight: 700;\
+      padding: 8px 14px; border-radius: 10px; cursor: pointer; letter-spacing: 0.3px;\
+      box-shadow: 0 4px 16px rgba(0,0,0,0.45); user-select: none;\
+    }\
+    .lensed-reopen-tab:hover { background: #5a52f0; }\
     .lensed-header {\
       display: flex; align-items: center; justify-content: space-between;\
       padding: 8px 12px; background: #1a1a1e; cursor: grab; flex-shrink: 0;\
       border-bottom: 1px solid #2a2a2e;\
     }\
     .lensed-header:active { cursor: grabbing; }\
-    .lensed-panel.collapsed .lensed-header { border-bottom: none; }\
-    .lensed-title {\
-      font-weight: 600; font-size: 12px; letter-spacing: 0.3px; color: #a5a5ff;\
-      display: flex; align-items: center; gap: 6px;\
+    .lensed-title { display: flex; align-items: center; gap: 8px; }\
+    .lensed-brand {\
+      font-weight: 700; font-size: 13px; letter-spacing: 0.3px; color: #a5a5ff;\
+    }\
+    .lensed-next-label {\
+      font-size: 10px; font-weight: 700; letter-spacing: 0.4px;\
+      text-transform: uppercase; color: #8a8a92;\
     }\
     .lensed-badge {\
-      background: #6366f1; color: #fff; font-size: 10px; font-weight: 700;\
-      padding: 1px 6px; border-radius: 9px; min-width: 14px; text-align: center;\
+      background: #6366f1; color: #fff; font-size: 15px; font-weight: 800;\
+      min-width: 26px; height: 26px; padding: 0 7px; border-radius: 13px;\
+      display: inline-flex; align-items: center; justify-content: center;\
+      box-shadow: 0 0 0 2px rgba(99,102,241,0.25);\
     }\
     .lensed-toggle {\
       background: none; border: none; color: #888; cursor: pointer;\
       font-size: 16px; padding: 0 2px; line-height: 1;\
     }\
     .lensed-toggle:hover { color: #e5e5e5; }\
-    .lensed-body { overflow-y: auto; flex: 1; padding: 0; }\
-    .lensed-panel.collapsed .lensed-body { display: none; }\
-    \
-    /* SKU controls */\
-    .lensed-sku-bar {\
-      padding: 8px 12px; border-bottom: 1px solid #2a2a2e; background: #151518;\
-      display: flex; gap: 10px; align-items: stretch;\
+    .lensed-controls { display: flex; align-items: center; gap: 6px; }\
+    .lensed-version {\
+      position: absolute; left: 0; bottom: 0; z-index: 4;\
+      font-size: 8px; font-weight: 600; color: #5a5a66; letter-spacing: 0.3px;\
+      background: #111113; padding: 1px 6px 1px 8px; border-top-right-radius: 6px;\
+      pointer-events: none;\
     }\
-    .lensed-sku-main { flex: 1; min-width: 0; }\
+    .lensed-close-btn {\
+      background: none; border: none; color: #888; cursor: pointer;\
+      font-size: 15px; line-height: 1; padding: 0 3px;\
+    }\
+    .lensed-close-btn:hover { color: #f87171; }\
+    /* Recent orders: a bounded, scrollable section — NOT the growth region, so\
+       the "−" toggle hides only this, and resizing grows the stage instead. */\
+    .lensed-body { overflow-y: auto; flex: 0 0 auto; max-height: 200px; padding: 0; }\
+    .lensed-panel.orders-hidden .lensed-body { display: none; }\
+    \
+    /* Stage section: left column (input + staged + talking points), right column (ASP).\
+       flex:1 so it absorbs extra height on resize — the talking points grow. */\
+    .lensed-sku-bar {\
+      padding: 10px 12px; border-bottom: 1px solid #2a2a2e; background: #151518;\
+      display: flex; gap: 10px; align-items: stretch; flex: 1 1 auto; min-height: 0;\
+    }\
+    .lensed-sku-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }\
     .lensed-asp {\
-      flex-shrink: 0; width: 124px; padding-left: 10px;\
-      border-left: 1px solid #2a2a2e;\
+      flex-shrink: 0; width: 132px; padding-left: 12px; border-left: 1px solid #2a2a2e;\
       display: flex; flex-direction: column; align-items: flex-end;\
       justify-content: center; text-align: right;\
     }\
     .lensed-asp-label {\
-      font-size: 9px; font-weight: 600; letter-spacing: 0.6px;\
-      text-transform: uppercase; color: #777; margin-bottom: 2px;\
+      font-size: 11px; font-weight: 700; letter-spacing: 0.5px;\
+      text-transform: uppercase; color: #9a9aa2; margin-bottom: 4px;\
     }\
     .lensed-asp-value {\
-      font-size: 48px; font-weight: 800; color: #34d399; line-height: 1;\
-      white-space: nowrap;\
+      font-size: 40px; font-weight: 800; color: #34d399; line-height: 1; white-space: nowrap;\
     }\
     .lensed-be-label {\
-      font-size: 8px; font-weight: 600; letter-spacing: 0.5px;\
-      text-transform: uppercase; color: #777; margin-top: 6px;\
+      font-size: 10px; font-weight: 700; letter-spacing: 0.5px;\
+      text-transform: uppercase; color: #9a9aa2; margin-top: 12px; margin-bottom: 2px;\
     }\
     .lensed-be-value {\
-      font-size: 14px; font-weight: 700; color: #9a9aa2; line-height: 1;\
-      white-space: nowrap;\
+      font-size: 23px; font-weight: 800; color: #d4d4dc; line-height: 1; white-space: nowrap;\
     }\
     .lensed-sku-row {\
       display: flex; align-items: center; gap: 6px;\
@@ -136,6 +188,12 @@
     .lensed-sku-btn:disabled { opacity: 0.3; cursor: default; }\
     .lensed-sku-btn.primary { background: #6366f1; border-color: #6366f1; color: #fff; }\
     .lensed-sku-btn.primary:hover { background: #5558e6; }\
+    /* Restage: prominent secondary action — tinted + outlined, brighter icon, bigger */\
+    .lensed-sku-btn.restage {\
+      width: 34px; height: 34px; font-size: 18px;\
+      background: rgba(99,102,241,0.16); border-color: #4f46e5; color: #a5b4ff;\
+    }\
+    .lensed-sku-btn.restage:hover { background: rgba(99,102,241,0.32); border-color: #6366f1; color: #fff; }\
     .lensed-resolved {\
       font-size: 11px; color: #34d399; margin-top: 4px; min-height: 16px;\
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
@@ -143,18 +201,24 @@
     .lensed-resolved.error { color: #f87171; }\
     .lensed-resolved:empty { display: none; }\
     .lensed-staged-count {\
-      font-size: 11px; color: #9a9aa2; margin-top: 4px; min-height: 16px;\
+      font-size: 10px; color: #8a8a92; font-weight: 700; letter-spacing: 0.5px;\
+      text-transform: uppercase; margin-top: 8px; min-height: 14px;\
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
     }\
     .lensed-staged {\
-      display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; min-height: 0;\
+      display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; min-height: 0;\
     }\
     .lensed-staged:empty { display: none; }\
-    .lensed-pill {\
-      display: inline-flex; align-items: center; gap: 3px;\
-      background: #6366f1; color: #fff; font-size: 11px; font-weight: 600;\
-      padding: 2px 8px; border-radius: 10px;\
+    /* Staged item — readable indigo pill: "2× iPad 9th Gen · #14" */\
+    .lensed-staged-item {\
+      display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%;\
+      box-sizing: border-box; overflow: hidden; white-space: nowrap;\
+      background: #4f46e5; color: #fff; font-size: 12px; font-weight: 600;\
+      padding: 3px 9px; border-radius: 10px;\
     }\
+    .lensed-si-title { overflow: hidden; text-overflow: ellipsis; min-width: 0; }\
+    .lensed-si-num { color: #cdcdff; font-weight: 500; flex-shrink: 0; }\
+    .lensed-si-num::before { content: "\\00B7 "; }\
     .lensed-session-status {\
       font-size: 10px; color: #555; margin-top: 4px;\
     }\
@@ -163,7 +227,7 @@
     /* Talking points (grouped per staged SKU) */\
     .lensed-notes {\
       margin-top: 8px; padding-top: 8px; border-top: 1px solid #2a2a2e;\
-      max-height: 200px; overflow-y: auto;\
+      flex: 1 1 auto; min-height: 0; overflow-y: auto;\
     }\
     .lensed-notes:empty { display: none; }\
     .lensed-notes-head {\
@@ -173,53 +237,56 @@
     .lensed-note-group { margin-bottom: 8px; }\
     .lensed-note-group:last-child { margin-bottom: 0; }\
     .lensed-note-sku {\
-      font-size: 12px; font-weight: 700; color: #a5a5ff; margin-bottom: 3px;\
+      font-size: 13px; font-weight: 700; color: #a5a5ff; margin-bottom: 4px;\
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
     }\
     .lensed-note {\
-      font-size: 13px; color: #d4d4d8; line-height: 1.35; padding-left: 12px;\
-      position: relative; margin-bottom: 1px;\
+      font-size: 15px; color: #e2e2e8; line-height: 1.55; padding-left: 17px;\
+      position: relative; margin-bottom: 7px;\
     }\
+    .lensed-note:last-child { margin-bottom: 0; }\
     .lensed-note::before {\
-      content: "\\2022"; position: absolute; left: 2px; color: #6366f1;\
+      content: "\\2022"; position: absolute; left: 1px; top: -1px;\
+      color: #818cf8; font-size: 15px; font-weight: 700;\
     }\
     .lensed-note-more {\
       font-size: 11px; color: #777; padding-left: 12px; margin-top: 1px;\
     }\
     \
-    /* Sales list */\
+    /* Section header (sticky within the scroll body) */\
+    .lensed-section-head {\
+      font-size: 9px; font-weight: 700; letter-spacing: 0.6px;\
+      text-transform: uppercase; color: #777;\
+      padding: 8px 12px 5px; position: sticky; top: 0;\
+      background: #111113; z-index: 1;\
+    }\
+    /* Recent orders (text-first, no thumbnails) */\
     .lensed-empty {\
       padding: 24px 12px; text-align: center; color: #555; font-size: 12px;\
     }\
     .lensed-sale {\
-      display: flex; align-items: center; gap: 8px; padding: 6px 12px;\
+      display: flex; flex-direction: column; gap: 2px; padding: 7px 12px;\
       border-bottom: 1px solid #1e1e22; animation: lensed-fade-in 0.25s ease;\
     }\
     .lensed-sale:last-child { border-bottom: none; }\
-    .lensed-sale.bound { border-left: 3px solid #6366f1; }\
-    .lensed-sale-img {\
-      width: 32px; height: 32px; border-radius: 4px; object-fit: cover;\
-      flex-shrink: 0; background: #222;\
-    }\
-    .lensed-sale-info { flex: 1; min-width: 0; }\
+    .lensed-sale.bound { border-left: 3px solid #6366f1; padding-left: 9px; }\
     .lensed-sale-top {\
-      display: flex; justify-content: space-between; align-items: baseline; gap: 6px;\
+      display: flex; justify-content: space-between; align-items: baseline; gap: 8px;\
     }\
-    .lensed-sale-product {\
-      font-size: 12px; font-weight: 500; white-space: nowrap;\
-      overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;\
+    .lensed-sale-order {\
+      font-size: 12px; font-weight: 600; color: #e5e5e5; flex: 1; min-width: 0;\
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
     }\
-    .lensed-sale-price {\
-      font-size: 12px; font-weight: 600; color: #34d399; flex-shrink: 0;\
+    .lensed-sale-right {\
+      flex-shrink: 0; white-space: nowrap; font-size: 12px;\
     }\
-    .lensed-sale-meta {\
-      font-size: 11px; color: #666; white-space: nowrap;\
-      overflow: hidden; text-overflow: ellipsis;\
-    }\
-    .lensed-sale-sku { color: #6366f1; font-weight: 500; }\
-    .lensed-sale-unpaid { color: #f59e0b; font-size: 10px; font-weight: 600; }\
-    .lensed-sale-bound-tag {\
-      font-size: 10px; color: #a5a5ff; font-weight: 500;\
+    .lensed-sale-price { font-weight: 700; color: #34d399; }\
+    .lensed-sale-status { font-weight: 600; color: #34d399; }\
+    .lensed-sale-unpaid { font-weight: 600; color: #f59e0b; }\
+    .lensed-sale-sep { color: #555; }\
+    .lensed-sale-item {\
+      font-size: 12px; color: #c8c8cf; padding-left: 1px;\
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
     }\
     @keyframes lensed-fade-in {\
       from { opacity: 0; transform: translateY(-4px); }\
@@ -271,6 +338,31 @@
     return elapsed < scanCharCount * SCAN_MAX_INTERKEY_MS && elapsed < SCAN_MAX_TOTAL_MS;
   }
 
+  // ── Global keyboard-wedge scanner (works when the SKU input is NOT focused) ──
+  // A separate buffer/timing from the input's own scan state, so the two never
+  // interfere. Same burst heuristic; commits through the existing RESOLVE_SKU →
+  // stageCurrentSku path (see the global keydown listener near the bottom).
+  var gScanBuffer = '';
+  var gScanFirst = 0, gScanLast = 0, gScanCount = 0;
+
+  function resetGlobalScan() { gScanBuffer = ''; gScanFirst = 0; gScanLast = 0; gScanCount = 0; }
+
+  function globalLooksLikeScan() {
+    if (gScanCount < SCAN_MIN_LENGTH) return false;
+    var elapsed = gScanLast - gScanFirst;
+    return elapsed < gScanCount * SCAN_MAX_INTERKEY_MS && elapsed < SCAN_MAX_TOTAL_MS;
+  }
+
+  // Focus the SKU input so the next scan/keystroke lands there — but only when
+  // it's safe: overlay open, input exists, and the user is NOT typing in a host
+  // editable field (TikTok chat, textareas, contenteditable). Never steals focus
+  // from an editable page element. (isEditableTarget is defined below — hoisted.)
+  function focusScanInput() {
+    if (hidden || !skuInputEl) return;
+    if (isEditableTarget(document.activeElement)) return;
+    try { skuInputEl.focus(); } catch (_) {}
+  }
+
   // ── SKU staging logic ──────────────────────────────────────────────
 
   // Total units across all staged pills (sum of qty).
@@ -283,7 +375,10 @@
   // Always-on staged-units count line. Updates as SKUs are staged/removed.
   function updateStagedLabel() {
     if (!stagedCountEl) return;
-    stagedCountEl.textContent = totalStagedUnits() + ' unit(s) staged';
+    var n = totalStagedUnits();
+    stagedCountEl.textContent = n === 0
+      ? 'Nothing staged'
+      : ('Staged — ' + n + ' unit' + (n === 1 ? '' : 's'));
   }
 
   // The resolve-confirmation line is separate and shown only while resolving a
@@ -300,22 +395,36 @@
     resolvedLabelEl.className = 'lensed-resolved';
   }
 
-  // Pill text: "#5" for a single unit, "#5 ×2" once quantity climbs.
-  function pillLabel(s) {
+  // Shared identity label for a staged/bound SKU: "1× iPad 9th Gen · #14".
+  // Quantity is ALWAYS shown (even 1×). Falls back to "1× #14" when the title is
+  // empty. Long titles are handled by CSS ellipsis + a full-value hover, not here.
+  // Used by the staged pills, the talking-points headers, and the recent-order
+  // bound item lines so the three formats never drift.
+  function skuLabel(s) {
     var qty = s.qty || 1;
-    return qty > 1 ? '#' + s.sku_number + ' ×' + qty : '#' + s.sku_number;
+    var num = '#' + s.sku_number;
+    var title = (s.title || '').trim();
+    return qty + '× ' + (title ? title + ' · ' + num : num);
   }
 
+  // Render staged SKUs as readable indigo pills: "2× keychain · #2". The title
+  // span holds qty + title; the number span shows "#n" (its "· " prefix is CSS).
   function renderStagedPills() {
     if (!stagedListEl) return;
     stagedListEl.innerHTML = '';
     for (var i = 0; i < stagedSkus.length; i++) {
-      var pill = el('span', 'lensed-pill');
-      pill.textContent = pillLabel(stagedSkus[i]);
-      if (stagedSkus[i].title) {
-        pill.title = stagedSkus[i].title;
+      var s = stagedSkus[i];
+      var qty = s.qty || 1;
+      var title = (s.title || '').trim();
+      var item = el('div', 'lensed-staged-item');
+      // Title span carries qty + title; falls back to qty + #number when untitled.
+      item.appendChild(el('span', 'lensed-si-title', qty + '× ' + (title || ('#' + s.sku_number))));
+      // Number span only when we have a title (otherwise it's already in the title).
+      if (title) {
+        item.appendChild(el('span', 'lensed-si-num', '#' + s.sku_number));
+        item.title = title;
       }
-      stagedListEl.appendChild(pill);
+      stagedListEl.appendChild(item);
     }
     updateAspGoal();
     renderTalkingPoints();
@@ -344,10 +453,8 @@
       }
 
       var group = el('div', 'lensed-note-group');
-      // Header: "2× #12 iPad 9th Gen" (qty always shown, even 1×).
-      var qty = s.qty || 1;
-      var head = qty + '× #' + s.sku_number + (s.title ? ' ' + s.title : '');
-      group.appendChild(el('div', 'lensed-note-sku', head));
+      // Header uses the shared label: "2× iPad 9th Gen · #12" (qty always shown).
+      group.appendChild(el('div', 'lensed-note-sku', skuLabel(s)));
 
       var shown = Math.min(notes.length, MAX_NOTES_PER_SKU);
       for (var j = 0; j < shown; j++) {
@@ -519,12 +626,33 @@
     } catch (_) {}
   }
 
+  // Commit a globally-captured scanner burst through the SAME path as an in-input
+  // scan (RESOLVE_SKU → stageCurrentSku). No SKU-lookup or staging behavior change.
+  function globalScanCommit(value) {
+    var trimmed = (value || '').trim().replace(/^#/, '');
+    if (!trimmed) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'RESOLVE_SKU', skuNumber: trimmed }, function (resp) {
+        if (chrome.runtime.lastError) return;
+        if (resp && resp.sku) {
+          pendingResolve = resp.sku;
+          stageCurrentSku(); // stages (or +1 qty) via the existing path
+        } else {
+          setResolveLine('SKU not found', true);
+        }
+        pendingResolve = null;
+        focusScanInput(); // ready for the next scan
+      });
+    } catch (_) {}
+  }
+
   // ── Auto-bind: fire when a new sale arrives ────────────────────────
 
   // Auto-bind the staged set to a sale. Returns the bind-time snapshot (so the
-  // caller can render the bound tag even after an auto-clear). On a SOLD sale we
-  // clear the staged pills AFTER snapshotting, so the next auction can't bind to
-  // a stale set; on not_sold we leave them so the host can re-run the same item.
+  // caller can render the bound items even after the auto-clear below). We clear
+  // the staged pills AFTER snapshotting on EVERY bind that had a staged set —
+  // paid and failed-payment alike — so no SKU silently carries into the next
+  // auction. `previousSkus` keeps the last set for the manual ↻ re-run.
   function autoBind(sale) {
     if (!sale || !sale.orderId) return [];
     // New order → binds (get() is undefined ≠ token). Same-status repeat →
@@ -551,6 +679,17 @@
       });
     }
 
+    if (skusForBind.length > 0) {
+      // Remember what bound to THIS order for the current page session so the
+      // recent-order row can render its item lines on re-render. Lean copy
+      // (display fields only); session-only, never persisted. A later status
+      // flip (failed→paid) arrives with staging already cleared, so it won't
+      // overwrite this entry.
+      sessionBoundSkus.set(sale.orderId, skusForBind.map(function (s) {
+        return { sku_number: s.sku_number, title: s.title, qty: s.qty };
+      }));
+    }
+
     try {
       chrome.runtime.sendMessage({
         type: 'AUTO_BIND',
@@ -563,11 +702,15 @@
       });
     } catch (_) {}
 
-    // One winner per auction: clear staged pills on a sold bind, AFTER the
-    // snapshot above (which is what the message + bound tag use). Background
-    // maps the same status as: not_sold iff isPaymentSuccessful === false.
-    var sold = sale.isPaymentSuccessful !== false;
-    if (sold && skusForBind.length > 0) {
+    // One winner per auction: clear the staged pills after EVERY bind that had a
+    // staged set — paid AND failed-payment alike — AFTER the snapshot + message
+    // above (the AUTO_BIND payload and the row's item lines are already captured)
+    // and after `previousSkus` was copied for the ↻ re-run. Clearing on a failed
+    // payment (previously skipped) stops the same SKUs from silently carrying
+    // over and binding to the NEXT order; the host re-runs manually via ↻. The
+    // AUTO_BIND payload and background's not_sold logging are unchanged — the
+    // message above still fires for failed payments.
+    if (skusForBind.length > 0) {
       clearStaged();
     }
 
@@ -596,25 +739,43 @@
     style.textContent = OVERLAY_CSS;
     shadowRoot.appendChild(style);
 
-    var panel = el('div', 'lensed-panel collapsed');
+    var panel = el('div', 'lensed-panel' + (ordersHidden ? ' orders-hidden' : ''));
 
     // ── Header ───────────────────────────────────────────────────
     var header = el('div', 'lensed-header');
-    var title = el('div', 'lensed-title', 'Lensed');
+    var title = el('div', 'lensed-title');
+    title.appendChild(el('span', 'lensed-brand', 'Lensed'));
+    title.appendChild(el('span', 'lensed-next-label', '\u2014 Next order'));
 
+    // Prominent current/next order number.
     countEl = el('span', 'lensed-badge', '0');
     title.appendChild(countEl);
 
-    var toggle = el('button', 'lensed-toggle', '+');
-    toggle.addEventListener('click', function (e) {
+    // Close (X): hides the whole overlay; a floating "Lensed" tab reopens it.
+    var closeBtn = el('button', 'lensed-close-btn', '\u2715');
+    closeBtn.title = 'Hide overlay';
+    closeBtn.addEventListener('click', function (e) {
       e.stopPropagation();
-      collapsed = !collapsed;
-      panel.classList.toggle('collapsed', collapsed);
-      toggle.textContent = collapsed ? '+' : '\u2212';
+      setHidden(true);
     });
 
+    var toggle = el('button', 'lensed-toggle', ordersHidden ? '+' : '\u2212');
+    toggle.title = 'Show / hide Recent orders';
+    toggle.addEventListener('click', function (e) {
+      e.stopPropagation();
+      ordersHidden = !ordersHidden;
+      panel.classList.toggle('orders-hidden', ordersHidden);
+      toggle.textContent = ordersHidden ? '+' : '\u2212';
+      persistPrefs();
+      focusScanInput();
+    });
+
+    var controls = el('div', 'lensed-controls');
+    controls.appendChild(closeBtn);
+    controls.appendChild(toggle);
+
     header.appendChild(title);
-    header.appendChild(toggle);
+    header.appendChild(controls);
 
     // ── SKU bar ──────────────────────────────────────────────────
     var skuBar = el('div', 'lensed-sku-bar');
@@ -665,17 +826,18 @@
       if (pendingResolve) {
         stageCurrentSku();
       }
+      focusScanInput();
     });
 
     // - button: remove last staged
     var removeBtn = el('button', 'lensed-sku-btn', '\u2212');
     removeBtn.title = 'Remove last SKU';
-    removeBtn.addEventListener('click', function () { removeLast(); });
+    removeBtn.addEventListener('click', function () { removeLast(); focusScanInput(); });
 
-    // \u21bb button: re-run the last bound SKU set
-    var rerunBtn = el('button', 'lensed-sku-btn', '\u21bb');
-    rerunBtn.title = 'Re-run last bound SKU set';
-    rerunBtn.addEventListener('click', function () { rerunPrevious(); });
+    // \u21bb restage button \u2014 prominent secondary action (re-runs the last bound set)
+    var rerunBtn = el('button', 'lensed-sku-btn restage', '\u21bb');
+    rerunBtn.title = 'Restage previous SKUs';
+    rerunBtn.addEventListener('click', function () { rerunPrevious(); focusScanInput(); });
 
     skuRow.appendChild(skuInputEl);
     skuRow.appendChild(addBtn);
@@ -683,13 +845,13 @@
     skuRow.appendChild(rerunBtn);
 
     resolvedLabelEl = el('div', 'lensed-resolved', '');
-    stagedCountEl = el('div', 'lensed-staged-count', '0 unit(s) staged');
+    stagedCountEl = el('div', 'lensed-staged-count', 'Nothing staged');
     stagedListEl = el('div', 'lensed-staged');
     notesListEl = el('div', 'lensed-notes');
     sessionStatusEl = el('div', 'lensed-session-status', 'Connecting\u2026');
 
-    // Left column: input row + transient resolve line + always-on staged count
-    // + staged pills + session status
+    // Stage section: input row + transient resolve line + always-on staged count
+    // + staged items + talking points + session status
     var skuMain = el('div', 'lensed-sku-main');
     skuMain.appendChild(skuRow);
     skuMain.appendChild(resolvedLabelEl);
@@ -698,15 +860,14 @@
     skuMain.appendChild(notesListEl);
     skuMain.appendChild(sessionStatusEl);
 
-    // Right column: large live ASP goal + smaller break-even underneath
+    // Right column of the stage section: compact ASP goal + break-even. Readable
+    // but sized so it doesn't overpower the staged SKUs on the left.
     var aspBox = el('div', 'lensed-asp');
-    var aspLabel = el('div', 'lensed-asp-label', 'ASP Goal');
+    aspBox.appendChild(el('div', 'lensed-asp-label', 'ASP goal'));
     aspValueEl = el('div', 'lensed-asp-value', '$0');
-    var beLabel = el('div', 'lensed-be-label', 'Break-even');
-    breakEvenValueEl = el('div', 'lensed-be-value', '$0');
-    aspBox.appendChild(aspLabel);
     aspBox.appendChild(aspValueEl);
-    aspBox.appendChild(beLabel);
+    aspBox.appendChild(el('div', 'lensed-be-label', 'Break-even'));
+    breakEvenValueEl = el('div', 'lensed-be-value', '$0');
     aspBox.appendChild(breakEvenValueEl);
 
     skuBar.appendChild(skuMain);
@@ -714,6 +875,7 @@
 
     // ── Sales list ───────────────────────────────────────────────
     var body = el('div', 'lensed-body');
+    body.appendChild(el('div', 'lensed-section-head', 'Recent orders'));
     salesListEl = el('div', '');
     var empty = el('div', 'lensed-empty', 'Waiting for sales\u2026');
     salesListEl.appendChild(empty);
@@ -722,7 +884,20 @@
     panel.appendChild(header);
     panel.appendChild(skuBar);
     panel.appendChild(body);
+    // Unobtrusive runtime version marker (muted, bottom-left corner) for testing.
+    var verStr = 'v?';
+    try { verStr = 'v' + chrome.runtime.getManifest().version; } catch (_) {}
+    panel.appendChild(el('span', 'lensed-version', verStr));
     shadowRoot.appendChild(panel);
+
+    // Floating reopen tab — shown only while the overlay is hidden (via the X).
+    // Lives in the same shadow root as the panel, so a re-inject always recreates
+    // it and the host can never get stuck with no way back.
+    var reopenTab = el('div', 'lensed-reopen-tab', 'Lensed');
+    reopenTab.title = 'Show Lensed overlay';
+    reopenTab.style.display = 'none';
+    reopenTab.addEventListener('click', function () { setHidden(false); });
+    shadowRoot.appendChild(reopenTab);
 
     // ── Dragging ─────────────────────────────────────────────────
     var dragging = false;
@@ -753,11 +928,123 @@
       panel.style.transition = '';
     });
 
+    // ── Resizing ─────────────────────────────────────────────────
+    // Top-left corner handle. The panel docks bottom-right, so at resize start we
+    // pin the current bottom-right corner and grow toward the top-left — the
+    // natural gesture for a bottom-docked panel, and it works whether or not the
+    // panel was previously dragged (drag anchors top-left). A separate `resizing`
+    // flag + its own listeners keep the header drag above untouched. It never
+    // touches skuInputEl, so scanner-input focus is unaffected. Min/max clamp in JS.
+    var resizeHandle = el('div', 'lensed-resize-handle');
+    resizeHandle.title = 'Resize';
+    panel.appendChild(resizeHandle);
+
+    var resizing = false;
+    var resizeStartX = 0, resizeStartY = 0, resizeStartW = 0, resizeStartH = 0;
+
+    function overlayMaxW() { return Math.min(OVERLAY_MAX_W, window.innerWidth - 32); }
+    function overlayMaxH() { return Math.min(OVERLAY_MAX_H, window.innerHeight - 32); }
+    function clampW(w) { return Math.max(OVERLAY_MIN_W, Math.min(overlayMaxW(), w)); }
+    function clampH(h) { return Math.max(OVERLAY_MIN_H, Math.min(overlayMaxH(), h)); }
+
+    // Persist size + Recent-Orders-hidden + whole-overlay-hidden together (guarded).
+    function persistPrefs() {
+      try {
+        chrome.storage.local.set({
+          lensed_overlay_size: overlaySize,
+          lensed_overlay_orders_hidden: ordersHidden,
+          lensed_overlay_hidden: hidden
+        });
+      } catch (_) {}
+    }
+
+    // Hide/show the whole overlay. Hidden → panel gone, floating tab shown.
+    function applyHidden() {
+      panel.style.display = hidden ? 'none' : '';
+      if (reopenTab) reopenTab.style.display = hidden ? '' : 'none';
+    }
+    function setHidden(v) {
+      hidden = v;
+      applyHidden();
+      persistPrefs();
+      if (!v) focusScanInput(); // reopening → ready to scan
+    }
+
+    // Apply the persisted (grip-resized) size whenever the overlay is open.
+    function applyOverlaySize() {
+      if (overlaySize && overlaySize.width && overlaySize.height) {
+        panel.style.width = clampW(overlaySize.width) + 'px';
+        panel.style.height = clampH(overlaySize.height) + 'px';
+        panel.style.maxHeight = 'none';
+      }
+    }
+
+    resizeHandle.addEventListener('mousedown', function (e) {
+      resizing = true;
+      var rect = panel.getBoundingClientRect();
+      resizeStartX = e.clientX;
+      resizeStartY = e.clientY;
+      resizeStartW = rect.width;
+      resizeStartH = rect.height;
+      // Pin the top-left corner so dragging the bottom-right grip grows down-right.
+      panel.style.left = rect.left + 'px';
+      panel.style.top = rect.top + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+      panel.style.maxHeight = 'none';
+      panel.style.transition = 'none';
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    document.addEventListener('mousemove', function (e) {
+      if (!resizing) return;
+      panel.style.width = clampW(resizeStartW + (e.clientX - resizeStartX)) + 'px';
+      panel.style.height = clampH(resizeStartH + (e.clientY - resizeStartY)) + 'px';
+    });
+
+    document.addEventListener('mouseup', function () {
+      if (!resizing) return;
+      resizing = false;
+      panel.style.transition = '';
+      var rect = panel.getBoundingClientRect();
+      overlaySize = { width: Math.round(rect.width), height: Math.round(rect.height) };
+      persistPrefs();
+    });
+
     document.body.appendChild(host);
 
     // Re-render staged pills + count if we had them before a re-inject
     renderStagedPills();
     updateStagedLabel();
+
+    // Reflect the current (module-scoped) prefs onto the freshly built DOM —
+    // correct immediately on SPA re-inject. On the first injection this page, also
+    // read chrome.storage.local once to hydrate those prefs, then re-apply.
+    function applyPrefs() {
+      panel.classList.toggle('orders-hidden', ordersHidden);
+      if (toggle) toggle.textContent = ordersHidden ? '+' : '−';
+      applyOverlaySize();
+      applyHidden();
+    }
+
+    applyPrefs();
+
+    if (!prefsLoaded) {
+      prefsLoaded = true;
+      try {
+        chrome.storage.local.get(
+          ['lensed_overlay_size', 'lensed_overlay_orders_hidden', 'lensed_overlay_hidden'],
+          function (data) {
+            if (chrome.runtime.lastError || !data) return;
+            if (typeof data.lensed_overlay_orders_hidden === 'boolean') ordersHidden = data.lensed_overlay_orders_hidden;
+            if (typeof data.lensed_overlay_hidden === 'boolean') hidden = data.lensed_overlay_hidden;
+            if (data.lensed_overlay_size) overlaySize = data.lensed_overlay_size;
+            applyPrefs();
+          }
+        );
+      } catch (_) {}
+    }
 
     // Request auth status from background
     try {
@@ -782,48 +1069,44 @@
     salesCount++;
     if (countEl) countEl.textContent = String(salesCount);
 
+    // Bound items for this order, preferring the session Map (survives re-render)
+    // and falling back to the bind-time snapshot passed by the caller.
+    var boundItems = (sale.orderId && sessionBoundSkus.get(sale.orderId)) ||
+      (boundSkus && boundSkus.length ? boundSkus : null);
+
     var row = el('div', 'lensed-sale' + (wasBound ? ' bound' : ''));
 
-    if (sale.imageUrl) {
-      var img = document.createElement('img');
-      img.className = 'lensed-sale-img';
-      img.src = sale.imageUrl;
-      img.alt = '';
-      img.loading = 'lazy';
-      row.appendChild(img);
-    }
-
-    var info = el('div', 'lensed-sale-info');
+    // \u2500\u2500 Line 1: "#order \u00B7 @buyer" (left, ellipsizes) + "price \u00B7 status" (right).
+    // Text-first \u2014 no thumbnail. All values via textContent (never innerHTML).
     var top = el('div', 'lensed-sale-top');
-    var product = el('span', 'lensed-sale-product', sale.productName || 'Unknown');
-    var price = el('span', 'lensed-sale-price', sale.sellingPrice || '$0');
-    top.appendChild(product);
-    top.appendChild(price);
 
-    var meta = el('div', 'lensed-sale-meta');
-    var metaParts = [];
-    if (sale.buyerUsername) metaParts.push('@' + sale.buyerUsername);
-    if (sale.platformSkuRef) metaParts.push('<span class="lensed-sale-sku">#' + sale.platformSkuRef + '</span>');
-    meta.innerHTML = metaParts.join(' \u00B7 ');
+    var leftParts = [];
+    if (sale.orderId) leftParts.push('#' + sale.orderId);
+    if (sale.buyerUsername) leftParts.push('@' + sale.buyerUsername);
+    var orderText = leftParts.join(' \u00B7 ');
+    var orderEl = el('span', 'lensed-sale-order', orderText || 'Order');
+    if (orderText) orderEl.title = orderText;
+    top.appendChild(orderEl);
 
-    if (sale.isPaymentSuccessful === false) {
-      var unpaid = el('span', 'lensed-sale-unpaid', ' UNPAID');
-      meta.appendChild(unpaid);
+    var right = el('span', 'lensed-sale-right');
+    right.appendChild(el('span', 'lensed-sale-price', sale.sellingPrice || '$0'));
+    right.appendChild(el('span', 'lensed-sale-sep', ' \u00B7 '));
+    var failed = sale.isPaymentSuccessful === false;
+    right.appendChild(el('span', failed ? 'lensed-sale-unpaid' : 'lensed-sale-status', failed ? 'Unpaid' : 'Paid'));
+    top.appendChild(right);
+
+    row.appendChild(top);
+
+    // \u2500\u2500 Line 2+: one line per bound item \u2014 "2\u00D7 iPad 9th Gen \u00B7 #14". Only present
+    // for orders bound during this page session (via the session Map).
+    if (boundItems && boundItems.length > 0) {
+      for (var i = 0; i < boundItems.length; i++) {
+        var itemText = skuLabel(boundItems[i]);
+        var itemEl = el('div', 'lensed-sale-item', itemText);
+        itemEl.title = itemText;
+        row.appendChild(itemEl);
+      }
     }
-
-    info.appendChild(top);
-    info.appendChild(meta);
-
-    // Bound tag uses the bind-time snapshot (staged pills may have been
-    // auto-cleared on a sold bind).
-    if (wasBound && boundSkus && boundSkus.length > 0) {
-      var boundTag = el('div', 'lensed-sale-bound-tag');
-      var skuNums = boundSkus.map(function (s) { return pillLabel(s); });
-      boundTag.textContent = '\u2192 ' + skuNums.join(', ');
-      info.appendChild(boundTag);
-    }
-
-    row.appendChild(info);
 
     salesListEl.insertBefore(row, salesListEl.firstChild);
     while (salesListEl.children.length > MAX_VISIBLE_SALES) {
@@ -876,21 +1159,52 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Overlay closed (✕) → scanner + shortcuts are inactive.
+    if (hidden) return;
     // Our input lives in the shadow DOM: when focused, shadowRoot.activeElement
-    // is the input (document.activeElement is just the host). Let it type.
+    // is the input — let its own listener handle typing/scans.
     if (shadowRoot && shadowRoot.activeElement === skuInputEl) return;
     // Don't hijack typing in the host page's own fields either.
     if (isEditableTarget(document.activeElement)) return;
 
-    if (e.key === '+') {
-      e.preventDefault();
-      addAnotherUnitOfLast();
-    } else if (e.key === '-') {
-      e.preventDefault();
-      removeLast();
-    } else if (e.key === '*') {
-      e.preventDefault();
-      rerunPrevious();
+    // Enter → commit a global wedge-scanner burst if it looks machine-fast.
+    if (e.key === 'Enter') {
+      if (globalLooksLikeScan()) {
+        e.preventDefault();
+        var scanned = gScanBuffer;
+        resetGlobalScan();
+        globalScanCommit(scanned);
+      } else {
+        resetGlobalScan();
+      }
+      return;
+    }
+
+    // Buffer printable single characters for wedge-scanner detection. We update
+    // the buffer FIRST so barcode chars (incl. the "-" in SKU<n>-<hex>) that
+    // arrive mid-burst are captured as scan data, not treated as shortcuts.
+    if (e.key && e.key.length === 1) {
+      var t = nowMs();
+      var interkey = t - gScanLast;
+      if (gScanCount === 0 || interkey > 100) { gScanFirst = t; gScanCount = 0; gScanBuffer = ''; }
+      gScanCount++;
+      gScanLast = t;
+      gScanBuffer += e.key;
+
+      // +/-/* shortcuts fire ONLY for a standalone press — never mid machine-burst.
+      // Barcodes are "SKU<n>-<hex>" (never START with +/-/*), so a burst's first
+      // char is a letter; a +/-/* arriving fast within a burst is scan data.
+      if (e.key === '+' || e.key === '-' || e.key === '*') {
+        var standalone = gScanCount <= 1 || interkey > SCAN_MAX_INTERKEY_MS;
+        if (standalone) {
+          e.preventDefault();
+          if (e.key === '+') addAnotherUnitOfLast();
+          else if (e.key === '-') removeLast();
+          else rerunPrevious();
+          resetGlobalScan(); // consumed as a shortcut, not part of a scan
+        }
+        // else: fast burst char → leave buffered, no shortcut, no preventDefault
+      }
     }
   }, true);
 
@@ -917,6 +1231,10 @@
 
       // Render in overlay
       renderSale(sale, wasBound, boundSkus);
+
+      // A bind just cleared staging — refocus so the host can scan the next item
+      // immediately (guarded: won't steal focus from TikTok chat/host fields).
+      if (boundSkus && boundSkus.length > 0) focusScanInput();
       return;
     }
 
