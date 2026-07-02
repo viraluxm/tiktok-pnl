@@ -49,8 +49,13 @@ export function useScanInput(onScan: (code: string) => void, opts: UseScanInputO
       const now = Date.now();
       if (e.key === 'Enter') {
         e.preventDefault();
-        const code = buf.current.trim();
+        let code = buf.current.trim();
         buf.current = '';
+        // Fallback: a hardware scanner fills the keystroke buffer (fast burst), but a
+        // human typist / paste trips the inter-char reset and leaves the buffer short.
+        // In that case use the focused input's actual .value so manual entry + paste work.
+        if (code.length < minLength && inputRef.current) code = (inputRef.current.value || '').trim();
+        if (inputRef.current) inputRef.current.value = '';
         if (code.length >= minLength) onScanRef.current(code);
         return;
       }
@@ -69,13 +74,13 @@ export function useScanInput(onScan: (code: string) => void, opts: UseScanInputO
   const inputProps = {
     ref: inputRef,
     onKeyDown,
-    onBlur: () => setTimeout(focus, 0),
+    onBlur: () => { setTimeout(focus, 0); },
     autoFocus: true,
     inputMode: 'none' as const,
     'aria-hidden': true,
     tabIndex: -1,
     // visually minimal but still focusable (display:none can't hold focus)
-    style: { position: 'absolute', opacity: 0, width: 1, height: 1, pointerEvents: 'none' as const },
+    style: { position: 'absolute', opacity: 0, width: 1, height: 1, pointerEvents: 'none' } as React.CSSProperties,
   };
 
   return { inputRef, inputProps, focus };

@@ -29,7 +29,7 @@ export async function POST(req: Request) {
   if (!foId || !FROM[action]) return NextResponse.json({ error: 'Missing fulfillmentOrderId or valid action' }, { status: 400 });
 
   const { data: box } = await supabase
-    .from('fulfillment_orders').select('id, status').eq('id', foId).eq('owner_user_id', user.id).maybeSingle();
+    .from('fulfillment_orders').select('id, status').eq('id', foId).maybeSingle(); // org RLS scopes visibility
   if (!box) return NextResponse.json({ error: 'Box not found' }, { status: 404 });
   if (!FROM[action].includes(box.status)) {
     return NextResponse.json({ error: 'ILLEGAL_TRANSITION', message: `Cannot ${action} from ${box.status}`, status: box.status }, { status: 409 });
@@ -43,7 +43,7 @@ export async function POST(req: Request) {
         : { status: 'shipped', shipped_at: new Date().toISOString(), exception_reason: null };
 
   const { error: uErr } = await supabase
-    .from('fulfillment_orders').update(patch).eq('id', foId).eq('owner_user_id', user.id);
+    .from('fulfillment_orders').update(patch).eq('id', foId);
   if (uErr) return NextResponse.json({ error: 'Failed to update', detail: uErr.message }, { status: 500 });
 
   return NextResponse.json({ ok: true, status: patch.status });

@@ -1,18 +1,18 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgId } from '@/lib/org';
+import { printLabel } from '@/lib/fulfillment/printLabel';
 
 export const dynamic = 'force-dynamic';
 
 const BUCKET = 'inventory-thumbnails';
 
-// POST { cubicleBarcode } — packer scans a cubicle at the station.
-//
-// Uses cubicle_state() (SECURITY DEFINER, no-leak) to branch WITHOUT exposing another
-// operator's order:
-//   'free'              → empty cubicle
-//   'occupied_by_other' → neutral "in use by another operator" (no order loaded)
-//   'mine'              → load the box + lines (RLS-visible), transition assigned→packing
+// POST { cubicleBarcode } — packer scans a cubicle at the station (the START action;
+// the pack-queue list is only a guide). ORG-SCOPED: loads whichever active box sits in
+// the scanned cubicle (either store) and, simultaneously:
+//   (a) triggers the label print (STUB — labels were pre-bought at "Buy labels"), and
+//   (b) returns the box's item cards for the packer's visual backstop check.
+// Empty cubicle → 'empty'. The scan IS the verification the bin matches the order.
 export async function POST(req: Request) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -31,27 +31,20 @@ export async function POST(req: Request) {
     .maybeSingle();
   if (!cubicle) return NextResponse.json({ error: 'UNKNOWN_CUBICLE', message: 'Cubicle barcode not recognized' }, { status: 404 });
 
-  const { data: state } = await supabase.rpc('cubicle_state', { p_cubicle: cubicle.id });
-
-  if (state === 'free') {
-    return NextResponse.json({ state: 'empty', cubicle_number: cubicle.cubicle_number, message: `Cubicle ${cubicle.cubicle_number} is empty` });
-  }
-  if (state === 'occupied_by_other') {
-    return NextResponse.json({ state: 'occupied_by_other', cubicle_number: cubicle.cubicle_number, message: `Cubicle ${cubicle.cubicle_number} is in use by another operator` });
-  }
-
-  // 'mine' — load the box (RLS guarantees it's ours) and move to packing.
+  // ORG-SHARED: load whichever active box sits in this cubicle (either store).
   const { data: box } = await supabase
     .from('fulfillment_orders')
     .select('id, group_key, order_ids, status, cubicle_id')
-    .eq('cubicle_id', cubicle.id).in('status', ['assigned', 'packing']).eq('owner_user_id', user.id)
+    .eq('cubicle_id', cubicle.id).in('status', ['assigned', 'packing'])
     .maybeSingle();
-  if (!box) return NextResponse.json({ error: 'Box not found for cubicle' }, { status: 404 });
+  if (!box) {
+    return NextResponse.json({ state: 'empty', cubicle_number: cubicle.cubicle_number, message: `Cubicle ${cubicle.cubicle_number} is empty` });
+  }
 
   const { data: lines } = await supabase
     .from('fulfillment_lines')
     .select('id, inventory_sku_id, required_qty, picked, picked_qty')
-    .eq('fulfillment_order_id', box.id).eq('owner_user_id', user.id);
+    .eq('fulfillment_order_id', box.id);
 
   // Enrich with inventory details for visual confirmation (items have no barcodes).
   const skuIds = (lines ?? []).map((l) => String(l.inventory_sku_id));
@@ -67,12 +60,17 @@ export async function POST(req: Request) {
   }
 
   if (box.status === 'assigned') {
-    await supabase.from('fulfillment_orders').update({ status: 'packing' }).eq('id', box.id).eq('owner_user_id', user.id);
+    await supabase.from('fulfillment_orders').update({ status: 'packing' }).eq('id', box.id);
   }
 
+  // Label prints AT scan time (stub) — pre-bought at "Buy labels". Items returned too,
+  // so print + visual backstop happen simultaneously.
+  const label = await printLabel({ group_key: box.group_key, order_ids: box.order_ids });
+
   return NextResponse.json({
-    state: 'mine',
+    state: 'loaded',
     cubicle_number: cubicle.cubicle_number,
+    label,
     fulfillment_order_id: box.id,
     group_key: box.group_key,
     order_ids: box.order_ids,
