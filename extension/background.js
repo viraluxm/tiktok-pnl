@@ -42,6 +42,15 @@ var cachedSkus = null;
 // missing and the insert path ran, this nonexistent SKU fails safe (no bad row).
 var TRANSITION_PLACEHOLDER_SKUS = [{ sku_id: '00000000-0000-0000-0000-000000000000', qty: 1 }];
 var authReady = false; // true once we've tried to rehydrate
+// Promise handle for the one-time startup rehydrate. Auth-dependent handlers
+// await this so a cold MV3 service worker never acts on null auth before the
+// stored session has been rehydrated — the root cause of the first scan falsely
+// reporting "SKU not found". Assigned at startup (bottom of file); guarded here
+// in case a handler somehow races that assignment.
+var authReadyPromise = null;
+function ensureAuthReady() {
+  return authReadyPromise || Promise.resolve();
+}
 
 // ─── JWT helpers ─────────────────────────────────────────────────────
 
@@ -192,29 +201,37 @@ async function persistAuth(at, rt) {
 }
 
 async function rehydrateAuth() {
-  var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID]);
-  if (data[SK_ACCESS_TOKEN]) {
-    accessToken = data[SK_ACCESS_TOKEN];
-    refreshToken = data[SK_REFRESH_TOKEN] || null;
-    userId = data[SK_USER_ID] || getUserIdFromToken(accessToken);
+  // Wrapped so a storage-read failure can never leave the worker "never ready":
+  // authReadyPromise resolves regardless, and awaiting handlers fall through to
+  // their own isAuthenticated() guards instead of throwing/hanging.
+  try {
+    var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID]);
+    if (data[SK_ACCESS_TOKEN]) {
+      accessToken = data[SK_ACCESS_TOKEN];
+      refreshToken = data[SK_REFRESH_TOKEN] || null;
+      userId = data[SK_USER_ID] || getUserIdFromToken(accessToken);
 
-    // If the stored access token is expired, try refreshing immediately
-    if (isTokenExpired(accessToken)) {
-      console.log('[LENSED][BG] rehydrated token is expired, refreshing...');
-      var refreshed = await tryRefreshToken();
-      if (!refreshed) {
-        console.warn('[LENSED][BG] rehydrate refresh failed — clearing auth');
-        accessToken = null;
-        refreshToken = null;
-        userId = null;
+      // If the stored access token is expired, try refreshing immediately
+      if (isTokenExpired(accessToken)) {
+        console.log('[LENSED][BG] rehydrated token is expired, refreshing...');
+        var refreshed = await tryRefreshToken();
+        if (!refreshed) {
+          console.warn('[LENSED][BG] rehydrate refresh failed — clearing auth');
+          accessToken = null;
+          refreshToken = null;
+          userId = null;
+        }
+      } else {
+        console.log('[LENSED][BG] auth rehydrated, user_id:', userId);
       }
     } else {
-      console.log('[LENSED][BG] auth rehydrated, user_id:', userId);
+      console.log('[LENSED][BG] no stored auth — waiting for relay from web app');
     }
-  } else {
-    console.log('[LENSED][BG] no stored auth — waiting for relay from web app');
+  } catch (e) {
+    console.error('[LENSED][BG] rehydrate storage read failed:', e);
+  } finally {
+    authReady = true;
   }
-  authReady = true;
 }
 
 async function tryRefreshToken() {
@@ -263,27 +280,49 @@ function isAuthenticated() {
 
 var SKU_COLS = 'select=id,sku_number,barcode,title,unit_cost_cents,qty_on_hand,live_seller_notes';
 
+// Normalize a typed/scanned term before lookup. Scanners can append hidden
+// control/zero-width characters and hosts may type a leading '#'; we also
+// uppercase because every barcode is generated uppercase (genBarcode in
+// src/app/api/inventory/skus/route.ts → "SKU<n>-<UPPERHEX>") and both the cache
+// match and PostgREST `barcode=eq.` are case-sensitive. sku_number is digits, so
+// uppercasing is a no-op for the numeric fallback.
+function normalizeScanTerm(term) {
+  var s = (term == null ? '' : String(term));
+  // Strip C0/C1 controls, DEL, and zero-width/joiner/BOM chars anywhere in the
+  // string — a scoped set (not a catch-all) so real barcode chars are untouched.
+  s = s.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200D\u2060\uFEFF]/g, '');
+  return s.trim().replace(/^#/, '').toUpperCase();
+}
+
 // Resolve a typed-or-scanned term: match barcode first (scanner path), then
 // fall back to sku_number (typed path). Term may be alphanumeric (a barcode).
+// Returns { sku, status } where status distinguishes a genuine miss ('not_found')
+// from a not-yet-signed-in worker ('not_authenticated') or a network error
+// ('error') — so the overlay never shows a premature "SKU not found".
 async function resolveSkuByNumber(term) {
-  var raw = (term == null ? '' : String(term)).trim();
-  if (!raw) return null;
+  var raw = normalizeScanTerm(term);
+  if (!raw) return { sku: null, status: 'empty' };
   var n = parseInt(raw, 10);
   var asNumber = (Number.isFinite(n) && n > 0) ? n : null;
 
-  // Check cache first: barcode, then sku_number.
+  // Check cache first: barcode, then sku_number. A warm worker resolves instantly.
   if (cachedSkus && cachedSkus.length > 0) {
     var byBarcode = cachedSkus.find(function (s) { return s.barcode === raw; });
-    if (byBarcode) return byBarcode;
+    if (byBarcode) return { sku: byBarcode, status: 'ok' };
     if (asNumber != null) {
       var byNum = cachedSkus.find(function (s) { return s.sku_number === asNumber; });
-      if (byNum) return byNum;
+      if (byNum) return { sku: byNum, status: 'ok' };
     }
   }
 
+  // Wait for the one-time startup rehydrate before judging auth. Without this, a
+  // scan that wakes a cold service worker races rehydrateAuth() and would report
+  // "not authenticated" → the false first-scan "SKU not found". Awaiting an
+  // already-settled promise on a warm worker is a no-op.
+  await ensureAuthReady();
   if (!isAuthenticated()) {
     console.warn('[LENSED][BG] not authenticated, cannot resolve SKU');
-    return null;
+    return { sku: null, status: 'not_authenticated' };
   }
 
   try {
@@ -305,16 +344,17 @@ async function resolveSkuByNumber(term) {
       var existing = cachedSkus.findIndex(function (s) { return s.id === rows[0].id; });
       if (existing >= 0) cachedSkus[existing] = rows[0];
       else cachedSkus.push(rows[0]);
-      return rows[0];
+      return { sku: rows[0], status: 'ok' };
     }
-    return null;
+    return { sku: null, status: 'not_found' };
   } catch (e) {
     console.error('[LENSED][BG] resolve SKU error:', e);
-    return null;
+    return { sku: null, status: 'error' };
   }
 }
 
 async function fetchAllSkus() {
+  await ensureAuthReady();
   if (!isAuthenticated()) return [];
   try {
     cachedSkus = await supabaseGet(
@@ -424,6 +464,10 @@ async function upsertCaptureEvent(sale, boundSkuId) {
 
 async function handleAutoBind(sale, stagedSkus) {
   if (!sale || !sale.orderId) return;
+
+  // A sale event can wake a cold worker; wait for the rehydrate so the
+  // isAuthenticated() gates below don't skip logging on the first bind.
+  await ensureAuthReady();
 
   // Status for this snapshot: a failed payment is not_sold, otherwise sold.
   // (This is exactly the p_result passed to lensed_log_auction below.)
@@ -546,10 +590,12 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'RESOLVE_SKU') {
-    resolveSkuByNumber(message.skuNumber).then(function (sku) {
-      sendResponse({ sku: sku });
+    // resolveSkuByNumber returns { sku, status }; forward it verbatim so the
+    // overlay can tell a genuine miss from a not-yet-authenticated worker.
+    resolveSkuByNumber(message.skuNumber).then(function (result) {
+      sendResponse(result);
     }).catch(function () {
-      sendResponse({ sku: null });
+      sendResponse({ sku: null, status: 'error' });
     });
     return true;
   }
@@ -580,14 +626,25 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'GET_AUTH_STATUS') {
-    sendResponse({ authenticated: isAuthenticated(), userId: userId });
+    // Wait for the startup rehydrate so a cold worker doesn't report a false
+    // "Not connected" on the overlay's first paint.
+    ensureAuthReady().then(function () {
+      sendResponse({ authenticated: isAuthenticated(), userId: userId });
+    });
     return true;
   }
 });
 
 // ─── Service worker startup: rehydrate auth from storage ─────────────
-rehydrateAuth().then(function () {
+// Capture the promise so auth-dependent handlers (resolveSkuByNumber,
+// fetchAllSkus, handleAutoBind, GET_AUTH_STATUS) can await it via
+// ensureAuthReady() — closing the cold-start race that made the first scan
+// falsely report "SKU not found".
+authReadyPromise = rehydrateAuth().then(function () {
   broadcastAuthStatus();
+}).catch(function (e) {
+  // ensureAuthReady() must always settle so no handler hangs on a rejected gate.
+  console.error('[LENSED][BG] startup rehydrate failed:', e);
 });
 
 console.log('[LENSED][BG] service worker started');
