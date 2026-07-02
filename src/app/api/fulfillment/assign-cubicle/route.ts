@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgId } from '@/lib/org';
+import { resolveActor } from '@/lib/fulfillment/resolveActor';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,11 +18,16 @@ export async function POST(req: Request) {
   const orgId = await getOrgId(supabase, user.id);
   if (!orgId) return NextResponse.json({ error: 'No organization' }, { status: 400 });
 
-  let body: { fulfillmentOrderId?: string; cubicleBarcode?: string };
+  let body: { fulfillmentOrderId?: string; cubicleBarcode?: string; override?: boolean; workerId?: string; shiftId?: string };
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
   const foId = typeof body.fulfillmentOrderId === 'string' ? body.fulfillmentOrderId : '';
   const cubicleBarcode = typeof body.cubicleBarcode === 'string' ? body.cubicleBarcode.trim() : '';
+  const override = body.override === true;
   if (!foId || !cubicleBarcode) return NextResponse.json({ error: 'Missing fulfillmentOrderId or cubicleBarcode' }, { status: 400 });
+
+  // Attribution actor (chunk 5): who completed the pick. Stamp if supplied, else no-op.
+  const actor = await resolveActor(supabase, orgId, body.workerId, body.shiftId);
+  if (!actor.ok) return NextResponse.json({ error: 'INVALID_ACTOR', message: actor.error }, { status: 400 });
 
   // Resolve cubicle (org-shared, active).
   const { data: cubicle } = await supabase
@@ -30,18 +36,30 @@ export async function POST(req: Request) {
     .maybeSingle();
   if (!cubicle) return NextResponse.json({ error: 'UNKNOWN_CUBICLE', message: 'Cubicle barcode not recognized' }, { status: 404 });
 
-  // Box must be fully picked before assignment.
+  // Box must be fully picked before assignment (org RLS scopes visibility).
   const { data: box } = await supabase
-    .from('fulfillment_orders').select('id, status').eq('id', foId).eq('owner_user_id', user.id).maybeSingle();
+    .from('fulfillment_orders').select('id, status, missing_order_ids').eq('id', foId).maybeSingle();
   if (!box) return NextResponse.json({ error: 'Box not found' }, { status: 404 });
   if (box.status !== 'fully_picked' && box.status !== 'assigned') {
     return NextResponse.json({ error: 'NOT_FULLY_PICKED', message: 'Scan all items before assigning a cubicle', status: box.status }, { status: 409 });
   }
+  // BLOCK COMPLETION while unbound orders remain — prevents a silent under-ship.
+  // Requires a deliberate override to proceed.
+  const unbound = (box.missing_order_ids as string[]) ?? [];
+  if (unbound.length > 0 && !override) {
+    return NextResponse.json({
+      error: 'UNBOUND_PRESENT',
+      unbound_count: unbound.length,
+      message: `${unbound.length} order(s) in this box have no scanned SKUs — bind them first, or override to assign anyway.`,
+    }, { status: 409 });
+  }
 
+  const patch: Record<string, unknown> = { cubicle_id: cubicle.id, status: 'assigned', assigned_at: new Date().toISOString() };
+  if (actor.workerId) { patch.picked_by = actor.workerId; patch.picked_via_shift = actor.shiftId; } // who completed the pick
   const { error: uErr } = await supabase
     .from('fulfillment_orders')
-    .update({ cubicle_id: cubicle.id, status: 'assigned', assigned_at: new Date().toISOString() })
-    .eq('id', foId).eq('owner_user_id', user.id);
+    .update(patch)
+    .eq('id', foId);
 
   if (uErr) {
     // 23505 = the cross-operator partial unique index → cubicle already holds an active box.
