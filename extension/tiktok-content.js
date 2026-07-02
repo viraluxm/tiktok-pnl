@@ -395,6 +395,23 @@
     resolvedLabelEl.className = 'lensed-resolved';
   }
 
+  // Resolve-line copy. A lookup shows MSG_SEARCHING while the background round-trip
+  // is in flight, so "SKU not found" is only ever shown AFTER a lookup completes
+  // and only for a genuine miss (status 'not_found'). Other terminal states get
+  // their own message instead of being mislabeled as not-found.
+  var MSG_SEARCHING = 'Searching…';
+  var MSG_NOT_FOUND = 'SKU not found';
+  var MSG_NOT_CONNECTED = 'Not connected — open Lensed app to sign in';
+  var MSG_LOOKUP_FAILED = 'Lookup failed — try again';
+
+  // Render the correct error line for a RESOLVE_SKU response that produced no SKU.
+  // Never shows "SKU not found" for an auth/error state.
+  function showResolveMiss(status) {
+    if (status === 'not_authenticated') { setResolveLine(MSG_NOT_CONNECTED, true); return; }
+    if (status === 'error') { setResolveLine(MSG_LOOKUP_FAILED, true); return; }
+    setResolveLine(MSG_NOT_FOUND, true); // 'not_found' (or anything else) → genuine miss
+  }
+
   // Shared identity label for a staged/bound SKU: "1× iPad 9th Gen · #14".
   // Quantity is ALWAYS shown (even 1×). Falls back to "1× #14" when the title is
   // empty. Long titles are handled by CSS ellipsis + a full-value hover, not here.
@@ -484,14 +501,21 @@
     return stagedCostCents() * 3;
   }
 
-  function formatDollars(cents) {
-    var d = (cents || 0) / 100;
-    return '$' + d.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  // Live-auction bids are whole dollars, so the ASP goal and break-even targets
+  // are shown as whole dollars too — standard nearest-dollar rounding ($12.49 →
+  // $12, $12.50 → $13, $12.75 → $13). Rounding is applied at DISPLAY time only:
+  // aspGoalCents()/stagedCostCents() keep returning exact cents and the bind/RPC
+  // money path uses raw unit_cost_cents, so this never affects stored/logged profit.
+  function formatBidGoalDollars(cents) {
+    var c = Number(cents);
+    if (!Number.isFinite(c) || c <= 0) return '$0';
+    var wholeDollars = Math.round(c / 100);
+    return '$' + wholeDollars.toLocaleString('en-US');
   }
 
   function updateAspGoal() {
-    if (aspValueEl) aspValueEl.textContent = formatDollars(aspGoalCents());
-    if (breakEvenValueEl) breakEvenValueEl.textContent = formatDollars(stagedCostCents());
+    if (aspValueEl) aspValueEl.textContent = formatBidGoalDollars(aspGoalCents());
+    if (breakEvenValueEl) breakEvenValueEl.textContent = formatBidGoalDollars(stagedCostCents());
   }
 
   // Show a red stock-limit message (used when an increment would exceed qty_on_hand).
@@ -589,15 +613,19 @@
       updateStagedLabel();
       return;
     }
+    setResolveLine(MSG_SEARCHING, false); // progress state \u2014 miss only after lookup
     try {
       chrome.runtime.sendMessage({ type: 'RESOLVE_SKU', skuNumber: trimmed }, function (resp) {
-        if (chrome.runtime.lastError) return;
+        if (chrome.runtime.lastError) { clearResolveLine(); return; }
+        // Ignore a stale reply if the field changed since this lookup fired (a
+        // newer keystroke supersedes it) \u2014 stops a slow reply clobbering it.
+        if (skuInputEl && (skuInputEl.value || '').trim().replace(/^#/, '') !== trimmed) return;
         if (resp && resp.sku) {
           pendingResolve = resp.sku;
           setResolveLine('\u2713 #' + resp.sku.sku_number + ' ' + (resp.sku.title || ''), false);
         } else {
           pendingResolve = null;
-          setResolveLine('SKU not found', true);
+          showResolveMiss(resp && resp.status);
         }
       });
     } catch (_) {}
@@ -610,14 +638,20 @@
     clearTimeout(debounceTimer); // cancel the trailing debounced resolve
     var trimmed = (value || '').trim().replace(/^#/, '');
     if (!trimmed) return;
+    setResolveLine(MSG_SEARCHING, false); // don't flash "not found" mid-lookup
     try {
       chrome.runtime.sendMessage({ type: 'RESOLVE_SKU', skuNumber: trimmed }, function (resp) {
-        if (chrome.runtime.lastError) return;
+        if (chrome.runtime.lastError) {
+          setResolveLine(MSG_LOOKUP_FAILED, true);
+          if (skuInputEl) skuInputEl.value = '';
+          pendingResolve = null;
+          return;
+        }
         if (resp && resp.sku) {
           pendingResolve = resp.sku;
-          stageCurrentSku(); // stages (or +1 qty); clears input on success
+          stageCurrentSku(); // stages (or +1 qty); clears input + resolve line on success
         } else {
-          setResolveLine('SKU not found', true);
+          showResolveMiss(resp && resp.status);
         }
         // Always leave the field clean and ready for the next scan.
         if (skuInputEl) skuInputEl.value = '';
@@ -631,14 +665,20 @@
   function globalScanCommit(value) {
     var trimmed = (value || '').trim().replace(/^#/, '');
     if (!trimmed) return;
+    setResolveLine(MSG_SEARCHING, false); // show progress; miss only after lookup
     try {
       chrome.runtime.sendMessage({ type: 'RESOLVE_SKU', skuNumber: trimmed }, function (resp) {
-        if (chrome.runtime.lastError) return;
+        if (chrome.runtime.lastError) {
+          setResolveLine(MSG_LOOKUP_FAILED, true);
+          pendingResolve = null;
+          focusScanInput();
+          return;
+        }
         if (resp && resp.sku) {
           pendingResolve = resp.sku;
           stageCurrentSku(); // stages (or +1 qty) via the existing path
         } else {
-          setResolveLine('SKU not found', true);
+          showResolveMiss(resp && resp.status);
         }
         pendingResolve = null;
         focusScanInput(); // ready for the next scan
@@ -799,6 +839,10 @@
 
       if (e.key === 'Enter') {
         e.preventDefault();
+        // Enter commits now, so cancel the still-armed trailing input-debounce —
+        // otherwise it fires a second, redundant resolve (and 'Searching…' write)
+        // ~200ms later for the same value.
+        clearTimeout(debounceTimer);
         // Scanner: value arrived as a machine-fast burst → auto-stage and reset.
         if (looksLikeScan()) {
           var scanned = skuInputEl.value;
