@@ -13,7 +13,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useScanInput } from '@/hooks/useScanInput';
+import { useFulfillmentShift } from '@/lib/fulfillment/shiftContext';
 
 interface Line {
   inventory_sku_id: string; sku_number: number | null; title: string; thumbnail_url: string | null;
@@ -58,6 +60,9 @@ export default function PickPage() {
 
   const allPicked = !!box && box.lines.length > 0 && box.lines.every((l) => l.picked);
 
+  const router = useRouter();
+  const shift = useFulfillmentShift(); // { workerId, shiftId, ... } — present since the shell gates on an active shift
+
   async function api(path: string, body?: unknown) {
     const res = await fetch(`/api/fulfillment/${path}`, {
       method: body === undefined ? 'GET' : 'POST',
@@ -65,6 +70,15 @@ export default function PickPage() {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     return { res, json: await res.json().catch(() => ({})) };
+  }
+
+  // Shift ended mid-action → server rejected it (INVALID_ACTOR), nothing stamped/applied.
+  // Make it unmistakable the action did NOT register, then send back to re-select.
+  function shiftEnded(json: { error?: string }): boolean {
+    if (json?.error !== 'INVALID_ACTOR') return false;
+    alert('Your shift ended — that action did NOT register. Re-select your name, then redo it.');
+    router.replace('/fulfillment');
+    return true;
   }
 
   const loadQueue = useCallback(async () => {
@@ -91,9 +105,10 @@ export default function PickPage() {
   async function scanSection(barcode: string, qty = 1) {
     if (!box) return;
     setBusy(true);
-    const { res, json } = await api('scan-section', { fulfillmentOrderId: box.fulfillment_order_id, sectionBarcode: barcode, qty });
+    const { res, json } = await api('scan-section', { fulfillmentOrderId: box.fulfillment_order_id, sectionBarcode: barcode, qty, workerId: shift?.workerId, shiftId: shift?.shiftId });
     setBusy(false);
     if (!res.ok) {
+      if (shiftEnded(json)) return;
       setMsg({ kind: 'error', text: json.error === 'WRONG_SECTION' ? `✗ Wrong section — ${json.message}` : json.error === 'UNKNOWN_SECTION' ? '✗ Section barcode not recognized' : (json.message || json.error || 'Scan failed') });
       return;
     }
@@ -120,9 +135,10 @@ export default function PickPage() {
   async function assignCubicle(barcode: string, override = false) {
     if (!box) return;
     setBusy(true);
-    const { res, json } = await api('assign-cubicle', { fulfillmentOrderId: box.fulfillment_order_id, cubicleBarcode: barcode, override });
+    const { res, json } = await api('assign-cubicle', { fulfillmentOrderId: box.fulfillment_order_id, cubicleBarcode: barcode, override, workerId: shift?.workerId, shiftId: shift?.shiftId });
     setBusy(false);
     if (!res.ok) {
+      if (shiftEnded(json)) return;
       if (json.error === 'CUBICLE_TAKEN') setMsg({ kind: 'error', text: `✗ Cubicle ${json.cubicle_number} is taken — scan a free cubicle.` });
       else if (json.error === 'UNKNOWN_CUBICLE') setMsg({ kind: 'error', text: '✗ Cubicle barcode not recognized.' });
       else if (json.error === 'NOT_FULLY_PICKED') setMsg({ kind: 'error', text: 'Scan all items before assigning a cubicle.' });

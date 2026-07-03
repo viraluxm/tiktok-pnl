@@ -15,7 +15,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useScanInput } from '@/hooks/useScanInput';
+import { useFulfillmentShift } from '@/lib/fulfillment/shiftContext';
 
 interface PackLine { id: string; inventory_sku_id: string; required_qty: number; picked_qty: number; sku_number?: number; title?: string; thumbnail_url?: string | null }
 interface LabelResult { mode: string; message: string; labelUrl: string | null }
@@ -42,6 +44,8 @@ export default function PackPage() {
   const [label, setLabel] = useState<LabelResult | null>(null);
   const [msg, setMsg] = useState<Msg>(null);
   const [busy, setBusy] = useState(false);
+  const router = useRouter();
+  const shift = useFulfillmentShift(); // { workerId, shiftId, ... } — present since the shell gates on an active shift
 
   async function api(path: string, body?: unknown) {
     const res = await fetch(`/api/fulfillment/${path}`, {
@@ -77,9 +81,12 @@ export default function PackPage() {
   async function confirmShip() {
     if (!loaded) return;
     setBusy(true);
-    const { res, json } = await api('confirm-ship', { fulfillmentOrderId: loaded.fulfillment_order_id });
+    const { res, json } = await api('confirm-ship', { fulfillmentOrderId: loaded.fulfillment_order_id, workerId: shift?.workerId, shiftId: shift?.shiftId });
     setBusy(false);
-    if (!res.ok) { setMsg({ kind: 'error', text: json.error || 'Failed to ship' }); return; }
+    if (!res.ok) {
+      if (json.error === 'INVALID_ACTOR') { alert('Your shift ended — this box was NOT shipped. Re-select your name, then redo it.'); router.replace('/fulfillment'); return; }
+      setMsg({ kind: 'error', text: json.error || 'Failed to ship' }); return;
+    }
     setMsg({ kind: 'ok', text: `Shipped ✓ — cubicle ${loaded.cubicle_number} freed.` });
     setLoaded(null); setLabel(null); loadQueue();
   }
