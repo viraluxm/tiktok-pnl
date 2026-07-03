@@ -23,6 +23,13 @@ var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm
 var SK_ACCESS_TOKEN = 'lensed_access_token';
 var SK_REFRESH_TOKEN = 'lensed_refresh_token';
 var SK_USER_ID = 'lensed_user_id';
+// Live-session identity — persisted so a Live Manager reload or MV3 service-worker
+// eviction RESUMES the same session instead of forking a new one. Auction
+// idempotency is scoped to (session_id, order_id), so re-binding an order under a
+// fresh session id would create a duplicate row / double-decrement inventory;
+// pinning the session id here prevents that.
+var SK_SESSION_ID = 'lensed_session_id';
+var SK_ROOM_ID = 'lensed_room_id';
 
 // ─── State ───────────────────────────────────────────────────────────
 var accessToken = null;
@@ -205,7 +212,7 @@ async function rehydrateAuth() {
   // authReadyPromise resolves regardless, and awaiting handlers fall through to
   // their own isAuthenticated() guards instead of throwing/hanging.
   try {
-    var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID]);
+    var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID]);
     if (data[SK_ACCESS_TOKEN]) {
       accessToken = data[SK_ACCESS_TOKEN];
       refreshToken = data[SK_REFRESH_TOKEN] || null;
@@ -223,6 +230,15 @@ async function rehydrateAuth() {
         }
       } else {
         console.log('[LENSED][BG] auth rehydrated, user_id:', userId);
+      }
+
+      // Restore the pinned live-session identity so a post-reload/eviction bind
+      // resumes the SAME session instead of creating a duplicate. Only when auth
+      // survived rehydrate (a cleared token above means don't resume a session).
+      if (accessToken) {
+        if (data[SK_SESSION_ID]) currentSessionId = data[SK_SESSION_ID];
+        if (data[SK_ROOM_ID]) currentRoomId = data[SK_ROOM_ID];
+        if (currentSessionId) console.log('[LENSED][BG] session restored:', currentSessionId);
       }
     } else {
       console.log('[LENSED][BG] no stored auth — waiting for relay from web app');
@@ -267,8 +283,9 @@ async function clearAuth() {
   refreshToken = null;
   userId = null;
   currentSessionId = null;
+  currentRoomId = null;
   cachedSkus = null;
-  await chrome.storage.local.remove([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID]);
+  await chrome.storage.local.remove([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID]);
   console.log('[LENSED][BG] auth cleared');
 }
 
@@ -384,6 +401,8 @@ async function getOrCreateSession() {
     if (rows && rows.length > 0) {
       currentSessionId = rows[0].id;
       console.log('[LENSED][BG] found open session:', currentSessionId);
+      persistSession();
+      broadcastSession();
       return currentSessionId;
     }
 
@@ -398,6 +417,8 @@ async function getOrCreateSession() {
     if (created && created.length > 0) {
       currentSessionId = created[0].id;
       console.log('[LENSED][BG] created session:', currentSessionId);
+      persistSession();
+      broadcastSession();
       return currentSessionId;
     }
     console.error('[LENSED][BG] session create returned empty');
@@ -547,6 +568,34 @@ function broadcastAuthStatus() {
   });
 }
 
+// Persist the resolved live-session identity so a reload / SW eviction resumes
+// the same session (see SK_SESSION_ID). Best-effort; failures are non-fatal.
+function persistSession() {
+  try {
+    var data = {};
+    data[SK_SESSION_ID] = currentSessionId || null;
+    data[SK_ROOM_ID] = currentRoomId || null;
+    chrome.storage.local.set(data);
+  } catch (_) {}
+}
+
+// Tell open TikTok tabs which live session they're attached to, so each overlay
+// can scope its persisted order counter to this session id.
+function broadcastSession() {
+  chrome.tabs.query({ url: 'https://shop.tiktok.com/*' }, function (tabs) {
+    if (chrome.runtime.lastError) return;
+    for (var i = 0; i < tabs.length; i++) {
+      try {
+        chrome.tabs.sendMessage(tabs[i].id, {
+          type: 'LENSED_SESSION',
+          sessionId: currentSessionId || null,
+          roomId: currentRoomId || null,
+        }).catch(function () {});
+      } catch (_) {}
+    }
+  });
+}
+
 // ─── External message handler (from Lensed web app) ──────────────────
 
 chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResponse) {
@@ -562,7 +611,12 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
   persistAuth(at, rt || '').then(function () {
     cachedSkus = null; // invalidate SKU cache for new user
     currentSessionId = null; // re-resolve session for new user
+    currentRoomId = null;
+    // Drop the previous user's pinned session/room so the new user never resumes
+    // it; broadcast the reset so overlays re-scope their counter.
+    try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID]); } catch (_) {}
     broadcastAuthStatus();
+    broadcastSession();
     sendResponse({ ok: true, userId: userId });
   });
 
@@ -578,6 +632,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     if (message.roomId && message.roomId !== currentRoomId) {
       currentRoomId = message.roomId;
       console.log('[LENSED][BG] room_id set:', currentRoomId);
+      persistSession();
     }
     return;
   }
@@ -629,7 +684,12 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     // Wait for the startup rehydrate so a cold worker doesn't report a false
     // "Not connected" on the overlay's first paint.
     ensureAuthReady().then(function () {
-      sendResponse({ authenticated: isAuthenticated(), userId: userId });
+      sendResponse({
+        authenticated: isAuthenticated(),
+        userId: userId,
+        sessionId: currentSessionId || null,
+        roomId: currentRoomId || null,
+      });
     });
     return true;
   }
