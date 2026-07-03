@@ -21,6 +21,8 @@ interface LiveOverlayProps {
   onBlockUser: (comment: LiveComment) => void;
   toast: string | null;
   showBidBump: boolean;
+  // When set (final seconds of the session), show the ending-soon countdown.
+  endingInSeconds?: number | null;
 }
 
 const RED = '#FE2C55';
@@ -221,6 +223,7 @@ export default function LiveOverlay({
   onBlockUser,
   toast,
   showBidBump,
+  endingInSeconds,
 }: LiveOverlayProps) {
   const [selected, setSelected] = useState<LiveComment | null>(null);
 
@@ -334,6 +337,20 @@ export default function LiveOverlay({
           </div>
         </div>
       </div>
+
+      {/* Final-seconds ending countdown warning */}
+      {endingInSeconds != null && (
+        <div className="pointer-events-none fixed inset-x-0 top-[16%] z-40 flex justify-center px-6">
+          <div
+            role="status"
+            aria-live="assertive"
+            className="rounded-2xl px-5 py-3 text-center text-[16px] font-bold text-white shadow-xl shadow-black/40 backdrop-blur-md motion-safe:animate-pulse"
+            style={{ backgroundColor: RED }}
+          >
+            Practice live ending in {endingInSeconds}…
+          </div>
+        </div>
+      )}
 
       {/* "User blocked" toast */}
       {toast && (

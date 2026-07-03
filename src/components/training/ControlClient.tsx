@@ -2,7 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { COMMENTS, type LiveComment } from './simulatorData';
-import { randomUsername, type TrainerEvent } from './trainerEvents';
+import {
+  SESSION_SECONDS,
+  SESSION_ENDING_SECONDS,
+  formatClock,
+  randomUsername,
+  type TrainerEvent,
+} from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import TrainerVideoView from './TrainerVideoView';
 
@@ -14,6 +20,12 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
   const [previewSeconds, setPreviewSeconds] = useState(0);
   const [previewSoldAt, setPreviewSoldAt] = useState<number | null>(null);
   const [previewComments, setPreviewComments] = useState<LiveComment[]>([]);
+
+  // Session mirror (host -> controller via `sessionState` broadcast). No local
+  // timer here: values update each time the host's existing session tick fires.
+  const [sessionSecondsLeft, setSessionSecondsLeft] = useState<number | null>(null);
+  const [sessionViewers, setSessionViewers] = useState(0);
+  const [sessionPhase, setSessionPhase] = useState<'idle' | 'running' | 'complete'>('idle');
 
   const secondsRef = useRef(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -52,6 +64,12 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
   // a local countdown approximates the host timer; bid 0 => start (10s),
   // bid > 0 => a bid landed (7s); !running with bid > 0 => sold, else idle.
   const { status, peerPresent, send } = useSessionChannel(sessionId, 'controller', (event: TrainerEvent) => {
+    if (event.action === 'sessionState') {
+      setSessionSecondsLeft(event.secondsLeft);
+      setSessionViewers(event.viewers);
+      setSessionPhase(event.phase);
+      return;
+    }
     if (event.action !== 'auctionState') return;
     if (event.running) {
       clearEndedTimer();
@@ -83,6 +101,19 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
   });
 
   const connected = status === 'connected';
+
+  // Session mirror, derived from the host broadcast. Elapsed counts UP from 0.
+  const showSessionStats = peerPresent && sessionPhase !== 'idle' && sessionSecondsLeft !== null;
+  const elapsedSeconds =
+    sessionSecondsLeft === null ? 0 : Math.max(0, SESSION_SECONDS - sessionSecondsLeft);
+  const endingInSeconds =
+    peerPresent &&
+    sessionPhase === 'running' &&
+    sessionSecondsLeft !== null &&
+    sessionSecondsLeft > 0 &&
+    sessionSecondsLeft <= SESSION_ENDING_SECONDS
+      ? sessionSecondsLeft
+      : null;
 
   // Stop the local timers on unmount (refs only — no reactive deps).
   useEffect(() => {
@@ -122,6 +153,18 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="min-h-[100dvh] bg-tt-bg px-4 py-6 text-tt-text">
+      {/* Final-seconds ending countdown warning (mirrors the host) */}
+      {endingInSeconds != null && (
+        <div className="pointer-events-none fixed inset-x-0 top-4 z-50 flex justify-center px-4">
+          <div
+            role="status"
+            aria-live="assertive"
+            className="rounded-2xl bg-[#FE2C55] px-5 py-3 text-[16px] font-bold text-white shadow-xl shadow-black/40 motion-safe:animate-pulse"
+          >
+            Practice live ending in {endingInSeconds}…
+          </div>
+        </div>
+      )}
       <div className="mx-auto w-full max-w-md lg:max-w-4xl">
         <header className="flex items-center justify-between">
           <h1 className="text-lg font-bold">Practice Controller</h1>
@@ -130,6 +173,25 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
             {connLabel}
           </span>
         </header>
+
+        {/* Live session mirror: elapsed time (counting up) + viewer count */}
+        {showSessionStats && (
+          <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-xl border border-tt-border bg-tt-card px-4 py-2.5 text-[13px] backdrop-blur-xl">
+            <span className="flex items-center gap-1.5 text-tt-muted">
+              Elapsed
+              <span className="font-semibold tabular-nums text-tt-text">
+                {formatClock(elapsedSeconds)}
+              </span>
+            </span>
+            <span className="flex items-center gap-1.5 text-tt-muted">
+              Viewers
+              <span className="font-semibold tabular-nums text-tt-text">{sessionViewers}</span>
+            </span>
+            {sessionPhase === 'complete' && (
+              <span className="font-medium text-tt-muted">· Practice ended</span>
+            )}
+          </div>
+        )}
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)] lg:items-start">
           {/* Live host camera preview */}
