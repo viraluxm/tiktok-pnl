@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
+import { kpiAllowlisted } from '@/lib/fulfillment/kpiAccess';
 
 interface Session { id: string; title: string; status: string; started_at: string | null; tiktok_live_id: string | null }
 
@@ -23,11 +24,13 @@ export default function PickPackEntry() {
   const [result, setResult] = useState<{ boxes_created: number; orders_selected: number; note: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [kpiOn, setKpiOn] = useState(false);
 
   useEffect(() => {
     supabase.from('live_sessions').select('id, title, status, started_at, tiktok_live_id')
       .order('started_at', { ascending: false })
       .then(({ data }) => setSessions((data as Session[]) ?? []));
+    kpiAllowlisted(supabase).then(setKpiOn);
   }, [supabase]);
 
   const loadOrders = useCallback(async (sid: string) => {
@@ -67,6 +70,7 @@ export default function PickPackEntry() {
           <nav className="flex gap-3 text-sm">
             <Link href="/pick" className="text-tt-cyan underline">Pick</Link>
             <Link href="/pack" className="text-tt-cyan underline">Pack</Link>
+            {kpiOn && <Link href="/pickpack/kpis" className="text-tt-cyan underline">Worker KPIs</Link>}
             <Link href="/pickpack/settings" className="text-tt-cyan underline">Settings</Link>
           </nav>
         </div>

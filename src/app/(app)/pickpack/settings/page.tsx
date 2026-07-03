@@ -12,8 +12,10 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { code128ToSvg } from '@/lib/barcode/code128';
+import { kpiAllowlisted } from '@/lib/fulfillment/kpiAccess';
 
 interface Cubicle { id: string; cubicle_number: number; cubicle_barcode: string; is_active: boolean }
 interface Section { id: string; section_barcode: string; inventory_sku_id: string; label: string | null; is_active: boolean }
@@ -45,6 +47,7 @@ export default function PickPackSettings() {
   const [newDevKind, setNewDevKind] = useState<'picker' | 'packer'>('picker');
   const [newDevLabel, setNewDevLabel] = useState('');
   const [provCode, setProvCode] = useState<string | null>(null); // one-time provisioning payload (base64)
+  const [kpiOn, setKpiOn] = useState(false);
 
   const load = useCallback(async () => {
     const { data: mem } = await supabase.from('organization_members').select('org_id').limit(1).maybeSingle();
@@ -64,6 +67,7 @@ export default function PickPackSettings() {
     setWorkers((w as Worker[]) ?? []);
     setDevices((d as Device[]) ?? []);
     setIsOwner(owner?.data === true);
+    kpiAllowlisted(supabase).then(setKpiOn);
   }, [supabase]);
 
   useEffect(() => { load(); }, [load]);
@@ -149,7 +153,10 @@ export default function PickPackSettings() {
     <div className="min-h-screen bg-tt-bg text-tt-text p-6">
       <style>{`@media print { body * { visibility: hidden; } .print-sheet, .print-sheet * { visibility: visible; } .print-sheet { position: absolute; left: 0; top: 0; width: 100%; } .no-print { display: none !important; } }`}</style>
       <div className="max-w-4xl mx-auto">
-        <h1 className="text-3xl font-bold mb-2">Pick/Pack settings</h1>
+        <div className="flex items-center justify-between mb-2">
+          <h1 className="text-3xl font-bold">Pick/Pack settings</h1>
+          {kpiOn && <Link href="/pickpack/kpis" className="text-sm text-tt-cyan underline">Worker KPIs →</Link>}
+        </div>
         <p className="text-sm text-tt-muted mb-6">Org-shared cubicles & shelf sections. Configure once, print the barcode sheets.</p>
         {msg && <div className="mb-5 rounded-lg border border-tt-border bg-tt-card-hover px-4 py-3 text-sm">{msg}</div>}
 
