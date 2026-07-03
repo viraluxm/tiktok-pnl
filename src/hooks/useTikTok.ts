@@ -17,6 +17,9 @@ interface TikTokConnection {
   syncProgressOrders: number;
   syncProgressDay: string | null;
   shopLogo: string | null;
+  syncError: string | null;
+  syncErrorAt: string | null;
+  needsReconnect: boolean;
 }
 
 interface TikTokStatusResponse {

@@ -253,6 +253,20 @@ export default function RealDashboard() {
       <div className="px-8 py-6">
         <TikTokConnect />
 
+        {/* Sync error banner — a broken sync is visible, not silent (fail-loud). */}
+        {connection?.syncError && (
+          <div className="mb-4 rounded-lg border border-tt-red/40 bg-tt-red/10 px-4 py-3 text-sm text-tt-red flex items-center justify-between gap-4">
+            <span>
+              {connection.needsReconnect
+                ? '⚠ Sync failed — reconnect your TikTok Shop. Recent orders may be missing until you reconnect.'
+                : `⚠ Sync incomplete (${connection.syncError}). Data may be behind; it will retry on the next sync.`}
+            </span>
+            {connection.needsReconnect && (
+              <a href="/api/tiktok/auth" className="shrink-0 px-3 py-1.5 rounded-lg bg-tt-red text-white text-xs font-semibold">Reconnect</a>
+            )}
+          </div>
+        )}
+
         {/* Ad Account Connection */}
         {SHOW_AD_SPEND_UI && isConnected && (
           <div className="mb-4 flex items-center gap-3">
