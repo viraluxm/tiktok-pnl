@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { getOrgId } from '@/lib/org';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,6 +18,13 @@ export async function POST(req: Request) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  // Inventory is ORG-SHARED (035b): a SKU pool row may be owned by the other
+  // operator yet referenced by this operator's sold lines. Resolve inventory by
+  // org, not user_id — the old user_id filter dropped cross-owner SKUs (e.g. 21/22
+  // of Abe's lines). RLS on inventory_skus is is_org_member(org_id), so this is safe.
+  const orgId = await getOrgId(supabase, user.id);
+  if (!orgId) return NextResponse.json({ error: 'No organization' }, { status: 400 });
 
   let body: { orderId?: string };
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
@@ -83,7 +91,7 @@ export async function POST(req: Request) {
     const { data: inv } = await supabase
       .from('inventory_skus')
       .select('id, sku_number, title, barcode, thumbnail_path')
-      .eq('user_id', user.id)
+      .eq('org_id', orgId)
       .in('id', skuIds);
     skus = (inv ?? []).map((s) => {
       const path = (s.thumbnail_path as string | null) ?? null;
