@@ -37,6 +37,17 @@
   var prefsLoaded = false;  // read chrome.storage prefs only once per page load
   var salesCount = 0;
 
+  // Dedup + persistence for the visible "Next order" counter (salesCount).
+  // seenOrderIds is the set of order_ids already counted this live: it stops
+  // duplicate relays and payment-status flips (failed→paid) from advancing the
+  // counter twice, and — once persisted and restored — stops TikTok's cumulative
+  // order re-poll from re-inflating the count after a Live Manager reload.
+  // counterSessionId scopes the persisted record to ONE live session, so a fresh
+  // live never inherits a previous live's number (chrome.storage key below).
+  var seenOrderIds = Object.create(null);
+  var counterSessionId = null;
+  var LK_COUNTER = 'lensed_live_counter';
+
   // Persisted overlay size (chrome.storage.local key `lensed_overlay_size`), set
   // only by the bottom-right resize grip. Cached in memory so SPA re-injects
   // re-apply instantly. Min/max are enforced in JS.
@@ -1096,7 +1107,10 @@
     try {
       chrome.runtime.sendMessage({ type: 'GET_AUTH_STATUS' }, function (resp) {
         if (chrome.runtime.lastError) return;
-        if (resp) updateAuthStatus(resp.authenticated, resp.userId);
+        if (resp) {
+          updateAuthStatus(resp.authenticated, resp.userId);
+          if (resp.sessionId) adoptSession(resp.sessionId);
+        }
       });
     } catch (_) {}
 
@@ -1112,8 +1126,16 @@
     var empty = salesListEl.querySelector('.lensed-empty');
     if (empty) empty.remove();
 
-    salesCount++;
-    if (countEl) countEl.textContent = String(salesCount);
+    // Count each order at most once per live. Duplicate relays and payment-status
+    // flips re-emit the same order_id and must NOT advance the visible counter;
+    // the row itself is still (re-)rendered below so its Paid/Unpaid state updates.
+    var countOrderId = sale && sale.orderId;
+    if (!countOrderId || !seenOrderIds[countOrderId]) {
+      if (countOrderId) seenOrderIds[countOrderId] = true;
+      salesCount++;
+      if (countEl) countEl.textContent = String(salesCount);
+      persistCounter();
+    }
 
     // Bound items for this order, preferring the session Map (survives re-render)
     // and falling back to the bind-time snapshot passed by the caller.
@@ -1158,6 +1180,53 @@
     while (salesListEl.children.length > MAX_VISIBLE_SALES) {
       salesListEl.removeChild(salesListEl.lastChild);
     }
+  }
+
+  // ── Live order counter: persistence + session scoping ───────────────
+  // The counter is otherwise in-memory only, so a Live Manager reload/crash
+  // restarts it at 0. Persist salesCount + the counted order_ids under one key,
+  // SCOPED to the live session id, and restore them when we re-attach to that
+  // same session. persistCounter is a no-op until the session id is known, so
+  // nothing durable is ever written unscoped.
+  function persistCounter() {
+    if (!counterSessionId) return;
+    try {
+      var rec = {};
+      rec[LK_COUNTER] = {
+        sessionId: counterSessionId,
+        salesCount: salesCount,
+        orderIds: Object.keys(seenOrderIds)
+      };
+      chrome.storage.local.set(rec);
+    } catch (_) {}
+  }
+
+  // Adopt the live session id reported by the background worker (via
+  // GET_AUTH_STATUS or a LENSED_SESSION broadcast). On a persisted record for the
+  // SAME session we restore the counter + dedup set (recovering across a reload).
+  // For a new session id we flush the current in-memory count under it, so the
+  // first live of a session starts clean and never inherits a prior live's number.
+  function adoptSession(sessionId) {
+    if (!sessionId || sessionId === counterSessionId) return;
+    counterSessionId = sessionId;
+    try {
+      chrome.storage.local.get([LK_COUNTER], function (data) {
+        if (chrome.runtime.lastError || !data) return;
+        var rec = data[LK_COUNTER];
+        if (rec && rec.sessionId === counterSessionId) {
+          seenOrderIds = Object.create(null);
+          if (Array.isArray(rec.orderIds)) {
+            for (var i = 0; i < rec.orderIds.length; i++) seenOrderIds[rec.orderIds[i]] = true;
+          }
+          salesCount = typeof rec.salesCount === 'number' ? rec.salesCount : rec.orderIds ? rec.orderIds.length : 0;
+          if (countEl) countEl.textContent = String(salesCount);
+          console.log('[LENSED][TT] counter restored for session', counterSessionId, '→', salesCount);
+        } else {
+          console.log('[LENSED][TT] counter scoped to new session', counterSessionId);
+          persistCounter();
+        }
+      });
+    } catch (_) {}
   }
 
   // ── Fullscreen-aware mount root ────────────────────────────────────
@@ -1338,6 +1407,9 @@
     if (!message || typeof message !== 'object') return;
     if (message.type === 'LENSED_AUTH_STATUS') {
       updateAuthStatus(message.authenticated, message.userId);
+    } else if (message.type === 'LENSED_SESSION') {
+      // Background resolved/changed the live session — scope our counter to it.
+      if (message.sessionId) adoptSession(message.sessionId);
     }
   });
 
