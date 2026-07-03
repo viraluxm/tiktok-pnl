@@ -12,23 +12,18 @@ import {
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import TrainerVideoView from './TrainerVideoView';
 
-// ---- Auto-bid randomness (module-level: stable identity, no per-render churn) ----
+// ---- Auto-bid tuning (module-level: stable identity, no per-render churn) ----
+// Auto-bidding sends realistic +$1 bids (like a real TikTok auction) and stops
+// once the bid reaches the cap. Randomness comes from timing, skipped attempts,
+// and random usernames — NOT from the bid amount.
+const AUTO_BID_MAX = 20; // stop auto-bidding once the current bid reaches $20
+const AUTO_BID_SKIP_CHANCE = 0.3; // ~30% of attempts send no bid (bursts & pauses)
+
 function randInt(min: number, max: number): number {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
-// Weighted, realistic bid amount in dollars. 0 = skip this tick (never sent as a
-// bid). Roughly ~25% skip, ~50% small ($1–5), ~18% medium ($6–15), ~7% large
-// ($16–40) — so it feels random, not a predictable increment.
-function nextAutoBidAmount(): number {
-  const r = Math.random();
-  if (r < 0.25) return 0;
-  if (r < 0.75) return randInt(1, 5);
-  if (r < 0.93) return randInt(6, 15);
-  return randInt(16, 40);
-}
-
-// Randomized inter-bid delay (ms) so the cadence never feels robotic.
+// Randomized inter-attempt delay (ms) so the cadence never feels robotic.
 function randomAutoBidDelay(): number {
   return randInt(800, 4500);
 }
@@ -56,6 +51,9 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const endedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commentIdRef = useRef(0);
+  // Live bid mirror in a ref so the auto-bidder can hard-stop at the cap without
+  // taking currentBid as an effect dependency (which would restart it each +$1).
+  const currentBidRef = useRef(0);
 
   const auctionRunning = previewPhase === 'running';
 
@@ -142,13 +140,18 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
 
   // Auto-bidding may ACTIVELY fire only while every safety condition holds. Any
   // stop condition — manual mode, auction not running, session complete, host
-  // gone, channel down — flips this false and tears the loop down (effect below).
+  // gone, channel down, OR the $20 cap reached — flips this false and tears the
+  // loop down (effect below). currentBid crossing the cap flips it exactly once
+  // (values 0–19 all keep it true, so the loop is NOT restarted on every +$1).
   const autoBidActive =
     autoBid &&
     connected &&
     peerPresent &&
     sessionPhase === 'running' &&
-    previewPhase === 'running';
+    previewPhase === 'running' &&
+    currentBid < AUTO_BID_MAX;
+  // Auto is on and an auction is running, but the $20 cap has been reached.
+  const autoBidCapped = autoBid && previewPhase === 'running' && currentBid >= AUTO_BID_MAX;
 
   // Stop the local timers on unmount (refs only — no reactive deps).
   useEffect(() => {
@@ -157,6 +160,12 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
       if (endedTimerRef.current) clearTimeout(endedTimerRef.current);
     };
   }, []);
+
+  // Keep the bid ref in sync so the auto-bid loop reads the live value without
+  // taking currentBid as an effect dependency (which would restart it each bid).
+  useEffect(() => {
+    currentBidRef.current = currentBid;
+  }, [currentBid]);
 
   // Auto-bidder: a single self-rescheduling timeout, gated entirely by
   // `autoBidActive`. When it becomes true the loop starts; when any stop
@@ -169,10 +178,13 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
     let timer: ReturnType<typeof setTimeout>;
     const tick = () => {
       if (cancelled) return;
-      const amount = nextAutoBidAmount();
-      if (amount > 0) {
-        // Reuse the exact manual send path; host applies + broadcasts the bid.
-        send({ action: 'placeBid', username: randomUsername(), amount });
+      // Hard cap guard: never bid at/above $20, even in the brief window before
+      // the cap flips autoBidActive. Stop the loop (don't reschedule).
+      if (currentBidRef.current >= AUTO_BID_MAX) return;
+      // Realistic: mostly +$1 bids with occasional skipped attempts. Omitting
+      // `amount` makes the host apply its standard +$1 — identical to a manual bid.
+      if (Math.random() >= AUTO_BID_SKIP_CHANCE) {
+        send({ action: 'placeBid', username: randomUsername() });
       }
       timer = setTimeout(tick, randomAutoBidDelay()); // reschedule with a fresh delay
     };
@@ -312,8 +324,10 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
               />
               <span className="text-tt-muted">
                 {autoBidActive
-                  ? 'Auto bidding on · random $0–$40'
-                  : 'Auto bidding armed — start an auction to begin'}
+                  ? 'Auto bidding on · +$1 bids · max $20'
+                  : autoBidCapped
+                    ? 'Auto bidding paused · max $20 reached'
+                    : 'Auto bidding armed — start an auction to begin'}
               </span>
             </div>
           )}
