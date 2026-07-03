@@ -4,26 +4,23 @@ import { useEffect, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import LiveOverlay from './LiveOverlay';
 import { HOST_NAME, type LiveComment } from './simulatorData';
-import { type TrainerEvent } from './trainerEvents';
+import {
+  SESSION_SECONDS,
+  SESSION_ENDING_SECONDS,
+  formatClock,
+  type TrainerEvent,
+} from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import { useVideoPublish } from '@/lib/training/useVideoPublish';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
 type AuctionPhase = 'idle' | 'running' | 'ended';
 
-const SESSION_SECONDS = 20 * 60; // 20-minute practice session
 const AUCTION_START_SECONDS = 10;
 const AUCTION_BID_RESET_SECONDS = 7;
 
 function jitter(magnitude: number): number {
   return Math.round((Math.random() - 0.5) * magnitude);
-}
-
-function formatClock(totalSeconds: number): string {
-  const safe = Math.max(0, totalSeconds);
-  const m = Math.floor(safe / 60);
-  const s = safe % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 function clearIntervalRef(ref: MutableRefObject<ReturnType<typeof setInterval> | null>) {
@@ -111,6 +108,18 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
 
   function broadcastAuctionState(running: boolean, bid: number, winner: string | null) {
     channelSend({ action: 'auctionState', running, bid, winner });
+  }
+
+  // The host owns the authoritative session clock + viewer count; mirror both to
+  // the controller (elapsed timer, viewer count, ending countdown). Emitted on
+  // the EXISTING per-second session tick — no extra timer.
+  function broadcastSessionState(phase: 'running' | 'complete') {
+    channelSend({
+      action: 'sessionState',
+      secondsLeft: Math.max(0, sessionSecondsRef.current),
+      viewers: viewersRef.current,
+      phase,
+    });
   }
 
   // Attaches the live stream whenever the <video> mounts/remounts.
@@ -284,11 +293,15 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       setSessionSeconds(sessionSecondsRef.current);
       if (sessionSecondsRef.current <= 0) {
         completePractice();
+      } else {
+        broadcastSessionState('running');
       }
     }, 1000);
 
     viewerTickRef.current = setInterval(updateViewers, 2500);
     updateViewers();
+    // Initial mirror so the controller isn't blank for up to a second.
+    broadcastSessionState('running');
   }
 
   function completePractice() {
@@ -297,6 +310,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     auctionActiveRef.current = false;
     setAuctionPhase('idle');
     setSessionState('complete');
+    // Tell the controller the live has ended (stops its elapsed timer + countdown,
+    // and is the clean stop-signal a future auto-bidder will hook into).
+    broadcastSessionState('complete');
   }
 
   async function startPractice() {
@@ -448,6 +464,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         onBlockUser={blockUser}
         toast={toast}
         showBidBump={showBidBump}
+        endingInSeconds={
+          sessionSeconds > 0 && sessionSeconds <= SESSION_ENDING_SECONDS ? sessionSeconds : null
+        }
       />
 
       {sessionState === 'complete' && (
