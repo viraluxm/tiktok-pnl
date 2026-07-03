@@ -23,7 +23,9 @@ export const SESSION_ENDING_SECONDS = 10;
 //                       sessionState (session clock, viewer count, lifecycle)
 export type TrainerEvent =
   | { action: 'comment'; username: string; text: string }
-  | { action: 'placeBid'; username: string }
+  // amount omitted => host applies the manual +$1 (unchanged). Auto-bidding sends
+  // a sanitized integer amount (host clamps to 1–40); $0 = skip, never sent.
+  | { action: 'placeBid'; username: string; amount?: number }
   | { action: 'startAuction' }
   | { action: 'resetAuction' }
   | { action: 'auctionState'; running: boolean; bid: number; winner: string | null }
