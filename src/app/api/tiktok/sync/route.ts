@@ -38,7 +38,13 @@ export async function POST() {
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
 
-  // Sync shop logo via Business API (GMV Max store/list has thumbnail_url)
+  // Sync shop logo via Business API (GMV Max store/list has thumbnail_url).
+  // Option A (matched-only): the store list belongs to the ADS advertiser, which can cover a
+  // different brand than THIS TikTok Shop (e.g. a lots-of-steals login whose only business
+  // connection is Snore's advertiser). Only adopt a logo from a store that actually MATCHES
+  // this connection (by shop name or cipher/id); if the advertiser has stores but none match,
+  // CLEAR shop_logo rather than show the wrong brand (the UI falls back to a neutral
+  // placeholder). Proper long-term fix is a shop-native logo source (TikTok Shop API) — backlog.
   try {
     const { data: bizConn } = await admin.from('tiktok_business_connections').select('access_token, advertiser_id').eq('user_id', userId).single();
     if (bizConn?.advertiser_id) {
@@ -48,10 +54,27 @@ export async function POST() {
       });
       const storeJson = await storeRes.json();
       const stores = (storeJson.data?.store_list || []) as Array<Record<string, unknown>>;
-      if (stores[0]?.thumbnail_url) {
-        await admin.from('tiktok_connections').update({ shop_logo: String(stores[0].thumbnail_url) }).eq('user_id', userId);
-        console.log('[Sync] Shop logo synced');
+
+      // Match a store to THIS connection by name or id/cipher (case-insensitive, defensive on
+      // field names since the store object shape is loosely typed).
+      const norm = (v: unknown) => String(v ?? '').trim().toLowerCase();
+      const shopName = norm(connection.shop_name);
+      const shopCipher = norm(connection.shop_cipher);
+      const matched = stores.find((st) => {
+        const nameHit = !!shopName && [st.store_name, st.name, st.shop_name].some((f) => norm(f) === shopName);
+        const idHit = !!shopCipher && [st.store_id, st.store_code, st.shop_id, st.shop_code, st.id].some((f) => norm(f) === shopCipher);
+        return nameHit || idHit;
+      });
+
+      if (matched?.thumbnail_url) {
+        await admin.from('tiktok_connections').update({ shop_logo: String(matched.thumbnail_url) }).eq('user_id', userId);
+        console.log('[Sync] Shop logo matched + synced');
+      } else if (stores.length > 0) {
+        // Advertiser returned stores but none is this shop → clear the stale wrong-brand logo.
+        await admin.from('tiktok_connections').update({ shop_logo: null }).eq('user_id', userId);
+        console.log('[Sync] No matching advertiser store — shop logo cleared');
       }
+      // stores empty (or a thrown fetch) → learned nothing; leave shop_logo untouched.
     }
   } catch (err) {
     console.log('[Sync] Shop logo fetch failed:', (err as Error).message);

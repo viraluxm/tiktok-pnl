@@ -171,22 +171,6 @@ export default function TikTokConnect() {
                   </button>
                 </div>
               </div>
-
-              <div className="border-t border-tt-border" />
-
-              {/* Add Store */}
-              <a
-                href="/api/tiktok/auth"
-                className="flex items-center gap-3 px-6 py-3.5 text-sm text-tt-cyan hover:bg-[rgba(105,201,208,0.05)] transition-colors"
-              >
-                <div className="w-10 h-10 rounded-xl border-2 border-dashed border-tt-cyan/30 flex items-center justify-center">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="12" y1="5" x2="12" y2="19" />
-                    <line x1="5" y1="12" x2="19" y2="12" />
-                  </svg>
-                </div>
-                <span className="font-semibold">Add Store</span>
-              </a>
             </div>
           )}
         </div>

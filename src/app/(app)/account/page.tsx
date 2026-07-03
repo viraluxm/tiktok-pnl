@@ -75,10 +75,6 @@ export default function AccountPage() {
     setPasswordLoading(false);
   }
 
-  // Mock plan data (will be replaced with real subscription data)
-  const currentPlan = 'Pro';
-  const shopsCount = 1;
-
   return (
     <div className="min-h-screen bg-tt-bg">
       <Header />
@@ -193,27 +189,6 @@ export default function AccountPage() {
             )}
           </div>
 
-          {/* Current Plan */}
-          <div className="border-b border-tt-border py-6">
-            <div className="flex items-start justify-between">
-              <div className="flex items-start gap-3">
-                <span className="text-tt-muted mt-0.5"><PlanIcon /></span>
-                <div>
-                  <p className="text-xs text-tt-muted uppercase tracking-wide mb-1">Current Plan</p>
-                  <p className="text-tt-text font-semibold">{currentPlan}</p>
-                  <p className="text-xs text-tt-cyan">{shopsCount} {shopsCount === 1 ? 'Shop' : 'Shops'} Active</p>
-                </div>
-              </div>
-              <button
-                onClick={() => router.push('/plans')}
-                className="px-3 py-1.5 rounded-lg border border-tt-border text-tt-text text-xs font-medium hover:bg-tt-card-hover transition-all flex items-center gap-1.5"
-              >
-                <PlanIcon size={12} />
-                Manage Plan
-              </button>
-            </div>
-          </div>
-
           {/* Member Since */}
           <AccountRow
             icon={<CalendarIcon />}
@@ -263,15 +238,6 @@ function LockIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
       <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-    </svg>
-  );
-}
-
-function PlanIcon({ size = 16 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="2" y="5" width="20" height="14" rx="2"/>
-      <line x1="2" y1="10" x2="22" y2="10"/>
     </svg>
   );
 }

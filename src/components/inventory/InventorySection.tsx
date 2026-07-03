@@ -484,15 +484,6 @@ export default function InventorySection() {
                   className="input disabled:opacity-50"
                 />
               </Field>
-              <Field label="Shortcut">
-                <input
-                  value={form.shortcut_letter}
-                  onChange={(e) => setForm((f) => ({ ...f, shortcut_letter: e.target.value.toUpperCase() }))}
-                  maxLength={2}
-                  placeholder="A"
-                  className="input uppercase"
-                />
-              </Field>
               <Field label="Title" className="col-span-2">
                 <input
                   value={form.title}
@@ -506,11 +497,11 @@ export default function InventorySection() {
                   {/* FIFO: cost is per-layer and qty = Σ layers — both read-only here,
                       managed via the cost layers below. */}
                   <Field label="Unit cost">
-                    <div className="input flex items-center text-tt-muted" title="Cost is tracked per layer — see Cost layers below">
-                      Per layer ↓
+                    <div className="input flex items-center text-tt-muted" title="Under FIFO, unit cost is tracked per cost layer (oldest layer sells first). Set it in the Cost layers section below.">
+                      Set per cost layer below ↓
                     </div>
                   </Field>
-                  <Field label="Qty on hand (Σ layers)">
+                  <Field label="Total on hand (all cost layers)">
                     <div className={`input flex items-center justify-end tabular-nums ${(editingSku?.qty_on_hand ?? 0) < 0 ? 'text-tt-red font-semibold' : 'text-tt-muted'}`}>
                       {editingSku?.qty_on_hand ?? 0}
                     </div>
@@ -545,7 +536,7 @@ export default function InventorySection() {
             <div className="mt-5 rounded-xl border border-tt-border bg-tt-bg/40 p-4">
               <div className="flex items-baseline justify-between mb-2">
                 <span className="text-xs font-semibold text-tt-text">Cost layers (FIFO)</span>
-                <span className="text-[11px] text-tt-muted">a sale draws fully from the oldest layer that can cover it · total = Σ layers = {editingSku.qty_on_hand ?? 0}</span>
+                <span className="text-[11px] text-tt-muted">oldest layer sells first · total on hand across all cost layers = {editingSku.qty_on_hand ?? 0}</span>
               </div>
               <div className="space-y-1.5 mb-3">
                 {editingSku.batches.length === 0 ? (
@@ -674,7 +665,6 @@ export default function InventorySection() {
                   />
                 </th>
                 <th className="text-left font-medium px-4 py-3">SKU</th>
-                <th className="text-left font-medium px-4 py-3">Shortcut</th>
                 <th className="text-left font-medium px-4 py-3">Item</th>
                 <th className="text-right font-medium px-4 py-3">Unit cost</th>
                 <th className="text-right font-medium px-4 py-3">Qty</th>
@@ -698,15 +688,6 @@ export default function InventorySection() {
                     />
                   </td>
                   <td className="px-4 py-3 font-mono text-tt-muted">{s.sku_number}</td>
-                  <td className="px-4 py-3">
-                    {s.shortcut_letter ? (
-                      <span className="inline-flex items-center justify-center min-w-6 h-6 px-1.5 rounded-md bg-tt-cyan/15 text-tt-cyan text-xs font-bold">
-                        {s.shortcut_letter}
-                      </span>
-                    ) : (
-                      <span className="text-tt-muted">—</span>
-                    )}
-                  </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-3 min-w-0">
                       <Thumb url={s.thumbnail_url} />

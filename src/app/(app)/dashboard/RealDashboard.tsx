@@ -20,13 +20,12 @@ import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
 import ReturnsTab from '@/components/dashboard/ReturnsTab';
 import ShowsTab from '@/components/shows/ShowsTab';
-import ShippingTab from '@/components/shipping/ShippingTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'inventory' | 'shows' | 'shipping' | 'returns';
+type ViewTab = 'dashboard' | 'inventory' | 'shows' | 'returns';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -238,7 +237,6 @@ export default function RealDashboard() {
     { label: 'Dashboard', value: 'dashboard' },
     { label: 'Inventory', value: 'inventory' },
     { label: 'Shows', value: 'shows' },
-    { label: 'Shipping', value: 'shipping' },
     { label: 'Returns', value: 'returns' },
   ];
 
@@ -342,11 +340,6 @@ export default function RealDashboard() {
 
         {/* Shows View */}
         {activeView === 'shows' && <ShowsTab />}
-
-        {/* Shipping View */}
-        {activeView === 'shipping' && (
-          <ShippingTab />
-        )}
 
         {/* Returns View */}
         {activeView === 'returns' && (
