@@ -30,16 +30,32 @@ var SK_USER_ID = 'lensed_user_id';
 // pinning the session id here prevents that.
 var SK_SESSION_ID = 'lensed_session_id';
 var SK_ROOM_ID = 'lensed_room_id';
+// When the session was last pinned (ms). On restore we discard a session pinned
+// longer ago than the reuse cutoff, so a session left 'live' from a previous day is
+// never resumed — even for the same room.
+var SK_SESSION_TS = 'lensed_session_ts';
 
 // ─── State ───────────────────────────────────────────────────────────
 var accessToken = null;
 var refreshToken = null;
 var userId = null;
-var currentRoomId = null;
+var currentRoomId = null;          // the live's DETECTED tiktok room (from the page)
 var currentSessionId = null;
+// Room that currentSessionId is scoped to (persisted as SK_ROOM_ID). A session is
+// reused ONLY when the detected room matches this — so a new live (new tiktok room)
+// never attaches its orders to a previous live's session. On rehydrate the restored
+// session stays "pending room confirmation" (currentRoomId is left null) until the
+// page reports a room that matches.
+var sessionRoomId = null;
 var loggedOrderStatus = new Map(); // order_id -> last logged status ('sold' | 'not_sold')
 var loggedOrderSession = new Map(); // order_id -> session_id of the row we logged (for flip transitions)
 var cachedSkus = null;
+
+// Never auto-reuse an extension-created session older than this. A session left in
+// 'live' for days (the extension never calls /end) must NOT be adopted for a new
+// day's live — even if a room id somehow recurred. Beyond the cutoff we create a
+// fresh room-scoped session instead.
+var SESSION_REUSE_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h
 
 // A status-flip transition (e.g. failed→paid) re-calls the RPC to flip an
 // EXISTING row; migration 027's transition path decrements the originally-bound
@@ -212,7 +228,7 @@ async function rehydrateAuth() {
   // authReadyPromise resolves regardless, and awaiting handlers fall through to
   // their own isAuthenticated() guards instead of throwing/hanging.
   try {
-    var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID]);
+    var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
     if (data[SK_ACCESS_TOKEN]) {
       accessToken = data[SK_ACCESS_TOKEN];
       refreshToken = data[SK_REFRESH_TOKEN] || null;
@@ -236,9 +252,24 @@ async function rehydrateAuth() {
       // resumes the SAME session instead of creating a duplicate. Only when auth
       // survived rehydrate (a cleared token above means don't resume a session).
       if (accessToken) {
+        // Restore the pinned session AND the room it was scoped to. Do NOT set
+        // currentRoomId — the live's DETECTED room is unknown until the page reports
+        // it, so the restored session stays "pending room confirmation" and is reused
+        // only once a detected room matches sessionRoomId (see getOrCreateSession and
+        // the TIKTOK_ROOM handler). This is what stops a reload/eviction from adopting
+        // a stale session for a DIFFERENT live.
         if (data[SK_SESSION_ID]) currentSessionId = data[SK_SESSION_ID];
-        if (data[SK_ROOM_ID]) currentRoomId = data[SK_ROOM_ID];
-        if (currentSessionId) console.log('[LENSED][BG] session restored:', currentSessionId);
+        if (data[SK_ROOM_ID]) sessionRoomId = data[SK_ROOM_ID];
+        // Stale-cutoff on the restored session: a session pinned longer ago than the
+        // reuse window (e.g. left 'live' from a previous day) must not be resumed.
+        var pinnedTs = Number(data[SK_SESSION_TS]) || 0;
+        if (currentSessionId && (!pinnedTs || (Date.now() - pinnedTs) > SESSION_REUSE_MAX_AGE_MS)) {
+          console.log('[LENSED][BG] restored session too old — discarding:', currentSessionId);
+          currentSessionId = null;
+          sessionRoomId = null;
+        } else if (currentSessionId) {
+          console.log('[LENSED][BG] session restored (pending room confirmation):', currentSessionId, 'room', sessionRoomId);
+        }
       }
     } else {
       console.log('[LENSED][BG] no stored auth — waiting for relay from web app');
@@ -284,8 +315,9 @@ async function clearAuth() {
   userId = null;
   currentSessionId = null;
   currentRoomId = null;
+  sessionRoomId = null;
   cachedSkus = null;
-  await chrome.storage.local.remove([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID]);
+  await chrome.storage.local.remove([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
   console.log('[LENSED][BG] auth cleared');
 }
 
@@ -385,38 +417,66 @@ async function fetchAllSkus() {
   }
 }
 
-async function getOrCreateSession() {
-  if (currentSessionId) return currentSessionId;
+// Resolve (or create) the live session for a specific tiktok room. `roomId` is the
+// authoritative room for THIS order (passed from the sale payload); it defends
+// against a stale in-memory/persisted session even before a TIKTOK_ROOM arrives.
+async function getOrCreateSession(roomId) {
+  var room = roomId || currentRoomId || null;
+
+  // Reuse the in-memory session ONLY when it is scoped to the SAME room. A session
+  // pinned to a different room (e.g. a restored one from a previous live) is never
+  // reused for a new room's orders.
+  if (currentSessionId && sessionRoomId && room && sessionRoomId === room) {
+    return currentSessionId;
+  }
   if (!isAuthenticated()) {
     console.warn('[LENSED][BG] not authenticated, cannot get/create session');
     return null;
   }
+  if (!room) {
+    // Conservative: with no known room we refuse to adopt a (possibly stale) session
+    // or create an unscoped one. The order is still written to capture_events; it is
+    // simply not bound to an auction item until a room is known.
+    console.warn('[LENSED][BG] room unknown — refusing to bind to a session (order captured only)');
+    return null;
+  }
 
   try {
-    // Find open session
+    // Reuse ONLY a recent, extension-created, still-open session for THIS exact room.
+    var cutoffIso = new Date(Date.now() - SESSION_REUSE_MAX_AGE_MS).toISOString();
     var rows = await supabaseGet(
       'live_sessions',
-      "select=id,status&status=in.(draft,live)&order=started_at.desc&limit=1"
+      'select=id,status,tiktok_live_id,started_at'
+        + '&tiktok_live_id=eq.' + encodeURIComponent(room)
+        + '&status=in.(draft,live)&source=eq.extension'
+        + '&started_at=gte.' + encodeURIComponent(cutoffIso)
+        + '&order=started_at.desc&limit=1'
     );
     if (rows && rows.length > 0) {
       currentSessionId = rows[0].id;
-      console.log('[LENSED][BG] found open session:', currentSessionId);
+      sessionRoomId = room;
+      console.log('[LENSED][BG] reusing room-scoped session:', currentSessionId, 'room', room);
       persistSession();
       broadcastSession();
       return currentSessionId;
     }
 
-    // Create new
+    // No recent room-scoped session → create a new one, tagged with this room.
     var created = await supabasePost('live_sessions', {
       user_id: userId,
       title: 'TikTok Live',
       status: 'live',
       started_at: new Date().toISOString(),
       source: 'extension',
+      tiktok_live_id: room,
+      // store_id intentionally omitted — it is not known client-side. Production
+      // populates it out-of-band (DB default/trigger). Do NOT add an API round-trip
+      // just to fetch it in this PR.
     });
     if (created && created.length > 0) {
       currentSessionId = created[0].id;
-      console.log('[LENSED][BG] created session:', currentSessionId);
+      sessionRoomId = room;
+      console.log('[LENSED][BG] created room-scoped session:', currentSessionId, 'room', room);
       persistSession();
       broadcastSession();
       return currentSessionId;
@@ -521,8 +581,10 @@ async function handleAutoBind(sale, stagedSkus) {
     console.log('[LENSED][BG] status flip — re-calling RPC for transition:', sale.orderId, prevToken, '->', result);
     await logAuction(flipSession, result, TRANSITION_PLACEHOLDER_SKUS, sale.orderId);
   } else if (stagedSkus && stagedSkus.length > 0 && isAuthenticated()) {
-    // ── Fresh bind (unchanged): requires staged SKUs ────────────────────────
-    var sessionId = await getOrCreateSession();
+    // ── Fresh bind: requires staged SKUs + a room-scoped session ───────────────
+    // Pass the sale's own room so a stale in-memory/persisted session (different
+    // room) is never reused for this order — the July-3 root cause.
+    var sessionId = await getOrCreateSession(sale.roomId);
     if (sessionId) {
       // Aggregate by sku_id, summing per-pill qty (qty defaults to 1 if absent).
       var byId = {};
@@ -538,13 +600,32 @@ async function handleAutoBind(sale, stagedSkus) {
       // then neither decrements inventory (decrement is gated on p_result='sold')
       // nor counts it toward sold totals/profit. On a later paid re-send the flip
       // branch above transitions it once (migration 027).
-      await logAuction(sessionId, result, pSkus, sale.orderId);
-      // Remember the session we created the row in so a later flip can target it.
-      loggedOrderSession.set(sale.orderId, sessionId);
-      boundSkuId = stagedSkus.length === 1 ? stagedSkus[0].id : null;
+      var logRow = await logAuction(sessionId, result, pSkus, sale.orderId);
+      if (logRow) {
+        // Only record success on an actual bind so a later flip can target it.
+        loggedOrderSession.set(sale.orderId, sessionId);
+        boundSkuId = stagedSkus.length === 1 ? stagedSkus[0].id : null;
+      } else {
+        // Bind failed (RPC error/empty). Don't fake success: roll back the status
+        // dedup so an identical re-send RETRIES instead of being silently skipped,
+        // and surface it (the order still lands in capture_events below).
+        loggedOrderStatus.delete(sale.orderId);
+        console.error('[LENSED][BG] BIND FAILED — order captured only (will retry on re-send):', sale.orderId, 'session', sessionId);
+      }
+    } else {
+      // Staged SKUs existed but no room-scoped session could be resolved (e.g. room
+      // unknown). Roll back dedup so a retry can bind once a room is known.
+      loggedOrderStatus.delete(sale.orderId);
+      console.warn('[LENSED][BG] no room-scoped session — order captured only (will retry):', sale.orderId);
     }
   } else if (!isAuthenticated()) {
-    console.warn('[LENSED][BG] not authenticated — sale captured but not logged to lensed_log_auction');
+    console.warn('[LENSED][BG] not authenticated — sale captured but not logged to lensed_log_auction:', sale.orderId);
+  } else {
+    // Authenticated, a real new/changed order, but NOTHING was staged → the order is
+    // captured raw and NOT bound to an auction item. Surface it (the overlay shows a
+    // visible warning; this is the background-side diagnostic) instead of silently
+    // dropping the SKU/COGS link — the July-3 captured-only failure mode.
+    console.warn('[LENSED][BG] no staged SKUs — order captured only, NOT bound to an auction item:', sale.orderId);
   }
 
   // Always upsert to capture_events (raw audit log)
@@ -574,7 +655,8 @@ function persistSession() {
   try {
     var data = {};
     data[SK_SESSION_ID] = currentSessionId || null;
-    data[SK_ROOM_ID] = currentRoomId || null;
+    data[SK_ROOM_ID] = sessionRoomId || null; // the room the session is scoped to
+    data[SK_SESSION_TS] = currentSessionId ? Date.now() : null; // for the stale-cutoff on restore
     chrome.storage.local.set(data);
   } catch (_) {}
 }
@@ -612,9 +694,10 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
     cachedSkus = null; // invalidate SKU cache for new user
     currentSessionId = null; // re-resolve session for new user
     currentRoomId = null;
+    sessionRoomId = null;
     // Drop the previous user's pinned session/room so the new user never resumes
-    // it; broadcast the reset so overlays re-scope their counter.
-    try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID]); } catch (_) {}
+    // it; broadcast the reset so overlays clear staged SKUs and re-scope their counter.
+    try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]); } catch (_) {}
     broadcastAuthStatus();
     broadcastSession();
     sendResponse({ ok: true, userId: userId });
@@ -629,11 +712,27 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (!message || typeof message !== 'object') return;
 
   if (message.type === 'TIKTOK_ROOM') {
-    if (message.roomId && message.roomId !== currentRoomId) {
-      currentRoomId = message.roomId;
-      console.log('[LENSED][BG] room_id set:', currentRoomId);
-      persistSession();
+    var newRoom = message.roomId;
+    if (!newRoom || newRoom === currentRoomId) return;
+    var oldRoom = currentRoomId;
+    currentRoomId = newRoom;
+    console.log('[LENSED][BG] new room detected:', newRoom, '(was', oldRoom + ')');
+
+    if (currentSessionId && sessionRoomId && sessionRoomId !== newRoom) {
+      // The pinned/restored session belongs to a DIFFERENT room → discard it so
+      // this new live's orders never attach to the old live. A fresh room-scoped
+      // session is resolved/created on the next bind.
+      console.log('[LENSED][BG] session discarded — room mismatch: session', currentSessionId, 'was room', sessionRoomId, '→ new room', newRoom);
+      currentSessionId = null;
+      sessionRoomId = null;
+      persistSession();   // clears SK_SESSION_ID / SK_ROOM_ID
+      broadcastSession(); // sessionId=null → overlays clear staged SKUs + counter
+    } else if (currentSessionId && sessionRoomId === newRoom) {
+      // Restored session's room confirmed by the live page — safe to keep it.
+      console.log('[LENSED][BG] session room confirmed:', currentSessionId, 'room', newRoom);
+      broadcastSession();
     }
+    // else: no session yet — nothing to rotate; a bind will create one for newRoom.
     return;
   }
 

@@ -30,6 +30,7 @@
   var resolvedLabelEl = null;   // transient resolve confirmation line (✓ / errors)
   var stagedCountEl = null;     // always-on "N unit(s) staged" line
   var sessionStatusEl = null;
+  var capturedOnlyWarnEl = null; // visible "orders captured but not bound" warning
   var aspValueEl = null;
   var breakEvenValueEl = null;
   var ordersHidden = false; // "−" hides only the Recent Orders section, not the whole overlay; persisted
@@ -47,6 +48,16 @@
   var seenOrderIds = Object.create(null);
   var counterSessionId = null;
   var LK_COUNTER = 'lensed_live_counter';
+  // Persisted staged-SKU selection, scoped to a session id. Restored after a Live
+  // Manager reload / SW restart / reconnect so a mid-auction selection survives;
+  // cleared on session/room change so a new live never inherits it.
+  var LK_STAGED = 'lensed_staged_skus';
+  // The live's detected tiktok room (mirrors what inject relays to background). Used
+  // to scope persisted staged SKUs.
+  var currentRoomId = null;
+  // Count of orders captured this session that did NOT bind to a SKU (nothing staged
+  // at capture time). Surfaced as a visible overlay warning so it is never silent.
+  var capturedOnlyCount = 0;
 
   // Persisted overlay size (chrome.storage.local key `lensed_overlay_size`), set
   // only by the bottom-right resize grip. Cached in memory so SPA re-injects
@@ -234,6 +245,14 @@
       font-size: 10px; color: #555; margin-top: 4px;\
     }\
     .lensed-session-status.active { color: #34d399; }\
+    /* Captured-only warning — orders are recording but not binding to a SKU */\
+    .lensed-warn {\
+      margin-top: 8px; padding: 7px 9px; border-radius: 7px;\
+      background: #422006; border: 1px solid #b45309; color: #fed7aa;\
+      font-size: 11px; font-weight: 700; line-height: 1.35;\
+      white-space: normal;\
+    }\
+    .lensed-warn:empty { display: none; }\
     \
     /* Talking points (grouped per staged SKU) */\
     .lensed-notes {\
@@ -578,6 +597,7 @@
     pendingResolve = null;
     clearResolveLine(); // staging done — resolve line is no longer relevant
     updateStagedLabel();
+    persistStaged();
   }
 
   function removeLast() {
@@ -589,6 +609,7 @@
     renderStagedPills();
     clearResolveLine();
     updateStagedLabel();
+    persistStaged();
   }
 
   // Add another unit of the most recently staged SKU (respects the stock cap).
@@ -604,6 +625,7 @@
     renderStagedPills();
     clearResolveLine();
     updateStagedLabel();
+    persistStaged();
   }
 
   function rerunPrevious() {
@@ -616,6 +638,7 @@
     renderStagedPills();
     clearResolveLine();
     updateStagedLabel();
+    persistStaged();
   }
 
   function resolveSkuInput(value) {
@@ -776,6 +799,7 @@
     renderStagedPills();   // empties pills and drives ASP + break-even back to $0
     clearResolveLine();
     updateStagedLabel();   // "0 unit(s) staged"
+    persistStaged();       // persist the now-empty selection for this session
   }
 
   // ── Build overlay DOM ──────────────────────────────────────────────
@@ -906,6 +930,8 @@
     stagedListEl = el('div', 'lensed-staged');
     notesListEl = el('div', 'lensed-notes');
     sessionStatusEl = el('div', 'lensed-session-status', 'Connecting\u2026');
+    capturedOnlyWarnEl = el('div', 'lensed-warn', '');
+    renderCapturedOnlyWarning(); // repaint if a re-inject happens with a live count
 
     // Stage section: input row + transient resolve line + always-on staged count
     // + staged items + talking points + session status
@@ -916,6 +942,7 @@
     skuMain.appendChild(stagedListEl);
     skuMain.appendChild(notesListEl);
     skuMain.appendChild(sessionStatusEl);
+    skuMain.appendChild(capturedOnlyWarnEl);
 
     // Right column of the stage section: compact ASP goal + break-even. Readable
     // but sized so it doesn't overpower the staged SKUs on the left.
@@ -1195,10 +1222,48 @@
       rec[LK_COUNTER] = {
         sessionId: counterSessionId,
         salesCount: salesCount,
-        orderIds: Object.keys(seenOrderIds)
+        orderIds: Object.keys(seenOrderIds),
+        capturedOnly: capturedOnlyCount
       };
       chrome.storage.local.set(rec);
     } catch (_) {}
+  }
+
+  // Persist the current staged-SKU selection, scoped to the live session id, so a
+  // Live Manager reload / SW restart restores it. A no-op until the session id is
+  // known (nothing durable is written unscoped). Called on every staged-set change.
+  function persistStaged() {
+    if (!counterSessionId) return;
+    try {
+      var rec = {};
+      rec[LK_STAGED] = { sessionId: counterSessionId, roomId: currentRoomId || null, skus: stagedSkus };
+      chrome.storage.local.set(rec);
+    } catch (_) {}
+  }
+
+  // Paint (or hide) the captured-only warning from the current count.
+  function renderCapturedOnlyWarning() {
+    if (!capturedOnlyWarnEl) return;
+    if (capturedOnlyCount > 0) {
+      capturedOnlyWarnEl.textContent = '⚠ ' + capturedOnlyCount + ' order'
+        + (capturedOnlyCount === 1 ? '' : 's')
+        + ' captured but NOT bound to a SKU. Stage a SKU before the sale to bind it.';
+    } else {
+      capturedOnlyWarnEl.textContent = '';
+    }
+  }
+
+  // Background signalled a session reset (room change / user switch / session end):
+  // clear the staged selection and the per-live counter so the next live starts clean.
+  function onSessionReset() {
+    counterSessionId = null;
+    seenOrderIds = Object.create(null);
+    salesCount = 0;
+    capturedOnlyCount = 0;
+    if (countEl) countEl.textContent = '0';
+    renderCapturedOnlyWarning();
+    if (stagedSkus.length > 0) clearStaged();
+    console.log('[LENSED][TT] session reset — cleared staged SKUs + counter');
   }
 
   // Adopt the live session id reported by the background worker (via
@@ -1210,7 +1275,7 @@
     if (!sessionId || sessionId === counterSessionId) return;
     counterSessionId = sessionId;
     try {
-      chrome.storage.local.get([LK_COUNTER], function (data) {
+      chrome.storage.local.get([LK_COUNTER, LK_STAGED], function (data) {
         if (chrome.runtime.lastError || !data) return;
         var rec = data[LK_COUNTER];
         if (rec && rec.sessionId === counterSessionId) {
@@ -1219,11 +1284,30 @@
             for (var i = 0; i < rec.orderIds.length; i++) seenOrderIds[rec.orderIds[i]] = true;
           }
           salesCount = typeof rec.salesCount === 'number' ? rec.salesCount : rec.orderIds ? rec.orderIds.length : 0;
+          capturedOnlyCount = typeof rec.capturedOnly === 'number' ? rec.capturedOnly : 0;
           if (countEl) countEl.textContent = String(salesCount);
-          console.log('[LENSED][TT] counter restored for session', counterSessionId, '→', salesCount);
+          renderCapturedOnlyWarning();
+          console.log('[LENSED][TT] counter restored for session', counterSessionId, '→', salesCount, '· captured-only', capturedOnlyCount);
         } else {
           console.log('[LENSED][TT] counter scoped to new session', counterSessionId);
+          capturedOnlyCount = 0;
+          renderCapturedOnlyWarning();
           persistCounter();
+        }
+
+        // Staged SKUs: restore ONLY the selection saved for THIS session (recovering a
+        // mid-auction selection across a reload / SW restart). On a different/new
+        // session, drop any in-memory selection so a prior live never leaks in.
+        var srec = data[LK_STAGED];
+        if (srec && srec.sessionId === counterSessionId && Array.isArray(srec.skus) && srec.skus.length > 0) {
+          stagedSkus = srec.skus.map(function (s) {
+            return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+          });
+          renderStagedPills();
+          updateStagedLabel();
+          console.log('[LENSED][TT] staged SKUs restored for session', counterSessionId, '→', stagedSkus.length);
+        } else if (stagedSkus.length > 0) {
+          clearStaged();
         }
       });
     } catch (_) {}
@@ -1369,11 +1453,25 @@
       // Auto-bind fires for a new order OR a status flip of an already-bound one.
       // wasBound mirrors that dedup decision (computed before autoBind updates it)
       // so the bound tag renders whenever this call will actually bind.
-      var wasBound = boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && stagedSkus.length > 0;
+      // brandNewOrder / hadStaged are captured BEFORE renderSale (which marks the
+      // order seen) so we can detect a captured-only order below.
+      var brandNewOrder = !!(sale && sale.orderId && !seenOrderIds[sale.orderId]);
+      var hadStaged = stagedSkus.length > 0;
+      var wasBound = boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && hadStaged;
       var boundSkus = autoBind(sale);
 
       // Render in overlay
       renderSale(sale, wasBound, boundSkus);
+
+      // Captured-only: a brand-new order arrived with nothing staged, so it was
+      // recorded raw but NOT bound to a SKU. Count once + show a visible warning so
+      // this failure is never silent again (the July-3 incident).
+      if (brandNewOrder && !hadStaged && (!boundSkus || boundSkus.length === 0)) {
+        capturedOnlyCount++;
+        renderCapturedOnlyWarning();
+        persistCounter();
+        console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
+      }
 
       // A bind just cleared staging — refocus so the host can scan the next item
       // immediately (guarded: won't steal focus from TikTok chat/host fields).
@@ -1382,6 +1480,7 @@
     }
 
     if (data.source === 'lensed-tiktok-room') {
+      currentRoomId = data.roomId || currentRoomId; // scope persisted staged SKUs
       try {
         chrome.runtime.sendMessage({ type: 'TIKTOK_ROOM', roomId: data.roomId }).catch(function () {});
       } catch (_) {}
@@ -1409,7 +1508,10 @@
       updateAuthStatus(message.authenticated, message.userId);
     } else if (message.type === 'LENSED_SESSION') {
       // Background resolved/changed the live session — scope our counter to it.
+      // A null sessionId means the session was reset (room change / user switch),
+      // so clear staged SKUs + counter for a clean next live.
       if (message.sessionId) adoptSession(message.sessionId);
+      else onSessionReset();
     }
   });
 
