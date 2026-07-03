@@ -45,5 +45,9 @@ export async function ensureFulfillmentAccount(admin: SupabaseClient, orgId: str
     .upsert({ org_id: orgId, user_id: userId, role: 'fulfillment' }, { onConflict: 'org_id,user_id' });
   if (mErr) throw new Error(`ensureFulfillmentAccount: membership failed (${mErr.message})`);
 
+  // Tag the profile 'fulfillment' so the route guard (chunk 10) confines this device account
+  // to the device routes. (The signup trigger creates the profile as 'store'; override it.)
+  await admin.from('profiles').upsert({ id: userId, account_type: 'fulfillment' }, { onConflict: 'id' });
+
   return { userId, email };
 }
