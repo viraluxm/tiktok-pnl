@@ -1056,7 +1056,7 @@
       persistPrefs();
     });
 
-    document.body.appendChild(host);
+    getOverlayMountRoot().appendChild(host);
 
     // Re-render staged pills + count if we had them before a re-inject
     renderStagedPills();
@@ -1158,6 +1158,28 @@
     }
   }
 
+  // ── Fullscreen-aware mount root ────────────────────────────────────
+  // TikTok Live Manager uses the Fullscreen API. When an element goes
+  // fullscreen the browser paints ONLY that element's subtree in the top
+  // layer — anything outside it (our overlay, appended to <body>) is not
+  // rendered at all, regardless of z-index. So while fullscreen is active
+  // the overlay host must live inside the fullscreen element, and move back
+  // to <body> when it exits.
+  function getOverlayMountRoot() {
+    return document.fullscreenElement || document.webkitFullscreenElement || document.body;
+  }
+
+  // Relocate the existing overlay host into the correct root WITHOUT
+  // recreating it — appendChild() moves the node, preserving its shadow DOM,
+  // all internal state (staged SKUs, ASP/break-even, size, auth), and event
+  // listeners. Recreate only when the host is actually missing.
+  function ensureOverlayMountedInCorrectRoot() {
+    var host = document.getElementById(CONTAINER_ID);
+    if (!host) { ensureOverlay(); return; }
+    var root = getOverlayMountRoot();
+    if (host.parentNode !== root) root.appendChild(host);
+  }
+
   // ── MutationObserver: re-inject if TikTok SPA removes our container
   function ensureOverlay() {
     if (!document.getElementById(CONTAINER_ID)) {
@@ -1184,6 +1206,12 @@
 
     var observer = new MutationObserver(function () { ensureOverlay(); });
     observer.observe(document.body, { childList: true, subtree: false });
+
+    // Keep the overlay inside the rendered subtree when Live Manager enters or
+    // exits fullscreen (see getOverlayMountRoot). webkit* is a defensive
+    // fallback for older Chromium builds that only fire the prefixed event.
+    document.addEventListener('fullscreenchange', ensureOverlayMountedInCorrectRoot);
+    document.addEventListener('webkitfullscreenchange', ensureOverlayMountedInCorrectRoot);
   }
 
   init();
