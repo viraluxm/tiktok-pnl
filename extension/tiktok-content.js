@@ -502,14 +502,16 @@
   }
 
   // Live-auction bids are whole dollars, so the ASP goal and break-even targets
-  // are shown as whole dollars too — standard nearest-dollar rounding ($12.49 →
-  // $12, $12.50 → $13, $12.75 → $13). Rounding is applied at DISPLAY time only:
-  // aspGoalCents()/stagedCostCents() keep returning exact cents and the bind/RPC
-  // money path uses raw unit_cost_cents, so this never affects stored/logged profit.
+  // are shown as whole dollars too — always rounded UP to the next whole dollar
+  // ($12.00 → $12, $12.01 → $13, $12.50 → $13, $12.99 → $13). A target must never
+  // display below the true cost, so we ceil rather than round to nearest. Rounding
+  // is applied at DISPLAY time only: aspGoalCents()/stagedCostCents() keep returning
+  // exact cents and the bind/RPC money path uses raw unit_cost_cents, so this never
+  // affects stored/logged profit.
   function formatBidGoalDollars(cents) {
     var c = Number(cents);
     if (!Number.isFinite(c) || c <= 0) return '$0';
-    var wholeDollars = Math.round(c / 100);
+    var wholeDollars = Math.ceil(c / 100);
     return '$' + wholeDollars.toLocaleString('en-US');
   }
 
