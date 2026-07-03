@@ -12,6 +12,27 @@ import {
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import TrainerVideoView from './TrainerVideoView';
 
+// ---- Auto-bid randomness (module-level: stable identity, no per-render churn) ----
+function randInt(min: number, max: number): number {
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+// Weighted, realistic bid amount in dollars. 0 = skip this tick (never sent as a
+// bid). Roughly ~25% skip, ~50% small ($1–5), ~18% medium ($6–15), ~7% large
+// ($16–40) — so it feels random, not a predictable increment.
+function nextAutoBidAmount(): number {
+  const r = Math.random();
+  if (r < 0.25) return 0;
+  if (r < 0.75) return randInt(1, 5);
+  if (r < 0.93) return randInt(6, 15);
+  return randInt(16, 40);
+}
+
+// Randomized inter-bid delay (ms) so the cadence never feels robotic.
+function randomAutoBidDelay(): number {
+  return randInt(800, 4500);
+}
+
 export default function ControlClient({ sessionId }: { sessionId: string }) {
   const [customText, setCustomText] = useState('');
   const [previewPhase, setPreviewPhase] = useState<'idle' | 'running' | 'ended'>('idle');
@@ -26,6 +47,10 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
   const [sessionSecondsLeft, setSessionSecondsLeft] = useState<number | null>(null);
   const [sessionViewers, setSessionViewers] = useState(0);
   const [sessionPhase, setSessionPhase] = useState<'idle' | 'running' | 'complete'>('idle');
+
+  // Auto-bidding is admin-controlled; Manual (false) is the default. The host
+  // stays the authority that actually applies bids.
+  const [autoBid, setAutoBid] = useState(false);
 
   const secondsRef = useRef(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -115,6 +140,16 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
       ? sessionSecondsLeft
       : null;
 
+  // Auto-bidding may ACTIVELY fire only while every safety condition holds. Any
+  // stop condition — manual mode, auction not running, session complete, host
+  // gone, channel down — flips this false and tears the loop down (effect below).
+  const autoBidActive =
+    autoBid &&
+    connected &&
+    peerPresent &&
+    sessionPhase === 'running' &&
+    previewPhase === 'running';
+
   // Stop the local timers on unmount (refs only — no reactive deps).
   useEffect(() => {
     return () => {
@@ -122,6 +157,31 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
       if (endedTimerRef.current) clearTimeout(endedTimerRef.current);
     };
   }, []);
+
+  // Auto-bidder: a single self-rescheduling timeout, gated entirely by
+  // `autoBidActive`. When it becomes true the loop starts; when any stop
+  // condition flips it false (or the component unmounts) this effect's cleanup
+  // clears the pending timer. So there is never more than one loop — even under
+  // StrictMode's setup→cleanup→setup — and no bid can fire after teardown.
+  useEffect(() => {
+    if (!autoBidActive) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (cancelled) return;
+      const amount = nextAutoBidAmount();
+      if (amount > 0) {
+        // Reuse the exact manual send path; host applies + broadcasts the bid.
+        send({ action: 'placeBid', username: randomUsername(), amount });
+      }
+      timer = setTimeout(tick, randomAutoBidDelay()); // reschedule with a fresh delay
+    };
+    timer = setTimeout(tick, randomAutoBidDelay()); // first attempt after a random delay
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [autoBidActive, send]);
 
   function sendComment(text: string) {
     const trimmed = text.trim();
@@ -221,6 +281,42 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
                 : 'Idle'}
             </span>
           </div>
+
+          {/* Manual / Auto bidding mode */}
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[13px] font-medium text-tt-muted">Bidding mode</span>
+            <div className="inline-flex rounded-lg border border-tt-border bg-tt-input-bg p-0.5">
+              <button
+                type="button"
+                onClick={() => setAutoBid(false)}
+                aria-pressed={!autoBid}
+                className={`min-h-[36px] cursor-pointer rounded-md px-3.5 text-[13px] font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40 ${!autoBid ? 'bg-tt-card text-tt-text shadow-sm' : 'text-tt-muted hover:text-tt-text'}`}
+              >
+                Manual
+              </button>
+              <button
+                type="button"
+                onClick={() => setAutoBid(true)}
+                aria-pressed={autoBid}
+                className={`min-h-[36px] cursor-pointer rounded-md px-3.5 text-[13px] font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40 ${autoBid ? 'bg-[#FE2C55] text-white' : 'text-tt-muted hover:text-tt-text'}`}
+              >
+                Auto
+              </button>
+            </div>
+          </div>
+
+          {autoBid && (
+            <div className="flex items-center gap-2 text-[12px]">
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${autoBidActive ? 'bg-[#00B66C] motion-safe:animate-pulse' : 'bg-tt-yellow'}`}
+              />
+              <span className="text-tt-muted">
+                {autoBidActive
+                  ? 'Auto bidding on · random $0–$40'
+                  : 'Auto bidding armed — start an auction to begin'}
+              </span>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-2">
             <button

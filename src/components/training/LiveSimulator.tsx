@@ -23,6 +23,15 @@ function jitter(magnitude: number): number {
   return Math.round((Math.random() - 0.5) * magnitude);
 }
 
+// Resolve the dollar increment for a bid. Manual bids carry no amount → +$1
+// (unchanged). Auto bids carry an integer amount; sanitize defensively (finite,
+// >= 1) and clamp to a safe max so a malformed value can never corrupt the total.
+function bidIncrement(amount: number | undefined): number {
+  if (amount === undefined) return 1;
+  if (!Number.isFinite(amount)) return 1;
+  return Math.min(40, Math.max(1, Math.round(amount)));
+}
+
 function clearIntervalRef(ref: MutableRefObject<ReturnType<typeof setInterval> | null>) {
   if (ref.current !== null) {
     clearInterval(ref.current);
@@ -92,7 +101,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         addComment(event.username, event.text);
         break;
       case 'placeBid':
-        placeBid(event.username);
+        placeBid(event.username, event.amount);
         break;
       case 'startAuction':
         startAuction();
@@ -216,12 +225,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     broadcastAuctionState(true, 0, null);
   }
 
-  // A manual fake bid from the controller: +$1, new winner, reset to 7s (no max).
-  function placeBid(username: string) {
+  // A fake bid from the controller. Manual bids carry no amount → +$1 (unchanged);
+  // auto bids carry a sanitized integer amount (1–40). New winner, reset to 7s.
+  // Defense in depth: bids are ignored unless an auction is actively running.
+  function placeBid(username: string, amount?: number) {
     if (!auctionActiveRef.current) return;
     if (auctionSecondsRef.current <= 0) return;
 
-    auctionBidRef.current += 1;
+    auctionBidRef.current += bidIncrement(amount);
     setAuctionBid(auctionBidRef.current);
     setAuctionWinner(username);
     auctionSecondsRef.current = AUCTION_BID_RESET_SECONDS;
