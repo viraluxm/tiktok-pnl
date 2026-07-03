@@ -12,10 +12,10 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { code128ToSvg } from '@/lib/barcode/code128';
 import { kpiAllowlisted } from '@/lib/fulfillment/kpiAccess';
+import FulfillmentNav from '@/components/fulfillment/FulfillmentNav';
 
 interface Cubicle { id: string; cubicle_number: number; cubicle_barcode: string; is_active: boolean }
 interface Section { id: string; section_barcode: string; inventory_sku_id: string; label: string | null; is_active: boolean }
@@ -153,11 +153,9 @@ export default function PickPackSettings() {
     <div className="min-h-screen bg-tt-bg text-tt-text p-6">
       <style>{`@media print { body * { visibility: hidden; } .print-sheet, .print-sheet * { visibility: visible; } .print-sheet { position: absolute; left: 0; top: 0; width: 100%; } .no-print { display: none !important; } }`}</style>
       <div className="max-w-4xl mx-auto">
-        <div className="flex items-center justify-between mb-2">
-          <h1 className="text-3xl font-bold">Pick/Pack settings</h1>
-          {kpiOn && <Link href="/pickpack/kpis" className="text-sm text-tt-cyan underline">Worker KPIs →</Link>}
-        </div>
-        <p className="text-sm text-tt-muted mb-6">Org-shared cubicles & shelf sections. Configure once, print the barcode sheets.</p>
+        <FulfillmentNav kpiOn={kpiOn} />
+        <h1 className="text-3xl font-bold mb-2">Settings &amp; Barcodes</h1>
+        <p className="text-sm text-tt-muted mb-6">Org-shared cubicles &amp; shelf sections. Configure once, print the barcode sheets.</p>
         {msg && <div className="mb-5 rounded-lg border border-tt-border bg-tt-card-hover px-4 py-3 text-sm">{msg}</div>}
 
         {/* ===== Cubicles ===== */}

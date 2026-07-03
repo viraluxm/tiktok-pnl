@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { kpiAllowlisted } from '@/lib/fulfillment/kpiAccess';
+import FulfillmentNav from '@/components/fulfillment/FulfillmentNav';
 
 interface Session { id: string; title: string; status: string; started_at: string | null; tiktok_live_id: string | null }
 
@@ -65,16 +66,10 @@ export default function PickPackEntry() {
   return (
     <div className="min-h-screen bg-tt-bg text-tt-text p-6">
       <div className="max-w-3xl mx-auto">
-        <div className="flex items-center justify-between mb-1">
-          <h1 className="text-3xl font-bold">Fulfillment — buy labels</h1>
-          <nav className="flex gap-3 text-sm">
-            <Link href="/pick" className="text-tt-cyan underline">Pick</Link>
-            <Link href="/pack" className="text-tt-cyan underline">Pack</Link>
-            {kpiOn && <Link href="/pickpack/kpis" className="text-tt-cyan underline">Worker KPIs</Link>}
-            <Link href="/pickpack/settings" className="text-tt-cyan underline">Settings</Link>
-          </nav>
-        </div>
-        <p className="text-sm text-tt-muted mb-6">Pick a live session, select orders, buy labels. <span className="text-tt-cyan">STUB mode: creates boxes for /pick — no real label purchased, nothing shipped.</span></p>
+        <FulfillmentNav kpiOn={kpiOn} />
+        <h1 className="text-3xl font-bold mb-1">Fulfillment — buy labels</h1>
+        <p className="text-sm text-tt-muted mb-2">Pick a live session, select orders, buy labels. <span className="text-tt-cyan">STUB mode: creates boxes for the pick queue — no real label purchased, nothing shipped.</span></p>
+        <p className="text-xs text-tt-muted mb-6">Pick &amp; Pack run on provisioned devices — set them up under <Link href="/pickpack/settings" className="text-tt-cyan underline">Settings &amp; Barcodes → Devices</Link>.</p>
 
         <div className="rounded-2xl border border-tt-border bg-tt-card p-4 mb-5">
           <label className="block text-xs uppercase tracking-wide text-tt-muted mb-2">Live session</label>
@@ -119,7 +114,7 @@ export default function PickPackEntry() {
           <div className="mt-5 rounded-2xl border border-tt-green/50 bg-tt-green/10 p-5">
             <div className="text-lg font-semibold text-tt-green">✓ {result.boxes_created} box(es) created from {result.orders_selected} order(s)</div>
             <div className="text-sm text-tt-muted mt-1">{result.note}</div>
-            <Link href="/pick" className="inline-block mt-3 px-5 py-2 rounded-lg bg-tt-cyan text-black font-semibold">Go to Pick →</Link>
+            <div className="mt-3 text-sm text-tt-muted">Boxes are ready — pickers will see them on the Pick device.</div>
           </div>
         )}
       </div>

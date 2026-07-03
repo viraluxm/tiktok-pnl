@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import FulfillmentNav from '@/components/fulfillment/FulfillmentNav';
 
 interface Row { worker_id: string; name: string; picks: number; packs: number; shifts: number; active_min: number; break_min: number; items_per_hr: number }
 interface Totals { picks: number; packs: number; shifts: number; active_min: number; break_min: number; items_per_hr: number }
@@ -40,10 +41,8 @@ export default function KpiDashboard() {
   return (
     <div className="min-h-screen bg-tt-bg text-tt-text p-6">
       <div className="max-w-4xl mx-auto">
-        <div className="flex items-center justify-between mb-1">
-          <h1 className="text-3xl font-bold">Worker KPIs</h1>
-          <Link href="/pickpack" className="text-sm text-tt-cyan underline">Fulfillment</Link>
-        </div>
+        <FulfillmentNav kpiOn />
+        <h1 className="text-3xl font-bold mb-1">Worker KPIs</h1>
         <p className="text-sm text-tt-muted mb-4">Org-wide (both stores) · throughput uses active time (breaks excluded).</p>
 
         <div className="flex gap-2 mb-5">

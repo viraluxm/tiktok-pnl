@@ -30,7 +30,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
   const profitChange = prevMetrics ? pctChange(metrics.totalNetProfit, prevMetrics.totalNetProfit) : null;
 
   return (
-    <div className="grid grid-cols-4 gap-5 mb-8">
+    <div className="grid grid-cols-3 gap-5 mb-8">
       {/* 1. Total GMV */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in">
         <div className="flex items-center gap-2 mb-2">
