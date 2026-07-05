@@ -34,7 +34,7 @@ export default function KpiDashboard() {
   if (state === 'denied') return (
     <div className="min-h-screen bg-tt-bg text-tt-text flex flex-col items-center justify-center p-8 text-center">
       <div className="text-xl font-semibold mb-2">Worker KPIs aren&apos;t available for this login.</div>
-      <Link href="/pickpack" className="text-tt-cyan underline">Back to fulfillment</Link>
+      <Link href="/pickpack/settings" className="text-tt-cyan underline">Back to fulfillment</Link>
     </div>
   );
 

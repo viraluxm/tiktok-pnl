@@ -346,7 +346,7 @@ export default function RealDashboard() {
           ))}
           {/* Fulfillment is a separate route surface — navigate rather than swap in-page views. */}
           <Link
-            href="/pickpack"
+            href="/pickpack/settings"
             className="px-6 py-2.5 rounded-lg border border-tt-border text-sm font-medium cursor-pointer transition-all text-tt-muted hover:bg-tt-card-hover"
           >
             Fulfillment

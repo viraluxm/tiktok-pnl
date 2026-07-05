@@ -234,7 +234,7 @@ export default function PickPage() {
         </>
       )}
       <div className="mt-6 text-center">
-        <Link href="/pickpack" className="text-xs text-tt-muted underline">Owner tools</Link>
+        <Link href="/pickpack/settings" className="text-xs text-tt-muted underline">Owner tools</Link>
       </div>
     </div>
   );

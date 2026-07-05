@@ -11,7 +11,6 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 const ITEMS: { href: string; label: string }[] = [
-  { href: '/pickpack', label: 'Buy Labels' },
   { href: '/pickpack/settings', label: 'Settings & Barcodes' },
 ];
 
