@@ -9,22 +9,29 @@ import { useCallback, useEffect, useRef } from 'react';
  * fast, then send Enter. This hook:
  *  - keeps a hidden, always-focused input alive (re-acquires focus on blur and
  *    after every commit, plus a slow safety re-focus interval),
- *  - buffers characters and commits on Enter,
- *  - uses an inter-char timing threshold so a stray human keystroke can't
- *    accumulate into a fake scan (a real scan burst arrives within `interCharMs`).
+ *  - commits on Enter using the input's own .value as the SOURCE OF TRUTH — the
+ *    browser accumulates the full burst regardless of inter-character timing
+ *    jitter (BT/USB-HID latency), so a slow gap mid-burst can't truncate the read,
+ *  - only resets on a LONG idle gap at the START of a burst (a stale partial from a
+ *    no-Enter misfire), never mid-burst.
+ *
+ * (A previous version reset a hand-rolled buffer whenever any inter-char gap
+ * exceeded ~80ms; a jittery scanner tripped that mid-burst and committed only the
+ * post-gap tail — e.g. an 18-digit order id captured as its last 7 digits. Fixed
+ * by trusting .value and dropping the mid-burst reset.)
  *
  * Returns props to spread onto a visually-minimal <input>, plus focus() to call
  * after rendering a result.
  */
 export interface UseScanInputOptions {
   minLength?: number;     // ignore commits shorter than this (default 3)
-  interCharMs?: number;   // gap above which we treat input as human typing and reset (default 80ms)
+  idleResetMs?: number;   // idle gap (start-of-burst only) after which a stale partial is cleared (default 500ms)
   refocusMs?: number;     // safety re-focus interval (default 1500ms)
   enabled?: boolean;      // pause scanning (e.g. while a modal is open)
 }
 
 export function useScanInput(onScan: (code: string) => void, opts: UseScanInputOptions = {}) {
-  const { minLength = 3, interCharMs = 80, refocusMs = 1500, enabled = true } = opts;
+  const { minLength = 3, idleResetMs = 500, refocusMs = 1500, enabled = true } = opts;
   const inputRef = useRef<HTMLInputElement | null>(null);
   const buf = useRef('');
   const lastTs = useRef(0);
@@ -49,25 +56,28 @@ export function useScanInput(onScan: (code: string) => void, opts: UseScanInputO
       const now = Date.now();
       if (e.key === 'Enter') {
         e.preventDefault();
-        let code = buf.current.trim();
+        // SOURCE OF TRUTH: the input's .value holds the full burst (the browser appends every
+        // character we don't preventDefault). buf is only a fallback if .value is somehow empty.
+        let code = (inputRef.current?.value || '').trim();
+        if (!code) code = buf.current.trim();
         buf.current = '';
-        // Fallback: a hardware scanner fills the keystroke buffer (fast burst), but a
-        // human typist / paste trips the inter-char reset and leaves the buffer short.
-        // In that case use the focused input's actual .value so manual entry + paste work.
-        if (code.length < minLength && inputRef.current) code = (inputRef.current.value || '').trim();
         if (inputRef.current) inputRef.current.value = '';
+        lastTs.current = now;
         if (code.length >= minLength) onScanRef.current(code);
         return;
       }
       if (e.key.length === 1) {
-        // A slow gap means a human pressed a key — start fresh so stray keystrokes
-        // don't bleed into the next scan burst.
-        if (now - lastTs.current > interCharMs) buf.current = '';
+        // Reset ONLY on a long idle gap at the START of a burst (a stale partial left by a
+        // no-Enter misfire) — NEVER mid-burst. Mid-burst resets are what truncated jittery scans.
+        if (now - lastTs.current > idleResetMs) {
+          buf.current = '';
+          if (inputRef.current) inputRef.current.value = ''; // cleared before the char's default insert
+        }
         buf.current += e.key;
         lastTs.current = now;
       }
     },
-    [enabled, minLength, interCharMs],
+    [enabled, minLength, idleResetMs],
   );
 
   // Props for a hidden/min input. autoFocus + onBlur refocus keep the scanner aimed.

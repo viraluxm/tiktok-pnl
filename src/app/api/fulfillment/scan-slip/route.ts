@@ -29,6 +29,19 @@ export async function POST(req: Request) {
   const scanned = typeof body.scanned === 'string' ? body.scanned.trim() : '';
   if (!scanned) return NextResponse.json({ error: 'Empty scan' }, { status: 400 });
 
+  // Shape guard: TikTok order ids are 18-digit numerics. Accept 16–20 digits for headroom.
+  // A truncated/garbled read (e.g. a jittery scanner delivering only the last 7 digits) fails
+  // this and is surfaced as "scan again" — NOT "unrecognized" — with the raw value echoed for
+  // diagnosis. This runs BEFORE the owner-lookup so a bad read never masquerades as unknown.
+  if (!/^\d{16,20}$/.test(scanned)) {
+    return NextResponse.json({
+      recognized: false,
+      partial: true,
+      scanned,
+      message: `Partial/invalid scan (${scanned.length} chars) — scan again. Read: ${scanned}`,
+    });
+  }
+
   const admin = createAdminClient();
 
   // Owner-lookup (service-role bypasses per-user RLS). order_id is NOT globally unique — a shared
