@@ -53,8 +53,6 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
   let actualMonthlySales = 0;
   let actualMonthlyUnits = 0;
   let actualMonthlyVideos = 0;
-  let actualMonthlyAdCost = 0;
-  let actualMonthlyAffiliate = 0;
   let actualMonthlyProfit = 0;
 
   monthEntries.forEach((e) => {
@@ -62,8 +60,6 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
     actualMonthlySales += Number(e.gmv) || 0;
     actualMonthlyUnits += Number(e.units_sold) || 1; // Fallback to 1 unit per entry
     actualMonthlyVideos += Number(e.videos_posted) || 0;
-    actualMonthlyAdCost += Number(e.ads) || 0;
-    actualMonthlyAffiliate += Number(e.affiliate) || 0;
     actualMonthlyProfit += c.totalNetProfit;
   });
 
@@ -138,18 +134,6 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
             <div className="text-lg font-bold text-tt-text">
               {fmtInt(forecastedUnits)}
             </div>
-          </div>
-
-          {/* Affiliate Commission */}
-          <div>
-            <div className="text-xs text-tt-muted mb-1">Affiliate Comm.</div>
-            <div className="text-lg font-bold text-tt-yellow">{fmt(actualMonthlyAffiliate)}</div>
-          </div>
-
-          {/* Adv. cost */}
-          <div>
-            <div className="text-xs text-tt-muted mb-1">Adv. cost</div>
-            <div className="text-lg font-bold text-tt-text">{fmt(actualMonthlyAdCost)}</div>
           </div>
 
           {/* Est. payout */}

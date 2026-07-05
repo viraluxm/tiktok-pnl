@@ -172,7 +172,7 @@ export default function RealDashboard() {
 
     const gmvData: number[] = [];
     const profitData: number[] = [];
-    let totalPlatFee = 0, totalShip = 0, totalAff = 0, totalProf = 0, totalUserCogs = 0;
+    let totalPlatFee = 0, totalShip = 0, totalProf = 0, totalUserCogs = 0;
 
     for (const date of sortedDates) {
       const d = byDate[date];
@@ -182,7 +182,6 @@ export default function RealDashboard() {
       profitData.push(dayProfit);
       totalPlatFee += pf;
       totalShip += d.shipping;
-      totalAff += d.affiliate;
       totalProf += dayProfit;
     }
 
@@ -192,14 +191,14 @@ export default function RealDashboard() {
 
     const hasUserCogs = totalUserCogs > 0;
     const breakdownLabels = hasUserCogs
-      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Affiliate', 'Ads', 'Net Profit']
-      : ['Platform Fee (6%)', 'Shipping', 'Affiliate', 'Ads', 'Net Profit'];
+      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Ads', 'Net Profit']
+      : ['Platform Fee (6%)', 'Shipping', 'Ads', 'Net Profit'];
     const rawAmounts = hasUserCogs
-      ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)]
-      : [Math.max(0, totalPlatFee), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)];
+      ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), 0, Math.max(0, totalProf)]
+      : [Math.max(0, totalPlatFee), Math.max(0, totalShip), 0, Math.max(0, totalProf)];
     const breakdownColors = hasUserCogs
-      ? ['#ff6384', '#f97316', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0']
-      : ['#ff6384', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0'];
+      ? ['#ff6384', '#f97316', '#ff9f40', '#EE1D52', '#69C9D0']
+      : ['#ff6384', '#ff9f40', '#EE1D52', '#69C9D0'];
     const totalCosts = rawAmounts.reduce((a, b) => a + b, 0);
 
     return {
