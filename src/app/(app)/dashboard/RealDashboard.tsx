@@ -25,8 +25,10 @@ import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
+// P&L renders chart.js — load client-only, same as Charts.
+const PnlTab = dynamic(() => import('@/components/pnl/PnlTab'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'inventory' | 'shows' | 'shipping' | 'returns';
+type ViewTab = 'dashboard' | 'pnl' | 'inventory' | 'shows' | 'shipping' | 'returns';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -235,6 +237,7 @@ export default function RealDashboard() {
 
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
+    { label: 'P&L', value: 'pnl' },
     { label: 'Inventory', value: 'inventory' },
     { label: 'Shows', value: 'shows' },
     { label: 'Shipping', value: 'shipping' },
@@ -335,6 +338,9 @@ export default function RealDashboard() {
             <Charts chartData={chartData} />
           </>
         )}
+
+        {/* P&L View */}
+        {activeView === 'pnl' && <PnlTab dateFrom={filters.dateFrom} dateTo={filters.dateTo} />}
 
         {/* Inventory View */}
         {activeView === 'inventory' && <InventorySection />}
