@@ -117,13 +117,61 @@ function supabaseHeaders() {
   return h;
 }
 
+// ── Fetch robustness (freeze-hardening) ──────────────────────────────
+// A hung socket during a long live can wedge an awaiting handler until the MV3
+// worker is finally evicted. Every Supabase call goes through an AbortController
+// timeout so it fails fast and predictably instead of hanging.
+var FETCH_TIMEOUT_MS = 8000;         // reads / RPC / token refresh
+var FETCH_TIMEOUT_WRITE_MS = 12000;  // inserts / upserts (more generous)
+
+function fetchWithTimeout(url, opts, ms) {
+  var controller = new AbortController();
+  var t = setTimeout(function () { controller.abort(); }, ms);
+  var o = Object.assign({}, opts || {}, { signal: controller.signal });
+  return fetch(url, o).finally(function () { clearTimeout(t); });
+}
+
+// Timeout + at most ONE retry on a TRANSIENT failure (abort/timeout or network
+// error — never on an HTTP error status). allowRetry MUST be false for
+// non-idempotent writes (the session INSERT has no idempotency key / unique
+// constraint, so a committed-but-timed-out retry would fork the session PR2
+// exists to prevent). Idempotent calls (GET, merge-duplicates upsert, the
+// session+order-keyed RPC, token refresh) pass allowRetry=true.
+async function sbFetch(url, opts, ms, allowRetry) {
+  try {
+    return await fetchWithTimeout(url, opts, ms);
+  } catch (e) {
+    var transient = e && (e.name === 'AbortError' || e.name === 'TypeError');
+    if (allowRetry && transient) {
+      console.warn('[LENSED][BG] fetch transient failure, retrying once:', String(url).split('?')[0], e.name);
+      await new Promise(function (r) { setTimeout(r, 500); });
+      return await fetchWithTimeout(url, opts, ms);
+    }
+    throw e;
+  }
+}
+
+// Pathological-safety cap for the per-order dedup Maps (order_id-keyed). Evict the
+// oldest key from BOTH maps in lockstep so the flip path (which needs the status
+// token AND the session id) never sees one map without the other. Real idempotency
+// is server-side (session_id + order_id), so a rare eviction costs at most one extra
+// idempotent RPC — never a duplicate row.
+var MAP_CAP = 5000;
+function capOrderMaps() {
+  while (loggedOrderStatus.size > MAP_CAP) {
+    var k = loggedOrderStatus.keys().next().value;
+    loggedOrderStatus.delete(k);
+    loggedOrderSession.delete(k);
+  }
+}
+
 async function supabaseGet(table, query) {
   var url = SUPABASE_URL + '/rest/v1/' + table + '?' + query;
-  var res = await fetch(url, { headers: supabaseHeaders() });
+  var res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
     var refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetch(url, { headers: supabaseHeaders() });
+      res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
     }
   }
   if (!res.ok) {
@@ -135,19 +183,21 @@ async function supabaseGet(table, query) {
 
 async function supabasePost(table, body) {
   var url = SUPABASE_URL + '/rest/v1/' + table;
-  var res = await fetch(url, {
+  // allowRetry=false: this creates a live_sessions row (no idempotency key / unique
+  // constraint), so a retry after a timed-out-but-committed INSERT would fork sessions.
+  var res = await sbFetch(url, {
     method: 'POST',
     headers: supabaseHeaders(),
     body: JSON.stringify(body),
-  });
+  }, FETCH_TIMEOUT_WRITE_MS, false);
   if (res.status === 401) {
     var refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetch(url, {
+      res = await sbFetch(url, {
         method: 'POST',
         headers: supabaseHeaders(),
         body: JSON.stringify(body),
-      });
+      }, FETCH_TIMEOUT_WRITE_MS, false);
     }
   }
   if (!res.ok) {
@@ -161,21 +211,22 @@ async function supabaseUpsert(table, body, onConflict) {
   var url = SUPABASE_URL + '/rest/v1/' + table;
   var headers = supabaseHeaders();
   headers['Prefer'] = 'resolution=merge-duplicates,return=representation';
-  var res = await fetch(url, {
+  // allowRetry=true: merge-duplicates makes a re-send idempotent (same conflict key).
+  var res = await sbFetch(url, {
     method: 'POST',
     headers: headers,
     body: JSON.stringify(body),
-  });
+  }, FETCH_TIMEOUT_WRITE_MS, true);
   if (res.status === 401) {
     var refreshed = await tryRefreshToken();
     if (refreshed) {
       headers = supabaseHeaders();
       headers['Prefer'] = 'resolution=merge-duplicates,return=representation';
-      res = await fetch(url, {
+      res = await sbFetch(url, {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(body),
-      });
+      }, FETCH_TIMEOUT_WRITE_MS, true);
     }
   }
   if (!res.ok) {
@@ -187,19 +238,22 @@ async function supabaseUpsert(table, body, onConflict) {
 
 async function supabaseRpc(fnName, params) {
   var url = SUPABASE_URL + '/rest/v1/rpc/' + fnName;
-  var res = await fetch(url, {
+  // allowRetry=true: lensed_log_auction is idempotent on (session_id, idem_key=
+  // order_id) — a retry with the SAME params replays (no duplicate row / decrement).
+  // The caller must never change p_session_id/p_idem_key across a retry (it doesn't).
+  var res = await sbFetch(url, {
     method: 'POST',
     headers: supabaseHeaders(),
     body: JSON.stringify(params),
-  });
+  }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
     var refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetch(url, {
+      res = await sbFetch(url, {
         method: 'POST',
         headers: supabaseHeaders(),
         body: JSON.stringify(params),
-      });
+      }, FETCH_TIMEOUT_MS, true);
     }
   }
   if (!res.ok) {
@@ -284,14 +338,17 @@ async function rehydrateAuth() {
 async function tryRefreshToken() {
   if (!refreshToken) return false;
   try {
-    var res = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+    // allowRetry=true (one retry): a transient network blip shouldn't drop auth. The
+    // aborted/failed path returns false below, so callers fall through to their own
+    // isAuthenticated() guards and nothing hangs (rehydrate always settles authReady).
+    var res = await sbFetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
       method: 'POST',
       headers: {
         'apikey': SUPABASE_ANON_KEY,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ refresh_token: refreshToken }),
-    });
+    }, FETCH_TIMEOUT_MS, true);
     if (!res.ok) {
       console.error('[LENSED][BG] token refresh failed:', res.status);
       return false;
@@ -564,6 +621,7 @@ async function handleAutoBind(sale, stagedSkus) {
     return;
   }
   loggedOrderStatus.set(sale.orderId, result);
+  capOrderMaps();
 
   // A flip = we've processed this order before, with a different status.
   var isFlip = prevToken !== undefined;
@@ -604,6 +662,7 @@ async function handleAutoBind(sale, stagedSkus) {
       if (logRow) {
         // Only record success on an actual bind so a later flip can target it.
         loggedOrderSession.set(sale.orderId, sessionId);
+        capOrderMaps();
         boundSkuId = stagedSkus.length === 1 ? stagedSkus[0].id : null;
       } else {
         // Bind failed (RPC error/empty). Don't fake success: roll back the status
@@ -725,6 +784,10 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       console.log('[LENSED][BG] session discarded — room mismatch: session', currentSessionId, 'was room', sessionRoomId, '→ new room', newRoom);
       currentSessionId = null;
       sessionRoomId = null;
+      // The discarded session's per-order dedup no longer applies to the new live;
+      // clear both maps in lockstep (also bounds them across a multi-live worker).
+      loggedOrderStatus.clear();
+      loggedOrderSession.clear();
       persistSession();   // clears SK_SESSION_ID / SK_ROOM_ID
       broadcastSession(); // sessionId=null → overlays clear staged SKUs + counter
     } else if (currentSessionId && sessionRoomId === newRoom) {
@@ -789,6 +852,8 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         sessionId: currentSessionId || null,
         roomId: currentRoomId || null,
       });
+    }).catch(function () {
+      try { sendResponse({ authenticated: false, userId: null, sessionId: null, roomId: null }); } catch (_) {}
     });
     return true;
   }

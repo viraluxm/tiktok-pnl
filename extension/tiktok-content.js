@@ -17,6 +17,12 @@
 (function () {
   'use strict';
 
+  // Duplicate-injection guard. Set on window (shared across ISOLATED-world injections
+  // of the same frame) so a re-injection (dev reload / executeScript) becomes a full
+  // no-op instead of doubling every top-level listener, the observer, and the counter.
+  if (window.__lensedContentLoaded) return;
+  window.__lensedContentLoaded = true;
+
   var CONTAINER_ID = 'lensed-overlay-root';
   var MAX_VISIBLE_SALES = 50;
 
@@ -86,6 +92,92 @@
   // Payment token mirrors the downstream sold/not_sold split.
   function saleStatusToken(sale) {
     return sale && sale.isPaymentSuccessful === false ? 'failed' : 'ok';
+  }
+
+  // ── Freeze-hardening: single-attach document handlers + diagnostics ──────
+  // The overlay is rebuilt on every SPA re-inject / fullscreen change. Document-
+  // level drag/resize listeners MUST attach ONCE per page — never per rebuild — or
+  // they accumulate into thousands of mousemove handlers and progressively freeze
+  // the tab (the reported bug). These module-scoped handlers act on `activePanel`
+  // (the current overlay) via shared drag/resize state, so a rebuild only swaps the
+  // panel reference; the document listener count stays flat.
+  var activePanel = null;
+  var dragState = { on: false, offX: 0, offY: 0 };
+  var resizeState = { on: false, startX: 0, startY: 0, startW: 0, startH: 0 };
+  var docHandlersAttached = false;
+  var pageWiringActive = false;     // overlay + observer + fullscreen listeners are live
+  var windowLifecycleBound = false; // pagehide/pageshow bound once (survive bfcache)
+  var overlayObserver = null;       // module-scoped so cleanup can disconnect it
+
+  // Cap for the per-order dedup Maps — a pathological-safety net so a single very
+  // long live can't grow them without bound. Normal lives stay far below this.
+  var MAP_CAP = 5000;
+  function capMap(m) { if (m.size > MAP_CAP) { var k = m.keys().next().value; m.delete(k); } }
+
+  // Lightweight diagnostics — inspect via `window.__lensedDiag` in the content-script
+  // context, or call lensedLogDiag(). Cheap counters only.
+  var diag = {
+    overlayCreateCount: 0,      // createOverlay() invocations
+    overlayRemountCount: 0,     // ensureOverlay() calls that actually rebuilt a removed overlay
+    overlayRelocateCount: 0,    // fullscreen relocate (move host, no rebuild)
+    docListenerAttachCount: 0,  // times the document drag/resize pair was attached (must stay 1)
+    observerRebuildCount: 0,    // MutationObserver-triggered rebuilds
+    lastCaptureTs: 0,           // last relayed sale rendered (ms)
+    lastBindTs: 0,              // last AUTO_BIND dispatched (ms)
+  };
+  try { window.__lensedDiag = diag; } catch (_) {}
+  function lensedLogDiag() { try { console.log('[LENSED][TT][diag]', JSON.stringify(diag)); } catch (_) {} }
+
+  function overlayMaxW() { return Math.min(OVERLAY_MAX_W, window.innerWidth - 32); }
+  function overlayMaxH() { return Math.min(OVERLAY_MAX_H, window.innerHeight - 32); }
+  function clampW(w) { return Math.max(OVERLAY_MIN_W, Math.min(overlayMaxW(), w)); }
+  function clampH(h) { return Math.max(OVERLAY_MIN_H, Math.min(overlayMaxH(), h)); }
+
+  // Persist overlay size + hidden prefs (module state). Shared by the hoisted
+  // document handlers and the in-overlay buttons.
+  function persistPrefs() {
+    try {
+      chrome.storage.local.set({
+        lensed_overlay_size: overlaySize,
+        lensed_overlay_orders_hidden: ordersHidden,
+        lensed_overlay_hidden: hidden
+      });
+    } catch (_) {}
+  }
+
+  // The ONE pair of document pointer handlers, shared across every overlay rebuild.
+  function onDocMouseMove(e) {
+    var panel = activePanel;
+    if (!panel) return;
+    if (dragState.on) {
+      panel.style.left = (e.clientX - dragState.offX) + 'px';
+      panel.style.top = (e.clientY - dragState.offY) + 'px';
+      panel.style.right = 'auto';
+      panel.style.bottom = 'auto';
+    } else if (resizeState.on) {
+      panel.style.width = clampW(resizeState.startW + (e.clientX - resizeState.startX)) + 'px';
+      panel.style.height = clampH(resizeState.startH + (e.clientY - resizeState.startY)) + 'px';
+    }
+  }
+  function onDocMouseUp() {
+    var panel = activePanel;
+    if (dragState.on) { dragState.on = false; if (panel) panel.style.transition = ''; }
+    if (resizeState.on) {
+      resizeState.on = false;
+      if (panel) {
+        panel.style.transition = '';
+        var rect = panel.getBoundingClientRect();
+        overlaySize = { width: Math.round(rect.width), height: Math.round(rect.height) };
+        persistPrefs();
+      }
+    }
+  }
+  function attachDocHandlersOnce() {
+    if (docHandlersAttached) return;
+    docHandlersAttached = true;
+    document.addEventListener('mousemove', onDocMouseMove);
+    document.addEventListener('mouseup', onDocMouseUp);
+    diag.docListenerAttachCount++;
   }
 
   // ── CSS ────────────────────────────────────────────────────────────
@@ -735,7 +827,8 @@
     // skipped. Status flip (failed→paid) → binds again so the RPC can transition.
     var token = saleStatusToken(sale);
     if (boundOrderStatus.get(sale.orderId) === token) return [];
-    boundOrderStatus.set(sale.orderId, token);
+    // The dedup token is committed AFTER the AUTO_BIND message is dispatched (below),
+    // so a synchronous throw before dispatch can't permanently suppress a retry.
 
     // Snapshot staged SKUs for this bind (deep-copy so qty edits can't reach the
     // snapshot). This is the AUTO_BIND payload — kept to exactly the fields the
@@ -764,8 +857,10 @@
       sessionBoundSkus.set(sale.orderId, skusForBind.map(function (s) {
         return { sku_number: s.sku_number, title: s.title, qty: s.qty };
       }));
+      capMap(sessionBoundSkus);
     }
 
+    var dispatched = false;
     try {
       chrome.runtime.sendMessage({
         type: 'AUTO_BIND',
@@ -776,17 +871,25 @@
           console.error('[LENSED][TT] auto-bind sendMessage error:', chrome.runtime.lastError);
         }
       });
-    } catch (_) {}
+      dispatched = true;
+    } catch (err) {
+      console.error('[LENSED][TT] auto-bind dispatch failed:', err);
+    }
 
-    // One winner per auction: clear the staged pills after EVERY bind that had a
-    // staged set — paid AND failed-payment alike — AFTER the snapshot + message
-    // above (the AUTO_BIND payload and the row's item lines are already captured)
-    // and after `previousSkus` was copied for the ↻ re-run. Clearing on a failed
-    // payment (previously skipped) stops the same SKUs from silently carrying
-    // over and binding to the NEXT order; the host re-runs manually via ↻. The
-    // AUTO_BIND payload and background's not_sold logging are unchanged — the
-    // message above still fires for failed payments.
-    if (skusForBind.length > 0) {
+    // Commit the dedup token only once the message actually dispatched, so a failed
+    // dispatch leaves the order retry-able (and staged SKUs intact) instead of
+    // silently suppressed.
+    if (dispatched) {
+      boundOrderStatus.set(sale.orderId, token);
+      capMap(boundOrderStatus);
+      diag.lastBindTs = Date.now();
+    }
+
+    // One winner per auction: clear the staged pills after a dispatched bind that had
+    // a staged set — paid AND failed-payment alike — AFTER the snapshot + message and
+    // after `previousSkus` was copied for the ↻ re-run. If dispatch failed we keep the
+    // staged set so a retry can still bind.
+    if (dispatched && skusForBind.length > 0) {
       clearStaged();
     }
 
@@ -805,6 +908,7 @@
   // ── Build overlay DOM ──────────────────────────────────────────────
 
   function createOverlay() {
+    diag.overlayCreateCount++;
     var existing = document.getElementById(CONTAINER_ID);
     if (existing) existing.remove();
 
@@ -984,32 +1088,19 @@
     shadowRoot.appendChild(reopenTab);
 
     // ── Dragging ─────────────────────────────────────────────────
-    var dragging = false;
-    var dragOffsetX = 0;
-    var dragOffsetY = 0;
-
+    // Only the per-overlay mousedown lives here; the document mousemove/mouseup are
+    // hoisted to module scope and attached ONCE (attachDocHandlersOnce) so a rebuild
+    // never adds another document listener. mousedown sets the shared drag state and
+    // points activePanel at THIS build.
     header.addEventListener('mousedown', function (e) {
       if (e.target === toggle) return;
-      dragging = true;
+      activePanel = panel;
       var rect = panel.getBoundingClientRect();
-      dragOffsetX = e.clientX - rect.left;
-      dragOffsetY = e.clientY - rect.top;
+      dragState.offX = e.clientX - rect.left;
+      dragState.offY = e.clientY - rect.top;
+      dragState.on = true;
       panel.style.transition = 'none';
       e.preventDefault();
-    });
-
-    document.addEventListener('mousemove', function (e) {
-      if (!dragging) return;
-      panel.style.left = (e.clientX - dragOffsetX) + 'px';
-      panel.style.top = (e.clientY - dragOffsetY) + 'px';
-      panel.style.right = 'auto';
-      panel.style.bottom = 'auto';
-    });
-
-    document.addEventListener('mouseup', function () {
-      if (!dragging) return;
-      dragging = false;
-      panel.style.transition = '';
     });
 
     // ── Resizing ─────────────────────────────────────────────────
@@ -1023,24 +1114,8 @@
     resizeHandle.title = 'Resize';
     panel.appendChild(resizeHandle);
 
-    var resizing = false;
-    var resizeStartX = 0, resizeStartY = 0, resizeStartW = 0, resizeStartH = 0;
-
-    function overlayMaxW() { return Math.min(OVERLAY_MAX_W, window.innerWidth - 32); }
-    function overlayMaxH() { return Math.min(OVERLAY_MAX_H, window.innerHeight - 32); }
-    function clampW(w) { return Math.max(OVERLAY_MIN_W, Math.min(overlayMaxW(), w)); }
-    function clampH(h) { return Math.max(OVERLAY_MIN_H, Math.min(overlayMaxH(), h)); }
-
-    // Persist size + Recent-Orders-hidden + whole-overlay-hidden together (guarded).
-    function persistPrefs() {
-      try {
-        chrome.storage.local.set({
-          lensed_overlay_size: overlaySize,
-          lensed_overlay_orders_hidden: ordersHidden,
-          lensed_overlay_hidden: hidden
-        });
-      } catch (_) {}
-    }
+    // (clampW/clampH/overlayMax* and persistPrefs are module-level now, so the single
+    // hoisted document resize handler can share them — see the freeze-hardening block.)
 
     // Hide/show the whole overlay. Hidden → panel gone, floating tab shown.
     function applyHidden() {
@@ -1064,12 +1139,13 @@
     }
 
     resizeHandle.addEventListener('mousedown', function (e) {
-      resizing = true;
+      activePanel = panel;
       var rect = panel.getBoundingClientRect();
-      resizeStartX = e.clientX;
-      resizeStartY = e.clientY;
-      resizeStartW = rect.width;
-      resizeStartH = rect.height;
+      resizeState.startX = e.clientX;
+      resizeState.startY = e.clientY;
+      resizeState.startW = rect.width;
+      resizeState.startH = rect.height;
+      resizeState.on = true;
       // Pin the top-left corner so dragging the bottom-right grip grows down-right.
       panel.style.left = rect.left + 'px';
       panel.style.top = rect.top + 'px';
@@ -1081,20 +1157,10 @@
       e.stopPropagation();
     });
 
-    document.addEventListener('mousemove', function (e) {
-      if (!resizing) return;
-      panel.style.width = clampW(resizeStartW + (e.clientX - resizeStartX)) + 'px';
-      panel.style.height = clampH(resizeStartH + (e.clientY - resizeStartY)) + 'px';
-    });
-
-    document.addEventListener('mouseup', function () {
-      if (!resizing) return;
-      resizing = false;
-      panel.style.transition = '';
-      var rect = panel.getBoundingClientRect();
-      overlaySize = { width: Math.round(rect.width), height: Math.round(rect.height) };
-      persistPrefs();
-    });
+    // Attach the shared document drag/resize handlers exactly once per page, and point
+    // them at this (latest) build. Rebuilds never grow the document listener count.
+    activePanel = panel;
+    attachDocHandlersOnce();
 
     getOverlayMountRoot().appendChild(host);
 
@@ -1141,7 +1207,7 @@
       });
     } catch (_) {}
 
-    console.log('[LENSED][TT] overlay injected');
+    console.log('[LENSED][TT] overlay injected', JSON.stringify(diag));
     return host;
   }
 
@@ -1260,10 +1326,14 @@
     seenOrderIds = Object.create(null);
     salesCount = 0;
     capturedOnlyCount = 0;
+    // Clear the per-order dedup Maps too: a new live's orders are legitimately
+    // distinct, so cross-live dedup state must not carry over (and this bounds them).
+    boundOrderStatus = new Map();
+    sessionBoundSkus = new Map();
     if (countEl) countEl.textContent = '0';
     renderCapturedOnlyWarning();
     if (stagedSkus.length > 0) clearStaged();
-    console.log('[LENSED][TT] session reset — cleared staged SKUs + counter');
+    console.log('[LENSED][TT] session reset — cleared staged SKUs + counter + dedup maps');
   }
 
   // Adopt the live session id reported by the background worker (via
@@ -1332,19 +1402,72 @@
     var host = document.getElementById(CONTAINER_ID);
     if (!host) { ensureOverlay(); return; }
     var root = getOverlayMountRoot();
-    if (host.parentNode !== root) root.appendChild(host);
+    if (host.parentNode !== root) { root.appendChild(host); diag.overlayRelocateCount++; }
   }
 
-  // ── MutationObserver: re-inject if TikTok SPA removes our container
+  // ── MutationObserver: re-inject if TikTok SPA removes our container.
+  // Returns true when it actually rebuilt (used by the observer to count rebuilds).
   function ensureOverlay() {
     if (!document.getElementById(CONTAINER_ID)) {
+      diag.overlayRemountCount++;
       createOverlay();
       if (salesCount > 0 && countEl) {
         countEl.textContent = String(salesCount);
         var empty = salesListEl && salesListEl.querySelector('.lensed-empty');
         if (empty) empty.remove();
       }
+      return true;
     }
+    return false;
+  }
+
+  // Coalesce SPA-mutation bursts: at most one ensureOverlay() per frame, and never
+  // let an exception in the callback kill the observer.
+  var rebuildScheduled = false;
+  function onBodyMutation() {
+    if (rebuildScheduled) return;
+    rebuildScheduled = true;
+    var run = function () {
+      rebuildScheduled = false;
+      try { if (ensureOverlay()) diag.observerRebuildCount++; } catch (_) {}
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 16);
+  }
+
+  // Build the overlay + attach the observer/fullscreen listeners. Restartable:
+  // idempotent via pageWiringActive so it runs once now and again after a bfcache
+  // restore (see pageshow). createOverlay() attaches the shared doc handlers once.
+  function startPageWiring() {
+    if (pageWiringActive) return;
+    pageWiringActive = true;
+    createOverlay();
+    overlayObserver = new MutationObserver(onBodyMutation);
+    overlayObserver.observe(document.body, { childList: true, subtree: false });
+    // Keep the overlay inside the rendered subtree on fullscreen enter/exit (webkit*
+    // is a defensive fallback for older Chromium).
+    document.addEventListener('fullscreenchange', ensureOverlayMountedInCorrectRoot);
+    document.addEventListener('webkitfullscreenchange', ensureOverlayMountedInCorrectRoot);
+  }
+
+  // Tear down everything page-scoped so a navigation / bfcache eviction leaves nothing
+  // live. Idempotent. Uses pagehide (bfcache-safe) — NOT unload/visibilitychange (the
+  // tab is backgrounded constantly during a live; tearing down there would drop the
+  // overlay + in-memory counter mid-live). The persisted counter/staged are written
+  // eagerly, so no save is needed here.
+  function teardown() {
+    pageWiringActive = false;
+    try { if (overlayObserver) { overlayObserver.disconnect(); overlayObserver = null; } } catch (_) {}
+    try { document.removeEventListener('mousemove', onDocMouseMove); } catch (_) {}
+    try { document.removeEventListener('mouseup', onDocMouseUp); } catch (_) {}
+    docHandlersAttached = false;
+    try { document.removeEventListener('fullscreenchange', ensureOverlayMountedInCorrectRoot); } catch (_) {}
+    try { document.removeEventListener('webkitfullscreenchange', ensureOverlayMountedInCorrectRoot); } catch (_) {}
+    try { if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; } } catch (_) {}
+    try { var host = document.getElementById(CONTAINER_ID); if (host) host.remove(); } catch (_) {}
+    shadowRoot = null; salesListEl = null; countEl = null; stagedListEl = null; notesListEl = null;
+    skuInputEl = null; resolvedLabelEl = null; stagedCountEl = null; sessionStatusEl = null;
+    capturedOnlyWarnEl = null; aspValueEl = null; breakEvenValueEl = null; activePanel = null;
   }
 
   function init() {
@@ -1356,17 +1479,15 @@
       }
       return;
     }
-
-    createOverlay();
-
-    var observer = new MutationObserver(function () { ensureOverlay(); });
-    observer.observe(document.body, { childList: true, subtree: false });
-
-    // Keep the overlay inside the rendered subtree when Live Manager enters or
-    // exits fullscreen (see getOverlayMountRoot). webkit* is a defensive
-    // fallback for older Chromium builds that only fire the prefixed event.
-    document.addEventListener('fullscreenchange', ensureOverlayMountedInCorrectRoot);
-    document.addEventListener('webkitfullscreenchange', ensureOverlayMountedInCorrectRoot);
+    // Window lifecycle listeners attach exactly once and survive bfcache (the frozen
+    // page keeps them). pagehide tears page wiring down; pageshow(persisted) rebuilds
+    // it — a bfcache-restored page does NOT re-run the content script.
+    if (!windowLifecycleBound) {
+      windowLifecycleBound = true;
+      window.addEventListener('pagehide', teardown);
+      window.addEventListener('pageshow', function (e) { if (e && e.persisted) startPageWiring(); });
+    }
+    startPageWiring();
   }
 
   init();
@@ -1444,7 +1565,7 @@
 
     if (data.source === 'lensed-tiktok-sale') {
       var sale = data.sale;
-
+      try {
       // Forward to background
       try {
         chrome.runtime.sendMessage({ type: 'TIKTOK_SALE', sale: sale }).catch(function () {});
@@ -1462,6 +1583,7 @@
 
       // Render in overlay
       renderSale(sale, wasBound, boundSkus);
+      diag.lastCaptureTs = Date.now();
 
       // Captured-only: a brand-new order arrived with nothing staged, so it was
       // recorded raw but NOT bound to a SKU. Count once + show a visible warning so
@@ -1476,6 +1598,9 @@
       // A bind just cleared staging — refocus so the host can scan the next item
       // immediately (guarded: won't steal focus from TikTok chat/host fields).
       if (boundSkus && boundSkus.length > 0) focusScanInput();
+      } catch (err) {
+        console.error('[LENSED][TT] sale handler error:', err);
+      }
       return;
     }
 
