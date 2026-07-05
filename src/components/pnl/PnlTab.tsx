@@ -139,7 +139,10 @@ type SkuSortKey =
   | 'net_profit_cents' | 'margin' | 'qty_on_hand' | 'daysOfCover' | 'lead_time_days';
 
 function enrichSku(r: PnlSkuRow): EnrichedSku {
-  const velocity = r.period_days > 0 ? r.units_sold / r.period_days : 0;
+  // Reorder velocity uses the FIXED trailing window (period-independent), NOT the
+  // selected-period units — otherwise a short window (e.g. "Today") would zero
+  // out velocity and falsely mark a SKU "OK".
+  const velocity = r.reorder_window_days > 0 ? r.reorder_units / r.reorder_window_days : 0;
   const daysOfCover = velocity > 0 ? r.qty_on_hand / velocity : null;
   const margin = marginOf(r.net_profit_cents, r.revenue_cents);
   const hasLead = r.lead_time_days != null;
@@ -240,7 +243,9 @@ function BySkuLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: stri
               <td className={`px-3 py-3 text-right tabular-nums ${r.lowMargin ? 'text-tt-red' : ''}`}>{pct(r.margin)}</td>
               <td className="px-3 py-3 text-right tabular-nums">{r.qty_on_hand.toLocaleString()}</td>
               <td className="px-3 py-3 text-right tabular-nums">
-                {r.daysOfCover == null ? <span className="text-tt-muted">—</span> : `${r.daysOfCover.toFixed(1)} d`}
+                <div>{r.daysOfCover == null ? <span className="text-tt-muted">—</span> : `${r.daysOfCover.toFixed(1)} d`}</div>
+                {/* Velocity window differs from the performance period — clamped for new SKUs. */}
+                <div className="text-[10px] text-tt-muted font-normal">velocity: last {r.reorder_window_days}d</div>
               </td>
               <td className="px-3 py-3 text-right tabular-nums">
                 {r.lead_time_days == null ? <span className="text-tt-muted">—</span> : `${r.lead_time_days} d`}
@@ -270,7 +275,7 @@ function BySkuLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: stri
         </tbody>
       </table>
       <div className="px-3 py-2.5 text-[11px] text-tt-muted border-t border-tt-border">
-        Days of cover = qty on hand ÷ daily velocity (units sold ÷ days in period). Reorder flags when cover ≤ lead time + {SAFETY_BUFFER_DAYS}-day buffer.
+        Performance columns (units / revenue / COGS / net / margin) reflect the selected period. Days of cover uses a fixed trailing 30-day velocity (or since first sale for newer SKUs) that is independent of the selected period, so the reorder signal stays stable. Reorder flags when cover ≤ lead time + {SAFETY_BUFFER_DAYS}-day buffer.
       </div>
     </div>
   );
@@ -326,7 +331,7 @@ function ByShowLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: str
                 {isOpen && (
                   <tr key={`${s.session_id}-hours`}>
                     <td colSpan={7} className="px-4 py-4 bg-tt-bg/40 border-b border-tt-border">
-                      <HourlyBreakdown sessionId={s.session_id} dateFrom={dateFrom} dateTo={dateTo} />
+                      <HourlyBreakdown sessionId={s.session_id} />
                     </td>
                   </tr>
                 )}
@@ -339,8 +344,8 @@ function ByShowLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: str
   );
 }
 
-function HourlyBreakdown({ sessionId, dateFrom, dateTo }: { sessionId: string; dateFrom: string | null; dateTo: string | null }) {
-  const { data = [], isLoading } = usePnlShowHourly(sessionId, dateFrom, dateTo);
+function HourlyBreakdown({ sessionId }: { sessionId: string }) {
+  const { data = [], isLoading } = usePnlShowHourly(sessionId);
 
   const chart = useMemo(() => ({
     labels: data.map((h) => hourLabel(h.hour_of_day)),

@@ -36,7 +36,10 @@ export interface PnlSkuRow {
   qty_on_hand: number;
   lead_time_days: number | null;
   reorder_point: number | null;
-  period_days: number;
+  // Reorder velocity basis — a FIXED trailing window, independent of the selected
+  // period. window_days is clamped to the SKU's own history (≤ 30).
+  reorder_units: number;
+  reorder_window_days: number;
 }
 
 export function usePnlBySku(from: string | null, to: string | null) {
@@ -61,7 +64,8 @@ export function usePnlBySku(from: string | null, to: string | null) {
         qty_on_hand: num(r.qty_on_hand),
         lead_time_days: numOrNull(r.lead_time_days),
         reorder_point: numOrNull(r.reorder_point),
-        period_days: num(r.period_days),
+        reorder_units: num(r.reorder_units),
+        reorder_window_days: num(r.reorder_window_days),
       }));
     },
   });
@@ -116,14 +120,15 @@ export interface PnlHourRow {
   net_profit_cents: number;
 }
 
-export function usePnlShowHourly(sessionId: string | null, from: string | null, to: string | null) {
+// The per-hour drill-down is always the FULL show — it does NOT take the period.
+export function usePnlShowHourly(sessionId: string | null) {
   const { user } = useUser();
   return useQuery<PnlHourRow[]>({
-    queryKey: ['pnl-show-hourly', user?.id, sessionId, from, to, TZ],
+    queryKey: ['pnl-show-hourly', user?.id, sessionId, TZ],
     enabled: !!user && !!sessionId,
     staleTime: 30_000,
     queryFn: async () => {
-      const res = await fetch(`/api/pnl/show-hourly?${qs(from, to, { session_id: sessionId! })}`);
+      const res = await fetch(`/api/pnl/show-hourly?${qs(null, null, { session_id: sessionId! })}`);
       if (!res.ok) throw new Error('Failed to load hourly breakdown');
       const json = await res.json();
       return (json.rows ?? []).map((r: Record<string, unknown>) => ({
