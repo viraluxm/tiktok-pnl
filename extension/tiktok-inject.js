@@ -14,6 +14,11 @@
 (function () {
   'use strict';
 
+  // Duplicate-injection guard (MAIN world). A second injection would double-wrap
+  // fetch/XHR — every response then relayed twice. Bail if already installed.
+  if (window.__lensedInjected) return;
+  window.__lensedInjected = true;
+
   const SALE_URL_MARKER = 'auction_result/get';
 
   // ── TEMPORARY SPIKE (observation only) ──────────────────────────────
@@ -46,6 +51,13 @@
   // (e.g. failed→paid on auction_result/get's cumulative snapshot) re-relays,
   // while an identical re-send (same order_id + same status) stays suppressed.
   const seenOrderStatus = new Map();
+  // Pathological-safety cap so a very long live can't grow this without bound. An
+  // evicted-then-re-relayed order is independently de-duped downstream (content
+  // boundOrderStatus + background loggedOrderStatus + RPC idempotency on order_id),
+  // so eviction never double-counts or double-binds. NOT cleared per-room here — this
+  // MAIN-world script cannot see the resolved session id, and clearing mid-live while
+  // the content script still holds the order would cause an out-of-order re-relay.
+  const SEEN_ORDER_CAP = 5000;
 
   // Payment token mirrors the downstream sold/not_sold split: a failed payment
   // is 'failed', everything else (paid / unknown / null) is 'ok'.
@@ -101,6 +113,9 @@
     }
 
     seenOrderStatus.set(orderId, token);
+    if (seenOrderStatus.size > SEEN_ORDER_CAP) {
+      seenOrderStatus.delete(seenOrderStatus.keys().next().value); // evict oldest
+    }
 
     return {
       orderId,
