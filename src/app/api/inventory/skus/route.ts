@@ -9,7 +9,7 @@ const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_BYTES = 5 * 1024 * 1024;
 
 const SELECT_COLS =
-  'id, sku_number, barcode, title, thumbnail_path, shortcut_letter, unit_cost_cents, qty_on_hand, weight_oz, length_in, width_in, height_in, category, is_active, live_seller_notes, created_at, updated_at';
+  'id, sku_number, barcode, title, thumbnail_path, shortcut_letter, unit_cost_cents, qty_on_hand, weight_oz, length_in, width_in, height_in, category, is_active, live_seller_notes, lead_time_days, supplier, reorder_point, created_at, updated_at';
 
 // Live seller talking points: a textarea (one bullet per line) -> text[].
 // Trim, drop blanks, and cap defensively (≤20 bullets, ≤200 chars each).
@@ -150,6 +150,9 @@ export async function POST(req: Request) {
     category: str('category').trim() ? str('category').trim() : null,
     is_active: str('is_active') === '' ? true : str('is_active') === 'true',
     live_seller_notes: parseNotes(str('live_seller_notes')),
+    lead_time_days: intOrNull(str('lead_time_days')),
+    supplier: str('supplier').trim() ? str('supplier').trim() : null,
+    reorder_point: intOrNull(str('reorder_point')),
   };
 
   // Insert the row first (server-generated barcode, retry on the rare collision).

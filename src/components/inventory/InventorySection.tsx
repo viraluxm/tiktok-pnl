@@ -135,6 +135,9 @@ interface FormState {
   qty_on_hand: string;
   is_active: boolean;
   live_seller_notes: string[]; // one entry per bullet input row
+  lead_time_days: string;
+  supplier: string;
+  reorder_point: string;
 }
 
 const EMPTY: FormState = {
@@ -145,6 +148,9 @@ const EMPTY: FormState = {
   qty_on_hand: '0',
   is_active: true,
   live_seller_notes: [],
+  lead_time_days: '',
+  supplier: '',
+  reorder_point: '',
 };
 
 export default function InventorySection() {
@@ -248,6 +254,9 @@ export default function InventorySection() {
       qty_on_hand: String(s.qty_on_hand ?? 0),
       is_active: s.is_active,
       live_seller_notes: [...(s.live_seller_notes ?? [])], // one row per existing note
+      lead_time_days: s.lead_time_days != null ? String(s.lead_time_days) : '',
+      supplier: s.supplier ?? '',
+      reorder_point: s.reorder_point != null ? String(s.reorder_point) : '',
     });
   }
 
@@ -293,6 +302,10 @@ export default function InventorySection() {
       is_active: form.is_active,
       // Drop empty rows and send as newline text; the API canonicalizes to text[].
       live_seller_notes: form.live_seller_notes.map((s) => s.trim()).filter(Boolean).join('\n'),
+      // Reorder planning — all optional; blank => null (API normalizes/validates).
+      lead_time_days: form.lead_time_days.trim() ? Math.trunc(Number(form.lead_time_days)) : null,
+      supplier: form.supplier.trim() || null,
+      reorder_point: form.reorder_point.trim() ? Math.trunc(Number(form.reorder_point)) : null,
     };
     try {
       if (editingId) {
@@ -542,6 +555,33 @@ export default function InventorySection() {
                   </Field>
                 </>
               )}
+              <Field label="Lead time (days)">
+                <input
+                  value={form.lead_time_days}
+                  onChange={(e) => setForm((f) => ({ ...f, lead_time_days: e.target.value }))}
+                  inputMode="numeric"
+                  placeholder="—"
+                  className="input tabular-nums"
+                />
+              </Field>
+              <Field label="Supplier / reorder link" className="col-span-2">
+                <input
+                  value={form.supplier}
+                  onChange={(e) => setForm((f) => ({ ...f, supplier: e.target.value }))}
+                  placeholder="Supplier name or URL"
+                  className="input"
+                />
+              </Field>
+              <Field label="Reorder point">
+                <input
+                  value={form.reorder_point}
+                  onChange={(e) => setForm((f) => ({ ...f, reorder_point: e.target.value }))}
+                  inputMode="numeric"
+                  placeholder="—"
+                  className="input tabular-nums"
+                />
+                <span className="block text-[11px] text-tt-muted mt-1">Leave blank to auto-calculate</span>
+              </Field>
               <Field label="Live seller talking points" className="col-span-2 md:col-span-4">
                 <span className="block text-[11px] text-tt-muted -mt-1 mb-1.5">
                   Shown in the live overlay when this SKU is scanned

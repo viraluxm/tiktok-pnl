@@ -10,7 +10,7 @@ const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_BYTES = 5 * 1024 * 1024;
 
 const SELECT_COLS =
-  'id, sku_number, barcode, title, thumbnail_path, shortcut_letter, unit_cost_cents, qty_on_hand, weight_oz, length_in, width_in, height_in, category, is_active, live_seller_notes, created_at, updated_at';
+  'id, sku_number, barcode, title, thumbnail_path, shortcut_letter, unit_cost_cents, qty_on_hand, weight_oz, length_in, width_in, height_in, category, is_active, live_seller_notes, lead_time_days, supplier, reorder_point, created_at, updated_at';
 
 // Live seller talking points: a textarea (one bullet per line) -> text[].
 // Trim, drop blanks, and cap defensively (≤20 bullets, ≤200 chars each).
@@ -102,6 +102,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (fd.has('category')) patch.category = str('category').trim() ? str('category').trim() : null;
   if (fd.has('is_active')) patch.is_active = str('is_active') === 'true';
   if (fd.has('live_seller_notes')) patch.live_seller_notes = parseNotes(str('live_seller_notes'));
+  if (fd.has('lead_time_days')) patch.lead_time_days = intOrNull(str('lead_time_days'));
+  if (fd.has('supplier')) patch.supplier = str('supplier').trim() ? str('supplier').trim() : null;
+  if (fd.has('reorder_point')) patch.reorder_point = intOrNull(str('reorder_point'));
 
   // Image: replace with a new upload, or remove.
   const newImage = fileFrom(fd, 'image');
