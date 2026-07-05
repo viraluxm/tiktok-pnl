@@ -11,12 +11,6 @@ import { refreshAccessToken } from '@/lib/tiktok/client';
 // getValidAccessToken() refreshes + persists (with a single-flight lock and a compare-and-swap
 // on the old refresh_token so a rotated token is never clobbered).
 
-// CANARY GATE (this pass): only these users may auto-refresh. Snore stays untouched until the
-// separate "enable for all" go. Remove this gate then.
-const REFRESH_ALLOWLIST = new Set<string>([
-  'f5885f7d-5841-457c-b66f-a5aa2916db46', // lots-of-steals
-]);
-
 const REFRESH_SKEW_MS = 5 * 60 * 1000;       // refresh if expiring within 5 min
 const BOGUS_FUTURE_MS = 60 * 24 * 60 * 60 * 1000; // expiry > now+60d is bogus (the 2082 rows) → revalidate
 const LOCK_STALE_MS = 60 * 1000;             // a held refresh lock older than this is stale
@@ -67,11 +61,6 @@ export async function getValidAccessToken(
   force = false,
 ): Promise<ValidTokenResult> {
   if (!force && !needsRefresh(conn)) {
-    return { ok: true, accessToken: decryptOrFallback(conn.access_token, 'access_token') };
-  }
-  // Canary gate: never auto-refresh a non-allowlisted (Snore) connection this pass — hand back
-  // the existing token as-is (still valid for Snore; if it isn't, the sync fails loud, no rotation).
-  if (!REFRESH_ALLOWLIST.has(conn.user_id)) {
     return { ok: true, accessToken: decryptOrFallback(conn.access_token, 'access_token') };
   }
   // Refresh token itself expired → cannot refresh, must re-auth.
