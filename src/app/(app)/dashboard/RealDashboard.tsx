@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import dynamic from 'next/dynamic';
+import Link from 'next/link';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import SummaryCards from '@/components/dashboard/SummaryCards';
@@ -20,13 +21,16 @@ import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
 import ReturnsTab from '@/components/dashboard/ReturnsTab';
 import ShowsTab from '@/components/shows/ShowsTab';
-import ShippingTab from '@/components/shipping/ShippingTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'inventory' | 'shows' | 'shipping' | 'returns';
+type ViewTab = 'dashboard' | 'inventory' | 'shows' | 'returns';
+
+// Ad-spend UI hidden for now (reversible): flip to true to restore the Ad Account bar.
+// Data/hooks/store_id trigger are untouched — this only gates the owner-facing controls.
+const SHOW_AD_SPEND_UI = false;
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -191,15 +195,16 @@ export default function RealDashboard() {
     totalProf -= totalUserCogs;
 
     const hasUserCogs = totalUserCogs > 0;
+    // Ads slice removed (was always 0 — ad_spend is hidden from this view). Arrays stay index-aligned.
     const breakdownLabels = hasUserCogs
-      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Affiliate', 'Ads', 'Net Profit']
-      : ['Platform Fee (6%)', 'Shipping', 'Affiliate', 'Ads', 'Net Profit'];
+      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Affiliate', 'Net Profit']
+      : ['Platform Fee (6%)', 'Shipping', 'Affiliate', 'Net Profit'];
     const rawAmounts = hasUserCogs
-      ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)]
-      : [Math.max(0, totalPlatFee), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)];
+      ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), Math.max(0, totalAff), Math.max(0, totalProf)]
+      : [Math.max(0, totalPlatFee), Math.max(0, totalShip), Math.max(0, totalAff), Math.max(0, totalProf)];
     const breakdownColors = hasUserCogs
-      ? ['#ff6384', '#f97316', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0']
-      : ['#ff6384', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0'];
+      ? ['#ff6384', '#f97316', '#ff9f40', '#ffcd56', '#69C9D0']
+      : ['#ff6384', '#ff9f40', '#ffcd56', '#69C9D0'];
     const totalCosts = rawAmounts.reduce((a, b) => a + b, 0);
 
     return {
@@ -238,7 +243,6 @@ export default function RealDashboard() {
     { label: 'Dashboard', value: 'dashboard' },
     { label: 'Inventory', value: 'inventory' },
     { label: 'Shows', value: 'shows' },
-    { label: 'Shipping', value: 'shipping' },
     { label: 'Returns', value: 'returns' },
   ];
 
@@ -249,8 +253,22 @@ export default function RealDashboard() {
       <div className="px-8 py-6">
         <TikTokConnect />
 
+        {/* Sync error banner — a broken sync is visible, not silent (fail-loud). */}
+        {connection?.syncError && (
+          <div className="mb-4 rounded-lg border border-tt-red/40 bg-tt-red/10 px-4 py-3 text-sm text-tt-red flex items-center justify-between gap-4">
+            <span>
+              {connection.needsReconnect
+                ? '⚠ Sync failed — reconnect your TikTok Shop. Recent orders may be missing until you reconnect.'
+                : `⚠ Sync incomplete (${connection.syncError}). Data may be behind; it will retry on the next sync.`}
+            </span>
+            {connection.needsReconnect && (
+              <a href="/api/tiktok/auth" className="shrink-0 px-3 py-1.5 rounded-lg bg-tt-red text-white text-xs font-semibold">Reconnect</a>
+            )}
+          </div>
+        )}
+
         {/* Ad Account Connection */}
-        {isConnected && (
+        {SHOW_AD_SPEND_UI && isConnected && (
           <div className="mb-4 flex items-center gap-3">
             {bizConnected ? (
               <div className="flex items-center gap-3 px-4 py-2 rounded-lg border border-tt-border bg-tt-card">
@@ -326,6 +344,13 @@ export default function RealDashboard() {
               {tab.label}
             </button>
           ))}
+          {/* Fulfillment is a separate route surface — navigate rather than swap in-page views. */}
+          <Link
+            href="/pickpack/settings"
+            className="px-6 py-2.5 rounded-lg border border-tt-border text-sm font-medium cursor-pointer transition-all text-tt-muted hover:bg-tt-card-hover"
+          >
+            Fulfillment
+          </Link>
         </div>
 
         {/* Dashboard View */}
@@ -342,11 +367,6 @@ export default function RealDashboard() {
 
         {/* Shows View */}
         {activeView === 'shows' && <ShowsTab />}
-
-        {/* Shipping View */}
-        {activeView === 'shipping' && (
-          <ShippingTab />
-        )}
 
         {/* Returns View */}
         {activeView === 'returns' && (

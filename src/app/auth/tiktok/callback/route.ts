@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import { exchangeCodeForToken, getAuthorizedShops } from '@/lib/tiktok/client';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { encrypt } from '@/lib/crypto';
+import { expiryToIso } from '@/lib/tiktok/token';
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
@@ -61,7 +62,10 @@ export async function GET(request: Request) {
     // Store connection in database using admin client (bypasses RLS)
     const adminClient = createAdminClient();
 
-    const tokenExpiresAt = new Date(Date.now() + tokenData.access_token_expire_in * 1000).toISOString();
+    // TikTok returns *_expire_in as ABSOLUTE Unix seconds (not a duration) — parse defensively.
+    console.log(`[TikTok callback] expiry raw: access_token_expire_in=${tokenData.access_token_expire_in}, refresh_token_expire_in=${tokenData.refresh_token_expire_in}`);
+    const tokenExpiresAt = expiryToIso(tokenData.access_token_expire_in);
+    const refreshExpiresAt = expiryToIso(tokenData.refresh_token_expire_in);
 
     const { error: upsertError } = await adminClient
       .from('tiktok_connections')
@@ -70,6 +74,7 @@ export async function GET(request: Request) {
         access_token: encrypt(tokenData.access_token),
         refresh_token: encrypt(tokenData.refresh_token),
         token_expires_at: tokenExpiresAt,
+        refresh_token_expires_at: refreshExpiresAt,
         shop_cipher: shopCipher,
         shop_name: shopName || tokenData.seller_name || 'TikTok Shop',
         connected_at: new Date().toISOString(),

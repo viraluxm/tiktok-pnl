@@ -67,24 +67,26 @@ export async function exchangeCodeForToken(code: string): Promise<TikTokShopToke
 }
 
 export async function refreshAccessToken(refreshToken: string): Promise<TikTokShopTokenResponse> {
-  // POST with form-encoded body to keep app_secret out of URLs
-  const body = new URLSearchParams({
+  // GET with query params — matches TikTok Shop's /token/get; the endpoint 404s on POST.
+  const params = new URLSearchParams({
     app_key: TIKTOK_SHOP_APP_KEY,
     app_secret: TIKTOK_SHOP_APP_SECRET,
     refresh_token: refreshToken,
     grant_type: 'refresh_token',
   });
 
-  const res = await fetch(TIKTOK_SHOP_REFRESH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+  const res = await fetch(`${TIKTOK_SHOP_REFRESH_URL}?${params.toString()}`, { method: 'GET' });
+  const rawText = await res.text();
 
-  const json = await res.json();
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(rawText);
+  } catch {
+    throw new Error(`TikTok Shop token refresh non-JSON (HTTP ${res.status}): ${rawText.slice(0, 200)}`);
+  }
 
   if (json.code !== 0) {
-    throw new Error(`TikTok Shop token refresh failed: ${json.message || 'unknown error'}`);
+    throw new Error(`TikTok Shop token refresh failed: ${json.message || 'unknown error'} (code ${json.code})`);
   }
 
   return json.data as TikTokShopTokenResponse;

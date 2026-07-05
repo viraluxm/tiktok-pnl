@@ -11,7 +11,7 @@ export async function GET() {
 
   const { data: connection, error } = await supabase
     .from('tiktok_connections')
-    .select('id, shop_name, shop_cipher, shop_logo, advertiser_ids, connected_at, last_synced_at, sync_cursor, sync_started_at, sync_progress_orders, sync_progress_day')
+    .select('id, shop_name, shop_cipher, shop_logo, advertiser_ids, connected_at, last_synced_at, sync_cursor, sync_started_at, sync_progress_orders, sync_progress_day, sync_error, sync_error_at')
     .eq('user_id', user.id)
     .single();
 
@@ -51,6 +51,9 @@ export async function GET() {
       syncProgressOrders: connection.sync_progress_orders || 0,
       syncProgressDay: connection.sync_progress_day || null,
       shopLogo: connection.shop_logo || null,
+      syncError: connection.sync_error || null,
+      syncErrorAt: connection.sync_error_at || null,
+      needsReconnect: connection.sync_error === 'NEEDS_RECONNECT',
     },
   });
 }
