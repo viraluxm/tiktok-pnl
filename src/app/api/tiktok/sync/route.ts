@@ -130,9 +130,11 @@ export async function POST() {
               if (oid) rows.set(oid, parsed);
             }
 
-            // Bulk upsert orders (strip product_name — not a DB column, used only for product naming)
+            // Bulk upsert orders (strip product_name — not a DB column, used only for product naming).
+            // Stamp store_id explicitly from the connection being synced (connection-scoped,
+            // not session-scoped). May be null for an unlinked connection → trigger backstops.
             const upsertData = [...rows.values()];
-            const dbRows = upsertData.map(({ product_name: _, ...rest }) => rest);
+            const dbRows = upsertData.map(({ product_name: _, ...rest }) => ({ ...rest, store_id: connection.store_id }));
             const { error: upsertErr } = await admin.from('synced_order_ids').upsert(dbRows, { onConflict: 'user_id,order_id' });
             if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
             else totalNew += upsertData.length;

@@ -33,19 +33,47 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   let title = 'Live session';
+  let storeId: string | null = null;
   try {
     const body = await req.json();
     if (body && typeof body.title === 'string' && body.title.trim()) {
       title = body.title.trim().slice(0, 120);
     }
+    // store_id is OPTIONAL for now: honored (and validated) when a caller — e.g.
+    // the extension's Start-Live flow — sends it. When absent, the set_store_id
+    // trigger still backstops it. This makes the endpoint forward-compatible
+    // without requiring the extension change yet.
+    if (body && typeof body.store_id === 'string' && body.store_id.trim()) {
+      storeId = body.store_id.trim();
+    }
   } catch {
     // No body is fine; use the default title.
   }
 
+  // A specified store must belong to the caller (guards against picking someone
+  // else's store once one login owns multiple stores).
+  if (storeId) {
+    const { data: membership } = await supabase
+      .from('store_members')
+      .select('store_id')
+      .eq('user_id', user.id)
+      .eq('store_id', storeId)
+      .maybeSingle();
+    if (!membership) {
+      return NextResponse.json({ error: 'Invalid store for this user' }, { status: 400 });
+    }
+  }
+
   const nowIso = new Date().toISOString();
+  const insertRow: Record<string, unknown> = {
+    user_id: user.id, title, status: 'live', started_at: nowIso, source: 'manual',
+  };
+  // Set explicitly only when provided; otherwise the trigger backstops it.
+  if (storeId) insertRow.store_id = storeId;
+
   const { data, error } = await supabase
     .from('live_sessions')
-    .insert({ user_id: user.id, title, status: 'live', started_at: nowIso, source: 'manual' })
+    .insert(insertRow)
     .select(SELECT_COLS)
     .single();
 

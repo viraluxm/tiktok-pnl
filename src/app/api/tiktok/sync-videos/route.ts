@@ -38,6 +38,7 @@ export async function POST() {
       if (videos.length > 0) {
         const rows = videos.map(v => ({
           user_id: userId,
+          store_id: connection.store_id, // connection-scoped; null → trigger backstops
           tiktok_video_id: v.id,
           title: v.title,
           username: v.username,
