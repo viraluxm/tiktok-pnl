@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { fetchReturns, fetchCancellations } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
+import { getActiveStore } from '@/lib/tiktok/activeStore';
 
 const SHOP_TIMEZONE = 'America/Los_Angeles';
 
@@ -64,8 +65,14 @@ export async function GET(request: Request) {
 
   const admin = createAdminClient();
 
+  // Per-store action: needs a specific store's connection (can't target "all").
+  const activeStore = await getActiveStore();
+  if (activeStore === 'all') return NextResponse.json({ error: 'Select a store first' }, { status: 400 });
   // Get TikTok connection for API calls
-  const { data: connection } = await admin.from('tiktok_connections').select('*').eq('user_id', data.user.id).single();
+  const { data: connection } = await admin.from('tiktok_connections').select('*').eq('user_id', data.user.id).eq('store_id', activeStore).maybeSingle();
+  if (!connection?.access_token || !connection?.shop_cipher) {
+    return NextResponse.json({ error: 'No TikTok connection' }, { status: 404 });
+  }
 
   // Calculate date range
   const now = new Date();

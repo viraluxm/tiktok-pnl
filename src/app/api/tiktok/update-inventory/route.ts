@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { updateInventory } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
+import { getActiveStore } from '@/lib/tiktok/activeStore';
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -15,7 +16,10 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
-  const { data: connection } = await admin.from('tiktok_connections').select('access_token, shop_cipher').eq('user_id', data.user.id).single();
+  // Per-store action: needs a specific store's connection (can't target "all").
+  const activeStore = await getActiveStore();
+  if (activeStore === 'all') return NextResponse.json({ error: 'Select a store first' }, { status: 400 });
+  const { data: connection } = await admin.from('tiktok_connections').select('access_token, shop_cipher').eq('user_id', data.user.id).eq('store_id', activeStore).maybeSingle();
   if (!connection?.shop_cipher) return NextResponse.json({ error: 'No TikTok connection' }, { status: 404 });
 
   const accessToken = decryptOrFallback(connection.access_token, 'access_token');
