@@ -26,10 +26,12 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     .eq('id', id).eq('user_id', user.id).maybeSingle();
   if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
 
+  // Session-scoped: use the connection for THIS session's store (not the active-store
+  // cookie — a session knows its own store).
   const { data: conn } = await supabase
     .from('tiktok_connections')
     .select('shop_cipher, access_token')
-    .eq('user_id', user.id).maybeSingle();
+    .eq('user_id', user.id).eq('store_id', session.store_id).maybeSingle();
   if (!conn?.access_token || !conn?.shop_cipher) {
     return NextResponse.json({ error: 'No TikTok connection' }, { status: 400 });
   }
