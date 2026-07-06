@@ -13,10 +13,12 @@ export async function GET(request: Request) {
   const cookieStore = await cookies();
   const savedState = cookieStore.get('tiktok_oauth_state')?.value;
   const userId = cookieStore.get('tiktok_oauth_user')?.value;
+  const storeId = cookieStore.get('tiktok_oauth_store')?.value;
 
   // Clear OAuth cookies
   cookieStore.delete('tiktok_oauth_state');
   cookieStore.delete('tiktok_oauth_user');
+  cookieStore.delete('tiktok_oauth_store');
 
   // Validate state for CSRF protection
   if (!state || !savedState || state !== savedState) {
@@ -32,6 +34,14 @@ export async function GET(request: Request) {
   if (!userId) {
     console.error('No user ID found in cookie');
     return NextResponse.redirect(`${origin}/login`);
+  }
+
+  // Connections are per-store (unique(user_id, store_id), store_id NOT NULL).
+  // The auth route set this cookie after validating membership; re-check here
+  // (defense-in-depth) before stamping it on the connection.
+  if (!storeId) {
+    console.error('No store ID found in cookie');
+    return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=missing_store`);
   }
 
   try {
@@ -61,12 +71,28 @@ export async function GET(request: Request) {
     // Store connection in database using admin client (bypasses RLS)
     const adminClient = createAdminClient();
 
+    // Re-validate the target store belongs to this user (admin client bypasses RLS,
+    // so check explicitly) before stamping the connection.
+    const { data: membership } = await adminClient
+      .from('store_members')
+      .select('store_id')
+      .eq('user_id', userId)
+      .eq('store_id', storeId)
+      .maybeSingle();
+    if (!membership) {
+      console.error('TikTok callback: store not owned by user', { userId, storeId });
+      return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=invalid_store`);
+    }
+
     const tokenExpiresAt = new Date(Date.now() + tokenData.access_token_expire_in * 1000).toISOString();
 
+    // Per-store connection: upsert on (user_id, store_id) so re-authing one store
+    // updates only that store's row and never clobbers another store's connection.
     const { error: upsertError } = await adminClient
       .from('tiktok_connections')
       .upsert({
         user_id: userId,
+        store_id: storeId,
         access_token: encrypt(tokenData.access_token),
         refresh_token: encrypt(tokenData.refresh_token),
         token_expires_at: tokenExpiresAt,
@@ -74,7 +100,7 @@ export async function GET(request: Request) {
         shop_name: shopName || tokenData.seller_name || 'TikTok Shop',
         connected_at: new Date().toISOString(),
       }, {
-        onConflict: 'user_id',
+        onConflict: 'user_id,store_id',
       });
 
     if (upsertError) {

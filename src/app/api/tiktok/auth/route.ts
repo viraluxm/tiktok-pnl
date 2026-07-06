@@ -3,13 +3,31 @@ import { cookies } from 'next/headers';
 import { createClient } from '@/lib/supabase/server';
 import { getAuthUrl } from '@/lib/tiktok/client';
 
-export async function GET() {
+export async function GET(request: Request) {
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://lensed.io';
   // Verify user is authenticated
   const supabase = await createClient();
   const { data: { user }, error } = await supabase.auth.getUser();
 
   if (error || !user) {
-    return NextResponse.redirect(new URL('/login', process.env.NEXT_PUBLIC_SITE_URL || 'https://lensed.io'));
+    return NextResponse.redirect(new URL('/login', siteUrl));
+  }
+
+  // Which store is being connected? Required — connections are now per-store
+  // (unique(user_id, store_id), migration 042). The callback stamps this store_id.
+  const storeId = new URL(request.url).searchParams.get('store_id');
+  if (!storeId) {
+    return NextResponse.redirect(new URL('/dashboard?tiktok=error&reason=missing_store', siteUrl));
+  }
+  // The store must belong to the caller.
+  const { data: membership } = await supabase
+    .from('store_members')
+    .select('store_id')
+    .eq('user_id', user.id)
+    .eq('store_id', storeId)
+    .maybeSingle();
+  if (!membership) {
+    return NextResponse.redirect(new URL('/dashboard?tiktok=error&reason=invalid_store', siteUrl));
   }
 
   // Generate CSRF state token
@@ -27,6 +45,15 @@ export async function GET() {
 
   // Also store user ID so we know who to connect on callback
   cookieStore.set('tiktok_oauth_user', user.id, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 600,
+    path: '/',
+  });
+
+  // And the target store, so the callback stamps store_id on the connection.
+  cookieStore.set('tiktok_oauth_store', storeId, {
     httpOnly: true,
     secure: true,
     sameSite: 'lax',
