@@ -82,3 +82,35 @@ export interface FilterState {
 }
 
 export type MarginLevel = 'green' | 'yellow' | 'red';
+
+export type EmployeeStatus = 'active' | 'probation' | 'former';
+
+// Suggested roles the UI offers as presets; `role` is stored as free text so other
+// values are allowed.
+export type EmployeeRole = 'host' | 'fulfillment' | 'manager' | 'support' | 'other';
+
+export interface Employee {
+  id: string;
+  user_id: string;
+  name: string;
+  role: string;
+  status: EmployeeStatus;
+  hourly_rate: number;
+  hire_date: string | null;
+  probation_end_date: string | null;
+  store_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Shift {
+  id: string;
+  user_id: string;
+  employee_id: string;
+  date: string;
+  start_time: string; // 'HH:MM' or 'HH:MM:SS'
+  end_time: string;
+  store_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
