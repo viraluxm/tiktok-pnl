@@ -279,14 +279,14 @@ Notes:
 
 ## 5. Known gaps / future work
 
-- **No reversal path yet.** A mistakenly sent batch cannot be cleanly undone today: `lensed_settle_batch`
-  only zeroes a *negative* layer, and there is no void/adjust operation. If a wrong batch (wrong qty,
-  cost, or SKU) is pushed, correction is currently **manual** (direct DB edit) — and because
-  `qty_on_hand` moves in lockstep and FIFO draws are order-sensitive, a naive manual delete can break
-  the invariant. **Future feature:** a `lensed_void_batch` / `lensed_adjust_batch` RPC that reverses a
-  batch's `qty_remaining` contribution and its `qty_on_hand` bump atomically (guarded so it can't be
-  used to erase already-drawn cost history), exposed to ViewTrack as an "undo send" that references the
-  original `external_ref` / `lensed_batch_id`.
+- **Reversal — IMPLEMENTED (migration 046, 2026-07-07).** `lensed_void_batch(org, batch_id)` removes a
+  single ViewTrack layer and restores `qty_on_hand` in the same transaction, refusing (`ALREADY_DRAWN`)
+  if any of it has been drawn by a sale (`qty_remaining ≠ qty_added`, where `qty_added` is the newly
+  recorded originally-added qty). Deleting the row clears its idempotency record so the order can be
+  re-sent fresh. Exposed as `POST /api/integrations/viewtrack/skus/[id]/batches/[batchId]/void`, and in
+  ViewTrack as an "Undo send" action that resets the order to unsent (order kept, SKU mapping preserved)
+  so it can be edited and resent. Verified end-to-end. Note this covers *undo before any draw*; there is
+  still no partial adjust/void for a batch already partly sold — that remains manual and intentionally so.
 - **Single org only** (env-bound). Multi-org support later via an `integration_credentials` table.
 - **USD-only.** Multi-currency (carry currency + convert) is out of scope for this iteration.
 
