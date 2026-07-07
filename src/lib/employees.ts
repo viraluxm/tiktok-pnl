@@ -103,7 +103,8 @@ export interface GeneratedShift {
   date: string; // 'YYYY-MM-DD'
   start_time: string;
   end_time: string;
-  modified: boolean;
+  modified: boolean; // hours came from a 'modified' exception
+  skipped: boolean;  // a 'skip' exception exists — surfaced for "Restore"; excluded from pay
   recurring: true;
 }
 
@@ -117,8 +118,10 @@ const MAX_GENERATED_DAYS = 3660;
 // exception replaces the hours (a null side falls back to the rule's time).
 //
 // rangeStart null → each rule's own start_date. rangeEnd null (all-time) → capped at
-// `today`, so we never emit unbounded future instances. Instances count toward pay by
-// default (the caller sums them with one-off shifts).
+// `today`, so we never emit unbounded future instances. Non-skipped instances count
+// toward pay by default (the caller sums them with one-off shifts); 'skip'-exception
+// dates are still EMITTED with skipped=true so the UI can offer "Restore", but the
+// caller must exclude skipped ones from pay.
 export function generateRecurringShifts(
   rules: ShiftRule[],
   exceptions: ShiftException[],
@@ -153,19 +156,19 @@ export function generateRecurringShifts(
       if (days.has(cursor.getUTCDay())) {
         const iso = toISODateUTC(cursor);
         const ex = exByKey.get(`${rule.id}|${iso}`);
-        if (ex?.type !== 'skip') {
-          const modified = ex?.type === 'modified';
-          out.push({
-            id: `${rule.id}:${iso}`,
-            rule_id: rule.id,
-            employee_id: rule.employee_id,
-            date: iso,
-            start_time: modified ? ex!.modified_start ?? rule.start_time : rule.start_time,
-            end_time: modified ? ex!.modified_end ?? rule.end_time : rule.end_time,
-            modified,
-            recurring: true,
-          });
-        }
+        const skipped = ex?.type === 'skip';
+        const modified = ex?.type === 'modified';
+        out.push({
+          id: `${rule.id}:${iso}`,
+          rule_id: rule.id,
+          employee_id: rule.employee_id,
+          date: iso,
+          start_time: modified ? ex!.modified_start ?? rule.start_time : rule.start_time,
+          end_time: modified ? ex!.modified_end ?? rule.end_time : rule.end_time,
+          modified,
+          skipped,
+          recurring: true,
+        });
       }
       cursor = addDaysUTC(cursor, 1);
     }

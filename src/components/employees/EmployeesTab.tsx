@@ -60,6 +60,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
     toggleRuleActive,
     deleteRule,
     upsertException,
+    deleteException,
   } = useShiftRules();
 
   // Recurring instances computed for the selected period (rule − exceptions).
@@ -75,9 +76,10 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Pay counts one-off shifts + generated recurring instances for the period.
+  // Pay counts one-off shifts + generated recurring instances for the period,
+  // excluding skipped instances (they exist only so the UI can offer "Restore").
   const pay = useMemo(
-    () => computePay(employees, [...shifts, ...generated]),
+    () => computePay(employees, [...shifts, ...generated.filter((g) => !g.skipped)]),
     [employees, shifts, generated],
   );
   const totals = useMemo(
@@ -218,6 +220,9 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
               modified_start: start,
               modified_end: end,
             });
+          }}
+          onClearException={async (rule_id, date) => {
+            await deleteException.mutateAsync({ rule_id, date });
           }}
         />
       )}
@@ -495,6 +500,7 @@ type DisplayRow =
       start_time: string;
       end_time: string;
       modified: boolean;
+      skipped: boolean;
     };
 
 function ShiftsView({
@@ -510,6 +516,7 @@ function ShiftsView({
   onToggleRule,
   onSkipInstance,
   onModifyInstance,
+  onClearException,
 }: {
   employees: Employee[];
   shifts: Shift[];
@@ -523,6 +530,7 @@ function ShiftsView({
   onToggleRule: (id: string, active: boolean) => Promise<void>;
   onSkipInstance: (ruleId: string, date: string) => Promise<void>;
   onModifyInstance: (ruleId: string, date: string, start: string, end: string) => Promise<void>;
+  onClearException: (ruleId: string, date: string) => Promise<void>;
 }) {
   const [mode, setMode] = useState<'oneoff' | 'recurring'>('oneoff');
 
@@ -576,6 +584,7 @@ function ShiftsView({
           start_time: g.start_time,
           end_time: g.end_time,
           modified: g.modified,
+          skipped: g.skipped,
         }),
       ),
     ];
@@ -642,6 +651,15 @@ function ShiftsView({
     if (!confirm(`Skip this recurring shift on ${row.date}? The rule keeps generating other days.`)) return;
     try {
       await onSkipInstance(row.rule_id, row.date);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  // Restore (un-skip) or revert (un-modify): both just clear the date's exception.
+  async function handleClear(row: Extract<DisplayRow, { kind: 'recurring' }>) {
+    try {
+      await onClearException(row.rule_id, row.date);
     } catch (err) {
       alert((err as Error).message);
     }
@@ -866,8 +884,10 @@ function ShiftsView({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
-                <tr key={row.id} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
+              {rows.map((row) => {
+                const skipped = row.kind === 'recurring' && row.skipped;
+                return (
+                <tr key={row.id} className={`border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors ${skipped ? 'opacity-60' : ''}`}>
                   <td className="px-5 py-3 text-xs text-tt-muted">{row.date}</td>
                   <td className="px-5 py-3 text-[13px] text-tt-text">{nameById.get(row.employee_id) || 'Unknown'}</td>
                   <td className="px-5 py-3">
@@ -877,6 +897,9 @@ function ShiftsView({
                         {row.modified && (
                           <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Modified</span>
                         )}
+                        {row.skipped && (
+                          <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-red/15 text-tt-red">Skipped</span>
+                        )}
                       </span>
                     ) : (
                       <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">One-off</span>
@@ -884,7 +907,7 @@ function ShiftsView({
                   </td>
                   <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{row.start_time.slice(0, 5)}</td>
                   <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{row.end_time.slice(0, 5)}</td>
-                  <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{shiftHours(row.start_time, row.end_time).toFixed(2)}</td>
+                  <td className={`px-5 py-3 text-[13px] text-right tabular-nums ${skipped ? 'text-tt-muted line-through' : 'text-tt-text'}`}>{shiftHours(row.start_time, row.end_time).toFixed(2)}</td>
                   <td className="px-5 py-3 text-center whitespace-nowrap">
                     {row.kind === 'oneoff' ? (
                       <button
@@ -892,6 +915,13 @@ function ShiftsView({
                         className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
                       >
                         Delete
+                      </button>
+                    ) : row.skipped ? (
+                      <button
+                        onClick={() => handleClear(row)}
+                        className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                      >
+                        Restore
                       </button>
                     ) : (
                       <>
@@ -909,6 +939,14 @@ function ShiftsView({
                         >
                           Edit
                         </button>
+                        {row.modified && (
+                          <button
+                            onClick={() => handleClear(row)}
+                            className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
+                          >
+                            Revert
+                          </button>
+                        )}
                         <button
                           onClick={() => handleSkip(row)}
                           className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
@@ -919,7 +957,8 @@ function ShiftsView({
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
               {rows.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-5 py-12 text-center text-tt-muted text-sm">

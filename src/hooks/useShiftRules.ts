@@ -112,6 +112,20 @@ export function useShiftRules() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shift_exceptions'] }),
   });
 
+  // Remove an exception for a (rule, date) — un-skip ("restore") or un-modify
+  // ("revert to the rule's default"). No-op if none exists.
+  const deleteException = useMutation({
+    mutationFn: async ({ rule_id, date }: { rule_id: string; date: string }) => {
+      const { error } = await supabase
+        .from('shift_exceptions')
+        .delete()
+        .eq('rule_id', rule_id)
+        .eq('date', date);
+      if (error) throw error;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shift_exceptions'] }),
+  });
+
   return {
     rules: rulesQuery.data || [],
     exceptions: exceptionsQuery.data || [],
@@ -120,5 +134,6 @@ export function useShiftRules() {
     toggleRuleActive,
     deleteRule,
     upsertException,
+    deleteException,
   };
 }
