@@ -114,3 +114,35 @@ export interface Shift {
   created_at: string;
   updated_at: string;
 }
+
+// A recurring-shift RULE. Instances are computed from the rule minus its
+// exceptions at read time — never materialized (see migration 047).
+export interface ShiftRule {
+  id: string;
+  user_id: string;
+  employee_id: string;
+  days_of_week: number[]; // getUTCDay() numbers: 0=Sun … 6=Sat
+  start_time: string;
+  end_time: string;
+  start_date: string;
+  active: boolean;
+  store_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ShiftExceptionType = 'skip' | 'modified';
+
+// A per-date override on a rule: 'skip' suppresses that date's instance;
+// 'modified' replaces its hours (a null side falls back to the rule's time).
+export interface ShiftException {
+  id: string;
+  user_id: string;
+  rule_id: string;
+  date: string;
+  type: ShiftExceptionType;
+  modified_start: string | null;
+  modified_end: string | null;
+  created_at: string;
+  updated_at: string;
+}
