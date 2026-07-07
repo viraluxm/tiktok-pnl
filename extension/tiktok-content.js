@@ -35,7 +35,9 @@
   var skuInputEl = null;
   var resolvedLabelEl = null;   // transient resolve confirmation line (✓ / errors)
   var stagedCountEl = null;     // always-on "N unit(s) staged" line
-  var sessionStatusEl = null;
+  var sessionStatusEl = null;    // compact combined row: "Connected · ● account"
+  var authConnected = false;     // last auth state (drives the status row)
+  var authStatusReceived = false; // keep "Connecting…" until the first auth status arrives
   var capturedOnlyWarnEl = null; // visible "orders captured but not bound" warning
   var aspValueEl = null;
   var breakEvenValueEl = null;
@@ -61,6 +63,15 @@
   // The live's detected tiktok room (mirrors what inject relays to background). Used
   // to scope persisted staged SKUs.
   var currentRoomId = null;
+  // Detected tiktok host account from the MAIN-world injector's API path (room
+  // owner/anchor, relayed as 'lensed-tiktok-account'). Display only — labels the
+  // overlay; takes priority over the DOM label. See renderAccount / renderStatusLine.
+  var currentAccount = null;
+  // Account label read from the VISIBLE Live Manager dashboard DOM (top-right account
+  // area). Detection-verification fallback only — display-only, never forwarded to the
+  // background/session logic. API detection (currentAccount) takes priority. See
+  // detectVisibleAccount / renderStatusLine.
+  var domAccountLabel = null;
   // Count of orders captured this session that did NOT bind to a SKU (nothing staged
   // at capture time). Surfaced as a visible overlay warning so it is never silent.
   var capturedOnlyCount = 0;
@@ -337,6 +348,10 @@
       font-size: 10px; color: #555; margin-top: 4px;\
     }\
     .lensed-session-status.active { color: #34d399; }\
+    .lensed-acct-sep { color: #4b5563; }\
+    .lensed-acct-dot { color: #34d399; }\
+    .lensed-acct-name { color: #9ca3af; }\
+    .lensed-acct-warn { color: #6b7280; }\
     /* Captured-only warning — orders are recording but not binding to a SKU */\
     .lensed-warn {\
       margin-top: 8px; padding: 7px 9px; border-radius: 7px;\
@@ -1034,6 +1049,7 @@
     stagedListEl = el('div', 'lensed-staged');
     notesListEl = el('div', 'lensed-notes');
     sessionStatusEl = el('div', 'lensed-session-status', 'Connecting\u2026');
+    renderStatusLine(); // repaint combined status+account on re-inject (self-guards until auth known)
     capturedOnlyWarnEl = el('div', 'lensed-warn', '');
     renderCapturedOnlyWarning(); // repaint if a re-inject happens with a live count
 
@@ -1442,6 +1458,7 @@
     if (pageWiringActive) return;
     pageWiringActive = true;
     createOverlay();
+    scheduleAccountDetection(); // detection-verification only (display + logs)
     overlayObserver = new MutationObserver(onBodyMutation);
     overlayObserver.observe(document.body, { childList: true, subtree: false });
     // Keep the overlay inside the rendered subtree on fullscreen enter/exit (webkit*
@@ -1611,19 +1628,212 @@
       } catch (_) {}
       return;
     }
+
+    if (data.source === 'lensed-tiktok-account') {
+      // Detected host identity from the MAIN-world injector — label the overlay only.
+      // Display-only in this PR: NOT forwarded to the worker (no session scoping here).
+      renderAccount(data.account || null);
+      return;
+    }
   });
 
   // ── Auth status display ─────────────────────────────────────────────
 
   function updateAuthStatus(authenticated, uid) {
-    if (!sessionStatusEl) return;
-    if (authenticated) {
-      sessionStatusEl.textContent = 'Connected';
-      sessionStatusEl.className = 'lensed-session-status active';
-    } else {
-      sessionStatusEl.textContent = 'Not connected \u2014 open Lensed app to sign in';
-      sessionStatusEl.className = 'lensed-session-status';
+    authConnected = !!authenticated;
+    authStatusReceived = true;
+    renderStatusLine();
+  }
+
+  // API-sourced host identity (from tiktok-inject.js / background). Authoritative \u2014
+  // takes priority over the DOM label. Display only.
+  function renderAccount(account) {
+    currentAccount = account || null;
+    renderStatusLine();
+  }
+
+  // The account to show, preferring the API identity over the visible-DOM label.
+  function accountDisplay() {
+    if (currentAccount && (currentAccount.handle || currentAccount.nickname || currentAccount.id)) {
+      return {
+        name: currentAccount.handle ? '@' + currentAccount.handle : (currentAccount.nickname || currentAccount.id),
+        src: 'API',
+        key: currentAccount.key || null,
+      };
     }
+    if (domAccountLabel) return { name: domAccountLabel, src: 'dashboard', key: null };
+    return null;
+  }
+
+  // Compact combined status row: "Connected \u00b7 \u25cf name" / "Connected \u00b7 \u26a0 Account
+  // unverified" / "Not connected \u2014 \u2026". The account name is small + muted; the green
+  // dot is the only status cue. Display-only \u2014 nothing here changes session behavior.
+  function renderStatusLine() {
+    if (!sessionStatusEl) return;
+    if (!authStatusReceived) return; // keep the initial "Connecting\u2026" until auth is known
+    sessionStatusEl.textContent = '';
+    if (!authConnected) {
+      sessionStatusEl.className = 'lensed-session-status';
+      sessionStatusEl.textContent = 'Not connected \u2014 open Lensed app to sign in';
+      return;
+    }
+    sessionStatusEl.className = 'lensed-session-status active';
+    sessionStatusEl.appendChild(document.createTextNode('Connected'));
+    sessionStatusEl.appendChild(el('span', 'lensed-acct-sep', ' \u00b7 '));
+    var acct = accountDisplay();
+    if (acct) {
+      sessionStatusEl.appendChild(el('span', 'lensed-acct-dot', '\u25cf'));
+      var nm = el('span', 'lensed-acct-name', ' ' + acct.name);
+      nm.title = 'Detected ' + acct.src + ' account: ' + acct.name + (acct.key ? ' (' + acct.key + ')' : '');
+      sessionStatusEl.appendChild(nm);
+    } else {
+      sessionStatusEl.appendChild(el('span', 'lensed-acct-warn', '\u26a0 Account unverified'));
+    }
+  }
+
+  // \u2500\u2500 Visible-dashboard account detection (detection-verification only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Reads the account shown in the TikTok Live Manager top-right, using ROBUST,
+  // attribute/structure/position heuristics \u2014 NOT fragile TikTok class names. This
+  // path is display + logging only; it is never forwarded to the background or used
+  // for session scoping.
+  var domDetectScanCap = 3000;
+
+  // Common Live-Manager UI chrome that is handle-SHAPED (single word) but is NOT an
+  // account \u2014 rejected so plain top-right text can't produce a false positive.
+  var UI_STOPWORDS = /^(settings?|profile|account|accounts|notifications?|messages?|message|help|support|live|golive|go|end|start|logout|signout|signin|login|menu|search|home|dashboard|more|share|gift|gifts|wallet|studio|manage|manager|create|upload|explore|following|followers?|follower|inbox|activity|analytics|balance|coins|recharge|feedback|language)$/i;
+
+  function looksLikeHandle(s) {
+    if (!s) return false;
+    var t = String(s).trim();
+    // @handle or bare handle: no spaces, letters/digits/._, 2\u201324 chars.
+    if (!/^@?[A-Za-z0-9][A-Za-z0-9._]{1,23}$/.test(t)) return false;
+    if (UI_STOPWORDS.test(normHandle(t))) return false;
+    return true;
+  }
+
+  function normHandle(s) { return String(s).trim().replace(/^@/, ''); }
+
+  // Is the element in the top-right region of the viewport (where the account menu
+  // lives), and actually rendered?
+  function isTopRight(el) {
+    try {
+      var r = el.getBoundingClientRect();
+      if (!r || r.width === 0 || r.height === 0) return false;
+      return r.top < 140 && r.right > (window.innerWidth - 440) && r.width < 360;
+    } catch (_) { return false; }
+  }
+
+  function directText(el) {
+    var t = '';
+    for (var i = 0; i < el.childNodes.length; i++) {
+      if (el.childNodes[i].nodeType === 3) t += el.childNodes[i].nodeValue;
+    }
+    return t.trim();
+  }
+
+  // Returns { label, why, scanned, topRightCount, samples } \u2014 label is null if nothing
+  // confident was found. Our own overlay lives in a shadow root, so it is invisible to
+  // these document queries and can never be picked up.
+  function detectVisibleAccount() {
+    var best = null;         // { text, score, why }
+    var samples = [];        // rejected top-right texts, for the failure diagnostic
+    var topRightCount = 0;
+    var scanned = 0;
+
+    function consider(text, score, why) {
+      if (!text) return;
+      var t = String(text).trim();
+      if (t.length < 2 || t.length > 40) return;
+      if (!looksLikeHandle(t)) {
+        if (samples.length < 6 && t && !/^\s*$/.test(t)) samples.push(t.slice(0, 24));
+        return;
+      }
+      if (!best || score > best.score) best = { text: normHandle(t), score: score, why: why };
+    }
+
+    // Strategy 1 \u2014 avatar alt text near the top (avatars usually carry the account name).
+    try {
+      var imgs = document.querySelectorAll('img[alt]');
+      for (var i = 0; i < imgs.length && scanned < domDetectScanCap; i++) {
+        scanned++;
+        var alt = imgs[i].getAttribute('alt');
+        if (alt && isTopRight(imgs[i])) { topRightCount++; consider(alt, 8, 'img[alt]@top-right'); }
+      }
+    } catch (_) {}
+
+    // Strategy 2 \u2014 aria-label / title on account/profile controls in the top-right.
+    try {
+      var labelled = document.querySelectorAll('[aria-label],[title]');
+      for (var j = 0; j < labelled.length && scanned < domDetectScanCap; j++) {
+        scanned++;
+        var el = labelled[j];
+        if (!isTopRight(el)) continue;
+        topRightCount++;
+        var val = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+        if (looksLikeHandle(val)) { consider(val, 9, 'aria/title@top-right'); continue; }
+        // "Account: onlybids", "onlybids profile", "@onlybids" \u2192 extract the handle.
+        if (/account|profile|user|@|switch/i.test(val)) {
+          var m = val.match(/@?[A-Za-z0-9][A-Za-z0-9._]{1,23}/);
+          if (m) consider(m[0], 7, 'aria/title-extract');
+        }
+      }
+    } catch (_) {}
+
+    // Strategy 3 \u2014 short handle-like text sitting in the top-right corner.
+    try {
+      var nodes = document.querySelectorAll('a,button,span,div,p');
+      for (var k = 0; k < nodes.length && scanned < domDetectScanCap; k++) {
+        scanned++;
+        var n = nodes[k];
+        if (!isTopRight(n)) continue;
+        topRightCount++;
+        var txt = directText(n);
+        if (txt) consider(txt, 6, 'top-right-text');
+      }
+    } catch (_) {}
+
+    return {
+      label: best ? best.text : null,
+      why: best ? best.why : null,
+      scanned: scanned,
+      topRightCount: topRightCount,
+      samples: samples,
+    };
+  }
+
+  // Run one detection pass. Logs the required success line on a new/changed label and
+  // updates the overlay; logs a redacted diagnostic on failure (only when asked, to
+  // avoid console spam). Never touches session logic.
+  function runAccountDomDetection(logFailure) {
+    var res;
+    try { res = detectVisibleAccount(); } catch (e) { return; }
+    if (res.label) {
+      if (res.label !== domAccountLabel) {
+        domAccountLabel = res.label;
+        console.log('[LENSED][TT] visible account label detected:', res.label, '(via ' + res.why + ')');
+        renderStatusLine();
+      }
+      return;
+    }
+    if (logFailure && !domAccountLabel && !currentAccount) {
+      console.log('[LENSED][TT] visible account label NOT detected \u2014 top-right elements inspected:',
+        res.topRightCount, '/ nodes scanned:', res.scanned,
+        '; non-handle candidate samples:', res.samples);
+    }
+  }
+
+  // Burst of attempts (the Live Manager shell loads late / is a SPA), then a slow
+  // re-check to catch an account switch. Only logs on a changed label / final failure.
+  var ACCOUNT_DETECT_DELAYS = [600, 2000, 5000, 10000];
+  function scheduleAccountDetection() {
+    for (var i = 0; i < ACCOUNT_DETECT_DELAYS.length; i++) {
+      (function (idx) {
+        setTimeout(function () {
+          runAccountDomDetection(idx === ACCOUNT_DETECT_DELAYS.length - 1);
+        }, ACCOUNT_DETECT_DELAYS[idx]);
+      })(i);
+    }
+    try { setInterval(function () { runAccountDomDetection(false); }, 12000); } catch (_) {}
   }
 
   // Listen for auth status broadcasts from background

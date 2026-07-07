@@ -9,7 +9,10 @@
  * room_id is extracted from the ?room_id= query string on streamer_desktop
  * API calls — NOT from URL path markers.
  *
- * Phase 1: console.log only. No Supabase writes.
+ * Host/account identity is best-effort: a few room lifecycle endpoints (room/status,
+ * room/info, room/enter) are inspected for the room OWNER/ANCHOR object and relayed
+ * as 'lensed-tiktok-account'. FAIL-OPEN — nothing found means nothing relayed. The
+ * JSON paths are UNVERIFIED (see [account detection] below).
  */
 (function () {
   'use strict';
@@ -21,28 +24,36 @@
 
   const SALE_URL_MARKER = 'auction_result/get';
 
-  // ── TEMPORARY SPIKE (observation only) ──────────────────────────────
-  // Read-only console logging of two lifecycle-candidate endpoints so we can
-  // confirm, during a live, whether they're usable as auction/session signals.
-  // This does NOT relay, dedupe, or act on these responses in any way, and the
-  // existing auction_result/get capture is untouched. REMOVE after the spike.
-  const SPIKE_MARKERS = [
-    { marker: 'start_auction', tag: 'start_auction' },
-    { marker: 'room/status', tag: 'room_status' },
-  ];
+  // ── [account detection] endpoint markers ────────────────────────────
+  // Room lifecycle endpoints whose responses are inspected (read-only) for the room
+  // OWNER/ANCHOR identity — on the host's own desktop the room owner IS the logged-in
+  // host. Path-anchored (not a loose substring) so lookalikes like `multi_room/status`
+  // are not matched, and `start_auction` is deliberately excluded (it carries the
+  // BUYER/bidder, never the host). Replaces the earlier full-body SPIKE logging.
+  const IDENTITY_URL_RE = /\/room\/(status|info|enter)(?:[/?]|$)/;
 
-  function matchSpike(urlLower) {
-    for (let i = 0; i < SPIKE_MARKERS.length; i++) {
-      if (urlLower.includes(SPIKE_MARKERS[i].marker)) return SPIKE_MARKERS[i].tag;
-    }
-    return null;
+  function matchIdentity(urlLower) {
+    const m = urlLower.match(IDENTITY_URL_RE);
+    return m ? ('room/' + m[1]) : null;
   }
 
-  function logSpike(tag, url, text) {
+  // Dev logging (opt-in, no rebuild): set `window.__LENSED_DEV__ = true` or
+  // localStorage 'lensed_dev' = '1' in the page console to log which identity
+  // fields were found — and, when none were, a REDACTED structural sketch (keys
+  // only, no values) so the true JSON paths can be mapped on a live page. Full raw
+  // bodies stay OFF unless the louder `window.__LENSED_DEV_RAW__` / localStorage
+  // 'lensed_dev_raw' is set (they can contain PII/tokens).
+  function isDev() {
     try {
-      console.log('[LENSED][SPIKE] ' + tag + ' URL:', url);
-      console.log('[LENSED][SPIKE] ' + tag + ' BODY:', text);
-    } catch (_) {}
+      return window.__LENSED_DEV__ === true ||
+        (window.localStorage && window.localStorage.getItem('lensed_dev') === '1');
+    } catch (_) { return false; }
+  }
+  function isDevRaw() {
+    try {
+      return window.__LENSED_DEV_RAW__ === true ||
+        (window.localStorage && window.localStorage.getItem('lensed_dev_raw') === '1');
+    } catch (_) { return false; }
   }
 
   // In-memory dedup — resets on navigation/reload. Sufficient for Phase 1;
@@ -77,6 +88,152 @@
     lastRoomId = roomId;
     console.log('[LENSED][TT] room_id detected:', roomId);
     window.postMessage({ source: 'lensed-tiktok-room', roomId }, window.location.origin);
+  }
+
+  // ── [account detection] host/anchor identity ────────────────────────
+  // Best-effort + UNVERIFIED: the JSON paths/field names below are hypotheses from
+  // TikTok's known webcast API shapes and have NOT been confirmed against a real
+  // shop.tiktok.com streamer-desktop response. If nothing matches we relay nothing
+  // (the visible-dashboard label in tiktok-content.js is the confirmed fallback).
+  // Display + logging only — the relayed identity is not used for any session or
+  // Supabase-write decision. Use dev logging (isDev) to confirm the true fields.
+  let lastAccountKey = null;
+
+  function firstString(obj, keys) {
+    for (let i = 0; i < keys.length; i++) {
+      let v = obj[keys[i]];
+      if (typeof v === 'number' && isFinite(v)) v = String(v);
+      if (typeof v === 'string' && v.trim() !== '') return v.trim();
+    }
+    return null;
+  }
+
+  const SECUID_KEYS = ['sec_uid', 'secUid'];
+  // User-specific id fields first; the generic 'id'/'id_str' are last-resort fallbacks
+  // (in an owner/anchor object they ARE the user id, but preferring explicit fields
+  // avoids grabbing a wrapper's generic id).
+  const UID_KEYS = ['user_id', 'owner_user_id', 'anchor_id', 'uid', 'id_str', 'id', 'ownerUserId', 'anchorId'];
+  const HANDLE_KEYS = ['unique_id', 'uniqueId', 'display_id', 'displayId', 'handle'];
+  const NICK_KEYS = ['nickname', 'nick_name', 'nickName'];
+
+  // Pull an identity from a SINGLE object (no recursion). null unless a field hits.
+  function identityFromObj(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    const secUid = firstString(obj, SECUID_KEYS);
+    const accountId = firstString(obj, UID_KEYS);
+    const handle = firstString(obj, HANDLE_KEYS);
+    const nickname = firstString(obj, NICK_KEYS);
+    if (!secUid && !accountId && !handle) return null;
+    return { secUid: secUid, accountId: accountId, handle: handle, nickname: nickname };
+  }
+
+  // A strong (confident) identity: a stable sec_uid, or a handle+nickname pair. A
+  // bare numeric id is NOT strong alone (could be a room/product id) — only trusted
+  // when read from an explicit owner/anchor path below.
+  function isStrongIdentity(id) {
+    return !!(id && (id.secUid || (id.handle && id.nickname)));
+  }
+
+  // Bounded breadth-first scan for an owner-shaped object (defensive against path
+  // drift). Only objects reached THROUGH a host-semantic key (owner/anchor/host/
+  // creator/streamer, or a descendant of one) are eligible — so a buyer/viewer/guest
+  // object elsewhere in the tree is never mistaken for the host. Capped in nodes+depth.
+  const HOST_KEY_RE = /owner|anchor|host|creator|streamer/i;
+  function deepScanIdentity(root, maxDepth) {
+    const queue = [{ o: root, d: 0, host: false }];
+    let scanned = 0;
+    while (queue.length && scanned < 500) {
+      const node = queue.shift();
+      scanned++;
+      if (!node.o || typeof node.o !== 'object') continue;
+      if (node.host) {
+        const id = identityFromObj(node.o);
+        if (isStrongIdentity(id)) return id;
+      }
+      if (node.d < maxDepth) {
+        const keys = Object.keys(node.o);
+        for (let i = 0; i < keys.length; i++) {
+          const v = node.o[keys[i]];
+          if (v && typeof v === 'object') {
+            queue.push({ o: v, d: node.d + 1, host: node.host || HOST_KEY_RE.test(keys[i]) });
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // Extract the host identity from a lifecycle response. Explicit owner/anchor
+  // paths first (trusted → a bare id is acceptable there), then a strong deep-scan.
+  function extractAccountIdentity(json) {
+    if (!json || typeof json !== 'object') return null;
+    const data = (json.data && typeof json.data === 'object') ? json.data : null;
+    const room = (json.room && typeof json.room === 'object') ? json.room
+      : (data && data.room && typeof data.room === 'object') ? data.room : null;
+    const candidates = [
+      room && room.owner, data && data.owner, json.owner,
+      room && room.anchor, data && data.anchor, json.anchor,
+      data && data.anchor_info, json.anchor_info,
+      data && data.owner_user_info, json.owner_user_info,
+    ];
+    for (let i = 0; i < candidates.length; i++) {
+      const id = identityFromObj(candidates[i]);
+      if (id) return id; // an explicit owner/anchor path is trusted
+    }
+    return deepScanIdentity(json, 4);
+  }
+
+  function accountKeyOf(id) {
+    if (!id) return null;
+    if (id.secUid) return 's:' + id.secUid;
+    if (id.accountId) return 'i:' + id.accountId;
+    if (id.handle) return 'h:' + id.handle.toLowerCase();
+    return null;
+  }
+
+  // Keys-only structural sketch for dev logging (never values → no PII leak).
+  function sketchKeys(json) {
+    try {
+      const out = { top: Object.keys(json).slice(0, 40) };
+      if (json.data && typeof json.data === 'object') out.data = Object.keys(json.data).slice(0, 40);
+      const room = (json.room || (json.data && json.data.room));
+      if (room && typeof room === 'object') out.room = Object.keys(room).slice(0, 40);
+      return out;
+    } catch (_) { return null; }
+  }
+
+  function relayAccount(id, tag) {
+    const key = accountKeyOf(id);
+    if (!key || key === lastAccountKey) return;
+    lastAccountKey = key;
+    const account = {
+      key: key,
+      id: id.accountId || null,
+      secUid: id.secUid || null,
+      handle: id.handle || null,
+      nickname: id.nickname || null,
+      source: tag || null,
+    };
+    console.log('[LENSED][TT] account detected:', account.handle || account.nickname || key, '(via ' + tag + ')');
+    window.postMessage({ source: 'lensed-tiktok-account', account: account }, window.location.origin);
+  }
+
+  function handleIdentityText(url, text, tag) {
+    if (!text || typeof text !== 'string') return;
+    // Only inspect tiktok.com response bodies (never third-party hosts) — mirrors the
+    // hostname guard in extractRoomIdFromUrl.
+    try {
+      const u = new URL(url, window.location.origin);
+      if (!/(^|\.)tiktok\.com$/i.test(u.hostname)) return;
+    } catch (_) {}
+    let json;
+    try { json = JSON.parse(text); } catch (_) { return; }
+    const id = extractAccountIdentity(json);
+    if (id) { relayAccount(id, tag); return; }
+    if (isDev()) {
+      console.log('[LENSED][TT][dev] no host identity in ' + tag + ' — keys:', sketchKeys(json));
+      if (isDevRaw()) console.log('[LENSED][TT][dev-raw] ' + tag + ' BODY:', text);
+    }
   }
 
   // ── Parsing helpers ────────────────────────────────────────────────
@@ -198,13 +355,13 @@
     if (urlLower.includes('room_id=')) relayRoom(extractRoomIdFromUrl(url));
 
     const isSale = urlLower.includes(SALE_URL_MARKER);
-    const spikeTag = matchSpike(urlLower); // SPIKE: observation only
-    if (!isSale && !spikeTag) return p;
+    const idTag = matchIdentity(urlLower); // [account detection] observe only
+    if (!isSale && !idTag) return p;
 
     return p.then((res) => {
       try {
         res.clone().text().then((text) => {
-          if (spikeTag) logSpike(spikeTag, url, text); // SPIKE: log only, no relay
+          if (idTag) { try { handleIdentityText(url, text, idTag); } catch (_) {} }
           if (isSale) { try { handleResponseText(url, text); } catch (_) {} }
         }).catch(() => {});
       } catch (_) {}
@@ -234,11 +391,11 @@
       });
     }
 
-    // SPIKE: observation only — log full URL + body for lifecycle-candidate endpoints.
-    const spikeTag = matchSpike(urlLower);
-    if (spikeTag) {
+    // [account detection] observe only — read host identity from lifecycle responses.
+    const idTag = matchIdentity(urlLower);
+    if (idTag) {
       this.addEventListener('load', () => {
-        try { logSpike(spikeTag, String(url), this.responseText); } catch (_) {}
+        try { handleIdentityText(String(url), this.responseText, idTag); } catch (_) {}
       });
     }
 
