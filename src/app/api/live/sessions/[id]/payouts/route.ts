@@ -22,14 +22,16 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
 
   const { data: session } = await supabase
     .from('live_sessions')
-    .select('id, started_at, ended_at')
+    .select('id, started_at, ended_at, store_id')
     .eq('id', id).eq('user_id', user.id).maybeSingle();
   if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
 
+  // Session-scoped: use the connection for THIS session's store (not the active-store
+  // cookie — a session knows its own store).
   const { data: conn } = await supabase
     .from('tiktok_connections')
     .select('shop_cipher, access_token')
-    .eq('user_id', user.id).maybeSingle();
+    .eq('user_id', user.id).eq('store_id', session.store_id).maybeSingle();
   if (!conn?.access_token || !conn?.shop_cipher) {
     return NextResponse.json({ error: 'No TikTok connection' }, { status: 400 });
   }
@@ -87,7 +89,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   for (const oid of orderIds) {
     const e = estMap.get(oid);
     if (e) {
-      payoutRows.push({ user_id: user.id, order_id: oid, net_payout_cents: e.net, settled: false, fees: e.fees });
+      payoutRows.push({ user_id: user.id, order_id: oid, net_payout_cents: e.net, settled: false, fees: e.fees, store_id: session.store_id });
     } else {
       // Not in unsettled → may be settled. Per-order settled lookup (precise).
       let s: Record<string, unknown> | null = null;
@@ -96,7 +98,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
         catch { if (attempt < 3) await sleep(500 * attempt); }
       }
       if (s && Number(s.total_count) > 0) {
-        payoutRows.push({ user_id: user.id, order_id: oid, net_payout_cents: Math.round((Number(s.settlement_amount) || 0) * 100), settled: true, fees: s });
+        payoutRows.push({ user_id: user.id, order_id: oid, net_payout_cents: Math.round((Number(s.settlement_amount) || 0) * 100), settled: true, fees: s, store_id: session.store_id });
       }
       // else: TikTok has neither yet → no row (stays blank, never a 0).
     }

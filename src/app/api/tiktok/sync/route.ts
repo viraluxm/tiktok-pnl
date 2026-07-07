@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { decryptOrFallback } from '@/lib/crypto';
 import { getOrgId } from '@/lib/org';
+import { getActiveStore } from '@/lib/tiktok/activeStore';
 
 const BACKFILL_DAYS = 365;
 const TIME_BUDGET_MS = 50_000; // 50s for fetching, rest for DB work
@@ -32,11 +33,78 @@ export async function POST() {
   // SHARED catalog: products is org-owned. Service-role inserts (auth.uid()=NULL)
   // must stamp org_id explicitly — the auto-fill trigger can't fire here.
   const orgId = await getOrgId(admin, userId);
-  const { data: connection, error: connError } = await admin.from('tiktok_connections').select('*').eq('user_id', userId).single();
-  if (connError || !connection) return NextResponse.json({ error: 'No TikTok connection' }, { status: 404 });
-  if (!connection.shop_cipher) return NextResponse.json({ error: 'No shop_cipher' }, { status: 400 });
 
-  const accessToken = decryptOrFallback(connection.access_token, 'access_token');
+  // Connections are per-store (unique(user_id, store_id), migration 042). The active
+  // store from the cookie decides scope: a specific store → just that connection;
+  // 'all' → every store's connection, each synced against its OWN connection so its
+  // orders tag to the correct store. Oldest cursor first so the most-behind store
+  // gets time budget first (avoids starving a store in 'all' mode).
+  const activeStore = await getActiveStore();
+  let cq = admin.from('tiktok_connections').select('*').eq('user_id', userId)
+    .order('sync_cursor', { ascending: true, nullsFirst: true });
+  if (activeStore !== 'all') cq = cq.eq('store_id', activeStore);
+  const { data: connections, error: connError } = await cq;
+  if (connError || !connections || connections.length === 0) {
+    return NextResponse.json({ error: 'No TikTok connection' }, { status: 404 });
+  }
+
+  const perStore: Array<Record<string, unknown>> = [];
+  for (const connection of connections) {
+    if (Date.now() - batchStart >= TIME_BUDGET_MS) break; // shared budget across stores
+    if (!connection.shop_cipher) {
+      perStore.push({ store_id: connection.store_id, skipped: 'no_shop_cipher' });
+      continue;
+    }
+    try {
+      perStore.push(await syncConnection(admin, connection, userId, orgId, batchStart));
+    } catch (err) {
+      console.error(`[Sync] store ${connection.store_id} failed:`, (err as Error).message);
+      await admin.from('tiktok_connections').update({ sync_started_at: null })
+        .eq('user_id', userId).eq('store_id', connection.store_id);
+      perStore.push({ store_id: connection.store_id, error: 'sync_failed' });
+    }
+  }
+
+  // Entries are USER-level daily aggregates (across all the user's stores) — rebuild
+  // once after all in-scope stores have synced this batch.
+  const { data: rebuildCount, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: userId });
+  if (rebuildErr) console.error('[Rebuild] Error:', rebuildErr.message);
+
+  const isCaughtUp = perStore.every((s) => s.isCaughtUp !== false);
+  const ordersThisBatch = perStore.reduce((a, s) => a + (Number(s.ordersThisBatch) || 0), 0);
+  const totalUniqueOrders = perStore.reduce((a, s) => a + (Number(s.totalUniqueOrders) || 0), 0);
+
+  console.log(`[Sync] DONE ${perStore.length} store(s): +${ordersThisBatch} orders, entries=${rebuildCount || 0}, caught_up=${isCaughtUp}, ${Date.now() - batchStart}ms`);
+
+  return NextResponse.json({
+    success: true,
+    summary: {
+      isCaughtUp,
+      totalUniqueOrders,
+      ordersThisBatch,
+      entriesCreated: rebuildCount || 0,
+      elapsedMs: Date.now() - batchStart,
+      stores: perStore,
+      // Progress display for the client driver (first in-scope store's cursor).
+      currentDay: perStore[0]?.currentDay ?? null,
+    },
+  });
+}
+
+// Sync ONE store's connection: shop logo + product catalog + day-loop of orders.
+// All tiktok_connections updates are keyed by (user_id, store_id) so they touch only
+// this store's row. Returns a per-store summary. Does NOT rebuild entries (the caller
+// does that once, user-level).
+async function syncConnection(
+  admin: AdminClient,
+  connection: Record<string, unknown>,
+  userId: string,
+  orgId: string | null,
+  batchStart: number,
+) {
+  const storeId = connection.store_id as string;
+  const shopCipher = connection.shop_cipher as string;
+  const accessToken = decryptOrFallback(connection.access_token as string, 'access_token');
 
   // Sync shop logo via Business API (GMV Max store/list has thumbnail_url)
   try {
@@ -49,8 +117,8 @@ export async function POST() {
       const storeJson = await storeRes.json();
       const stores = (storeJson.data?.store_list || []) as Array<Record<string, unknown>>;
       if (stores[0]?.thumbnail_url) {
-        await admin.from('tiktok_connections').update({ shop_logo: String(stores[0].thumbnail_url) }).eq('user_id', userId);
-        console.log('[Sync] Shop logo synced');
+        await admin.from('tiktok_connections').update({ shop_logo: String(stores[0].thumbnail_url) })
+          .eq('user_id', userId).eq('store_id', storeId);
       }
     }
   } catch (err) {
@@ -60,10 +128,10 @@ export async function POST() {
   // Always sync product catalog (for variant names and current SKU list)
   try {
     const { getProducts } = await import('@/lib/tiktok/client');
-    const catalogProducts = await getProducts(accessToken, connection.shop_cipher);
+    const catalogProducts = await getProducts(accessToken, shopCipher);
     for (const cp of catalogProducts) {
       if (!cp.product_id) continue;
-      const variants = cp.skus.map(s => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku, inventory: s.inventory }));
+      const variants = cp.skus.map((s) => ({ id: s.sku_id, name: s.sku_name, sku: s.seller_sku, inventory: s.inventory }));
       const { error: catErr } = await admin.from('products').upsert({
         user_id: userId,
         org_id: orgId,
@@ -74,12 +142,10 @@ export async function POST() {
       }, { onConflict: 'user_id,tiktok_product_id' });
       if (catErr) console.error(`[Sync] Catalog upsert error for ${cp.product_id}:`, catErr.message);
     }
-    console.log(`[Sync] Product catalog: ${catalogProducts.length} products synced`);
   } catch (err) {
     console.error('[Sync] Product catalog sync failed:', (err as Error).message);
   }
 
-  // Already caught up?
   // Use shop timezone for all date calculations
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
   const backfillStart = new Date();
@@ -87,137 +153,121 @@ export async function POST() {
   const backfillStartStr = backfillStart.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 
   // Always re-sync today: clamp cursor so it never skips past today
-  const rawCursor = connection.sync_cursor || backfillStartStr;
+  const rawCursor = (connection.sync_cursor as string) || backfillStartStr;
   let currentDay = rawCursor > todayStr ? todayStr : rawCursor;
   if (currentDay < backfillStartStr) currentDay = backfillStartStr;
+  const startProgress = (connection.sync_progress_orders as number) || 0;
 
-  console.log(`[Sync] START cursor=${currentDay} target=${todayStr}`);
+  console.log(`[Sync] store=${storeId} START cursor=${currentDay} target=${todayStr}`);
 
   // Mark sync in progress
-  await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString() }).eq('user_id', userId);
+  await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString() })
+    .eq('user_id', userId).eq('store_id', storeId);
 
-  try {
-    const shopName = connection.shop_name || 'TikTok Shop';
-    const product = await getOrCreateProduct(admin, userId, shopName);
-    let totalNew = 0;
-    let daysProcessed = 0;
+  const shopName = (connection.shop_name as string) || 'TikTok Shop';
+  await getOrCreateProduct(admin, userId, shopName);
+  let totalNew = 0;
+  let daysProcessed = 0;
 
-    // ===== MAIN LOOP: one day at a time, paginate within each day =====
-    while (currentDay <= todayStr && Date.now() - batchStart < TIME_BUDGET_MS) {
-      const nextDay = advanceDay(currentDay);
-      const startTs = dayToTs(currentDay);
-      const endTs = dayToTs(nextDay);
+  // ===== MAIN LOOP: one day at a time, paginate within each day =====
+  while (currentDay <= todayStr && Date.now() - batchStart < TIME_BUDGET_MS) {
+    const nextDay = advanceDay(currentDay);
+    const startTs = dayToTs(currentDay);
+    const endTs = dayToTs(nextDay);
 
-      // Fetch ALL pages for this day
-      let pageToken: string | null = null;
-      let dayOrders = 0;
-      let pageNum = 0;
+    let pageToken: string | null = null;
+    let dayOrders = 0;
+    let pageNum = 0;
 
-      do {
-        if (Date.now() - batchStart >= TIME_BUDGET_MS) break;
-        if (pageNum >= 500) break; // Safety: max 500 pages per day (25,000 orders)
-        pageNum++;
+    do {
+      if (Date.now() - batchStart >= TIME_BUDGET_MS) break;
+      if (pageNum >= 500) break; // Safety: max 500 pages per day (25,000 orders)
+      pageNum++;
 
-        try {
-          const { orders, nextCursor } = await fetchOrdersPage(accessToken, connection.shop_cipher, startTs, endTs, pageToken);
+      try {
+        const { orders, nextCursor } = await fetchOrdersPage(accessToken, shopCipher, startTs, endTs, pageToken);
 
-          if (orders.length > 0) {
-            // Parse and deduplicate by order_id
-            const rows = new Map<string, Record<string, unknown>>();
-            for (const o of orders) {
-              const parsed = parseOrder(userId, o as Record<string, unknown>);
-              const oid = String(parsed.order_id || '');
-              if (oid) rows.set(oid, parsed);
-            }
-
-            // Bulk upsert orders (strip product_name — not a DB column, used only for product naming)
-            const upsertData = [...rows.values()];
-            const dbRows = upsertData.map(({ product_name: _, ...rest }) => rest);
-            const { error: upsertErr } = await admin.from('synced_order_ids').upsert(dbRows, { onConflict: 'user_id,order_id' });
-            if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
-            else totalNew += upsertData.length;
-
-            dayOrders += upsertData.length;
-
-            // Upsert unique products (use actual product_name from TikTok, not sku_name)
-            const products = new Map<string, Record<string, unknown>>();
-            for (const row of upsertData) {
-              const pid = row.tiktok_product_id as string;
-              if (pid && !products.has(pid)) {
-                const name = String(row.product_name || '') || String(row.sku_name || '') || `Product ${pid.slice(-6)}`;
-                const hasRealName = !!String(row.product_name || '');
-                products.set(pid, { user_id: userId, org_id: orgId, tiktok_product_id: pid, name, _hasRealName: hasRealName });
-              }
-            }
-            for (const [, prod] of products) {
-              const hasRealName = prod._hasRealName;
-              delete prod._hasRealName;
-              // If we have a real product_name, update existing rows; otherwise only insert new
-              const { error: pErr } = await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: !hasRealName });
-              if (pErr) { /* ignore */ }
-            }
+        if (orders.length > 0) {
+          // Parse and deduplicate by order_id
+          const rows = new Map<string, Record<string, unknown>>();
+          for (const o of orders) {
+            const parsed = parseOrder(userId, o as Record<string, unknown>);
+            const oid = String(parsed.order_id || '');
+            if (oid) rows.set(oid, parsed);
           }
 
-          // Next page or done — ONLY stop when TikTok returns no next_page_token
-          pageToken = nextCursor;
-        } catch (err) {
-          console.error(`[Sync] Fetch error ${currentDay} p${pageNum}:`, (err as Error).message);
-          pageToken = null;
+          // Bulk upsert orders (strip product_name — not a DB column). Stamp store_id
+          // explicitly from the connection being synced → correct per-store tagging.
+          const upsertData = [...rows.values()];
+          const dbRows = upsertData.map(({ product_name: _, ...rest }) => ({ ...rest, store_id: storeId }));
+          const { error: upsertErr } = await admin.from('synced_order_ids').upsert(dbRows, { onConflict: 'user_id,order_id' });
+          if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
+          else totalNew += upsertData.length;
+
+          dayOrders += upsertData.length;
+
+          // Upsert unique products (use actual product_name from TikTok, not sku_name)
+          const products = new Map<string, Record<string, unknown>>();
+          for (const row of upsertData) {
+            const pid = row.tiktok_product_id as string;
+            if (pid && !products.has(pid)) {
+              const name = String(row.product_name || '') || String(row.sku_name || '') || `Product ${pid.slice(-6)}`;
+              const hasRealName = !!String(row.product_name || '');
+              products.set(pid, { user_id: userId, org_id: orgId, tiktok_product_id: pid, name, _hasRealName: hasRealName });
+            }
+          }
+          for (const [, prod] of products) {
+            const hasRealName = prod._hasRealName;
+            delete prod._hasRealName;
+            const { error: pErr } = await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: !hasRealName });
+            if (pErr) { /* ignore */ }
+          }
         }
-      } while (pageToken);
 
-      if (dayOrders > 50) console.log(`[Sync] Day ${currentDay}: ${pageNum} pages, ${dayOrders} orders`);
-
-      currentDay = nextDay;
-      daysProcessed++;
-
-      // Save progress every 10 days
-      if (daysProcessed % 10 === 0) {
-        await admin.from('tiktok_connections').update({
-          sync_cursor: currentDay,
-          sync_progress_orders: (connection.sync_progress_orders || 0) + totalNew,
-          sync_progress_day: currentDay,
-        }).eq('user_id', userId);
+        pageToken = nextCursor;
+      } catch (err) {
+        console.error(`[Sync] Fetch error ${currentDay} p${pageNum}:`, (err as Error).message);
+        pageToken = null;
       }
+    } while (pageToken);
+
+    if (dayOrders > 50) console.log(`[Sync] store=${storeId} Day ${currentDay}: ${pageNum} pages, ${dayOrders} orders`);
+
+    currentDay = nextDay;
+    daysProcessed++;
+
+    // Save progress every 10 days
+    if (daysProcessed % 10 === 0) {
+      await admin.from('tiktok_connections').update({
+        sync_cursor: currentDay,
+        sync_progress_orders: startProgress + totalNew,
+        sync_progress_day: currentDay,
+      }).eq('user_id', userId).eq('store_id', storeId);
     }
-
-    const isCaughtUp = currentDay > todayStr;
-
-    // Save cursor + clear lock
-    const { error: saveErr } = await admin.from('tiktok_connections').update({
-      sync_cursor: isCaughtUp ? todayStr : currentDay,
-      sync_started_at: null,
-      sync_progress_orders: (connection.sync_progress_orders || 0) + totalNew,
-      sync_progress_day: currentDay,
-      last_synced_at: new Date().toISOString(),
-    }).eq('user_id', userId);
-
-    if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
-    else console.log(`[Sync] SAVED cursor=${isCaughtUp ? todayStr : currentDay}`);
-
-    // Rebuild entries via SQL
-    const { data: rebuildCount, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: userId });
-    if (rebuildErr) console.error('[Rebuild] Error:', rebuildErr.message);
-
-    console.log(`[Sync] DONE: ${daysProcessed}d, ${totalNew} orders, entries=${rebuildCount || 0}, caught_up=${isCaughtUp}, ${Date.now() - batchStart}ms`);
-
-    return NextResponse.json({
-      success: true,
-      summary: {
-        isCaughtUp,
-        totalUniqueOrders: (connection.sync_progress_orders || 0) + totalNew,
-        ordersThisBatch: totalNew,
-        entriesCreated: rebuildCount || 0,
-        daysProcessed,
-        currentDay,
-        elapsedMs: Date.now() - batchStart,
-      },
-    });
-  } catch (error) {
-    console.error('[Sync] FAILED:', error);
-    await admin.from('tiktok_connections').update({ sync_started_at: null }).eq('user_id', userId);
-    return NextResponse.json({ error: 'Sync failed' }, { status: 500 });
   }
+
+  const isCaughtUp = currentDay > todayStr;
+
+  // Save cursor + clear lock
+  const { error: saveErr } = await admin.from('tiktok_connections').update({
+    sync_cursor: isCaughtUp ? todayStr : currentDay,
+    sync_started_at: null,
+    sync_progress_orders: startProgress + totalNew,
+    sync_progress_day: currentDay,
+    last_synced_at: new Date().toISOString(),
+  }).eq('user_id', userId).eq('store_id', storeId);
+  if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
+
+  console.log(`[Sync] store=${storeId} DONE: ${daysProcessed}d, ${totalNew} orders, caught_up=${isCaughtUp}`);
+
+  return {
+    store_id: storeId,
+    isCaughtUp,
+    ordersThisBatch: totalNew,
+    totalUniqueOrders: startProgress + totalNew,
+    daysProcessed,
+    currentDay,
+  };
 }
 
 // ===== HELPERS =====
