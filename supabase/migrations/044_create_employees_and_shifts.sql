@@ -1,4 +1,4 @@
--- 043_create_employees_and_shifts.sql
+-- 044_create_employees_and_shifts.sql
 -- First-party team roster + timekeeping for the Employee tab.
 --
 -- These are RECORDS ONLY — no auth users, no logins. They belong to the account
