@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { fmt } from '@/lib/calculations';
-import { computePay, shiftHours } from '@/lib/employees';
+import { computePay, shiftHours, nextPayday } from '@/lib/employees';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
 import { useShifts } from '@/hooks/useShifts';
 import type { Employee, EmployeeStatus } from '@/types';
@@ -194,6 +194,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                   <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hourly Rate</th>
                   <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hours</th>
                   <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Pay Owed</th>
+                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Next Payday</th>
                 </tr>
               </thead>
               <tbody>
@@ -204,11 +205,12 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                     <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(employee.hourly_rate)}</td>
                     <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmtHours(hours)}</td>
                     <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(owed)}</td>
+                    <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{nextPayday(employee.hire_date) ?? '—'}</td>
                   </tr>
                 ))}
                 {pay.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="px-5 py-12 text-center text-tt-muted text-sm">No employees yet</td>
+                    <td colSpan={6} className="px-5 py-12 text-center text-tt-muted text-sm">No employees yet</td>
                   </tr>
                 )}
               </tbody>
@@ -218,6 +220,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                     <td className="px-5 py-3 text-[13px] font-semibold text-tt-text" colSpan={3}>Total</td>
                     <td className="px-5 py-3 text-[13px] font-semibold text-tt-text text-right tabular-nums">{fmtHours(totals.hours)}</td>
                     <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(totals.pay)}</td>
+                    <td className="px-5 py-3" />
                   </tr>
                 </tfoot>
               )}

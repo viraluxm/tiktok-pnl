@@ -33,3 +33,52 @@ export function computePay(employees: Employee[], shifts: Shift[]): EmployeePay[
     return { employee, hours, pay: hours * employee.hourly_rate };
   });
 }
+
+const DAY_MS = 86_400_000;
+const FRIDAY = 5; // getUTCDay(): Sun=0 … Fri=5 … Sat=6
+
+// Parse a 'YYYY-MM-DD' date as UTC midnight. Working purely in UTC-midnight space keeps
+// the weekday/step math free of local-timezone and DST drift.
+function parseDateUTC(d: string): Date {
+  const [y, m, day] = d.slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, day));
+}
+
+function addDaysUTC(d: Date, days: number): Date {
+  return new Date(d.getTime() + days * DAY_MS);
+}
+
+// The employee's NEXT upcoming biweekly payday relative to `today`, anchored to
+// hire_date. Rules: paydays fall on Fridays; the first payday is the SECOND Friday
+// after hire_date; then every 14 days. Friday-hire edge case — the hire day itself
+// does not count, so the next Friday is the "1st Friday" (handled by taking the first
+// Friday STRICTLY after hire_date). Returns a formatted date like "Fri, Jul 17", or
+// null when hire_date is missing/unparseable.
+export function nextPayday(hireDate: string | null, today: Date = new Date()): string | null {
+  if (!hireDate) return null;
+  const hire = parseDateUTC(hireDate);
+  if (isNaN(hire.getTime())) return null;
+
+  // 1st Friday strictly after hire_date (a Friday hire rolls forward a full week).
+  const daysToFirstFriday = ((FRIDAY - hire.getUTCDay() + 7) % 7) || 7;
+  const firstFriday = addDaysUTC(hire, daysToFirstFriday);
+  // First payday = 2nd Friday = 1st Friday + 7 days.
+  const firstPayday = addDaysUTC(firstFriday, 7);
+
+  // Compare at day granularity using the local calendar date the user sees as "today".
+  const todayUTC = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+
+  // Advance in 14-day steps to the first payday that is today or later.
+  let payday = firstPayday;
+  if (payday.getTime() < todayUTC.getTime()) {
+    const periods = Math.ceil((todayUTC.getTime() - payday.getTime()) / (14 * DAY_MS));
+    payday = addDaysUTC(payday, periods * 14);
+  }
+
+  return payday.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
