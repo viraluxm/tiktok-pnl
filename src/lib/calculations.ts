@@ -121,6 +121,7 @@ export function computeDashboardMetrics(entries: Entry[], costsMap?: CostsMap): 
     totalAffiliate,
     totalShipping,
     totalUnitsSold,
+    totalUnits: totalUnitsSold, // entries-based path: totalUnitsSold here IS the units/qty sum
     entryCount: entries.length,
     avgViewsPerVideo,
     revenuePerVideo,

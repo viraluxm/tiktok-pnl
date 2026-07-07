@@ -28,6 +28,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
 
   const gmvChange = prevMetrics ? pctChange(metrics.totalGMV, prevMetrics.totalGMV) : null;
   const profitChange = prevMetrics ? pctChange(metrics.totalNetProfit, prevMetrics.totalNetProfit) : null;
+  const unitsChange = prevMetrics ? pctChange(metrics.totalUnits, prevMetrics.totalUnits) : null;
 
   return (
     <div className="grid grid-cols-4 gap-5 mb-8">
@@ -59,7 +60,21 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
         </div>
       </div>
 
-      {/* 3. Returns / Refunds */}
+      {/* 3. Units Sold */}
+      <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-2">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Units Sold</span>
+          <ChangeIndicator change={unitsChange} />
+        </div>
+        <div className="text-[30px] font-bold text-tt-text">{fmtInt(metrics.totalUnits)}</div>
+        {metrics.totalUnitsSold > 0 && (
+          <div className="text-xs text-tt-muted mt-1">
+            {fmtInt(metrics.totalUnitsSold)} orders
+          </div>
+        )}
+      </div>
+
+      {/* 4. Returns / Refunds */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-3">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Returns / Refunds</span>

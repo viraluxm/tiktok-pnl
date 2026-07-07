@@ -125,6 +125,7 @@ export default function RealDashboard() {
       totalAffiliate: affiliate,
       totalShipping: shipping,
       totalUnitsSold: t?.totalOrders || 0,
+      totalUnits: t?.totalUnits || 0, // actual units/qty (same orderTotals source as GMV/Net Profit)
       entryCount: t?.totalOrders || 0,
       avgViewsPerVideo: 0,
       revenuePerVideo: 0,
