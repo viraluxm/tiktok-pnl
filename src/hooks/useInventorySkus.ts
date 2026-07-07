@@ -27,6 +27,9 @@ export interface InventorySku {
   category: string | null;
   is_active: boolean;
   live_seller_notes: string[]; // bullets shown live in the extension overlay
+  lead_time_days: number | null; // days from reorder to arrival
+  supplier: string | null; // freeform: supplier name or reorder URL
+  reorder_point: number | null; // manual floor; null = auto-compute later
   created_at: string;
   updated_at: string;
   batches: SkuBatch[]; // FIFO cost layers, oldest first
@@ -42,6 +45,9 @@ export interface SkuFields {
   // Write shape is the raw textarea string (one bullet per line); the server
   // canonicalizes to text[]. Read shape on InventorySku is string[].
   live_seller_notes?: string;
+  lead_time_days?: number | null;
+  supplier?: string | null;
+  reorder_point?: number | null;
 }
 
 const KEY = 'inventory-skus';

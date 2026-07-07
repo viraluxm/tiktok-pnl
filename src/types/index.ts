@@ -54,6 +54,7 @@ export interface DashboardMetrics {
   totalAffiliate: number;
   totalShipping: number;
   totalUnitsSold: number;
+  totalUnits: number; // units/quantity sold (distinct from totalUnitsSold, which is order count on the dashboard)
   entryCount: number;
   avgViewsPerVideo: number;
   revenuePerVideo: number;

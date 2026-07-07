@@ -25,8 +25,10 @@ import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
+// P&L renders chart.js — load client-only, same as Charts.
+const PnlTab = dynamic(() => import('@/components/pnl/PnlTab'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'inventory' | 'shows' | 'shipping' | 'returns';
+type ViewTab = 'dashboard' | 'pnl' | 'inventory' | 'shows' | 'shipping' | 'returns';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -123,6 +125,7 @@ export default function RealDashboard() {
       totalAffiliate: affiliate,
       totalShipping: shipping,
       totalUnitsSold: t?.totalOrders || 0,
+      totalUnits: t?.totalUnits || 0, // actual units/qty (same orderTotals source as GMV/Net Profit)
       entryCount: t?.totalOrders || 0,
       avgViewsPerVideo: 0,
       revenuePerVideo: 0,
@@ -172,7 +175,7 @@ export default function RealDashboard() {
 
     const gmvData: number[] = [];
     const profitData: number[] = [];
-    let totalPlatFee = 0, totalShip = 0, totalAff = 0, totalProf = 0, totalUserCogs = 0;
+    let totalPlatFee = 0, totalShip = 0, totalProf = 0, totalUserCogs = 0;
 
     for (const date of sortedDates) {
       const d = byDate[date];
@@ -182,7 +185,6 @@ export default function RealDashboard() {
       profitData.push(dayProfit);
       totalPlatFee += pf;
       totalShip += d.shipping;
-      totalAff += d.affiliate;
       totalProf += dayProfit;
     }
 
@@ -192,14 +194,14 @@ export default function RealDashboard() {
 
     const hasUserCogs = totalUserCogs > 0;
     const breakdownLabels = hasUserCogs
-      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Affiliate', 'Ads', 'Net Profit']
-      : ['Platform Fee (6%)', 'Shipping', 'Affiliate', 'Ads', 'Net Profit'];
+      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Net Profit']
+      : ['Platform Fee (6%)', 'Shipping', 'Net Profit'];
     const rawAmounts = hasUserCogs
-      ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)]
-      : [Math.max(0, totalPlatFee), Math.max(0, totalShip), Math.max(0, totalAff), 0, Math.max(0, totalProf)];
+      ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), Math.max(0, totalProf)]
+      : [Math.max(0, totalPlatFee), Math.max(0, totalShip), Math.max(0, totalProf)];
     const breakdownColors = hasUserCogs
-      ? ['#ff6384', '#f97316', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0']
-      : ['#ff6384', '#ff9f40', '#ffcd56', '#EE1D52', '#69C9D0'];
+      ? ['#ff6384', '#f97316', '#ff9f40', '#69C9D0']
+      : ['#ff6384', '#ff9f40', '#69C9D0'];
     const totalCosts = rawAmounts.reduce((a, b) => a + b, 0);
 
     return {
@@ -236,6 +238,7 @@ export default function RealDashboard() {
 
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
+    { label: 'P&L', value: 'pnl' },
     { label: 'Inventory', value: 'inventory' },
     { label: 'Shows', value: 'shows' },
     { label: 'Shipping', value: 'shipping' },
@@ -336,6 +339,9 @@ export default function RealDashboard() {
             <Charts chartData={chartData} />
           </>
         )}
+
+        {/* P&L View */}
+        {activeView === 'pnl' && <PnlTab dateFrom={filters.dateFrom} dateTo={filters.dateTo} />}
 
         {/* Inventory View */}
         {activeView === 'inventory' && <InventorySection />}

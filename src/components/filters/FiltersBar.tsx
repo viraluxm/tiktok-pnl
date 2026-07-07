@@ -23,6 +23,9 @@ export default function FiltersBar({
     { label: 'Yesterday', value: 1 },
     { label: '7 Days', value: 7 },
     { label: '30 Days', value: 30 },
+    // Lifetime = no lower bound (earliest data → now). Reuses the existing 'all'
+    // path in useFilters, which clears dateFrom/dateTo (unbounded).
+    { label: 'Lifetime', value: 'all' },
   ];
 
   return (
