@@ -118,6 +118,32 @@ status is logged once; a `failed → paid` flip is allowed through once.
   on service‑worker restart, and refreshes on `401` via
   `/auth/v1/token?grant_type=refresh_token`.
 
+## Account detection (display only)
+
+The overlay shows which TikTok account is currently active on the Live Manager
+dashboard, e.g. `Connected · ● auctioneerdeals`. **Detection is display + logging
+only** — it does not change capture, session, or Supabase‑write behavior.
+
+- **Two detection paths, in priority order:**
+  1. **API (priority):** `tiktok-inject.js` (MAIN world) inspects the room
+     OWNER/ANCHOR object in `room/status | room/info | room/enter` responses (on
+     the host's own desktop the room owner is the host) and relays it as
+     `lensed-tiktok-account`. Prefers a stable `sec_uid`/id; `@handle`/nickname are
+     labels. The exact JSON field paths are best‑effort — if nothing matches it
+     simply relays nothing.
+  2. **Visible dashboard label (fallback):** `tiktok-content.js` reads the
+     **top‑right account label** using robust attribute/position heuristics
+     (avatar `alt`, `aria-label`/`title`, top‑right handle‑like text) with a
+     UI‑stopword guard — **not** fragile TikTok class names. Confirmed working on a
+     live dashboard.
+- **Overlay:** the connection‑status row becomes `Connected · ● <account>` (small,
+  muted; the green dot is the status cue), or a short `⚠ Account unverified` when
+  detection finds nothing.
+- **Console (debug):** `[LENSED][TT] visible account label detected: <name> (via …)`
+  and, on the API path, `[LENSED][TT] account detected: <name> (via room/…)`.
+- Neither path is forwarded to the service worker or persisted — no session or
+  storage effect. Backend account→store mapping is intentionally out of scope here.
+
 ## How it writes to Supabase
 
 Same project as the web app (`dvucodtdojumvplmgjeu`), authenticated as the
