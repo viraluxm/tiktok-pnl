@@ -21,6 +21,7 @@ import { useReturns } from '@/hooks/useReturns';
 import ReturnsTab from '@/components/dashboard/ReturnsTab';
 import ShowsTab from '@/components/shows/ShowsTab';
 import ShippingTab from '@/components/shipping/ShippingTab';
+import SupportTab from '@/components/support/SupportTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
 
@@ -28,7 +29,7 @@ const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: fal
 // P&L renders chart.js — load client-only, same as Charts.
 const PnlTab = dynamic(() => import('@/components/pnl/PnlTab'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'pnl' | 'inventory' | 'shows' | 'shipping' | 'returns';
+type ViewTab = 'dashboard' | 'pnl' | 'inventory' | 'shows' | 'shipping' | 'returns' | 'support';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -243,6 +244,7 @@ export default function RealDashboard() {
     { label: 'Shows', value: 'shows' },
     { label: 'Shipping', value: 'shipping' },
     { label: 'Returns', value: 'returns' },
+    { label: 'Support', value: 'support' },
   ];
 
   return (
@@ -358,6 +360,9 @@ export default function RealDashboard() {
         {activeView === 'returns' && (
           <ReturnsTab data={returnsData} isLoading={returnsLoading} />
         )}
+
+        {/* Support View */}
+        {activeView === 'support' && <SupportTab />}
           </>
         )}
       </div>

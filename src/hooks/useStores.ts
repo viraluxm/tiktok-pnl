@@ -53,6 +53,8 @@ export function useSetActiveStore() {
       qc.invalidateQueries({ queryKey: ['pnl-by-sku'] });
       qc.invalidateQueries({ queryKey: ['pnl-by-show'] });
       qc.invalidateQueries({ queryKey: ['pnl-by-period'] });
+      qc.invalidateQueries({ queryKey: ['support-conversations'] });
+      qc.invalidateQueries({ queryKey: ['support-messages'] });
     },
   });
 }
