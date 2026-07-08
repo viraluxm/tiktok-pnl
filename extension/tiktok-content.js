@@ -1581,15 +1581,89 @@
     return !!node.isContentEditable;
   }
 
+  // ── Hotkey debugging ── off by default. Opt in at runtime with
+  // localStorage 'lensed_hotkey_debug' = '1' to log every step of the +/-/*
+  // shortcut path (receipt, gating, match, and dispatch).
+  var HOTKEY_DEBUG = false;
+  function hotkeyDebugOn() {
+    if (HOTKEY_DEBUG) return true;
+    try { return localStorage.getItem('lensed_hotkey_debug') === '1'; } catch (_) { return false; }
+  }
+  function hlog(msg, data) {
+    if (!hotkeyDebugOn()) return;
+    if (data !== undefined) console.log('[LENSED][HOTKEY] ' + msg, data);
+    else console.log('[LENSED][HOTKEY] ' + msg);
+  }
+  function describeTarget(node) {
+    if (!node) return null;
+    var tag = (node.tagName || '').toLowerCase();
+    return tag + (node.id ? '#' + node.id : '') + (node.className && node.className.baseVal === undefined ? '.' + String(node.className).split(' ').filter(Boolean).join('.') : '');
+  }
+  // Confirm which frame this listener is bound in (top vs iframe) and the URL.
+  hlog('keydown listener attached', {
+    isTopFrame: window.top === window,
+    href: (function () { try { return location.href; } catch (_) { return '(cross-origin)'; } })()
+  });
+
+  // Dispatch a matched hotkey, logging whether it fired or was blocked by an
+  // empty staged/previous set (the underlying fns silently no-op otherwise).
+  function fireHotkey(action) {
+    if (action === 'add') {
+      if (stagedSkus.length === 0) { hlog('matched but no staged item to add'); return; }
+      addAnotherUnitOfLast(); hlog('fired add'); return;
+    }
+    if (action === 'remove') {
+      if (stagedSkus.length === 0) { hlog('matched but no removable item'); return; }
+      removeLast(); hlog('fired remove'); return;
+    }
+    if (action === 'rerun') {
+      if (previousSkus.length === 0) { hlog('matched but no previous item to rerun'); return; }
+      rerunPrevious(); hlog('fired rerun'); return;
+    }
+  }
+
   document.addEventListener('keydown', function (e) {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Scope debug logging to our candidate keys so we don't flood on normal typing.
+    var isHotkeyCandidate = e.key === '+' || e.key === '-' || e.key === '*'
+      || e.code === 'NumpadAdd' || e.code === 'NumpadSubtract' || e.code === 'NumpadMultiply';
+    if (isHotkeyCandidate) hlog('received', { key: e.key, code: e.code, target: describeTarget(e.target) });
+
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+      if (isHotkeyCandidate) hlog('ignored modifier held', { ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey });
+      return;
+    }
     // Overlay closed (✕) → scanner + shortcuts are inactive.
-    if (hidden) return;
-    // Our input lives in the shadow DOM: when focused, shadowRoot.activeElement
-    // is the input — let its own listener handle typing/scans.
-    if (shadowRoot && shadowRoot.activeElement === skuInputEl) return;
-    // Don't hijack typing in the host page's own fields either.
-    if (isEditableTarget(document.activeElement)) return;
+    if (hidden) { if (isHotkeyCandidate) hlog('ignored overlay hidden'); return; }
+
+    // A true macro/numpad key (never produced by a keyboard-wedge scanner or by
+    // normal typing) is allowed to fire even while the SKU input is focused, so the
+    // host can drive the overlay hands-free. Normal characters (incl. a typed
+    // +/-/*) stay in the field. Focus inside the overlay's shadow DOM surfaces as
+    // shadowRoot.activeElement (document.activeElement is just the shadow host).
+    var isMacroCode = e.code === 'NumpadAdd' || e.code === 'NumpadSubtract' || e.code === 'NumpadMultiply';
+    var innerFocus = shadowRoot ? shadowRoot.activeElement : null;
+
+    // The Host <select> is never hijacked — not even by macro codes.
+    if (innerFocus && innerFocus === hostSelectEl) {
+      if (isHotkeyCandidate) hlog('ignored editable target', { active: 'host-select' });
+      return;
+    }
+
+    if (innerFocus === skuInputEl) {
+      if (isMacroCode) {
+        hlog('allowed macro key inside overlay input');
+        // fall through — the numpad branch below fires and swallows the char
+      } else {
+        // Normal typing / scans in the SKU input handle themselves.
+        if (isHotkeyCandidate) hlog('ignored editable target (SKU input focused)');
+        return;
+      }
+    } else if (isEditableTarget(document.activeElement)) {
+      // Editable element OUTSIDE the overlay (e.g. TikTok chat/comment box) — always
+      // block, even macro codes; we don't hijack while the host types elsewhere.
+      if (isHotkeyCandidate) hlog('ignored editable target', { active: describeTarget(document.activeElement) });
+      return;
+    }
 
     // Enter → commit a global wedge-scanner burst if it looks machine-fast.
     if (e.key === 'Enter') {
@@ -1614,10 +1688,12 @@
                   : e.code === 'NumpadMultiply' ? 'rerun'
                   : null;
     if (padAction) {
+      hlog('matched numpad code', { code: e.code, action: padAction });
       e.preventDefault();
-      if (padAction === 'add') addAnotherUnitOfLast();
-      else if (padAction === 'remove') removeLast();
-      else rerunPrevious();
+      // Swallow it so the same '+'/'-'/'*' char can't also land in a focused SKU
+      // input (this listener is capture-phase, so this runs before the field sees it).
+      e.stopPropagation();
+      fireHotkey(padAction);
       resetGlobalScan(); // consumed as a shortcut, not part of a scan
       return;
     }
@@ -1637,15 +1713,17 @@
       // Barcodes are "SKU<n>-<hex>" (never START with +/-/*), so a burst's first
       // char is a letter; a +/-/* arriving fast within a burst is scan data.
       if (e.key === '+' || e.key === '-' || e.key === '*') {
+        var action = e.key === '+' ? 'add' : e.key === '-' ? 'remove' : 'rerun';
         var standalone = gScanCount <= 1 || interkey > SCAN_MAX_INTERKEY_MS;
+        hlog('matched symbol key', { key: e.key, action: action, standalone: standalone, gScanCount: gScanCount, interkey: interkey });
         if (standalone) {
           e.preventDefault();
-          if (e.key === '+') addAnotherUnitOfLast();
-          else if (e.key === '-') removeLast();
-          else rerunPrevious();
+          fireHotkey(action);
           resetGlobalScan(); // consumed as a shortcut, not part of a scan
+        } else {
+          // fast burst char → leave buffered, no shortcut, no preventDefault
+          hlog('matched but suppressed as scan-burst char', { key: e.key, interkey: interkey, threshold: SCAN_MAX_INTERKEY_MS });
         }
-        // else: fast burst char → leave buffered, no shortcut, no preventDefault
       }
     }
   }, true);
