@@ -76,6 +76,19 @@
   // at capture time). Surfaced as a visible overlay warning so it is never silent.
   var capturedOnlyCount = 0;
 
+  // ── Live host selector ─────────────────────────────────────────────
+  // The MANUAL host running this live (a person from Lensed's Team/Employees roster) —
+  // deliberately distinct from the AUTO-detected TikTok account/shop shown in the status
+  // line (currentAccount / domAccountLabel). Never auto-filled from the account. Persisted
+  // per room/session so a Live Manager reload restores it, and re-asserted to the worker
+  // so live_sessions.host_id survives a service-worker restart.
+  var LK_HOST = 'lensed_selected_host';
+  var hosts = [];             // active employees [{id, name, role}, ...] for the dropdown
+  var selectedHostId = null;  // id of the chosen employee (host) for this live
+  var hostRowEl = null;
+  var hostSelectEl = null;
+  var hostWarnEl = null;
+
   // Persisted overlay size (chrome.storage.local key `lensed_overlay_size`), set
   // only by the bottom-right resize grip. Cached in memory so SPA re-injects
   // re-apply instantly. Min/max are enforced in JS.
@@ -352,6 +365,15 @@
     .lensed-acct-dot { color: #34d399; }\
     .lensed-acct-name { color: #9ca3af; }\
     .lensed-acct-warn { color: #6b7280; }\
+    .lensed-host-row { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 12px; }\
+    .lensed-host-label { color: #9ca3af; flex: 0 0 auto; }\
+    .lensed-host-select {\
+      flex: 1 1 auto; min-width: 0; background: #17171a; color: #e5e5e5;\
+      border: 1px solid #2a2a2e; border-radius: 6px; padding: 3px 6px;\
+      font-size: 12px; font-family: inherit; cursor: pointer;\
+    }\
+    .lensed-host-select:focus { outline: none; border-color: #34d399; }\
+    .lensed-host-warn { color: #d1a054; font-size: 11px; flex: 0 0 auto; white-space: nowrap; }\
     /* Captured-only warning — orders are recording but not binding to a SKU */\
     .lensed-warn {\
       margin-top: 8px; padding: 7px 9px; border-radius: 7px;\
@@ -1050,6 +1072,18 @@
     notesListEl = el('div', 'lensed-notes');
     sessionStatusEl = el('div', 'lensed-session-status', 'Connecting\u2026');
     renderStatusLine(); // repaint combined status+account on re-inject (self-guards until auth known)
+
+    // Host selector row \u2014 the MANUAL person running the live (Team/Employees roster),
+    // kept visually + semantically separate from the auto-detected account above.
+    hostRowEl = el('div', 'lensed-host-row');
+    hostRowEl.appendChild(el('span', 'lensed-host-label', 'Host'));
+    hostSelectEl = el('select', 'lensed-host-select');
+    hostSelectEl.addEventListener('change', onHostChange);
+    hostRowEl.appendChild(hostSelectEl);
+    hostWarnEl = el('span', 'lensed-host-warn', '');
+    hostRowEl.appendChild(hostWarnEl);
+    renderHostOptions(); // paint from in-memory roster + current selection (self-guards on empty)
+
     capturedOnlyWarnEl = el('div', 'lensed-warn', '');
     renderCapturedOnlyWarning(); // repaint if a re-inject happens with a live count
 
@@ -1062,6 +1096,7 @@
     skuMain.appendChild(stagedListEl);
     skuMain.appendChild(notesListEl);
     skuMain.appendChild(sessionStatusEl);
+    skuMain.appendChild(hostRowEl);
     skuMain.appendChild(capturedOnlyWarnEl);
 
     // Right column of the stage section: compact ASP goal + break-even. Readable
@@ -1349,7 +1384,12 @@
     if (countEl) countEl.textContent = '0';
     renderCapturedOnlyWarning();
     if (stagedSkus.length > 0) clearStaged();
-    console.log('[LENSED][TT] session reset — cleared staged SKUs + counter + dedup maps');
+    // A new live is a new show: drop the host selection (and its persisted record) so
+    // the next live never inherits the prior host. The overlay re-prompts.
+    selectedHostId = null;
+    renderHostOptions();
+    try { chrome.storage.local.remove([LK_HOST]); } catch (_) {}
+    console.log('[LENSED][TT] session reset — cleared staged SKUs + counter + dedup maps + host');
   }
 
   // Adopt the live session id reported by the background worker (via
@@ -1361,7 +1401,7 @@
     if (!sessionId || sessionId === counterSessionId) return;
     counterSessionId = sessionId;
     try {
-      chrome.storage.local.get([LK_COUNTER, LK_STAGED], function (data) {
+      chrome.storage.local.get([LK_COUNTER, LK_STAGED, LK_HOST], function (data) {
         if (chrome.runtime.lastError || !data) return;
         var rec = data[LK_COUNTER];
         if (rec && rec.sessionId === counterSessionId) {
@@ -1394,6 +1434,23 @@
           console.log('[LENSED][TT] staged SKUs restored for session', counterSessionId, '→', stagedSkus.length);
         } else if (stagedSkus.length > 0) {
           clearStaged();
+        }
+
+        // Selected host: restore ONLY the choice saved for THIS session (recovering it
+        // across a reload / SW restart) and re-assert to the worker so live_sessions
+        // .host_id is re-applied if the background lost it on eviction. A different
+        // session leaves the current selection untouched (room reset clears it).
+        var hrec = data[LK_HOST];
+        if (hrec && hrec.sessionId === counterSessionId && hrec.hostId) {
+          selectedHostId = hrec.hostId;
+          renderHostOptions();
+          try {
+            chrome.runtime.sendMessage(
+              { type: 'SET_SESSION_HOST', hostId: selectedHostId, roomId: currentRoomId || null },
+              function () { if (chrome.runtime.lastError) return; }
+            );
+          } catch (_) {}
+          console.log('[LENSED][TT] host restored for session', counterSessionId, '→', selectedHostId);
         }
       });
     } catch (_) {}
@@ -1485,6 +1542,7 @@
     shadowRoot = null; salesListEl = null; countEl = null; stagedListEl = null; notesListEl = null;
     skuInputEl = null; resolvedLabelEl = null; stagedCountEl = null; sessionStatusEl = null;
     capturedOnlyWarnEl = null; aspValueEl = null; breakEvenValueEl = null; activePanel = null;
+    hostRowEl = null; hostSelectEl = null; hostWarnEl = null;
   }
 
   function init() {
@@ -1510,11 +1568,12 @@
   init();
 
   // ── Global keyboard shortcuts (only when the SKU input is NOT focused) ─
-  // +  add another unit of the most recently staged SKU
-  // -  remove the last staged unit
-  // *  trigger re-run (the → button)
-  // When the SKU input (or any other editable field) is focused these keys
-  // type normally — we bail before handling.
+  // +  / NumpadAdd       add another unit of the most recently staged SKU
+  // -  / NumpadSubtract  remove the last staged unit
+  // *  / NumpadMultiply  trigger re-run (the ↻ restage button)
+  // Physical numpad / macro-pad keys are matched by event.code so pads that emit
+  // only a code (no printable key) still work. When the SKU input (or any other
+  // editable field) is focused these keys type normally — we bail before handling.
   function isEditableTarget(node) {
     if (!node) return false;
     var tag = (node.tagName || '').toLowerCase();
@@ -1522,15 +1581,89 @@
     return !!node.isContentEditable;
   }
 
+  // ── Hotkey debugging ── off by default. Opt in at runtime with
+  // localStorage 'lensed_hotkey_debug' = '1' to log every step of the +/-/*
+  // shortcut path (receipt, gating, match, and dispatch).
+  var HOTKEY_DEBUG = false;
+  function hotkeyDebugOn() {
+    if (HOTKEY_DEBUG) return true;
+    try { return localStorage.getItem('lensed_hotkey_debug') === '1'; } catch (_) { return false; }
+  }
+  function hlog(msg, data) {
+    if (!hotkeyDebugOn()) return;
+    if (data !== undefined) console.log('[LENSED][HOTKEY] ' + msg, data);
+    else console.log('[LENSED][HOTKEY] ' + msg);
+  }
+  function describeTarget(node) {
+    if (!node) return null;
+    var tag = (node.tagName || '').toLowerCase();
+    return tag + (node.id ? '#' + node.id : '') + (node.className && node.className.baseVal === undefined ? '.' + String(node.className).split(' ').filter(Boolean).join('.') : '');
+  }
+  // Confirm which frame this listener is bound in (top vs iframe) and the URL.
+  hlog('keydown listener attached', {
+    isTopFrame: window.top === window,
+    href: (function () { try { return location.href; } catch (_) { return '(cross-origin)'; } })()
+  });
+
+  // Dispatch a matched hotkey, logging whether it fired or was blocked by an
+  // empty staged/previous set (the underlying fns silently no-op otherwise).
+  function fireHotkey(action) {
+    if (action === 'add') {
+      if (stagedSkus.length === 0) { hlog('matched but no staged item to add'); return; }
+      addAnotherUnitOfLast(); hlog('fired add'); return;
+    }
+    if (action === 'remove') {
+      if (stagedSkus.length === 0) { hlog('matched but no removable item'); return; }
+      removeLast(); hlog('fired remove'); return;
+    }
+    if (action === 'rerun') {
+      if (previousSkus.length === 0) { hlog('matched but no previous item to rerun'); return; }
+      rerunPrevious(); hlog('fired rerun'); return;
+    }
+  }
+
   document.addEventListener('keydown', function (e) {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Scope debug logging to our candidate keys so we don't flood on normal typing.
+    var isHotkeyCandidate = e.key === '+' || e.key === '-' || e.key === '*'
+      || e.code === 'NumpadAdd' || e.code === 'NumpadSubtract' || e.code === 'NumpadMultiply';
+    if (isHotkeyCandidate) hlog('received', { key: e.key, code: e.code, target: describeTarget(e.target) });
+
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+      if (isHotkeyCandidate) hlog('ignored modifier held', { ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey });
+      return;
+    }
     // Overlay closed (✕) → scanner + shortcuts are inactive.
-    if (hidden) return;
-    // Our input lives in the shadow DOM: when focused, shadowRoot.activeElement
-    // is the input — let its own listener handle typing/scans.
-    if (shadowRoot && shadowRoot.activeElement === skuInputEl) return;
-    // Don't hijack typing in the host page's own fields either.
-    if (isEditableTarget(document.activeElement)) return;
+    if (hidden) { if (isHotkeyCandidate) hlog('ignored overlay hidden'); return; }
+
+    // A true macro/numpad key (never produced by a keyboard-wedge scanner or by
+    // normal typing) is allowed to fire even while the SKU input is focused, so the
+    // host can drive the overlay hands-free. Normal characters (incl. a typed
+    // +/-/*) stay in the field. Focus inside the overlay's shadow DOM surfaces as
+    // shadowRoot.activeElement (document.activeElement is just the shadow host).
+    var isMacroCode = e.code === 'NumpadAdd' || e.code === 'NumpadSubtract' || e.code === 'NumpadMultiply';
+    var innerFocus = shadowRoot ? shadowRoot.activeElement : null;
+
+    // The Host <select> is never hijacked — not even by macro codes.
+    if (innerFocus && innerFocus === hostSelectEl) {
+      if (isHotkeyCandidate) hlog('ignored editable target', { active: 'host-select' });
+      return;
+    }
+
+    if (innerFocus === skuInputEl) {
+      if (isMacroCode) {
+        hlog('allowed macro key inside overlay input');
+        // fall through — the numpad branch below fires and swallows the char
+      } else {
+        // Normal typing / scans in the SKU input handle themselves.
+        if (isHotkeyCandidate) hlog('ignored editable target (SKU input focused)');
+        return;
+      }
+    } else if (isEditableTarget(document.activeElement)) {
+      // Editable element OUTSIDE the overlay (e.g. TikTok chat/comment box) — always
+      // block, even macro codes; we don't hijack while the host types elsewhere.
+      if (isHotkeyCandidate) hlog('ignored editable target', { active: describeTarget(document.activeElement) });
+      return;
+    }
 
     // Enter → commit a global wedge-scanner burst if it looks machine-fast.
     if (e.key === 'Enter') {
@@ -1542,6 +1675,26 @@
       } else {
         resetGlobalScan();
       }
+      return;
+    }
+
+    // Physical numpad / macro-pad keys map to our overlay actions by event.code.
+    // These codes are produced only by real numpad keys, never by a keyboard-wedge
+    // barcode burst, so they fire immediately (no burst heuristic needed). Checked
+    // before the single-char buffering below so a numpad press that ALSO emits
+    // key '+'/'-'/'*' can't double-fire through the e.key path.
+    var padAction = e.code === 'NumpadAdd' ? 'add'
+                  : e.code === 'NumpadSubtract' ? 'remove'
+                  : e.code === 'NumpadMultiply' ? 'rerun'
+                  : null;
+    if (padAction) {
+      hlog('matched numpad code', { code: e.code, action: padAction });
+      e.preventDefault();
+      // Swallow it so the same '+'/'-'/'*' char can't also land in a focused SKU
+      // input (this listener is capture-phase, so this runs before the field sees it).
+      e.stopPropagation();
+      fireHotkey(padAction);
+      resetGlobalScan(); // consumed as a shortcut, not part of a scan
       return;
     }
 
@@ -1560,15 +1713,17 @@
       // Barcodes are "SKU<n>-<hex>" (never START with +/-/*), so a burst's first
       // char is a letter; a +/-/* arriving fast within a burst is scan data.
       if (e.key === '+' || e.key === '-' || e.key === '*') {
+        var action = e.key === '+' ? 'add' : e.key === '-' ? 'remove' : 'rerun';
         var standalone = gScanCount <= 1 || interkey > SCAN_MAX_INTERKEY_MS;
+        hlog('matched symbol key', { key: e.key, action: action, standalone: standalone, gScanCount: gScanCount, interkey: interkey });
         if (standalone) {
           e.preventDefault();
-          if (e.key === '+') addAnotherUnitOfLast();
-          else if (e.key === '-') removeLast();
-          else rerunPrevious();
+          fireHotkey(action);
           resetGlobalScan(); // consumed as a shortcut, not part of a scan
+        } else {
+          // fast burst char → leave buffered, no shortcut, no preventDefault
+          hlog('matched but suppressed as scan-burst char', { key: e.key, interkey: interkey, threshold: SCAN_MAX_INTERKEY_MS });
         }
-        // else: fast burst char → leave buffered, no shortcut, no preventDefault
       }
     }
   }, true);
@@ -1622,7 +1777,8 @@
     }
 
     if (data.source === 'lensed-tiktok-room') {
-      currentRoomId = data.roomId || currentRoomId; // scope persisted staged SKUs
+      currentRoomId = data.roomId || currentRoomId; // scope persisted staged SKUs + host
+      restoreHostByRoom(); // pre-first-sale reload: recover a host chosen for this room
       try {
         chrome.runtime.sendMessage({ type: 'TIKTOK_ROOM', roomId: data.roomId }).catch(function () {});
       } catch (_) {}
@@ -1640,9 +1796,13 @@
   // ── Auth status display ─────────────────────────────────────────────
 
   function updateAuthStatus(authenticated, uid) {
+    var wasConnected = authConnected;
     authConnected = !!authenticated;
     authStatusReceived = true;
     renderStatusLine();
+    renderHostWarning();
+    // Load the host roster on (re)connect, or if we became connected without one yet.
+    if (authConnected && (!wasConnected || hosts.length === 0)) fetchHosts();
   }
 
   // API-sourced host identity (from tiktok-inject.js / background). Authoritative \u2014
@@ -1689,6 +1849,123 @@
     } else {
       sessionStatusEl.appendChild(el('span', 'lensed-acct-warn', '\u26a0 Account unverified'));
     }
+  }
+
+  // \u2500\u2500 Live host selector \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Manual person running the show, sourced from Lensed's Team/Employees roster via the
+  // background worker (Supabase/PostgREST with the operator's relayed JWT). Independent
+  // of the auto-detected TikTok account above \u2014 never auto-filled from it.
+
+  // Ask the worker for the active employee roster, then repaint the dropdown.
+  function fetchHosts() {
+    try {
+      chrome.runtime.sendMessage({ type: 'FETCH_HOSTS' }, function (resp) {
+        if (chrome.runtime.lastError) return;
+        hosts = (resp && Array.isArray(resp.hosts)) ? resp.hosts : [];
+        renderHostOptions();
+      });
+    } catch (_) {}
+  }
+
+  // (Re)build the dropdown: placeholder first, then employees (role='host' already
+  // sorted first by the worker). A non-host role is labeled in parens so the operator
+  // can tell them apart. Restores the current selection when still present.
+  function renderHostOptions() {
+    if (!hostSelectEl) return;
+    hostSelectEl.textContent = '';
+    var ph = el('option', null, 'Select host\u2026');
+    ph.value = '';
+    hostSelectEl.appendChild(ph);
+    for (var i = 0; i < hosts.length; i++) {
+      var h = hosts[i];
+      if (!h || !h.id) continue;
+      var label = h.name || '(unnamed)';
+      if (h.role && h.role !== 'host') label += ' (' + h.role + ')';
+      var opt = el('option', null, label);
+      opt.value = h.id;
+      hostSelectEl.appendChild(opt);
+    }
+    var stillPresent = selectedHostId && hosts.some(function (h) { return h && h.id === selectedHostId; });
+    if (stillPresent) {
+      hostSelectEl.value = selectedHostId;
+    } else {
+      // Previously-selected host is no longer active/returned \u2014 drop it so we don't
+      // show a stale attribution, and surface the "no host" nudge.
+      if (selectedHostId && hosts.length > 0) selectedHostId = null;
+      hostSelectEl.value = '';
+    }
+    renderHostWarning();
+  }
+
+  // Subtle, non-blocking nudge when connected but no host is chosen. Capture is never
+  // blocked; unselected simply reports as "Unassigned" downstream.
+  function renderHostWarning() {
+    if (!hostWarnEl) return;
+    if (authConnected && !selectedHostId) {
+      hostWarnEl.textContent = '\u26a0 No host selected';
+      hostWarnEl.title = 'Select the person running this live so their hours and sales are tracked. Capture still works if left unset.';
+    } else {
+      hostWarnEl.textContent = '';
+      hostWarnEl.title = '';
+    }
+  }
+
+  // Operator changed the dropdown. Persist locally, tell the worker to attach it to the
+  // live session, and \u2014 because V1 keeps ONE host per session \u2014 WARN (never silently)
+  // when changing mid-live, since it re-attributes the whole live's orders.
+  function onHostChange() {
+    if (!hostSelectEl) return;
+    var val = hostSelectEl.value || null;
+    // Warn ONLY when a host was already selected for this live and the operator switches
+    // to a DIFFERENT one — never on the first selection, and not when clearing to none.
+    var changingMidLive = !!(selectedHostId && val && selectedHostId !== val);
+    selectedHostId = val;
+    persistSelectedHost();
+    renderHostWarning();
+    try {
+      chrome.runtime.sendMessage(
+        { type: 'SET_SESSION_HOST', hostId: selectedHostId, roomId: currentRoomId || null },
+        function () { if (chrome.runtime.lastError) return; }
+      );
+    } catch (_) {}
+    if (changingMidLive && resolvedLabelEl) {
+      resolvedLabelEl.textContent = '\u26a0 Host changed \u2014 this live\u2019s orders now attribute to the new host.';
+    }
+    console.log('[LENSED][TT] host selected:', selectedHostId);
+  }
+
+  // Persist the selection scoped to the current session + room so a reload restores it.
+  // Written even before a session exists (host can be picked pre-sale), so a
+  // pre-first-sale reload still restores by room.
+  function persistSelectedHost() {
+    try {
+      var rec = {};
+      rec[LK_HOST] = { sessionId: counterSessionId || null, roomId: currentRoomId || null, hostId: selectedHostId || null };
+      chrome.storage.local.set(rec);
+    } catch (_) {}
+  }
+
+  // Pre-first-sale reload path: no session yet, so adoptSession() won't fire. When the
+  // room becomes known, restore a host previously chosen for THIS room (only if none is
+  // currently selected) and re-assert it to the worker.
+  function restoreHostByRoom() {
+    if (selectedHostId || !currentRoomId) return;
+    try {
+      chrome.storage.local.get([LK_HOST], function (data) {
+        if (chrome.runtime.lastError || !data) return;
+        var hrec = data[LK_HOST];
+        if (hrec && hrec.hostId && hrec.roomId && hrec.roomId === currentRoomId && !selectedHostId) {
+          selectedHostId = hrec.hostId;
+          renderHostOptions();
+          try {
+            chrome.runtime.sendMessage(
+              { type: 'SET_SESSION_HOST', hostId: selectedHostId, roomId: currentRoomId },
+              function () { if (chrome.runtime.lastError) return; }
+            );
+          } catch (_) {}
+        }
+      });
+    } catch (_) {}
   }
 
   // \u2500\u2500 Visible-dashboard account detection (detection-verification only) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500

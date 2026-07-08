@@ -50,6 +50,15 @@ var sessionRoomId = null;
 var loggedOrderStatus = new Map(); // order_id -> last logged status ('sold' | 'not_sold')
 var loggedOrderSession = new Map(); // order_id -> session_id of the row we logged (for flip transitions)
 var cachedSkus = null;
+// Manually-selected live HOST (a person from the Team/Employees roster) chosen in the
+// overlay. This is NOT the auto-detected TikTok account/shop — it identifies the
+// employee running the show, for host-hours / performance attribution. Held in memory
+// and pushed to live_sessions.host_id via set_session_host. The content script owns the
+// durable per-room/session persistence and re-asserts it after a SW restart.
+var selectedHostId = null;
+// The session id we've already pushed selectedHostId to — so the attach RPC fires at
+// most once per (session, host) and never per-order on the hot bind path.
+var hostAppliedForSession = null;
 
 // Never auto-reuse an extension-created session older than this. A session left in
 // 'live' for days (the extension never calls /end) must NOT be adopted for a new
@@ -374,6 +383,8 @@ async function clearAuth() {
   currentRoomId = null;
   sessionRoomId = null;
   cachedSkus = null;
+  selectedHostId = null;
+  hostAppliedForSession = null;
   await chrome.storage.local.remove([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
   console.log('[LENSED][BG] auth cleared');
 }
@@ -474,6 +485,66 @@ async function fetchAllSkus() {
   }
 }
 
+// ─── Live host (Team/Employees roster) ───────────────────────────────
+// Columns projected for the overlay dropdown. Employees are user_id-scoped by RLS
+// (auth.uid() = user_id), so this returns exactly the signed-in operator's roster.
+var HOST_COLS = 'select=id,name,role,status';
+
+// Fetch the ACTIVE employees for the host dropdown. Sorted role='host' first (the
+// preset for on-camera staff) then by name — a display preference, NOT a filter: a
+// manager may also host, so every active employee is selectable.
+async function fetchActiveHosts() {
+  await ensureAuthReady();
+  if (!isAuthenticated()) return [];
+  try {
+    var rows = await supabaseGet(
+      'employees',
+      HOST_COLS + '&status=eq.active&order=name.asc'
+    );
+    rows = (rows || []).slice().sort(function (a, b) {
+      var ah = (a && a.role === 'host') ? 0 : 1;
+      var bh = (b && b.role === 'host') ? 0 : 1;
+      if (ah !== bh) return ah - bh;
+      return String((a && a.name) || '').localeCompare(String((b && b.name) || ''));
+    });
+    return rows;
+  } catch (e) {
+    console.error('[LENSED][BG] fetch hosts error:', e);
+    return [];
+  }
+}
+
+// Attach the selected host to the current live session via the set_session_host RPC.
+// Fire-and-forget + memoized so it never slows or breaks the capture path: if the RPC
+// is absent (migration not yet applied) or fails transiently, it logs and no-ops —
+// capture and binding are entirely unaffected. Never added to the session INSERT, so
+// session creation cannot fail on a missing host_id column.
+function maybeApplyHost() {
+  if (!isAuthenticated() || !currentSessionId || !selectedHostId) return;
+  if (hostAppliedForSession === currentSessionId) return;
+  var sid = currentSessionId;
+  var hid = selectedHostId;
+  hostAppliedForSession = sid; // optimistic — prevents duplicate concurrent RPCs
+  supabaseRpc('set_session_host', { p_session_id: sid, p_host_id: hid })
+    .then(function () {
+      console.log('[LENSED][BG] host attached to session', sid, '->', hid);
+    })
+    .catch(function (e) {
+      // Reset the memo so a later trigger (next bind / re-assert) can retry.
+      if (hostAppliedForSession === sid) hostAppliedForSession = null;
+      console.warn('[LENSED][BG] set_session_host failed (non-fatal):', String((e && e.message) || e));
+    });
+}
+
+// Record the operator's host choice and (re)apply it to the current session. Called
+// from the content script on selection change and on post-reload re-assert.
+function setSelectedHost(hostId) {
+  selectedHostId = hostId || null;
+  hostAppliedForSession = null; // force a re-apply to the current session
+  maybeApplyHost();
+  return { ok: true, sessionId: currentSessionId || null, hostId: selectedHostId };
+}
+
 // Resolve (or create) the live session for a specific tiktok room. `roomId` is the
 // authoritative room for THIS order (passed from the sale payload); it defends
 // against a stale in-memory/persisted session even before a TIKTOK_ROOM arrives.
@@ -484,6 +555,9 @@ async function getOrCreateSession(roomId) {
   // pinned to a different room (e.g. a restored one from a previous live) is never
   // reused for a new room's orders.
   if (currentSessionId && sessionRoomId && room && sessionRoomId === room) {
+    // Hot path (every sale) — do NOT attach the host here. host_id is durable in the
+    // DB once applied on create/reuse below, and an explicit change re-applies via
+    // setSelectedHost; attaching per-sale would retry the RPC on every order.
     return currentSessionId;
   }
   if (!isAuthenticated()) {
@@ -515,6 +589,7 @@ async function getOrCreateSession(roomId) {
       console.log('[LENSED][BG] reusing room-scoped session:', currentSessionId, 'room', room);
       persistSession();
       broadcastSession();
+      maybeApplyHost();
       return currentSessionId;
     }
 
@@ -536,6 +611,7 @@ async function getOrCreateSession(roomId) {
       console.log('[LENSED][BG] created room-scoped session:', currentSessionId, 'room', room);
       persistSession();
       broadcastSession();
+      maybeApplyHost();
       return currentSessionId;
     }
     console.error('[LENSED][BG] session create returned empty');
@@ -754,6 +830,8 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
     currentSessionId = null; // re-resolve session for new user
     currentRoomId = null;
     sessionRoomId = null;
+    selectedHostId = null;      // a new user's live must not inherit the prior host
+    hostAppliedForSession = null;
     // Drop the previous user's pinned session/room so the new user never resumes
     // it; broadcast the reset so overlays clear staged SKUs and re-scope their counter.
     try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]); } catch (_) {}
@@ -784,6 +862,10 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       console.log('[LENSED][BG] session discarded — room mismatch: session', currentSessionId, 'was room', sessionRoomId, '→ new room', newRoom);
       currentSessionId = null;
       sessionRoomId = null;
+      // A new live (new room) is a new show — never carry the prior live's host over.
+      // The overlay re-selects the host (and warns while none is chosen) for this room.
+      selectedHostId = null;
+      hostAppliedForSession = null;
       // The discarded session's per-order dedup no longer applies to the new live;
       // clear both maps in lockstep (also bounds them across a multi-live worker).
       loggedOrderStatus.clear();
@@ -833,6 +915,26 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     }).catch(function () {
       sendResponse({ skus: [] });
     });
+    return true;
+  }
+
+  if (message.type === 'FETCH_HOSTS') {
+    // Active employees for the overlay host dropdown (roster = people, not the account).
+    fetchActiveHosts().then(function (hosts) {
+      sendResponse({ hosts: hosts });
+    }).catch(function () {
+      sendResponse({ hosts: [] });
+    });
+    return true;
+  }
+
+  if (message.type === 'SET_SESSION_HOST') {
+    // Operator picked (or re-asserted after reload) the host running this live.
+    try {
+      sendResponse(setSelectedHost(message.hostId));
+    } catch (err) {
+      sendResponse({ ok: false, error: String((err && err.message) || err) });
+    }
     return true;
   }
 
