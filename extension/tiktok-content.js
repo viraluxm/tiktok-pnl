@@ -1568,11 +1568,12 @@
   init();
 
   // ── Global keyboard shortcuts (only when the SKU input is NOT focused) ─
-  // +  add another unit of the most recently staged SKU
-  // -  remove the last staged unit
-  // *  trigger re-run (the → button)
-  // When the SKU input (or any other editable field) is focused these keys
-  // type normally — we bail before handling.
+  // +  / NumpadAdd       add another unit of the most recently staged SKU
+  // -  / NumpadSubtract  remove the last staged unit
+  // *  / NumpadMultiply  trigger re-run (the ↻ restage button)
+  // Physical numpad / macro-pad keys are matched by event.code so pads that emit
+  // only a code (no printable key) still work. When the SKU input (or any other
+  // editable field) is focused these keys type normally — we bail before handling.
   function isEditableTarget(node) {
     if (!node) return false;
     var tag = (node.tagName || '').toLowerCase();
@@ -1600,6 +1601,24 @@
       } else {
         resetGlobalScan();
       }
+      return;
+    }
+
+    // Physical numpad / macro-pad keys map to our overlay actions by event.code.
+    // These codes are produced only by real numpad keys, never by a keyboard-wedge
+    // barcode burst, so they fire immediately (no burst heuristic needed). Checked
+    // before the single-char buffering below so a numpad press that ALSO emits
+    // key '+'/'-'/'*' can't double-fire through the e.key path.
+    var padAction = e.code === 'NumpadAdd' ? 'add'
+                  : e.code === 'NumpadSubtract' ? 'remove'
+                  : e.code === 'NumpadMultiply' ? 'rerun'
+                  : null;
+    if (padAction) {
+      e.preventDefault();
+      if (padAction === 'add') addAnotherUnitOfLast();
+      else if (padAction === 'remove') removeLast();
+      else rerunPrevious();
+      resetGlobalScan(); // consumed as a shortcut, not part of a scan
       return;
     }
 

@@ -66,6 +66,29 @@ status is logged once; a `failed → paid` flip is allowed through once.
   shortcuts only for standalone presses so a barcode's `-` isn't read as "remove".
   The SKU input is refocused after binds and overlay actions (guarded so it never
   steals focus from a host field).
+
+### Keyboard / macro‑pad hotkeys
+
+The overlay's three action buttons have global hotkeys, so a host can drive them
+from a physical 3‑button macro pad instead of the mouse. They fire only when the
+overlay is open and no editable field (input/textarea/select — incl. the **Host**
+dropdown — or contenteditable) is focused, and `preventDefault` runs only when a
+hotkey actually fires.
+
+| Macro‑pad key | `event.key` | `event.code` | Overlay button | Action |
+| --- | --- | --- | --- | --- |
+| **+** | `+` | `NumpadAdd` | `+` | add another unit of the last staged SKU |
+| **−** | `-` | `NumpadSubtract` | `−` | remove the last staged unit |
+| **✱** | `*` | `NumpadMultiply` | `↻` | re‑run / restage the previous set |
+
+Note: the **+** hotkey adds another unit of the *last staged* SKU (equivalent to
+re‑pressing `+` for the same item); the on‑screen `+` button stages the *currently
+resolved* SKU. All others match their buttons exactly.
+
+Both the top‑row symbols and the numpad codes are accepted — pads that send only
+the `Numpad*` code (no printable key) still work. Symbol presses defer to the
+scan‑burst heuristic so a barcode's `-` isn't read as "remove"; `Numpad*` codes
+are never part of a wedge burst and fire immediately.
 - Staged SKUs are held **in memory** in the content script (no persistence). When
   a sale arrives, the currently‑staged SKU(s) are bound to that order and the
   staging then clears for the next item — for **both** a paid sale and a failed
