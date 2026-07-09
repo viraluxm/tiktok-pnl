@@ -39,6 +39,10 @@
   var authConnected = false;     // last auth state (drives the status row)
   var authStatusReceived = false; // keep "Connecting…" until the first auth status arrives
   var capturedOnlyWarnEl = null; // visible "orders captured but not bound" warning
+  var shotStatusEl = null;       // [SCREENSHOT] compact counts (inside debug row)
+  var shotWarnEl = null;         // [SCREENSHOT] storage/capture warning (debug row)
+  var shotDebugEl = null;        // [SCREENSHOT] collapsed debug row (hidden unless enabled)
+  var shotDotEl = null;          // [SCREENSHOT] tiny header toggle dot
   var aspValueEl = null;
   var breakEvenValueEl = null;
   var ordersHidden = false; // "−" hides only the Recent Orders section, not the whole overlay; persisted
@@ -75,6 +79,28 @@
   // Count of orders captured this session that did NOT bind to a SKU (nothing staged
   // at capture time). Surfaced as a visible overlay warning so it is never silent.
   var capturedOnlyCount = 0;
+  // ── [SCREENSHOT] Capture state — OFF by default, opt-in, lazy ───────
+  // The screenshot feature must NEVER slow the core flow. It is disabled by
+  // default (chrome.storage key LK_SHOTS), initializes lazily well after the
+  // overlay/order system is stable, does NO polling, and only end-captures LIVE
+  // sales (never the reload backlog). Auto-start via DOM is disabled for now
+  // (fired before the video was ready → no_video). Manual "Test capture" only.
+  var LK_SHOTS = 'lensed_shots_enabled';
+  var SHOTS_DEBUG = false;              // verbose screenshot logs (off in prod)
+  var shotsEnabled = false;             // feature toggle (persisted)
+  var shotsReady = false;               // lazy-init complete + past catch-up
+  // Per-order auction_end dedup: order_ids we've already captured/uploaded a screenshot
+  // for. In-memory catches within-session re-fires; persisted (scoped to session) so a
+  // reload/catch-up within the freshness window doesn't re-upload. (The SW's
+  // deterministic 'end-<order_id>' key is the hard idempotency backstop.)
+  var LK_SHOT_ENDS = 'lensed_shot_end_orders';
+  var shotEndOrderIds = Object.create(null);
+  var cachedVideo = null;               // resolved <video>, revalidated per capture
+  var shotFailLogged = false;           // log first capture failure only, then quiet
+  var currentAuctionAttemptId = null;   // active attempt (auto-start disabled → null)
+  var auctionSaleSeenForAttempt = false;
+  var shotStatus = null;                // latest SHOT_STATUS from background
+  var lastCaptureTs = 0;
 
   // ── Live host selector ─────────────────────────────────────────────
   // The MANUAL host running this live (a person from Lensed's Team/Employees roster) —
@@ -992,6 +1018,14 @@
     controls.appendChild(closeBtn);
     controls.appendChild(toggle);
 
+    // [SCREENSHOT] Tiny header dot — toggles the (default-off) debug section.
+    // Muted when disabled; indigo when enabled. No prominent UI in the host flow.
+    shotDotEl = el('button', 'lensed-toggle', '·');
+    shotDotEl.title = 'Screenshots (debug)';
+    shotDotEl.style.cssText = 'font-size:18px;line-height:1;opacity:0.35;';
+    shotDotEl.addEventListener('click', function (e) { e.stopPropagation(); setShotsEnabled(!shotsEnabled); });
+    controls.appendChild(shotDotEl);
+
     header.appendChild(title);
     header.appendChild(controls);
 
@@ -1087,6 +1121,31 @@
     capturedOnlyWarnEl = el('div', 'lensed-warn', '');
     renderCapturedOnlyWarning(); // repaint if a re-inject happens with a live count
 
+    // [SCREENSHOT] Collapsed debug row — hidden unless the feature is enabled via
+    // the header dot. Small, muted; never part of the main host workflow.
+    shotDebugEl = el('div', '');
+    shotDebugEl.style.cssText = 'display:none;margin-top:6px;font-size:10px;color:#8a8a92;';
+    shotStatusEl = el('span', '', 'shots off');
+    var shotTestBtn = el('button', 'lensed-sku-btn', 'Test');
+    shotTestBtn.style.cssText = 'width:auto;padding:0 8px;font-size:10px;height:20px;margin-left:6px;';
+    shotTestBtn.title = 'Test screenshot capture';
+    shotTestBtn.addEventListener('click', function (e) { e.stopPropagation(); captureShot('manual'); });
+    var shotClearBtn = el('button', 'lensed-sku-btn', 'Clear');
+    shotClearBtn.style.cssText = 'width:auto;padding:0 8px;font-size:10px;height:20px;margin-left:4px;';
+    shotClearBtn.title = 'Clear this live’s screenshots';
+    shotClearBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (!counterSessionId) return;
+      if (typeof window.confirm === 'function' && !window.confirm('Delete this live’s local screenshots?')) return;
+      try { chrome.runtime.sendMessage({ type: 'CLEAR_SHOTS', sessionId: counterSessionId, roomId: currentRoomId }, function (r) { if (r && r.status) applyShotStatus(r.status); }); } catch (_) {}
+    });
+    shotWarnEl = el('span', '');
+    shotWarnEl.style.cssText = 'display:block;color:#f59e0b;margin-top:3px;';
+    shotDebugEl.appendChild(shotStatusEl);
+    shotDebugEl.appendChild(shotTestBtn);
+    shotDebugEl.appendChild(shotClearBtn);
+    shotDebugEl.appendChild(shotWarnEl);
+
     // Stage section: input row + transient resolve line + always-on staged count
     // + staged items + talking points + session status
     var skuMain = el('div', 'lensed-sku-main');
@@ -1098,6 +1157,8 @@
     skuMain.appendChild(sessionStatusEl);
     skuMain.appendChild(hostRowEl);
     skuMain.appendChild(capturedOnlyWarnEl);
+    skuMain.appendChild(shotDebugEl);
+    renderShotStatus();
 
     // Right column of the stage section: compact ASP goal + break-even. Readable
     // but sized so it doesn't overpower the staged SKUs on the left.
@@ -1126,7 +1187,8 @@
     // Unobtrusive runtime version marker (muted, bottom-left corner) for testing.
     var verStr = 'v?';
     try { verStr = 'v' + chrome.runtime.getManifest().version; } catch (_) {}
-    panel.appendChild(el('span', 'lensed-version', verStr));
+    // [VALIDATION] visible build tag so the correct unpacked folder is obvious on-screen.
+    panel.appendChild(el('span', 'lensed-version', verStr + ' · sniffer-v2'));
     shadowRoot.appendChild(panel);
 
     // Floating reopen tab — shown only while the overlay is hidden (via the X).
@@ -1258,7 +1320,7 @@
       });
     } catch (_) {}
 
-    console.log('[LENSED][TT] overlay injected', JSON.stringify(diag));
+    applyShotsUi(); // [SCREENSHOT] reflect current toggle state (no work if disabled)
     return host;
   }
 
@@ -1346,6 +1408,18 @@
     } catch (_) {}
   }
 
+  // Persist the set of order_ids already auction_end-screenshotted, scoped to the live
+  // session, so a reload within the freshness window doesn't re-upload. No-op until the
+  // session id is known. (Deterministic 'end-<order_id>' key is the hard backstop.)
+  function persistShotEnds() {
+    if (!counterSessionId) return;
+    try {
+      var rec = {};
+      rec[LK_SHOT_ENDS] = { sessionId: counterSessionId, orderIds: Object.keys(shotEndOrderIds) };
+      chrome.storage.local.set(rec);
+    } catch (_) {}
+  }
+
   // Persist the current staged-SKU selection, scoped to the live session id, so a
   // Live Manager reload / SW restart restores it. A no-op until the session id is
   // known (nothing durable is written unscoped). Called on every staged-set change.
@@ -1375,6 +1449,7 @@
   function onSessionReset() {
     counterSessionId = null;
     seenOrderIds = Object.create(null);
+    shotEndOrderIds = Object.create(null); // new live → its own auction_end dedup set
     salesCount = 0;
     capturedOnlyCount = 0;
     // Clear the per-order dedup Maps too: a new live's orders are legitimately
@@ -1401,8 +1476,14 @@
     if (!sessionId || sessionId === counterSessionId) return;
     counterSessionId = sessionId;
     try {
-      chrome.storage.local.get([LK_COUNTER, LK_STAGED, LK_HOST], function (data) {
+      chrome.storage.local.get([LK_COUNTER, LK_STAGED, LK_HOST, LK_SHOT_ENDS], function (data) {
         if (chrome.runtime.lastError || !data) return;
+        // Restore the auction_end dedup set for THIS session (skip re-upload after reload).
+        var srec = data[LK_SHOT_ENDS];
+        shotEndOrderIds = Object.create(null);
+        if (srec && srec.sessionId === counterSessionId && Array.isArray(srec.orderIds)) {
+          for (var si = 0; si < srec.orderIds.length; si++) shotEndOrderIds[srec.orderIds[si]] = true;
+        }
         var rec = data[LK_COUNTER];
         if (rec && rec.sessionId === counterSessionId) {
           seenOrderIds = Object.create(null);
@@ -1757,6 +1838,27 @@
       renderSale(sale, wasBound, boundSkus);
       diag.lastCaptureTs = Date.now();
 
+      // [SCREENSHOT] Auction END screenshot — only when the feature is enabled AND
+      // lazy-init is complete (shotsReady). shotsReady flips well after page load,
+      // so the reload backlog burst never triggers capture/IndexedDB work. Wrapped
+      // + fire-and-forget so it can never affect sale detection / bind / counter.
+      if (brandNewOrder && shotsEnabled && shotsReady) {
+        if (sale && sale.orderId && shotEndOrderIds[sale.orderId]) {
+          // Already screenshotted this order this live (survives reload via persist).
+          console.log('[LENSED][SHOT] skip duplicate auction_end', { orderId: sale.orderId });
+        } else if (isFreshSale(sale)) {
+          if (sale.orderId) { shotEndOrderIds[sale.orderId] = true; persistShotEnds(); }
+          auctionSaleSeenForAttempt = true;
+          try { endAuctionAttemptOnSale(sale); } catch (e) { if (SHOTS_DEBUG) console.warn('[LENSED][SHOT] end capture error:', e); }
+        } else {
+          // Backlog protection: a "new-to-this-tab" order that is actually old (catch-up /
+          // late-join cumulative flood, or a reconnect gap) must NOT screenshot — the live
+          // frame would be "now", not the sale moment. Counter/bind already handled above.
+          var _ageMs = (sale && sale.orderedAtMs) ? (Date.now() - sale.orderedAtMs) : null;
+          console.log('[LENSED][SHOT] skip stale auction_end', { orderId: sale && sale.orderId, ageMs: _ageMs });
+        }
+      }
+
       // Captured-only: a brand-new order arrived with nothing staged, so it was
       // recorded raw but NOT bound to a SKU. Count once + show a visible warning so
       // this failure is never silent again (the July-3 incident).
@@ -1764,7 +1866,8 @@
         capturedOnlyCount++;
         renderCapturedOnlyWarning();
         persistCounter();
-        console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
+        // Visible overlay warning above is the signal; console line gated to avoid live spam.
+        if (SHOTS_DEBUG) console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
       }
 
       // A bind just cleared staging — refocus so the host can scan the next item
@@ -2124,8 +2227,285 @@
       // so clear staged SKUs + counter for a clean next live.
       if (message.sessionId) adoptSession(message.sessionId);
       else onSessionReset();
+    } else if (message.type === 'SHOT_STATUS') {
+      // [SCREENSHOT] Background pushed updated counters after a store/clear.
+      applyShotStatus(message.status);
     }
   });
+
+  // ── [SCREENSHOT] Canvas video capture (safe, opt-in, lazy) ──────────
+  // Design: OFF by default; no polling; no DOM observers; no work on load/catch-up.
+  // Auto-start (DOM) is DISABLED — it fired before the video was ready (no_video).
+  // Only manual "Test capture" and (when enabled) live-sale end capture run. Any
+  // error self-disables the feature and leaves the rest of the extension untouched.
+  var SHOT_MAX_W = 1024;
+  var SHOT_QUALITY = 0.5;
+  var SHOT_ADAPTIVE_BYTES = 200 * 1024;
+  // Backlog gate: a real auction_end's order_create_time (→ sale.orderedAtMs) is ~now.
+  // Catch-up/late-join replays a cumulative backlog of OLD orders; only screenshot a
+  // genuinely recent sale. Missing/invalid timestamp → treated as NOT fresh (skip).
+  var SHOT_FRESH_WINDOW_MS = 5 * 60 * 1000;
+  function isFreshSale(sale) {
+    var t = sale && sale.orderedAtMs;
+    if (typeof t !== 'number' || !isFinite(t) || t <= 0) return false;
+    var age = Date.now() - t;
+    return age <= SHOT_FRESH_WINDOW_MS && age >= -SHOT_FRESH_WINDOW_MS; // recent; small future-skew guard
+  }
+
+  function shotDbg() { if (SHOTS_DEBUG) { try { console.log.apply(console, arguments); } catch (_) {} } }
+
+  function stagedSnapshot() {
+    return stagedSkus.map(function (s) { return { sku_number: s.sku_number, title: s.title, qty: s.qty || 1 }; });
+  }
+
+  function priceStrToCents(p) {
+    if (p == null) return null;
+    var c = String(p).replace(/[^0-9.]/g, '');
+    if (c === '') return null;
+    var n = parseFloat(c);
+    return isFinite(n) ? Math.round(n * 100) : null;
+  }
+
+  function shotIsVisible(elm) {
+    try {
+      if (!elm) return false;
+      var r = elm.getBoundingClientRect();
+      if (r.width <= 2 || r.height <= 2) return false;
+      var st = getComputedStyle(elm);
+      if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') === 0) return false;
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function videoUsable(v) { return v && v.readyState >= 2 && v.videoWidth > 0 && v.videoHeight > 0; }
+
+  // Deep shadow-DOM walk — exact finder from the working canvas probe.
+  function findLiveVideo() {
+    var out = [];
+    (function walk(root) {
+      if (!root || !root.querySelectorAll) return;
+      var v = root.querySelectorAll('video');
+      for (var i = 0; i < v.length; i++) out.push(v[i]);
+      var a = root.querySelectorAll('*');
+      for (var j = 0; j < a.length; j++) { if (a[j].shadowRoot) walk(a[j].shadowRoot); }
+    })(document);
+    for (var k = 0; k < out.length; k++) { if (videoUsable(out[k]) && !out[k].paused) return out[k]; }
+    for (var m = 0; m < out.length; m++) { if (videoUsable(out[m])) return out[m]; }
+    return null;
+  }
+
+  // Cached resolver with short retries — fixes the no_video race (capture fired
+  // before the video was decodable). Revalidates the cached ref each call.
+  function resolveVideo(cb, attempt) {
+    attempt = attempt || 0;
+    if (videoUsable(cachedVideo)) { cb(cachedVideo); return; }
+    var v = findLiveVideo();
+    if (v) { cachedVideo = v; cb(v); return; }
+    cachedVideo = null;
+    var delays = [150, 300, 600];
+    if (attempt < delays.length) { setTimeout(function () { resolveVideo(cb, attempt + 1); }, delays[attempt]); }
+    else cb(null);
+  }
+
+  function drawFrame(v) {
+    var sw = v.videoWidth, sh = v.videoHeight;
+    var scale = Math.min(1, SHOT_MAX_W / sw);
+    var w = Math.max(1, Math.round(sw * scale)), h = Math.max(1, Math.round(sh * scale));
+    var canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    var ctx = canvas.getContext('2d');
+    try { ctx.drawImage(v, 0, 0, w, h); }
+    catch (e) { return { ok: false, reason: 'drawimage_' + ((e && e.name) || 'err') }; }
+    var dataUrl;
+    try { dataUrl = canvas.toDataURL('image/jpeg', SHOT_QUALITY); }
+    catch (e) { return { ok: false, reason: 'todataurl_' + ((e && e.name) || 'err') }; }
+    var base64 = dataUrl.split(',')[1] || '';
+    var bytes = Math.round(base64.length * 3 / 4);
+    if (bytes > SHOT_ADAPTIVE_BYTES) {
+      try {
+        var d2 = canvas.toDataURL('image/jpeg', 0.4);
+        var b2 = d2.split(',')[1] || '';
+        if (b2 && b2.length < base64.length) { base64 = b2; bytes = Math.round(base64.length * 3 / 4); }
+      } catch (_) {}
+    }
+    return { ok: true, base64: base64, srcW: sw, srcH: sh, w: w, h: h, bytes: bytes };
+  }
+
+  // Synthetic JPEG for manual_test ONLY, when no live video is on screen. Lets the
+  // full upload path be exercised (Storage + metadata) without a live. Never used
+  // for auction_start/auction_end — those still require the real video frame.
+  function synthFrame() {
+    try {
+      var w = 512, h = 288;
+      var canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      var ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#111318'; ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#4f8cff'; ctx.fillRect(0, 0, w, 6);
+      ctx.fillStyle = '#ffffff'; ctx.font = 'bold 24px -apple-system, Segoe UI, sans-serif';
+      ctx.fillText('Lensed screenshot test', 20, 62);
+      ctx.fillStyle = '#c8c8d0'; ctx.font = '14px monospace';
+      ctx.fillText(new Date().toISOString(), 20, 104);
+      ctx.fillText('session: ' + (counterSessionId || 'nosession'), 20, 132);
+      ctx.fillText('room: ' + (currentRoomId || '—'), 20, 158);
+      ctx.fillStyle = '#8a8a92';
+      ctx.fillText('synthetic (no live video)', 20, 190);
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+      var base64 = dataUrl.split(',')[1] || '';
+      return { ok: true, base64: base64, srcW: w, srcH: h, w: w, h: h, bytes: Math.round(base64.length * 3 / 4), synthetic: true };
+    } catch (e) {
+      return { ok: false, reason: 'synth_' + ((e && e.name) || 'err') };
+    }
+  }
+
+  // Fire-and-forget capture → SW store. Guarded so it can never touch core flow.
+  function captureShot(kind, extra) {
+    if (!shotsEnabled) return;
+    extra = extra || {};
+    try {
+      resolveVideo(function (v) {
+        try {
+          var frame = v ? drawFrame(v) : { ok: false, reason: 'no_video' };
+          // manual_test fallback: no video → synthetic test image (auction_* never falls back).
+          if (!frame.ok && kind === 'manual') {
+            console.log('[LENSED][SHOT] manual_test fallback used:', frame.reason);
+            frame = synthFrame();
+          }
+          var msg = {
+            type: 'CAPTURE_STORE', kind: kind,
+            screenshotType: kind === 'start' ? 'auction_start' : (kind === 'manual' ? 'manual_test' : 'auction_end'),
+            attemptId: currentAuctionAttemptId,
+            sessionId: counterSessionId || null,
+            roomId: currentRoomId || null,
+            stagedSnapshot: stagedSnapshot(),
+            startTrigger: kind === 'start' ? 'dom' : null,
+            ts: Date.now(),
+          };
+          for (var kk in extra) { if (Object.prototype.hasOwnProperty.call(extra, kk)) msg[kk] = extra[kk]; }
+          if (!frame.ok) {
+            msg.kind = 'failed'; msg.error = frame.reason;
+            if (!shotFailLogged) { shotFailLogged = true; console.warn('[LENSED][SHOT] capture unavailable:', frame.reason); }
+            else shotDbg('[LENSED][SHOT] capture unavailable:', frame.reason);
+          } else {
+            msg.base64 = frame.base64;
+            msg.srcWidth = frame.srcW; msg.srcHeight = frame.srcH;
+            msg.width = frame.w; msg.height = frame.h;
+            msg.bytes = frame.bytes;
+            console.log('[LENSED][SHOT] upload started', { type: msg.screenshotType, bytes: frame.bytes, synthetic: !!frame.synthetic });
+          }
+          // Snapshot counters before the round-trip so we can log the outcome by delta.
+          var prev = shotStatus || { uploaded: 0, pending: 0, failed: 0, queued: 0 };
+          chrome.runtime.sendMessage(msg, function (resp) {
+            if (chrome.runtime.lastError) { console.warn('[LENSED][SHOT] upload failed (sendMessage):', chrome.runtime.lastError.message); return; }
+            if (resp && resp.status) {
+              var s = resp.status;
+              if (s.uploaded > (prev.uploaded || 0)) console.log('[LENSED][SHOT] upload + metadata success');
+              else if ((s.queued || s.pending || 0) > (prev.queued || prev.pending || 0)) console.warn('[LENSED][SHOT] upload pending — queued for retry (reason in SW console)');
+              else if (s.failed > (prev.failed || 0)) console.warn('[LENSED][SHOT] upload failed (reason in SW console)');
+              applyShotStatus(s);
+            }
+          });
+          lastCaptureTs = Date.now();
+        } catch (e) { shotDbg('[LENSED][SHOT] capture inner error:', e); }
+      });
+    } catch (e) { shotDbg('[LENSED][SHOT] capture error:', e); }
+  }
+
+  // Sale-driven end (authoritative). Attaches to the active attempt (none while
+  // auto-start is disabled → unmatched end-only). Never pairs on staged SKUs.
+  function endAuctionAttemptOnSale(sale) {
+    captureShot('end', {
+      orderId: sale.orderId || null,
+      buyer: sale.buyerUsername || null,
+      priceCents: priceStrToCents(sale.sellingPrice),
+    });
+    currentAuctionAttemptId = null;
+    auctionSaleSeenForAttempt = false;
+  }
+
+  // ── Overlay UI (tiny) ───────────────────────────────────────────────
+  function applyShotStatus(status) { if (status) shotStatus = status; renderShotStatus(); }
+  function renderShotStatus() {
+    if (shotStatusEl) {
+      if (!shotsEnabled) { shotStatusEl.textContent = 'shots off'; }
+      else {
+        var s = shotStatus;
+        shotStatusEl.textContent = s
+          ? ('shots ↑' + s.uploaded + ' ⏳' + (s.queued != null ? s.queued : s.pending) + ' ✕' + s.failed)
+          : 'shots on';
+      }
+    }
+    if (shotWarnEl) {
+      var w = '';
+      if (shotsEnabled && shotStatus && (shotStatus.queued > 0 || shotStatus.pending > 0)) {
+        w = (shotStatus.queued || shotStatus.pending) + ' pending upload — will retry.';
+      }
+      shotWarnEl.textContent = w ? ('⚠ ' + w) : '';
+    }
+  }
+
+  // Reflect toggle state onto the (collapsed) debug row + header dot. No work when off.
+  function applyShotsUi() {
+    if (shotDotEl) shotDotEl.style.opacity = shotsEnabled ? '0.9' : '0.35';
+    if (shotDebugEl) shotDebugEl.style.display = shotsEnabled ? 'block' : 'none';
+    renderShotStatus();
+    if (shotsEnabled && counterSessionId) {
+      try {
+        chrome.runtime.sendMessage({ type: 'GET_SHOT_STATUS', sessionId: counterSessionId, roomId: currentRoomId }, function (r) {
+          if (chrome.runtime.lastError) return;
+          if (r && r.status) applyShotStatus(r.status);
+        });
+      } catch (_) {}
+    }
+  }
+
+  function setShotsEnabled(on) {
+    shotsEnabled = !!on;
+    try { chrome.storage.local.set({ lensed_shots_enabled: shotsEnabled }); } catch (_) {}
+    if (shotsEnabled) shotsReady = true; // manual enable during a live is immediately ready
+    applyShotsUi();
+  }
+
+  // Lazy init: read the persisted flag ONCE, well after load, so nothing screenshot-
+  // related runs during the order-counter catch-up. Enables capture only past that.
+  function initShotsLazy() {
+    try {
+      chrome.storage.local.get([LK_SHOTS], function (data) {
+        if (chrome.runtime.lastError) { shotsEnabled = false; return; }
+        shotsEnabled = !!(data && data[LK_SHOTS]);
+        shotsReady = true; // past catch-up window regardless; capture still gated on shotsEnabled
+        applyShotsUi();
+      });
+    } catch (_) { shotsEnabled = false; }
+  }
+  setTimeout(initShotsLazy, 6000);
+
+  // ── DOM probe (dev, manual) — confirm auction selectors from a live ──
+  window.__lensedDomProbe = function () {
+    var report = { videos: [], keyworded: [], countdownLike: [] };
+    try {
+      var vids = document.querySelectorAll('video');
+      report.videos = [].map.call(vids, function (v) { return { rs: v.readyState, w: v.videoWidth, h: v.videoHeight, paused: v.paused, visible: shotIsVisible(v) }; });
+      var all = document.querySelectorAll('body *');
+      var kw = /auction|bid|countdown|winner|timer/i;
+      for (var i = 0; i < all.length && report.keyworded.length < 40; i++) {
+        var e = all[i];
+        var cls = (typeof e.className === 'string') ? e.className : '';
+        if (kw.test(cls) || kw.test(e.id || '')) {
+          report.keyworded.push({ tag: e.tagName.toLowerCase(), id: e.id || '', cls: cls.slice(0, 90), text: (e.textContent || '').trim().slice(0, 40), vis: shotIsVisible(e) });
+        }
+      }
+      for (var j = 0; j < all.length && report.countdownLike.length < 25; j++) {
+        var el2 = all[j];
+        var t = (el2.childElementCount === 0) ? (el2.textContent || '').trim() : '';
+        if (t && /^(\d{1,2}|\d?\d:\d\d)$/.test(t) && shotIsVisible(el2)) {
+          report.countdownLike.push({ tag: el2.tagName.toLowerCase(), cls: ((typeof el2.className === 'string') ? el2.className : '').slice(0, 90), text: t });
+        }
+      }
+    } catch (e) { report.error = String(e); }
+    console.log('[LENSED][DOMPROBE]', report);
+    return report;
+  };
 
   console.log('[LENSED][TT] content bridge + overlay installed');
 })();
