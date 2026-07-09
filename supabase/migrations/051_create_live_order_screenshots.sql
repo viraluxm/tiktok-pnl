@@ -220,16 +220,10 @@ begin
       where user_id = g.user_id and order_id = g.order_id and screenshot_type = 'auction_end'
         and id <> v_keep;
 
-    -- Optional: remove the now-orphaned Storage objects for the removed rows (safe —
-    -- only rows we're deleting; guarded to the private bucket). Comment out to keep
-    -- files and GC them out-of-band from the audit table instead.
-    delete from storage.objects
-      where bucket_id = 'live-screenshots'
-        and name in (
-          select object_key from public.live_order_screenshots
-          where user_id = g.user_id and order_id = g.order_id and screenshot_type = 'auction_end'
-            and id <> v_keep and object_key is not null
-        );
+    -- NOTE: the now-orphaned Storage objects for removed rows are NOT deleted here —
+    -- Supabase blocks direct DELETE on storage.objects (storage.protect_delete()). Their
+    -- object_key is recorded in live_order_screenshot_dedup above; GC them out-of-band
+    -- via the Storage API (storage.from('live-screenshots').remove([...])) when convenient.
 
     delete from public.live_order_screenshots
       where user_id = g.user_id and order_id = g.order_id and screenshot_type = 'auction_end'
