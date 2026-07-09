@@ -217,7 +217,8 @@ async function supabasePost(table, body) {
 }
 
 async function supabaseUpsert(table, body, onConflict) {
-  var url = SUPABASE_URL + '/rest/v1/' + table;
+  // on_conflict targets a specific unique constraint (else PostgREST uses the PK).
+  var url = SUPABASE_URL + '/rest/v1/' + table + (onConflict ? ('?on_conflict=' + encodeURIComponent(onConflict)) : '');
   var headers = supabaseHeaders();
   headers['Prefer'] = 'resolution=merge-duplicates,return=representation';
   // allowRetry=true: merge-duplicates makes a re-send idempotent (same conflict key).
@@ -767,6 +768,326 @@ async function handleAutoBind(sale, stagedSkus) {
   await upsertCaptureEvent(sale, boundSkuId);
 }
 
+// ── [SCREENSHOT] Upload-first store (Storage + live_order_screenshots) ────────
+// Content posts a captured JPEG (base64) via CAPTURE_STORE. We upload IMMEDIATELY
+// to the private live-screenshots bucket, then upsert live_order_screenshots
+// (unique user_id,image_id → idempotent). On success we keep NOTHING locally.
+// IndexedDB is a FAILURE-ONLY retry queue (outbox): used when upload/upsert fails
+// (offline, auth missing, retryable error), drained opportunistically (SW start,
+// next capture, after any success, manual enable). Deleted on confirmed upload.
+// Everything is async + guarded so it can never affect the core order flow.
+var SHOT_BUCKET = 'live-screenshots';
+var SHOT_TABLE = 'live_order_screenshots';
+var SHOT_DB_NAME = 'lensed-screenshots';
+var SHOT_DB_VERSION = 2;
+var SHOT_OUTBOX_CAP = 2000; // pathological bound on the local retry queue
+
+var _shotDbPromise = null;
+function shotDb() {
+  if (_shotDbPromise) return _shotDbPromise;
+  _shotDbPromise = new Promise(function (resolve, reject) {
+    var req = indexedDB.open(SHOT_DB_NAME, SHOT_DB_VERSION);
+    req.onupgradeneeded = function () {
+      var db = req.result;
+      // Retry queue only. (v1 images/manifest stores, if present, are left unused
+      // and get cleared on demand; upload-first never writes them.)
+      if (!db.objectStoreNames.contains('outbox')) {
+        db.createObjectStore('outbox', { keyPath: 'image_id' });
+      }
+      if (!db.objectStoreNames.contains('counters')) {
+        db.createObjectStore('counters', { keyPath: 'session_id' });
+      }
+    };
+    req.onsuccess = function () { resolve(req.result); };
+    req.onerror = function () { reject(req.error); };
+  });
+  return _shotDbPromise;
+}
+
+function idbReq(r) {
+  return new Promise(function (resolve, reject) {
+    r.onsuccess = function () { resolve(r.result); };
+    r.onerror = function () { reject(r.error); };
+  });
+}
+
+function base64ToBytes(base64) {
+  var bin = atob(base64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function newImageId() {
+  return (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('img-' + Date.now() + '-' + Math.round(Math.random() * 1e9));
+}
+
+function shotObjectKey(uid, sessionId, imageId) {
+  return uid + '/' + (sessionId || 'nosession') + '/' + imageId + '.jpg';
+}
+
+// ── Per-session counters (overlay status only) ───────────────────────
+// The counters store's keyPath is session_id, but a no-live capture has a null
+// session (manual_test / pre-session). IndexedDB rejects get/put/delete with a
+// null/undefined key, so we derive a deterministic NON-EMPTY key. This is a LOCAL
+// telemetry key only — the DB row keeps session_id null and the object path keeps
+// /nosession/ (both unchanged).
+function shotCounterKey(sessionId) {
+  return (userId || 'nouser') + ':' + (sessionId || 'nosession');
+}
+function emptyShotCounter(sessionId) {
+  return { session_id: shotCounterKey(sessionId), uploaded: 0, pending: 0, failed: 0, uploaded_bytes: 0, updated_at: Date.now() };
+}
+async function getShotCounter(db, sessionId) {
+  var tx = db.transaction(['counters'], 'readonly');
+  var row = await idbReq(tx.objectStore('counters').get(shotCounterKey(sessionId)));
+  return row || emptyShotCounter(sessionId);
+}
+async function putShotCounter(db, c) {
+  c.updated_at = Date.now();
+  var tx = db.transaction(['counters'], 'readwrite');
+  tx.objectStore('counters').put(c);
+  return new Promise(function (resolve, reject) { tx.oncomplete = resolve; tx.onerror = function () { reject(tx.error); }; });
+}
+
+// ── The two network steps (Storage PUT, then metadata upsert) ────────
+// Uses the user's Bearer token (supabaseHeaders). Returns {ok, retryable, status}.
+async function uploadShotObject(objectKey, bytes) {
+  var url = SUPABASE_URL + '/storage/v1/object/' + SHOT_BUCKET + '/' + objectKey;
+  var headers = {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: 'Bearer ' + (accessToken || SUPABASE_ANON_KEY),
+    'Content-Type': 'image/jpeg',
+    'x-upsert': 'true',
+  };
+  var res;
+  try { res = await sbFetch(url, { method: 'POST', headers: headers, body: bytes }, FETCH_TIMEOUT_WRITE_MS, false); }
+  catch (e) { return { ok: false, retryable: true, err: String(e && e.name || e) }; } // abort/network → retry
+  if (res.status === 401) {
+    var refreshed = await tryRefreshToken();
+    if (refreshed) {
+      headers.Authorization = 'Bearer ' + accessToken;
+      try { res = await sbFetch(url, { method: 'POST', headers: headers, body: bytes }, FETCH_TIMEOUT_WRITE_MS, false); }
+      catch (e2) { return { ok: false, retryable: true, err: String(e2 && e2.name || e2) }; }
+    }
+  }
+  if (res.ok) return { ok: true };
+  // 4xx (except 401 handled) are non-retryable client errors; 5xx retry later.
+  return { ok: false, retryable: res.status >= 500 || res.status === 429, status: res.status };
+}
+
+async function upsertShotRow(row) {
+  try {
+    // merge-duplicates on (user_id,image_id) → idempotent replay.
+    await supabaseUpsert(SHOT_TABLE, row, 'user_id,image_id');
+    return { ok: true };
+  } catch (e) {
+    var msg = String(e && e.message || e);
+    // Retry only transient/5xx; a constraint/permission error is terminal.
+    var retryable = /\((5\d\d|429)\)/.test(msg) || /AbortError|TypeError|Failed to fetch/i.test(msg);
+    return { ok: false, retryable: retryable, err: msg };
+  }
+}
+
+// Build the DB row from a capture message + resolved identity.
+function shotRowFrom(msg, imageId, objectKey, status) {
+  return {
+    user_id: userId,
+    image_id: imageId,
+    session_id: msg.sessionId || null,
+    room_id: msg.roomId || null,
+    order_id: msg.orderId || null,
+    auction_attempt_id: msg.attemptId || null,
+    screenshot_type: msg.screenshotType || (msg.kind === 'end' ? 'auction_end' : (msg.kind === 'manual' ? 'manual_test' : 'auction_end')),
+    start_trigger: msg.startTrigger || null,
+    tiktok_auction_id: msg.tiktokAuctionId || null,
+    tiktok_round_id: msg.tiktokRoundId || null,
+    object_key: objectKey,
+    storage_provider: 'supabase',
+    width: msg.width || null,
+    height: msg.height || null,
+    bytes: msg.bytes || null,
+    staged_skus_snapshot: msg.stagedSnapshot || [],
+    buyer_username: msg.buyer || null,
+    price_cents: (typeof msg.priceCents === 'number') ? msg.priceCents : null,
+    captured_at: msg.ts ? new Date(msg.ts).toISOString() : new Date().toISOString(),
+    upload_status: status,
+  };
+}
+
+async function enqueueOutbox(db, item) {
+  var tx = db.transaction(['outbox'], 'readwrite');
+  var store = tx.objectStore('outbox');
+  store.put(item);
+  // Bound the queue: drop the oldest if we somehow exceed the cap.
+  var count = await idbReq(store.count());
+  if (count > SHOT_OUTBOX_CAP) {
+    var cur = await idbReq(store.openCursor());
+    if (cur) { store.delete(cur.primaryKey); }
+  }
+  return new Promise(function (resolve, reject) { tx.oncomplete = resolve; tx.onerror = function () { reject(tx.error); }; });
+}
+async function deleteOutbox(db, imageId) {
+  var tx = db.transaction(['outbox'], 'readwrite');
+  tx.objectStore('outbox').delete(imageId);
+  return new Promise(function (resolve, reject) { tx.oncomplete = resolve; tx.onerror = function () { reject(tx.error); }; });
+}
+
+// ── Main entry: upload-first, enqueue on failure ─────────────────────
+async function handleCaptureStore(msg) {
+  await ensureAuthReady();
+  var db = await shotDb();
+  var sessionId = msg.sessionId || currentSessionId || null;
+
+  // [SCREENSHOT] SW is the session authority. For a LIVE shot (non-manual) with a
+  // known room + auth + an actual frame, resolve/create the room-scoped session so
+  // session_id and the object key are populated even when content's counterSessionId
+  // lagged (first-sale race) or nothing was staged. getOrCreateSession is idempotent
+  // + room-scoped (the same call the bind path uses) — it never forks a session, and
+  // it broadcasts the resolved session so later shots have it too. manual_test
+  // (kind='manual' / no roomId) stays /nosession/ with null session_id.
+  if (!sessionId && msg.base64 && msg.kind !== 'manual' && msg.roomId && isAuthenticated()) {
+    try { sessionId = await getOrCreateSession(msg.roomId); } catch (_) {}
+  }
+  msg.sessionId = sessionId; // shotRowFrom (row.session_id), object key, and outbox all read this
+
+  var counter = await getShotCounter(db, sessionId);
+
+  // A failed capture (content couldn't get a frame) — record + bail, no upload.
+  if (msg.kind === 'failed' || !msg.base64) {
+    counter.failed++;
+    await putShotCounter(db, counter);
+    return await buildStatus(sessionId);
+  }
+
+  // Idempotency: auction_end gets a DETERMINISTIC image_id derived from the order,
+  // so a re-capture (reload / catch-up / status flip within the freshness window)
+  // reuses the SAME object key (x-upsert overwrites in place — no orphan images) AND
+  // the SAME row via the existing unique(user_id,image_id) upsert (no duplicate rows).
+  // manual_test / auction_start keep a random id (unique per capture).
+  var imageId = (msg.screenshotType === 'auction_end' && msg.orderId)
+    ? ('end-' + msg.orderId)
+    : newImageId();
+
+  // No auth yet → straight to the retry queue (don't lose the shot).
+  if (!isAuthenticated()) {
+    await enqueueOutbox(db, { image_id: imageId, base64: msg.base64, storage_done: false, msg: msg, attempts: 0, last_error: 'not_authenticated', created_at: Date.now() });
+    counter.pending++;
+    await putShotCounter(db, counter);
+    return await buildStatus(sessionId);
+  }
+
+  var objectKey = shotObjectKey(userId, sessionId, imageId);
+  var bytes = base64ToBytes(msg.base64);
+
+  // Step 1: upload the object.
+  var up = await uploadShotObject(objectKey, bytes);
+  if (!up.ok) {
+    await enqueueOutbox(db, { image_id: imageId, base64: msg.base64, storage_done: false, msg: msg, attempts: 1, last_error: 'upload_' + (up.status || up.err || 'fail'), created_at: Date.now() });
+    counter.pending++;
+    await putShotCounter(db, counter);
+    console.warn('[LENSED][BG] shot upload failed → queued:', up.status || up.err);
+    return await buildStatus(sessionId);
+  }
+
+  // Step 2: upsert metadata (object already uploaded — idempotent key).
+  var row = shotRowFrom(msg, imageId, objectKey, 'uploaded');
+  var meta = await upsertShotRow(row);
+  if (!meta.ok) {
+    // Storage OK but metadata failed: queue WITHOUT the blob (object exists);
+    // drain retries only the upsert. This is the "storage success, metadata fail" path.
+    await enqueueOutbox(db, { image_id: imageId, base64: null, storage_done: true, row: row, attempts: 1, last_error: 'meta_' + meta.err, created_at: Date.now() });
+    counter.pending++;
+    await putShotCounter(db, counter);
+    console.warn('[LENSED][BG] shot metadata upsert failed → queued (object uploaded):', meta.err);
+    return await buildStatus(sessionId);
+  }
+
+  // Both confirmed → keep NOTHING locally.
+  counter.uploaded++;
+  counter.uploaded_bytes += bytes.length;
+  await putShotCounter(db, counter);
+  drainOutbox(); // opportunistic
+  return await buildStatus(sessionId);
+}
+
+// ── Opportunistic drain of the retry queue ───────────────────────────
+var _draining = false;
+async function drainOutbox() {
+  if (_draining) return;
+  if (!isAuthenticated()) return;
+  _draining = true;
+  try {
+    var db = await shotDb();
+    var items = await idbReq(db.transaction(['outbox'], 'readonly').objectStore('outbox').getAll());
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      try {
+        if (!it.storage_done) {
+          var objectKey = shotObjectKey(userId, (it.msg && it.msg.sessionId) || null, it.image_id);
+          var up = await uploadShotObject(objectKey, base64ToBytes(it.base64));
+          if (!up.ok) { it.attempts = (it.attempts || 0) + 1; it.last_error = 'upload_' + (up.status || up.err); await enqueueOutbox(db, it); if (!up.retryable) {} continue; }
+          it.storage_done = true;
+          it.row = shotRowFrom(it.msg, it.image_id, objectKey, 'uploaded');
+          it.base64 = null; // object uploaded; free the blob
+        }
+        var meta = await upsertShotRow(it.row);
+        if (!meta.ok) { it.attempts = (it.attempts || 0) + 1; it.last_error = 'meta_' + meta.err; await enqueueOutbox(db, it); continue; }
+        // Confirmed → remove from queue + tick counters.
+        await deleteOutbox(db, it.image_id);
+        var sid = it.row ? it.row.session_id : null;
+        var c = await getShotCounter(db, sid);
+        c.uploaded++; if (it.pending_counted !== false) c.pending = Math.max(0, c.pending - 1);
+        await putShotCounter(db, c);
+      } catch (e) { /* leave item queued for next drain */ }
+    }
+  } catch (_) {} finally {
+    _draining = false;
+  }
+  try { broadcastShotStatus(await buildStatus(null)); } catch (_) {}
+}
+
+// Status for the overlay: this session's counters + queue depth.
+async function buildStatus(sessionId) {
+  try {
+    var db = await shotDb();
+    var c = await getShotCounter(db, sessionId);
+    var queued = await idbReq(db.transaction(['outbox'], 'readonly').objectStore('outbox').count());
+    return {
+      sessionId: sessionId,
+      uploaded: c.uploaded, pending: c.pending, failed: c.failed,
+      uploadedBytes: c.uploaded_bytes, queued: queued,
+    };
+  } catch (_) {
+    return { sessionId: sessionId, uploaded: 0, pending: 0, failed: 0, uploadedBytes: 0, queued: 0 };
+  }
+}
+
+// Clear this session's local retry queue (does NOT touch uploaded rows in Lensed).
+async function clearShots(sessionId) {
+  var db = await shotDb();
+  var items = await idbReq(db.transaction(['outbox'], 'readonly').objectStore('outbox').getAll());
+  var tx = db.transaction(['outbox', 'counters'], 'readwrite');
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var sid = (it.row && it.row.session_id) || (it.msg && it.msg.sessionId) || null;
+    if (sid === sessionId) tx.objectStore('outbox').delete(it.image_id);
+  }
+  tx.objectStore('counters').delete(shotCounterKey(sessionId));
+  await new Promise(function (resolve, reject) { tx.oncomplete = resolve; tx.onerror = function () { reject(tx.error); }; });
+  return await buildStatus(sessionId);
+}
+
+function broadcastShotStatus(status) {
+  chrome.tabs.query({ url: 'https://shop.tiktok.com/*' }, function (tabs) {
+    if (chrome.runtime.lastError) return;
+    for (var i = 0; i < tabs.length; i++) {
+      try { chrome.tabs.sendMessage(tabs[i].id, { type: 'SHOT_STATUS', status: status }).catch(function () {}); } catch (_) {}
+    }
+  });
+}
+
+
 // ─── Broadcast auth status to content scripts ────────────────────────
 
 function broadcastAuthStatus() {
@@ -959,6 +1280,39 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     });
     return true;
   }
+
+  // [SCREENSHOT] Store one captured frame (or a failure/capped marker) locally.
+  if (message.type === 'CAPTURE_STORE') {
+    handleCaptureStore(message).then(function (status) {
+      broadcastShotStatus(status);
+      try { sendResponse({ ok: true, status: status }); } catch (_) {}
+    }).catch(function (e) {
+      console.error('[LENSED][BG] handleCaptureStore error:', e);
+      try { sendResponse({ ok: false, error: String(e && e.message || e) }); } catch (_) {}
+    });
+    return true;
+  }
+
+  if (message.type === 'GET_SHOT_STATUS') {
+    // Manual enable / overlay refresh — also a drain opportunity.
+    try { drainOutbox(); } catch (_) {}
+    buildStatus(message.sessionId || null).then(function (status) {
+      try { sendResponse({ ok: true, status: status }); } catch (_) {}
+    }).catch(function () {
+      try { sendResponse({ ok: false }); } catch (_) {}
+    });
+    return true;
+  }
+
+  if (message.type === 'CLEAR_SHOTS') {
+    clearShots(message.sessionId || null).then(function (status) {
+      broadcastShotStatus(status);
+      try { sendResponse({ ok: true, status: status }); } catch (_) {}
+    }).catch(function (e) {
+      try { sendResponse({ ok: false, error: String(e && e.message || e) }); } catch (_) {}
+    });
+    return true;
+  }
 });
 
 // ─── Service worker startup: rehydrate auth from storage ─────────────
@@ -968,6 +1322,8 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 // falsely report "SKU not found".
 authReadyPromise = rehydrateAuth().then(function () {
   broadcastAuthStatus();
+  // [SCREENSHOT] Opportunistic drain of any queued failed uploads on SW start.
+  try { drainOutbox(); } catch (_) {}
 }).catch(function (e) {
   // ensureAuthReady() must always settle so no handler hangs on a rejected gate.
   console.error('[LENSED][BG] startup rehydrate failed:', e);
