@@ -43,7 +43,7 @@ export interface ShowCoverage {
   window: { start_date: string | null; end_date: string | null; store_id: string | null };
 }
 
-export const showCoverageKey = (id: string) => ['show-coverage', id];
+export const showCoverageKey = (id: string, userId?: string) => ['show-coverage', userId, id];
 
 export async function fetchShowCoverage(id: string): Promise<ShowCoverage> {
   const res = await fetch(`/api/shows/${id}/coverage`);
@@ -56,7 +56,7 @@ export async function fetchShowCoverage(id: string): Promise<ShowCoverage> {
 export function useShowCoverage(id: string | null) {
   const { user } = useUser();
   return useQuery<ShowCoverage>({
-    queryKey: showCoverageKey(id ?? ''),
+    queryKey: showCoverageKey(id ?? '', user?.id),
     enabled: !!user && !!id,
     queryFn: () => fetchShowCoverage(id!),
     staleTime: 30_000,
@@ -114,6 +114,7 @@ export function useStartSession() {
 
 export function useEndSession() {
   const qc = useQueryClient();
+  const { user } = useUser();
   return useMutation<LiveSession, Error, string>({
     mutationFn: async (id: string) => {
       const res = await fetch(`/api/live/sessions/${id}/end`, { method: 'POST' });
@@ -126,7 +127,7 @@ export function useEndSession() {
       // Run the order coverage check automatically when a show ends, so the gap
       // (synced-but-never-captured) is computed the moment the live wraps —
       // populated in cache and ready when the show detail is viewed.
-      qc.prefetchQuery({ queryKey: showCoverageKey(id), queryFn: () => fetchShowCoverage(id) });
+      qc.prefetchQuery({ queryKey: showCoverageKey(id, user?.id), queryFn: () => fetchShowCoverage(id) });
     },
   });
 }

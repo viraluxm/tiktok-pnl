@@ -10,7 +10,7 @@ export default function UserMenu() {
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
   const supabase = createClient();
-  const { user } = useUser();
+  const { user, loading } = useUser();
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -29,9 +29,17 @@ export default function UserMenu() {
     router.refresh();
   }
 
-  const displayName = user?.user_metadata?.display_name || user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'User';
+  const resolvedName =
+    user?.user_metadata?.display_name ||
+    user?.user_metadata?.full_name ||
+    user?.email?.split('@')[0] ||
+    '';
+  // Never show a misleading generic username. Distinguish the three states:
+  // still resolving → "Loading…"; a transient auth blip with no user → "Account";
+  // a real user → their name. (A genuine sign-out redirects away via the layout.)
+  const displayName = resolvedName || (loading ? 'Loading…' : 'Account');
   const displayEmail = user?.email || '';
-  const initial = displayName.charAt(0).toUpperCase();
+  const initial = resolvedName ? resolvedName.charAt(0).toUpperCase() : '';
 
   return (
     <div className="relative" ref={menuRef}>
