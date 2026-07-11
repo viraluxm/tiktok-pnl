@@ -137,6 +137,10 @@ export function generateRecurringShifts(
   exceptions: ShiftException[],
   rangeStart: string | null,
   rangeEnd: string | null,
+  // ANTI-DOUBLE-COUNT: `${rule_id}|${date}` pairs that already have a materialized real
+  // `shifts` row. The generator must NOT also project these — the real row is the single
+  // source of truth for that day, so computePay counts it exactly once. See materialize.
+  materialized: ReadonlySet<string> = new Set(),
   today: Date = new Date(),
 ): GeneratedShift[] {
   // Exception lookup keyed by rule + date.
@@ -165,24 +169,66 @@ export function generateRecurringShifts(
     for (let i = 0; cursor.getTime() <= end.getTime() && i < MAX_GENERATED_DAYS; i++) {
       if (days.has(cursor.getUTCDay())) {
         const iso = toISODateUTC(cursor);
-        const ex = exByKey.get(`${rule.id}|${iso}`);
-        const skipped = ex?.type === 'skip';
-        const modified = ex?.type === 'modified';
-        out.push({
-          id: `${rule.id}:${iso}`,
-          rule_id: rule.id,
-          employee_id: rule.employee_id,
-          date: iso,
-          start_time: modified ? ex!.modified_start ?? rule.start_time : rule.start_time,
-          end_time: modified ? ex!.modified_end ?? rule.end_time : rule.end_time,
-          modified,
-          skipped,
-          recurring: true,
-        });
+        // Guard the PUSH (not `continue` — the cursor increment lives below the `if`, so a
+        // `continue` would loop forever). If a real row already covers (rule, date), skip
+        // projecting it: exactly-once is enforced by row EXISTENCE, not a date comparison.
+        if (!materialized.has(`${rule.id}|${iso}`)) {
+          const ex = exByKey.get(`${rule.id}|${iso}`);
+          const skipped = ex?.type === 'skip';
+          const modified = ex?.type === 'modified';
+          out.push({
+            id: `${rule.id}:${iso}`,
+            rule_id: rule.id,
+            employee_id: rule.employee_id,
+            date: iso,
+            start_time: modified ? ex!.modified_start ?? rule.start_time : rule.start_time,
+            end_time: modified ? ex!.modified_end ?? rule.end_time : rule.end_time,
+            modified,
+            skipped,
+            recurring: true,
+          });
+        }
       }
       cursor = addDaysUTC(cursor, 1);
     }
   }
 
   return out;
+}
+
+// A past recurring day to freeze into a real `shifts` row. Derived from the SAME
+// generator so hours (incl. 'modified' exceptions) match exactly what pay showed.
+export interface MaterializableInstance {
+  employee_id: string;
+  rule_id: string;
+  date: string;       // 'YYYY-MM-DD'
+  start_time: string;
+  end_time: string;   // always concrete (rule/modified) — never an open shift
+}
+
+// The set of PAST (date < today), non-skipped recurring instances that should be
+// materialized as real rows. "Past" is strict: today's in-progress day is left to the
+// live projection (owned by the generator until it becomes past). Skipped days are NOT
+// materialized (the person didn't work them). `materialized` excludes days already
+// frozen, so this is idempotent to compute. Callers persist the result (see materialize).
+export function pastInstancesToMaterialize(
+  rules: ShiftRule[],
+  exceptions: ShiftException[],
+  materialized: ReadonlySet<string> = new Set(),
+  today: Date = new Date(),
+): MaterializableInstance[] {
+  const todayISO = toISODateUTC(
+    new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())),
+  );
+  // Generate the full history up to (and incl.) today, then keep strictly-past,
+  // non-skipped, not-already-materialized instances. rangeEnd null → capped at today.
+  return generateRecurringShifts(rules, exceptions, null, null, materialized, today)
+    .filter((g) => !g.skipped && g.date < todayISO)
+    .map((g) => ({
+      employee_id: g.employee_id,
+      rule_id: g.rule_id,
+      date: g.date,
+      start_time: g.start_time,
+      end_time: g.end_time,
+    }));
 }

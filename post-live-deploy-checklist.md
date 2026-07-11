@@ -58,3 +58,23 @@ git stash list       # confirm stash@{0} is gone
 ## Rollback
 - **Web**: revert the `main` merge / redeploy previous Vercel build.
 - **Extension**: remove the unpacked load and re-load the previous packed build, or revert `main` and rebuild. The old `0.2.0` artifact is still tagged on `main`.
+
+---
+
+# Post-Live Deploy — Recurring-Shift Materialization (`feat/recurring-shift-materialization`)
+
+Freezes past recurring-shift days into real `shifts` rows so deleting/deactivating/editing a rule can't erase worked history. Daily Vercel cron + a pre-mutation freeze on the app side.
+
+## Migration
+- **Migration `055_shifts_source_rule_id.sql` is ALREADY APPLIED to prod** (project `dvucodtdojumvplmgjeu`): adds `shifts.source_rule_id` (nullable, FK **ON DELETE SET NULL**) + a unique index (idempotency) + a lookup index. Additive/idempotent — **do NOT re-run manually**; a fresh `db reset`/rebuild re-applies it harmlessly.
+
+## Env vars (Vercel) — REQUIRED before the cron does anything useful
+- **`CRON_SECRET`** — must be set (same secret the existing `auto-end-sessions` cron uses). The `/api/cron/materialize-shifts` route rejects any call whose `Authorization: Bearer <CRON_SECRET>` doesn't match. Without it the daily cron is unauthorized and no-ops.
+- **`SHIFT_MATERIALIZE_WRITE_ENABLED`** — **leave UNSET (log-only) for the first cron cycle.** In log-only mode the cron computes and logs exactly what it *would* materialize (`[cron/materialize-shifts] WOULD_MATERIALIZE …`) but writes nothing. After reviewing one run's output and confirming the would-materialize set looks right, **set it to `true`** to enable the (additive, idempotent) writes. It writes payroll rows, so the one-look-first ramp is deliberate.
+
+## Verify after enabling writes
+- Watch `[cron/materialize-shifts] mode=WRITE … materialized=N` in the cron logs.
+- Spot-check: a materialized past day appears as a real `shifts` row with `source_rule_id` set; deleting its rule leaves the row (now `source_rule_id = NULL`). Pay totals must be UNCHANGED by materialization (exactly-once — see `src/lib/employees.materialize.test.mjs`).
+
+## Rollback
+- Set `SHIFT_MATERIALIZE_WRITE_ENABLED` unset (back to log-only) to stop writes immediately; the column/FK are additive and safe to leave in place.

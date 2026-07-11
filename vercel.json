@@ -1,6 +1,7 @@
 {
   "fluid": true,
   "crons": [
-    { "path": "/api/cron/auto-end-sessions", "schedule": "*/30 * * * *" }
+    { "path": "/api/cron/auto-end-sessions", "schedule": "*/30 * * * *" },
+    { "path": "/api/cron/materialize-shifts", "schedule": "0 8 * * *" }
   ]
 }

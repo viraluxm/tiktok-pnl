@@ -63,10 +63,18 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
     deleteException,
   } = useShiftRules();
 
-  // Recurring instances computed for the selected period (rule − exceptions).
+  // (rule|date) pairs already frozen into real `shifts` rows (source_rule_id set).
+  // The generator excludes these so a materialized day is counted once (by the row),
+  // never twice (row + projection). See migration 055 / generateRecurringShifts.
+  const materialized = useMemo(
+    () => new Set(shifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
+    [shifts],
+  );
+
+  // Recurring instances computed for the selected period (rule − exceptions − materialized).
   const generated = useMemo(
-    () => generateRecurringShifts(rules, exceptions, dateFrom, dateTo),
-    [rules, exceptions, dateFrom, dateTo],
+    () => generateRecurringShifts(rules, exceptions, dateFrom, dateTo, materialized),
+    [rules, exceptions, dateFrom, dateTo, materialized],
   );
 
   // Employee add/edit modal
