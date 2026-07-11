@@ -39,6 +39,8 @@
   var authConnected = false;     // last auth state (drives the status row)
   var authStatusReceived = false; // keep "Connecting…" until the first auth status arrives
   var capturedOnlyWarnEl = null; // visible "orders captured but not bound" warning
+  var lastScanEl = null;         // temporary visible "Last scan: … · <state>" line
+  var reopenOverlay = null;      // module handle to reopen the overlay from the global scanner
   var shotStatusEl = null;       // [SCREENSHOT] compact counts (inside debug row)
   var shotWarnEl = null;         // [SCREENSHOT] storage/capture warning (debug row)
   var shotDebugEl = null;        // [SCREENSHOT] collapsed debug row (hidden unless enabled)
@@ -364,6 +366,12 @@
     }\
     .lensed-resolved.error { color: #f87171; }\
     .lensed-resolved:empty { display: none; }\
+    .lensed-lastscan {\
+      font-size: 10px; color: #9aa0aa; margin-top: 3px; min-height: 14px;\
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
+    }\
+    .lensed-lastscan.ok { color: #34d399; }\
+    .lensed-lastscan.error { color: #f87171; }\
     .lensed-staged-count {\
       font-size: 10px; color: #8a8a92; font-weight: 700; letter-spacing: 0.5px;\
       text-transform: uppercase; margin-top: 8px; min-height: 14px;\
@@ -529,13 +537,71 @@
   // stageCurrentSku path (see the global keydown listener near the bottom).
   var gScanBuffer = '';
   var gScanFirst = 0, gScanLast = 0, gScanCount = 0;
+  var gLastInterkey = 0;          // inter-key gap of the most recent buffered char
+  var gScanTimer = null;          // idle-commit timer (for scanners that omit Enter)
+  var SCAN_IDLE_COMMIT_MS = 130;  // quiet gap after the last burst char → auto-commit
 
-  function resetGlobalScan() { gScanBuffer = ''; gScanFirst = 0; gScanLast = 0; gScanCount = 0; }
+  function resetGlobalScan() {
+    gScanBuffer = ''; gScanFirst = 0; gScanLast = 0; gScanCount = 0; gLastInterkey = 0;
+    if (gScanTimer) { clearTimeout(gScanTimer); gScanTimer = null; }
+  }
 
   function globalLooksLikeScan() {
     if (gScanCount < SCAN_MIN_LENGTH) return false;
     var elapsed = gScanLast - gScanFirst;
     return elapsed < gScanCount * SCAN_MAX_INTERKEY_MS && elapsed < SCAN_MAX_TOTAL_MS;
+  }
+
+  // ── Scanner dev diagnostics + visible last-scan status ──────────────
+  // Dev logging opt-in: localStorage 'lensed_dev'='1' (or 'lensed_scan_debug'='1').
+  // Explains WHY a burst was accepted or rejected, for live troubleshooting.
+  function lensedDevOn() {
+    try { return localStorage.getItem('lensed_dev') === '1' || localStorage.getItem('lensed_scan_debug') === '1'; } catch (_) { return false; }
+  }
+  function slog(msg, data) {
+    if (!lensedDevOn()) return;
+    if (data !== undefined) console.log('[LENSED][SCAN] ' + msg, data);
+    else console.log('[LENSED][SCAN] ' + msg);
+  }
+
+  // Redact a raw scanned value for the on-stream status line: keep head/tail, mask
+  // the middle so a full barcode is never shown on camera.
+  function redactScan(v) {
+    v = String(v || '');
+    if (v.length <= 4) return v.replace(/[^\s]/g, '•');
+    return v.slice(0, 2) + '•••' + v.slice(-2);
+  }
+
+  // Temporary visible last-scan status so hosts can SEE a scan actually happened.
+  // state: detected | searching | staged | notfound | failed. `label` overrides the
+  // left value (e.g. the resolved "#14"); pass null to keep it generic.
+  function setScanStatus(label, state) {
+    if (!lastScanEl) return;
+    var words = { detected: 'detected', searching: 'searching…', staged: 'staged ✓', notfound: 'no SKU matched', failed: 'failed' };
+    var cls = (state === 'staged') ? ' ok' : (state === 'notfound' || state === 'failed') ? ' error' : '';
+    lastScanEl.className = 'lensed-lastscan' + cls;
+    lastScanEl.textContent = 'Last scan: ' + (label || '—') + ' · ' + (words[state] || state || '');
+  }
+
+  // Commit the buffered global scan if it still passes the burst heuristic. Shared
+  // by the Enter path and the idle timer (no-Enter scanners). Never commits human
+  // typing — globalLooksLikeScan() gates it.
+  function commitGlobalScanIfReady(reason) {
+    if (gScanTimer) { clearTimeout(gScanTimer); gScanTimer = null; }
+    if (globalLooksLikeScan()) {
+      var scanned = gScanBuffer;
+      slog('commit (' + reason + ')', { value: redactScan(scanned), count: gScanCount });
+      resetGlobalScan();
+      globalScanCommit(scanned);
+      return true;
+    }
+    slog('commit skipped — not a scan (' + reason + ')', { count: gScanCount, value: redactScan(gScanBuffer) });
+    resetGlobalScan();
+    return false;
+  }
+  function scheduleGlobalIdleCommit() {
+    if (gScanTimer) clearTimeout(gScanTimer);
+    gScanTimer = setTimeout(function () { gScanTimer = null; commitGlobalScanIfReady('idle'); }, SCAN_IDLE_COMMIT_MS);
   }
 
   // Focus the SKU input so the next scan/keystroke lands there — but only when
@@ -830,10 +896,12 @@
     var trimmed = (value || '').trim().replace(/^#/, '');
     if (!trimmed) return;
     setResolveLine(MSG_SEARCHING, false); // don't flash "not found" mid-lookup
+    setScanStatus(redactScan(trimmed), 'searching');
     try {
       chrome.runtime.sendMessage({ type: 'RESOLVE_SKU', skuNumber: trimmed }, function (resp) {
         if (chrome.runtime.lastError) {
           setResolveLine(MSG_LOOKUP_FAILED, true);
+          setScanStatus(redactScan(trimmed), 'failed');
           if (skuInputEl) skuInputEl.value = '';
           pendingResolve = null;
           return;
@@ -841,8 +909,11 @@
         if (resp && resp.sku) {
           pendingResolve = resp.sku;
           stageCurrentSku(); // stages (or +1 qty); clears input + resolve line on success
+          setScanStatus('#' + resp.sku.sku_number + ' ' + (resp.sku.title || ''), 'staged');
         } else {
           showResolveMiss(resp && resp.status);
+          var st = resp && resp.status;
+          setScanStatus(redactScan(trimmed), (st === 'not_authenticated' || st === 'error') ? 'failed' : 'notfound');
         }
         // Always leave the field clean and ready for the next scan.
         if (skuInputEl) skuInputEl.value = '';
@@ -856,11 +927,17 @@
   function globalScanCommit(value) {
     var trimmed = (value || '').trim().replace(/^#/, '');
     if (!trimmed) return;
+    // A scan committed while the overlay is hidden must NOT be silently dropped:
+    // reopen the overlay so the host sees the staged result (req 4a).
+    if (hidden && typeof reopenOverlay === 'function') { try { reopenOverlay(); } catch (_) {} }
     setResolveLine(MSG_SEARCHING, false); // show progress; miss only after lookup
+    setScanStatus(redactScan(trimmed), 'searching');
     try {
       chrome.runtime.sendMessage({ type: 'RESOLVE_SKU', skuNumber: trimmed }, function (resp) {
         if (chrome.runtime.lastError) {
           setResolveLine(MSG_LOOKUP_FAILED, true);
+          setScanStatus(redactScan(trimmed), 'failed');
+          slog('resolve failed (runtime.lastError)', { value: redactScan(trimmed) });
           pendingResolve = null;
           focusScanInput();
           return;
@@ -868,8 +945,13 @@
         if (resp && resp.sku) {
           pendingResolve = resp.sku;
           stageCurrentSku(); // stages (or +1 qty) via the existing path
+          setScanStatus('#' + resp.sku.sku_number + ' ' + (resp.sku.title || ''), 'staged');
+          slog('staged', { sku: resp.sku.sku_number });
         } else {
           showResolveMiss(resp && resp.status);
+          var st = resp && resp.status;
+          setScanStatus(redactScan(trimmed), (st === 'not_authenticated' || st === 'error') ? 'failed' : 'notfound');
+          slog('no SKU matched', { value: redactScan(trimmed), status: st });
         }
         pendingResolve = null;
         focusScanInput(); // ready for the next scan
@@ -1039,10 +1121,24 @@
     skuInputEl.type = 'text';
     skuInputEl.placeholder = 'Type or scan SKU';
 
+    var inputScanTimer = null;
     skuInputEl.addEventListener('input', function () {
       clearTimeout(debounceTimer);
       var val = skuInputEl.value;
       debounceTimer = setTimeout(function () { resolveSkuInput(val); }, 200);
+      // No-Enter scanner into the focused input: once the value is arriving as a
+      // machine-fast burst, auto-stage after a short idle gap even without Enter.
+      if (inputScanTimer) { clearTimeout(inputScanTimer); inputScanTimer = null; }
+      if (looksLikeScan()) {
+        setScanStatus(redactScan(val), 'detected');
+        inputScanTimer = setTimeout(function () {
+          inputScanTimer = null;
+          if (looksLikeScan() && skuInputEl && skuInputEl.value) {
+            scanCharCount = 0;
+            handleScanCommit(skuInputEl.value);
+          }
+        }, SCAN_IDLE_COMMIT_MS);
+      }
     });
 
     skuInputEl.addEventListener('keydown', function (e) {
@@ -1101,6 +1197,7 @@
     skuRow.appendChild(rerunBtn);
 
     resolvedLabelEl = el('div', 'lensed-resolved', '');
+    lastScanEl = el('div', 'lensed-lastscan', 'Last scan: —');
     stagedCountEl = el('div', 'lensed-staged-count', 'Nothing staged');
     stagedListEl = el('div', 'lensed-staged');
     notesListEl = el('div', 'lensed-notes');
@@ -1151,6 +1248,7 @@
     var skuMain = el('div', 'lensed-sku-main');
     skuMain.appendChild(skuRow);
     skuMain.appendChild(resolvedLabelEl);
+    skuMain.appendChild(lastScanEl);
     skuMain.appendChild(stagedCountEl);
     skuMain.appendChild(stagedListEl);
     skuMain.appendChild(notesListEl);
@@ -1235,6 +1333,10 @@
       panel.style.display = hidden ? 'none' : '';
       if (reopenTab) reopenTab.style.display = hidden ? '' : 'none';
     }
+    // Expose a module-level reopen so the global wedge-scanner (defined outside this
+    // closure) can pop the overlay back open when a scan lands while it's hidden.
+    reopenOverlay = function () { setHidden(false); };
+
     function setHidden(v) {
       hidden = v;
       applyHidden();
@@ -1621,7 +1723,7 @@
     try { if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; } } catch (_) {}
     try { var host = document.getElementById(CONTAINER_ID); if (host) host.remove(); } catch (_) {}
     shadowRoot = null; salesListEl = null; countEl = null; stagedListEl = null; notesListEl = null;
-    skuInputEl = null; resolvedLabelEl = null; stagedCountEl = null; sessionStatusEl = null;
+    skuInputEl = null; resolvedLabelEl = null; lastScanEl = null; stagedCountEl = null; sessionStatusEl = null;
     capturedOnlyWarnEl = null; aspValueEl = null; breakEvenValueEl = null; activePanel = null;
     hostRowEl = null; hostSelectEl = null; hostWarnEl = null;
   }
@@ -1713,57 +1815,80 @@
       if (isHotkeyCandidate) hlog('ignored modifier held', { ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey });
       return;
     }
-    // Overlay closed (✕) → scanner + shortcuts are inactive.
-    if (hidden) { if (isHotkeyCandidate) hlog('ignored overlay hidden'); return; }
 
-    // A true macro/numpad key (never produced by a keyboard-wedge scanner or by
-    // normal typing) is allowed to fire even while the SKU input is focused, so the
-    // host can drive the overlay hands-free. Normal characters (incl. a typed
-    // +/-/*) stay in the field. Focus inside the overlay's shadow DOM surfaces as
-    // shadowRoot.activeElement (document.activeElement is just the shadow host).
     var isMacroCode = e.code === 'NumpadAdd' || e.code === 'NumpadSubtract' || e.code === 'NumpadMultiply';
     var innerFocus = shadowRoot ? shadowRoot.activeElement : null;
+    var ownInputFocused = (innerFocus === skuInputEl);
 
-    // The Host <select> is never hijacked — not even by macro codes.
+    // ── (A) GLOBAL WEDGE-SCANNER CAPTURE ──────────────────────────────────────
+    // Runs at capture phase BEFORE any focus/hidden gate, so a scanner burst stages
+    // even when the host has accidentally clicked the TikTok chat/comment box (the
+    // root-cause bug: the old handler bailed on editable-target/hidden and dropped
+    // the scan entirely). Skipped only when OUR SKU input is focused — its own
+    // listeners own that path. A char is swallowed (preventDefault + stopPropagation)
+    // ONLY once it is confirmed part of a machine-fast burst, so human typing is
+    // never intercepted; the burst commits on Enter OR after a short idle gap for
+    // scanners that don't emit Enter. Only the very first burst char can leak into a
+    // focused chat field (it can't be classified until the second char arrives).
+    if (!ownInputFocused) {
+      if (e.key === 'Enter') {
+        if (globalLooksLikeScan()) {
+          slog('Enter → commit', { count: gScanCount });
+          e.preventDefault();
+          e.stopPropagation();
+          commitGlobalScanIfReady('enter');
+          return;
+        }
+        // Not a scan → leave Enter alone (e.g. the host sending a chat message).
+        if (gScanCount > 0) { slog('Enter — not a scan, reset', { count: gScanCount, value: redactScan(gScanBuffer) }); resetGlobalScan(); }
+      } else if (e.key && e.key.length === 1) {
+        var t = nowMs();
+        var interkey = t - gScanLast;
+        if (gScanCount === 0 || interkey > 100) { gScanFirst = t; gScanCount = 0; gScanBuffer = ''; }
+        gScanCount++;
+        gScanLast = t;
+        gLastInterkey = interkey;
+        gScanBuffer += e.key;
+        scheduleGlobalIdleCommit(); // commit on idle even if Enter never arrives
+
+        // 2nd+ char arriving machine-fast ⇒ confirmed scanner burst. Swallow so it
+        // can't land in the chat box, and surface a visible "detected" once.
+        var burstChar = gScanCount >= 2 && interkey < SCAN_MAX_INTERKEY_MS;
+        if (burstChar) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (gScanCount === 2) { setScanStatus(redactScan(gScanBuffer), 'detected'); slog('burst detected', { interkey: interkey, threshold: SCAN_MAX_INTERKEY_MS }); }
+          return;
+        }
+        // Not (yet) a burst → fall through so a standalone +/-/* can act as a shortcut.
+      }
+    }
+
+    // Overlay closed (✕) → shortcuts are inactive (the scanner above still works).
+    if (hidden) { if (isHotkeyCandidate) hlog('ignored overlay hidden'); return; }
+
+    // ── (B) OVERLAY SHORTCUTS ── gated by focus: a macro/numpad key drives the
+    // overlay hands-free even with the SKU input focused, but nothing hijacks the
+    // host <select> or a chat/comment field the host is typing in.
     if (innerFocus && innerFocus === hostSelectEl) {
       if (isHotkeyCandidate) hlog('ignored editable target', { active: 'host-select' });
       return;
     }
-
-    if (innerFocus === skuInputEl) {
+    if (ownInputFocused) {
       if (isMacroCode) {
         hlog('allowed macro key inside overlay input');
         // fall through — the numpad branch below fires and swallows the char
       } else {
-        // Normal typing / scans in the SKU input handle themselves.
         if (isHotkeyCandidate) hlog('ignored editable target (SKU input focused)');
         return;
       }
     } else if (isEditableTarget(document.activeElement)) {
-      // Editable element OUTSIDE the overlay (e.g. TikTok chat/comment box) — always
-      // block, even macro codes; we don't hijack while the host types elsewhere.
       if (isHotkeyCandidate) hlog('ignored editable target', { active: describeTarget(document.activeElement) });
       return;
     }
 
-    // Enter → commit a global wedge-scanner burst if it looks machine-fast.
-    if (e.key === 'Enter') {
-      if (globalLooksLikeScan()) {
-        e.preventDefault();
-        var scanned = gScanBuffer;
-        resetGlobalScan();
-        globalScanCommit(scanned);
-      } else {
-        resetGlobalScan();
-      }
-      return;
-    }
-
-    // Physical numpad / macro-pad keys map to our overlay actions by event.code.
-    // These codes are produced only by real numpad keys, never by a keyboard-wedge
-    // barcode burst, so they fire immediately (no burst heuristic needed). Checked
-    // before the single-char buffering below so a numpad press that ALSO emits
-    // key '+'/'-'/'*' can't double-fire through the e.key path.
+    // Physical numpad / macro-pad keys map to overlay actions by event.code — these
+    // codes are produced only by real numpad keys, never by a wedge-scanner burst.
     var padAction = e.code === 'NumpadAdd' ? 'add'
                   : e.code === 'NumpadSubtract' ? 'remove'
                   : e.code === 'NumpadMultiply' ? 'rerun'
@@ -1771,40 +1896,26 @@
     if (padAction) {
       hlog('matched numpad code', { code: e.code, action: padAction });
       e.preventDefault();
-      // Swallow it so the same '+'/'-'/'*' char can't also land in a focused SKU
-      // input (this listener is capture-phase, so this runs before the field sees it).
       e.stopPropagation();
       fireHotkey(padAction);
       resetGlobalScan(); // consumed as a shortcut, not part of a scan
       return;
     }
 
-    // Buffer printable single characters for wedge-scanner detection. We update
-    // the buffer FIRST so barcode chars (incl. the "-" in SKU<n>-<hex>) that
-    // arrive mid-burst are captured as scan data, not treated as shortcuts.
-    if (e.key && e.key.length === 1) {
-      var t = nowMs();
-      var interkey = t - gScanLast;
-      if (gScanCount === 0 || interkey > 100) { gScanFirst = t; gScanCount = 0; gScanBuffer = ''; }
-      gScanCount++;
-      gScanLast = t;
-      gScanBuffer += e.key;
-
-      // +/-/* shortcuts fire ONLY for a standalone press — never mid machine-burst.
-      // Barcodes are "SKU<n>-<hex>" (never START with +/-/*), so a burst's first
-      // char is a letter; a +/-/* arriving fast within a burst is scan data.
-      if (e.key === '+' || e.key === '-' || e.key === '*') {
-        var action = e.key === '+' ? 'add' : e.key === '-' ? 'remove' : 'rerun';
-        var standalone = gScanCount <= 1 || interkey > SCAN_MAX_INTERKEY_MS;
-        hlog('matched symbol key', { key: e.key, action: action, standalone: standalone, gScanCount: gScanCount, interkey: interkey });
-        if (standalone) {
-          e.preventDefault();
-          fireHotkey(action);
-          resetGlobalScan(); // consumed as a shortcut, not part of a scan
-        } else {
-          // fast burst char → leave buffered, no shortcut, no preventDefault
-          hlog('matched but suppressed as scan-burst char', { key: e.key, interkey: interkey, threshold: SCAN_MAX_INTERKEY_MS });
-        }
+    // Standalone +/-/* shortcut — fires ONLY for a deliberate, human-paced press.
+    // A +/-/* arriving mid machine-burst was already buffered/swallowed in (A), so it
+    // never reaches here; the standalone check uses the timing captured in (A).
+    if (e.key === '+' || e.key === '-' || e.key === '*') {
+      var action = e.key === '+' ? 'add' : e.key === '-' ? 'remove' : 'rerun';
+      var standalone = gScanCount <= 1 || gLastInterkey > SCAN_MAX_INTERKEY_MS;
+      hlog('matched symbol key', { key: e.key, action: action, standalone: standalone, gScanCount: gScanCount, interkey: gLastInterkey });
+      if (standalone) {
+        e.preventDefault();
+        e.stopPropagation();
+        fireHotkey(action);
+        resetGlobalScan(); // consumed as a shortcut, not part of a scan
+      } else {
+        hlog('matched but suppressed as scan-burst char', { key: e.key, interkey: gLastInterkey, threshold: SCAN_MAX_INTERKEY_MS });
       }
     }
   }, true);
