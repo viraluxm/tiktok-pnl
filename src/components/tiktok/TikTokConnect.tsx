@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useTikTok } from '@/hooks/useTikTok';
-import { useStores, useSetActiveStore, type StoreEntry } from '@/hooks/useStores';
+import { useStores, useSetActiveStore, useCreateStore, type StoreEntry } from '@/hooks/useStores';
 
 // Full-page OAuth connect for a specific owned store (Phase C requires store_id).
 const connectHref = (storeId: string) => `/api/tiktok/auth?store_id=${encodeURIComponent(storeId)}`;
@@ -11,9 +11,13 @@ export default function TikTokConnect() {
   const { syncProgress, sync, disconnect, isDisconnecting } = useTikTok();
   const { data: storesData, isLoading } = useStores();
   const setActiveStore = useSetActiveStore();
+  const createStore = useCreateStore();
 
   const [isOpen, setIsOpen] = useState(false);
   const [showDisconnectModal, setShowDisconnectModal] = useState(false);
+  const [isAdding, setIsAdding] = useState(false);
+  const [newStoreName, setNewStoreName] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -38,16 +42,60 @@ export default function TikTokConnect() {
   const stores: StoreEntry[] = storesData?.stores ?? [];
   const activeStore = storesData?.activeStore ?? 'all';
 
-  // No stores owned yet — brand-new-store creation is deferred (Phase E note).
+  const selectStore = (id: string) => {
+    setActiveStore.mutate(id);
+    setIsOpen(false);
+  };
+
+  const submitNewStore = () => {
+    const name = newStoreName.trim();
+    if (!name || createStore.isPending) return;
+    setAddError(null);
+    createStore.mutate(name, {
+      onSuccess: () => {
+        setNewStoreName('');
+        setIsAdding(false);
+      },
+      onError: (err) => setAddError(err.message),
+    });
+  };
+
+  const cancelAddStore = () => {
+    setIsAdding(false);
+    setNewStoreName('');
+    setAddError(null);
+  };
+
+  // No stores owned yet — offer store creation (Phase E) instead of a dead end.
   if (stores.length === 0) {
     return (
       <div className="mb-4 p-5 rounded-xl border border-tt-border bg-tt-card">
         <div className="flex items-center gap-3">
           <TikTokIcon />
-          <div>
+          <div className="flex-1">
             <h3 className="text-sm font-semibold text-tt-text">No stores yet</h3>
             <p className="text-xs text-tt-muted">Create a store to connect a TikTok Shop.</p>
           </div>
+        </div>
+        <div className="mt-4">
+          {isAdding ? (
+            <AddStoreForm
+              value={newStoreName}
+              onChange={(v) => { setNewStoreName(v); if (addError) setAddError(null); }}
+              onSubmit={submitNewStore}
+              onCancel={cancelAddStore}
+              isPending={createStore.isPending}
+              error={addError}
+            />
+          ) : (
+            <button
+              onClick={() => setIsAdding(true)}
+              className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-tt-cyan text-black text-xs font-semibold hover:opacity-90 transition-opacity cursor-pointer"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+              Add store
+            </button>
+          )}
         </div>
       </div>
     );
@@ -57,11 +105,6 @@ export default function TikTokConnect() {
   const headerLabel = activeStore === 'all' ? 'All stores' : activeEntry?.name ?? 'Store';
   const headerLogo = activeEntry?.shopLogo ?? null;
   const activeConnected = !!activeEntry?.connected;
-
-  const selectStore = (id: string) => {
-    setActiveStore.mutate(id);
-    setIsOpen(false);
-  };
 
   return (
     <>
@@ -178,6 +221,32 @@ export default function TikTokConnect() {
                   );
                 })}
               </div>
+
+              <div className="border-t border-tt-border" />
+
+              {/* Add store (Phase E) — always visible, below the store list */}
+              <div className="p-2">
+                {isAdding ? (
+                  <AddStoreForm
+                    value={newStoreName}
+                    onChange={(v) => { setNewStoreName(v); if (addError) setAddError(null); }}
+                    onSubmit={submitNewStore}
+                    onCancel={cancelAddStore}
+                    isPending={createStore.isPending}
+                    error={addError}
+                  />
+                ) : (
+                  <button
+                    onClick={() => setIsAdding(true)}
+                    className="w-full flex items-center gap-3 p-3 text-left rounded-xl hover:bg-[rgba(255,255,255,0.03)] transition-colors cursor-pointer"
+                  >
+                    <div className="w-9 h-9 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#69C9D0" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                    </div>
+                    <span className="text-sm font-semibold text-tt-text flex-1">Add store</span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -203,6 +272,52 @@ export default function TikTokConnect() {
         </div>
       )}
     </>
+  );
+}
+
+function AddStoreForm({
+  value, onChange, onSubmit, onCancel, isPending, error,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+  isPending: boolean;
+  error: string | null;
+}) {
+  return (
+    <div>
+      <input
+        autoFocus
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onSubmit();
+          if (e.key === 'Escape') onCancel();
+        }}
+        placeholder="Store name"
+        className="w-full px-3 py-2 rounded-lg bg-[rgba(255,255,255,0.03)] border border-tt-border text-sm text-tt-text placeholder:text-tt-muted focus:outline-none focus:border-tt-cyan"
+      />
+      {error && <p className="mt-1.5 px-1 text-[11px] text-tt-red">{error}</p>}
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          onClick={onSubmit}
+          disabled={!value.trim() || isPending}
+          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 cursor-pointer"
+        >
+          {isPending ? (
+            <><div className="w-3 h-3 border-2 border-black/60 border-t-transparent rounded-full animate-spin" />Creating...</>
+          ) : 'Create store'}
+        </button>
+        <button
+          onClick={onCancel}
+          className="px-3 py-1.5 rounded-lg border border-tt-border text-tt-muted text-xs font-medium hover:border-tt-text hover:text-tt-text transition-all cursor-pointer"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 

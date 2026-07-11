@@ -30,6 +30,27 @@ export function useStores() {
   });
 }
 
+// Creates a new store the caller owns (Phase E). The new row comes back not-yet-
+// connected, so after refetch the switcher shows it with its existing Connect action.
+export function useCreateStore() {
+  const qc = useQueryClient();
+  return useMutation<StoreEntry, Error, string>({
+    mutationFn: async (name: string) => {
+      const res = await fetch('/api/stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || 'Failed to create store');
+      return json.store as StoreEntry;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['stores'] });
+    },
+  });
+}
+
 // Sets the active store (server-validated cookie) and refetches everything scoped by
 // it, so the dashboard/status/analytics switch to the new store immediately.
 export function useSetActiveStore() {
