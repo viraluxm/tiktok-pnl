@@ -372,24 +372,39 @@
     }\
     .lensed-lastscan.ok { color: #34d399; }\
     .lensed-lastscan.error { color: #f87171; }\
+    /* Current-item card — the single most prominent element for the host. */\
+    .lensed-current-card {\
+      margin-top: 10px; padding: 12px 14px; border-radius: 12px;\
+      border: 2px solid #4f46e5;\
+      background: linear-gradient(180deg, rgba(99,102,241,0.16), rgba(99,102,241,0.05));\
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.18), 0 6px 22px rgba(79,70,229,0.28);\
+    }\
+    /* Muted empty state (Chrome 114+ :has) when nothing is staged. */\
+    .lensed-current-card:has(.lensed-staged:empty) {\
+      border-color: #2f2f36; background: #151518; box-shadow: none;\
+    }\
+    .lensed-current-head {\
+      font-size: 10px; font-weight: 800; letter-spacing: 1px;\
+      text-transform: uppercase; color: #a5b4ff; margin-bottom: 8px;\
+    }\
+    .lensed-current-card:has(.lensed-staged:empty) .lensed-current-head { color: #6b7280; }\
     .lensed-staged-count {\
       font-size: 10px; color: #8a8a92; font-weight: 700; letter-spacing: 0.5px;\
       text-transform: uppercase; margin-top: 8px; min-height: 14px;\
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
     }\
     .lensed-staged {\
-      display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; min-height: 0;\
+      display: flex; flex-direction: column; gap: 8px; margin-top: 0; min-height: 0;\
     }\
     .lensed-staged:empty { display: none; }\
-    /* Staged item — readable indigo pill: "2× iPad 9th Gen · #14" */\
+    /* Staged item — LARGE, high-contrast current item: "1× iPad Air 2nd Gen · #1" */\
     .lensed-staged-item {\
-      display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%;\
-      box-sizing: border-box; overflow: hidden; white-space: nowrap;\
-      background: #4f46e5; color: #fff; font-size: 12px; font-weight: 600;\
-      padding: 3px 9px; border-radius: 10px;\
+      display: flex; align-items: baseline; gap: 8px; width: 100%;\
+      box-sizing: border-box; overflow: hidden;\
+      color: #ffffff; font-size: 22px; font-weight: 800; line-height: 1.2;\
     }\
-    .lensed-si-title { overflow: hidden; text-overflow: ellipsis; min-width: 0; }\
-    .lensed-si-num { color: #cdcdff; font-weight: 500; flex-shrink: 0; }\
+    .lensed-si-title { min-width: 0; overflow: hidden; word-break: break-word; }\
+    .lensed-si-num { color: #a5b4ff; font-weight: 700; font-size: 15px; flex-shrink: 0; }\
     .lensed-si-num::before { content: "\\00B7 "; }\
     .lensed-session-status {\
       font-size: 10px; color: #555; margin-top: 4px;\
@@ -408,6 +423,16 @@
     }\
     .lensed-host-select:focus { outline: none; border-color: #34d399; }\
     .lensed-host-warn { color: #d1a054; font-size: 11px; flex: 0 0 auto; white-space: nowrap; }\
+    /* Top status bar (below header): connection + host, moved out of the work area. */\
+    .lensed-statusbar {\
+      display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;\
+      padding: 6px 12px; background: #151517; border-bottom: 1px solid #2a2a2e; flex-shrink: 0;\
+    }\
+    .lensed-statusbar .lensed-session-status {\
+      margin-top: 0; flex: 1 1 140px; min-width: 0;\
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\
+    }\
+    .lensed-statusbar .lensed-host-row { margin-top: 0; flex: 1 1 200px; min-width: 150px; justify-content: flex-end; }\
     /* Captured-only warning — orders are recording but not binding to a SKU */\
     .lensed-warn {\
       margin-top: 8px; padding: 7px 9px; border-radius: 7px;\
@@ -430,11 +455,11 @@
     .lensed-note-group { margin-bottom: 8px; }\
     .lensed-note-group:last-child { margin-bottom: 0; }\
     .lensed-note-sku {\
-      font-size: 13px; font-weight: 700; color: #a5a5ff; margin-bottom: 4px;\
+      font-size: 12px; font-weight: 700; color: #9a9aff; margin-bottom: 4px;\
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
     }\
     .lensed-note {\
-      font-size: 15px; color: #e2e2e8; line-height: 1.55; padding-left: 17px;\
+      font-size: 13px; color: #c9c9d2; line-height: 1.45; padding-left: 17px;\
       position: relative; margin-bottom: 7px;\
     }\
     .lensed-note:last-child { margin-bottom: 0; }\
@@ -1100,13 +1125,19 @@
     controls.appendChild(closeBtn);
     controls.appendChild(toggle);
 
-    // [SCREENSHOT] Tiny header dot — toggles the (default-off) debug section.
-    // Muted when disabled; indigo when enabled. No prominent UI in the host flow.
-    shotDotEl = el('button', 'lensed-toggle', '·');
-    shotDotEl.title = 'Screenshots (debug)';
-    shotDotEl.style.cssText = 'font-size:18px;line-height:1;opacity:0.35;';
-    shotDotEl.addEventListener('click', function (e) { e.stopPropagation(); setShotsEnabled(!shotsEnabled); });
-    controls.appendChild(shotDotEl);
+    // [SCREENSHOT] Tiny header dot — toggles the (default-off) debug section. Shown
+    // ONLY in dev mode (localStorage.lensed_dev='1') so it never occupies host space.
+    // Capture logic + persisted state are unchanged; applyShotsUi/renderShotStatus
+    // guard on `if (shotDotEl)`, so a null dot in normal mode is a safe no-op.
+    if (lensedDevOn()) {
+      shotDotEl = el('button', 'lensed-toggle', '·');
+      shotDotEl.title = 'Screenshots (debug)';
+      shotDotEl.style.cssText = 'font-size:18px;line-height:1;opacity:0.35;';
+      shotDotEl.addEventListener('click', function (e) { e.stopPropagation(); setShotsEnabled(!shotsEnabled); });
+      controls.appendChild(shotDotEl);
+    } else {
+      shotDotEl = null;
+    }
 
     header.appendChild(title);
     header.appendChild(controls);
@@ -1243,19 +1274,23 @@
     shotDebugEl.appendChild(shotClearBtn);
     shotDebugEl.appendChild(shotWarnEl);
 
-    // Stage section: input row + transient resolve line + always-on staged count
-    // + staged items + talking points + session status
+    // Current-item card — the single most prominent element: big staged SKU(s) + unit count.
+    var currentCard = el('div', 'lensed-current-card');
+    currentCard.appendChild(el('div', 'lensed-current-head', 'Current item'));
+    currentCard.appendChild(stagedListEl);
+    currentCard.appendChild(stagedCountEl);
+
+    // Stage section: scan row + transient resolve/scan feedback + big current-item card
+    // + talking points + captured-only warning. Connection + host move to the top status
+    // bar; the screenshot debug row is appended only in dev mode.
     var skuMain = el('div', 'lensed-sku-main');
     skuMain.appendChild(skuRow);
     skuMain.appendChild(resolvedLabelEl);
     skuMain.appendChild(lastScanEl);
-    skuMain.appendChild(stagedCountEl);
-    skuMain.appendChild(stagedListEl);
+    skuMain.appendChild(currentCard);
     skuMain.appendChild(notesListEl);
-    skuMain.appendChild(sessionStatusEl);
-    skuMain.appendChild(hostRowEl);
     skuMain.appendChild(capturedOnlyWarnEl);
-    skuMain.appendChild(shotDebugEl);
+    if (lensedDevOn()) skuMain.appendChild(shotDebugEl);
     renderShotStatus();
 
     // Right column of the stage section: compact ASP goal + break-even. Readable
@@ -1279,7 +1314,14 @@
     salesListEl.appendChild(empty);
     body.appendChild(salesListEl);
 
+    // Top status bar (below the header): connection + host selector, moved out of the
+    // main work area so the scan row and current-item card own that space.
+    var statusBar = el('div', 'lensed-statusbar');
+    statusBar.appendChild(sessionStatusEl);
+    statusBar.appendChild(hostRowEl);
+
     panel.appendChild(header);
+    panel.appendChild(statusBar);
     panel.appendChild(skuBar);
     panel.appendChild(body);
     // Unobtrusive runtime version marker (muted, bottom-left corner) for testing.
