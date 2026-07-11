@@ -55,6 +55,27 @@ run produced is kept in an external backup, not committed.
 ## Target end state
 
 - One primary repo tracking `origin/main`.
-- At most one active extension feature worktree.
+- No standing extension worktrees (see policy below).
 - One unrelated feature worktree (returns) kept separate.
 - Backups (bundles + patches + archived operational data) stored outside any repo.
+
+## Policy: no standing Chrome-extension worktrees (adopted 2026-07-11)
+
+Extension development moved off multiple worktrees to a simple branch-based workflow in
+the primary repo (`/Users/abe/tiktok-pnl`). This supersedes the earlier "at most one
+extension worktree" guidance.
+
+- **No standing Chrome-extension worktrees.** Extension features use normal Git branches
+  in `/Users/abe/tiktok-pnl`.
+- **One extension feature branch is actively checked out at a time.** Before switching
+  features, commit all work or intentionally capture it as a patch — never leave it only
+  in a worktree.
+- **Every extension feature branch starts from current `origin/main`.**
+- **Each feature is its own PR.** Never combine unrelated extension bug fixes or features
+  into a "combined" branch (that pattern is exactly what this consolidation unwound).
+- **Manifest version does not identify the newest code** — a higher `version` string can
+  sit on strictly older code. Git ancestry and `origin/main` are the source of truth.
+- **Temporary worktrees require a written reason** and must be removed after their PR
+  merges.
+- **The returns worktree (`/Users/abe/lensed-returns-detail`) is a temporary exception**
+  because it holds unrelated active WIP; it is left untouched until that work lands.
