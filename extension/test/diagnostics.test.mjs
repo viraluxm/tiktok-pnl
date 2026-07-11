@@ -98,9 +98,12 @@ async function run() {
   ok('ON: bind.sent emitted for a sale', diagEvents().some((e) => e && e.type === 'bind.sent'), diagEvents().map((e) => e && e.type).join(','));
   ok('ON: buyer username NOT in diagnostics', JSON.stringify(diagEvents()).indexOf('someone') === -1);
 
-  // Export button present + triggers DIAG_EXPORT + a JSON download.
-  const btn = [...sr(w).querySelectorAll('.lensed-toggle')].find((b) => (b.title || '').toLowerCase().includes('export'));
-  ok('ON: export button present', !!btn);
+  // Export button present + triggers DIAG_EXPORT + a JSON download. Lives in the
+  // dev-only diagnostics indicator row ("Export" button, title "Download diagnostics JSON").
+  const btn = [...sr(w).querySelectorAll('button')].find((b) => b.textContent === 'Export' && /diagnostics json/i.test(b.title || ''));
+  ok('ON: export button present (in diagnostics row)', !!btn);
+  // The indicator itself must be shown.
+  ok('ON: "Diagnostics ON" indicator present', /Diagnostics ON/.test(sr(w).textContent || ''));
   if (btn) { btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); await sleep(20); }
   ok('ON: export issued DIAG_EXPORT', sent.some((m) => m.type === 'DIAG_EXPORT'));
   ok('ON: export downloaded a .json file', clicks === 1 && /lensed-diagnostics-.*\.json/.test(lastDownload || ''), 'clicks=' + clicks + ' name=' + lastDownload);
