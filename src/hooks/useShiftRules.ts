@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { createClient } from '@/lib/supabase/client';
 import type { ShiftRule, ShiftException, ShiftExceptionType } from '@/types';
+import { pastInstancesToMaterialize } from '@/lib/employees';
 import { useUser } from './useUser';
 
 export interface ShiftRuleInput {
@@ -56,7 +57,39 @@ export function useShiftRules() {
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['shift_rules'] });
     queryClient.invalidateQueries({ queryKey: ['shift_exceptions'] });
+    queryClient.invalidateQueries({ queryKey: ['shifts'] }); // freeze may have added rows
   };
+
+  // PRE-MUTATION FREEZE (the app-side guard that makes delete/deactivate immediate,
+  // without waiting up to a day for the cron). Materializes the rule's PAST recurring
+  // days into real `shifts` rows BEFORE the destructive change, so worked history
+  // survives. Must run while the rule is still ACTIVE (the generator skips inactive
+  // rules) — callers invoke it before flipping active=false / deleting. Idempotent:
+  // the partial unique index + ignoreDuplicates make re-runs (and cron overlap) no-ops.
+  async function freezeRulePast(ruleId: string): Promise<void> {
+    const { data: rule } = await supabase.from('shift_rules').select('*').eq('id', ruleId).single();
+    if (!rule) return; // already gone — nothing to freeze
+    const { data: exs } = await supabase.from('shift_exceptions').select('*').eq('rule_id', ruleId);
+    const { data: existing } = await supabase.from('shifts').select('date').eq('source_rule_id', ruleId);
+    const materialized = new Set((existing ?? []).map((s) => `${ruleId}|${s.date as string}`));
+
+    const instances = pastInstancesToMaterialize([rule as ShiftRule], (exs ?? []) as ShiftException[], materialized);
+    if (instances.length === 0) return;
+
+    const rows = instances.map((i) => ({
+      user_id: user!.id,
+      employee_id: i.employee_id,
+      date: i.date,
+      start_time: i.start_time,
+      end_time: i.end_time,
+      store_id: (rule as ShiftRule).store_id ?? null,
+      source_rule_id: ruleId,
+    }));
+    const { error } = await supabase
+      .from('shifts')
+      .upsert(rows, { onConflict: 'employee_id,date,source_rule_id', ignoreDuplicates: true });
+    if (error) throw error;
+  }
 
   const addRule = useMutation({
     mutationFn: async (input: ShiftRuleInput) => {
@@ -73,6 +106,9 @@ export function useShiftRules() {
 
   const toggleRuleActive = useMutation({
     mutationFn: async ({ id, active }: { id: string; active: boolean }) => {
+      // Deactivating stops future generation AND would erase past projected hours —
+      // freeze them first. (Reactivating adds nothing to protect, so no freeze.)
+      if (!active) await freezeRulePast(id);
       const { error } = await supabase
         .from('shift_rules')
         .update({ active, updated_at: new Date().toISOString() })
@@ -82,10 +118,13 @@ export function useShiftRules() {
     onSuccess: invalidate,
   });
 
-  // Deleting a rule cascades its exceptions (FK) and stops FUTURE generation.
-  // It never touches the one-off `shifts` table; past pay already derived stands.
+  // Deleting a rule stops FUTURE generation and (via FK) cascades its exceptions. Past
+  // worked days are FROZEN into real `shifts` rows first (freezeRulePast), and the
+  // shifts→rule FK is ON DELETE SET NULL, so those rows survive the delete as plain
+  // one-off shifts. This is what stops the history-loss bug at the source.
   const deleteRule = useMutation({
     mutationFn: async (id: string) => {
+      await freezeRulePast(id);
       const { error } = await supabase.from('shift_rules').delete().eq('id', id);
       if (error) throw error;
     },

@@ -111,6 +111,9 @@ export interface Shift {
   start_time: string; // 'HH:MM' or 'HH:MM:SS'
   end_time: string | null; // null = OPEN shift (in progress, not yet ended)
   store_id?: string | null;
+  // Set when this row was MATERIALIZED from a recurring rule (migration 055); NULL = a
+  // plain one-off shift. FK is ON DELETE SET NULL, so deleting the rule keeps the row.
+  source_rule_id?: string | null;
   created_at: string;
   updated_at: string;
 }
