@@ -1,4 +1,9 @@
--- 051_synced_order_created_at.sql
+-- 053_synced_order_created_at.sql
+-- (Renumbered from 051 → 053 to avoid a duplicate-051 collision: main landed
+--  051_create_live_order_screenshots independently. Content unchanged; this is a
+--  repo-sequence fix only — the column/index below are already applied to prod.
+--  Idempotent (IF NOT EXISTS), so a fresh `db reset`/rebuild re-runs it harmlessly.)
+--
 -- Persist TikTok's real order create_time as a true timestamp on synced_order_ids,
 -- so live-window scoping (the order-coverage check) can stop relying on the
 -- date-granularity order_date, which rounds a short live window up to whole
