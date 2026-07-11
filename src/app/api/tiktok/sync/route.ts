@@ -313,6 +313,10 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   const orderId = String(o.id || '');
   const createTime = o.create_time as number;
   const date = createTime ? toLocalDate(createTime) : '';
+  // Precise order timestamp (create_time is unix SECONDS). Kept ALONGSIDE order_date
+  // — order_date stays exactly as before; this is additive. Null-safe: a missing
+  // create_time writes null rather than crashing (migration 051).
+  const orderCreatedAt = createTime ? new Date(createTime * 1000).toISOString() : null;
   const updateTime = o.update_time as number;
   const updatedDate = updateTime ? toLocalDate(updateTime) : '';
   const status = String(o.status || '').toUpperCase();
@@ -352,6 +356,7 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
 
   return {
     user_id: userId, order_id: orderId, order_date: date, updated_date: updatedDate,
+    order_created_at: orderCreatedAt,
     gmv, shipping, affiliate, platform_fee: platformFee, units,
     tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName,
     product_name: productName, status, auto_combine_group_id: autoCombineGroupId,

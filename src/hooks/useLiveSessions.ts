@@ -15,9 +15,53 @@ export interface LiveSession {
   source: string;
   created_at: string;
   updated_at: string;
+  store_id: string | null;
+  // Resolved from store_id by the sessions API; null when no store / not readable.
+  store_name: string | null;
 }
 
 const KEY = 'live-sessions';
+
+// ── Post-live order coverage check (read-only, list only) ──────────────────
+// Surfaces synced-but-never-captured orders — the set reconcile can't see.
+export interface CoverageGapOrder {
+  order_id: string;
+  order_date: string | null;
+  created_at: string | null;
+  buyer: string | null; // synced_order_ids has no buyer column → always null
+  gmv: number | null;
+  status: string | null;
+  auto_combine_group_id: string | null;
+}
+
+export interface ShowCoverage {
+  total_synced: number;
+  captured_but_unbound_count: number;
+  captured_but_unbound_ids: string[];
+  coverage_gap_count: number;
+  coverage_gap: CoverageGapOrder[];
+  window: { start_date: string | null; end_date: string | null; store_id: string | null };
+}
+
+export const showCoverageKey = (id: string) => ['show-coverage', id];
+
+export async function fetchShowCoverage(id: string): Promise<ShowCoverage> {
+  const res = await fetch(`/api/shows/${id}/coverage`);
+  if (!res.ok) throw new Error('Failed to load coverage');
+  return res.json();
+}
+
+// Auto-runs whenever a show detail is mounted (opened). Also refreshed when a
+// show is ended — see useEndSession below.
+export function useShowCoverage(id: string | null) {
+  const { user } = useUser();
+  return useQuery<ShowCoverage>({
+    queryKey: showCoverageKey(id ?? ''),
+    enabled: !!user && !!id,
+    queryFn: () => fetchShowCoverage(id!),
+    staleTime: 30_000,
+  });
+}
 
 export function useLiveSessions() {
   const { user } = useUser();
@@ -77,6 +121,12 @@ export function useEndSession() {
       const json = await res.json();
       return json.session;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: [KEY] });
+      // Run the order coverage check automatically when a show ends, so the gap
+      // (synced-but-never-captured) is computed the moment the live wraps —
+      // populated in cache and ready when the show detail is viewed.
+      qc.prefetchQuery({ queryKey: showCoverageKey(id), queryFn: () => fetchShowCoverage(id) });
+    },
   });
 }
