@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { fmt } from '@/lib/calculations';
-import { computePay, shiftHours, nextPayday, generateRecurringShifts, type GeneratedShift } from '@/lib/employees';
+import { computePay, shiftHours, generateRecurringShifts, payPeriodFor, paydayAtOffset, fmtPayDate, fmtMonthDay, type GeneratedShift } from '@/lib/employees';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules, type ShiftRuleInput } from '@/hooks/useShiftRules';
@@ -84,11 +84,33 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Pay counts one-off shifts + generated recurring instances for the period,
-  // excluding skipped instances (they exist only so the UI can offer "Restore").
+  // ── PAY VIEW: scoped to the GLOBAL BIWEEKLY PAY PERIOD, not the FiltersBar ──────────
+  // The Pay tab's Hours/Owed are for the current pay period's [start, end] window (the
+  // 2 weeks a payday pays for), independent of whatever the dashboard filter says. This
+  // is the fix: the old code scoped pay to the FiltersBar, so "all time" showed LIFETIME
+  // earnings and read as a running balance. periodOffset drives prev/next navigation.
+  const [periodOffset, setPeriodOffset] = useState(0);
+  const payday = useMemo(() => paydayAtOffset(periodOffset), [periodOffset]);
+  const period = useMemo(() => payPeriodFor(payday), [payday]);
+
+  // Shifts for the pay-period window — a SEPARATE fetch from the FiltersBar-scoped one,
+  // via the same hook (same auth/store/RLS scoping). Changing the FiltersBar can't move
+  // these numbers; only the period does.
+  const { shifts: periodShifts } = useShifts(period.start, period.end);
+  const periodMaterialized = useMemo(
+    () => new Set(periodShifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
+    [periodShifts],
+  );
+  // Recurring instances for the period, with the SAME materialized-exclusion guard as the
+  // Shifts view — a materialized recurring day is counted once (real row), never doubled.
+  const periodGenerated = useMemo(
+    () => generateRecurringShifts(rules, exceptions, period.start, period.end, periodMaterialized),
+    [rules, exceptions, period.start, period.end, periodMaterialized],
+  );
+  // Reuse computePay's exact hours×rate math (open shifts excluded, skipped excluded).
   const pay = useMemo(
-    () => computePay(employees, [...shifts, ...generated.filter((g) => !g.skipped)]),
-    [employees, shifts, generated],
+    () => computePay(employees, [...periodShifts, ...periodGenerated.filter((g) => !g.skipped)]),
+    [employees, periodShifts, periodGenerated],
   );
   const totals = useMemo(
     () => pay.reduce((acc, p) => ({ hours: acc.hours + p.hours, pay: acc.pay + p.pay }), { hours: 0, pay: 0 }),
@@ -180,9 +202,14 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
             </button>
           ))}
         </div>
-        <span className="text-xs text-tt-muted">
-          Period: <span className="text-tt-text font-medium">{periodLabel}</span>
-        </span>
+        {/* The FiltersBar drives Roster/Shifts, but the Pay view is scoped to its OWN
+            biweekly pay period (independent of the filter). Hide this label there so it
+            can't imply the pay numbers respond to the dashboard filter. */}
+        {subView !== 'pay' && (
+          <span className="text-xs text-tt-muted">
+            Period: <span className="text-tt-text font-medium">{periodLabel}</span>
+          </span>
+        )}
       </div>
 
       {subView === 'roster' && (
@@ -241,9 +268,43 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
 
       {subView === 'pay' && (
         <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
-          <div className="px-6 py-5 border-b border-tt-border flex items-center justify-between">
-            <h2 className="text-base font-semibold text-tt-text">Pay Owed</h2>
-            <span className="text-xs text-tt-muted">{periodLabel}</span>
+          <div className="px-6 py-5 border-b border-tt-border">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-base font-semibold text-tt-text">Pay owed — this pay period</h2>
+                <p className="text-xs text-tt-muted mt-1 max-w-md">
+                  Hours &amp; pay for the current biweekly period only — not lifetime, and not a running
+                  balance. Independent of the dashboard date filter.
+                </p>
+              </div>
+              {/* Current pay period + payday, with prev/next navigation. */}
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setPeriodOffset((o) => o - 1)}
+                  aria-label="Previous pay period"
+                  className="w-8 h-8 rounded-lg border border-tt-border text-tt-muted hover:bg-tt-card-hover hover:text-tt-text transition-colors cursor-pointer"
+                >←</button>
+                <div className="text-right min-w-[9.5rem]">
+                  <div className="text-[13px] font-semibold text-tt-text tabular-nums">
+                    {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}
+                  </div>
+                  <div className="text-[11px] text-tt-muted">Payday: {fmtPayDate(payday)}</div>
+                </div>
+                <button
+                  onClick={() => setPeriodOffset((o) => o + 1)}
+                  aria-label="Next pay period"
+                  className="w-8 h-8 rounded-lg border border-tt-border text-tt-muted hover:bg-tt-card-hover hover:text-tt-text transition-colors cursor-pointer"
+                >→</button>
+              </div>
+            </div>
+            {periodOffset !== 0 && (
+              <button
+                onClick={() => setPeriodOffset(0)}
+                className="mt-2 text-[11px] text-tt-cyan hover:underline cursor-pointer"
+              >
+                ← Back to current period
+              </button>
+            )}
           </div>
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
@@ -252,9 +313,8 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                   <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Employee</th>
                   <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Role</th>
                   <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hourly Rate</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hours</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Pay Owed</th>
-                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Next Payday</th>
+                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hours (period)</th>
+                  <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Pay Owed (period)</th>
                 </tr>
               </thead>
               <tbody>
@@ -265,22 +325,20 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                     <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(employee.hourly_rate)}</td>
                     <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmtHours(hours)}</td>
                     <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(owed)}</td>
-                    <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{nextPayday(employee.hire_date) ?? '—'}</td>
                   </tr>
                 ))}
                 {pay.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-5 py-12 text-center text-tt-muted text-sm">No employees yet</td>
+                    <td colSpan={5} className="px-5 py-12 text-center text-tt-muted text-sm">No employees yet</td>
                   </tr>
                 )}
               </tbody>
               {pay.length > 0 && (
                 <tfoot>
                   <tr className="border-t border-tt-border">
-                    <td className="px-5 py-3 text-[13px] font-semibold text-tt-text" colSpan={3}>Total</td>
+                    <td className="px-5 py-3 text-[13px] font-semibold text-tt-text" colSpan={3}>Total for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}</td>
                     <td className="px-5 py-3 text-[13px] font-semibold text-tt-text text-right tabular-nums">{fmtHours(totals.hours)}</td>
                     <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(totals.pay)}</td>
-                    <td className="px-5 py-3" />
                   </tr>
                 </tfoot>
               )}
