@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useLiveSessions, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
+import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
 import { useAuctionBoard, type AuctionItem } from '@/hooks/useLiveAuctions';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
@@ -207,7 +207,11 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
     >
       <td className="px-4 py-3">
         <div className="font-medium text-tt-text">{session.title || 'Untitled show'}</div>
-        <div className="text-xs text-tt-muted mt-0.5">{fmtDate(session.started_at)}</div>
+        <div className="text-xs text-tt-muted mt-0.5">
+          {session.store_name ? <span className="text-tt-text/70">{session.store_name}</span> : null}
+          {session.store_name ? ' · ' : ''}
+          {fmtDate(session.started_at)}
+        </div>
       </td>
       <td className="px-4 py-3">
         <StatusBadge status={session.status} />
@@ -479,6 +483,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           </button>
           <div className="text-xl font-bold">{session.title || 'Untitled show'}</div>
           <div className="text-sm text-tt-muted mt-1 flex items-center gap-3">
+            {session.store_name && <span className="text-tt-text/70">{session.store_name}</span>}
             <span>{fmtDate(session.started_at)}</span>
             <StatusBadge status={session.status} />
             {durationLabel && (
@@ -511,6 +516,10 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           </button>
         </div>
       </div>
+
+      {/* Order coverage check — synced-but-never-captured. Deliberately styled
+          amber (not the reconcile red/green) so the two are never confused. */}
+      <CoveragePanel sessionId={session.id} />
 
       {/* Reconciliation results */}
       {recon && (
@@ -799,6 +808,89 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 Bind anyway
               </button>
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Post-live ORDER COVERAGE CHECK (read-only, list only). Auto-runs on open via
+// useShowCoverage; also refreshed when a show is ended (useEndSession prefetch).
+// Shows the count reconcile is structurally blind to: synced orders that were
+// never captured (and so never bound). Distinct from captured-but-unbound, which
+// reconcile handles — the two are shown as separate figures, never merged.
+function CoveragePanel({ sessionId }: { sessionId: string }) {
+  const { data, isLoading, isError } = useShowCoverage(sessionId);
+
+  if (isLoading) {
+    return (
+      <div className="mb-5 rounded-xl border border-tt-border bg-tt-card px-4 py-3 text-sm text-tt-muted">
+        Checking order coverage…
+      </div>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <div className="mb-5 rounded-xl border border-tt-border bg-tt-card px-4 py-3 text-sm text-tt-muted">
+        Order coverage check unavailable.
+      </div>
+    );
+  }
+
+  const gap = data.coverage_gap_count;
+  const hasGap = gap > 0;
+
+  return (
+    <div
+      className={`mb-5 rounded-xl border px-4 py-3 ${
+        hasGap ? 'border-amber-400/40 bg-amber-400/10' : 'border-tt-border bg-tt-card'
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`text-xs font-semibold uppercase tracking-wide ${hasGap ? 'text-amber-300' : 'text-tt-muted'}`}>
+          Order coverage
+        </span>
+        <span className={`text-sm ${hasGap ? 'text-amber-200' : 'text-tt-text'}`}>
+          {data.total_synced} synced order{data.total_synced === 1 ? '' : 's'} ·{' '}
+          {data.captured_but_unbound_count} captured but unbound ·{' '}
+          <span className={hasGap ? 'font-semibold text-amber-300' : ''}>
+            {gap} never captured (coverage gap)
+          </span>
+        </span>
+      </div>
+
+      {hasGap && (
+        <div className="mt-3">
+          <div className="text-xs text-amber-200/80 mb-2">
+            These TikTok orders synced but were never captured during the live, so they have no
+            SKU and are invisible to Reconcile. Listed for visibility only — no binding here yet.
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-amber-400/20">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-amber-400/20 text-amber-200/70 text-xs uppercase tracking-wide">
+                  <th className="text-left font-medium px-3 py-2">Order ID</th>
+                  <th className="text-left font-medium px-3 py-2">Order date</th>
+                  <th className="text-left font-medium px-3 py-2">Buyer</th>
+                  <th className="text-right font-medium px-3 py-2">GMV</th>
+                  <th className="text-left font-medium px-3 py-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.coverage_gap.map((o) => (
+                  <tr key={o.order_id} className="border-b border-amber-400/10 last:border-0">
+                    <td className="px-3 py-2 font-mono text-xs text-tt-text">{o.order_id}</td>
+                    <td className="px-3 py-2 text-tt-text/80">{o.order_date ?? '—'}</td>
+                    <td className="px-3 py-2 text-tt-muted">{o.buyer ?? '—'}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-tt-text/80">
+                      {o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}
+                    </td>
+                    <td className="px-3 py-2 text-tt-muted">{o.status ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

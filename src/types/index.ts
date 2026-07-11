@@ -109,7 +109,7 @@ export interface Shift {
   employee_id: string;
   date: string;
   start_time: string; // 'HH:MM' or 'HH:MM:SS'
-  end_time: string;
+  end_time: string | null; // null = OPEN shift (in progress, not yet ended)
   store_id?: string | null;
   created_at: string;
   updated_at: string;

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { fmt } from '@/lib/calculations';
 import { computePay, shiftHours, nextPayday, generateRecurringShifts, type GeneratedShift } from '@/lib/employees';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
@@ -51,7 +51,7 @@ function StatusBadge({ status }: { status: string }) {
 export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   const [subView, setSubView] = useState<SubView>('roster');
   const { employees, isLoading, addEmployee, updateEmployee, deleteEmployee } = useEmployees();
-  const { shifts, isLoading: shiftsLoading, addShift, deleteShift } = useShifts(dateFrom, dateTo);
+  const { shifts, openShifts, isLoading: shiftsLoading, addShift, endShift, deleteShift } = useShifts(dateFrom, dateTo);
   const {
     rules,
     exceptions,
@@ -191,11 +191,15 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
         <ShiftsView
           employees={employees}
           shifts={shifts}
+          openShifts={openShifts}
           generated={generated}
           rules={rules}
           isLoading={shiftsLoading || rulesLoading}
           onAddOneOff={async (input) => {
             await addShift.mutateAsync(input);
+          }}
+          onEndShift={async (id, end_time) => {
+            await endShift.mutateAsync({ id, end_time });
           }}
           onDeleteOneOff={async (id) => {
             await deleteShift.mutateAsync(id);
@@ -490,7 +494,7 @@ function daysLabel(days: number[]): string {
 }
 
 type DisplayRow =
-  | { kind: 'oneoff'; id: string; employee_id: string; date: string; start_time: string; end_time: string }
+  | { kind: 'oneoff'; id: string; employee_id: string; date: string; start_time: string; end_time: string | null }
   | {
       kind: 'recurring';
       id: string;
@@ -506,10 +510,12 @@ type DisplayRow =
 function ShiftsView({
   employees,
   shifts,
+  openShifts,
   generated,
   rules,
   isLoading,
   onAddOneOff,
+  onEndShift,
   onDeleteOneOff,
   onAddRule,
   onDeleteRule,
@@ -520,10 +526,12 @@ function ShiftsView({
 }: {
   employees: Employee[];
   shifts: Shift[];
+  openShifts: Shift[];
   generated: GeneratedShift[];
   rules: ShiftRule[];
   isLoading: boolean;
-  onAddOneOff: (input: { employee_id: string; date: string; start_time: string; end_time: string }) => Promise<void>;
+  onAddOneOff: (input: { employee_id: string; date: string; start_time: string; end_time: string | null }) => Promise<void>;
+  onEndShift: (id: string, end_time: string) => Promise<void>;
   onDeleteOneOff: (id: string) => Promise<void>;
   onAddRule: (input: ShiftRuleInput) => Promise<void>;
   onDeleteRule: (id: string) => Promise<void>;
@@ -539,6 +547,20 @@ function ShiftsView({
   const [date, setDate] = useState('');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
+  // "Currently in shift": save with end_time NULL (open shift). Hides the End field.
+  const [currentlyInShift, setCurrentlyInShift] = useState(false);
+
+  // End-shift modal for closing an open shift (end defaults to now, editable).
+  const [endingShift, setEndingShift] = useState<
+    { id: string; name: string; date: string; start_time: string; end_time: string } | null
+  >(null);
+
+  // Ticks so open-shift elapsed durations update live (every 30s — minute-granularity display).
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Recurring form
   const [rEmployeeId, setREmployeeId] = useState('');
@@ -561,10 +583,21 @@ function ShiftsView({
     return m;
   }, [employees]);
 
-  // One-off shifts + generated recurring instances, newest first.
+  // Employees who currently have an OPEN shift — the UI guard against a 2nd open shift.
+  const openByEmployee = useMemo(() => {
+    const m = new Set<string>();
+    for (const s of openShifts) m.add(s.employee_id);
+    return m;
+  }, [openShifts]);
+
+  // One-off shifts + generated recurring instances, newest first. Open shifts are
+  // unioned in (deduped by id) so an in-progress shift is ALWAYS visible even if it
+  // started before the selected pay period.
   const rows = useMemo<DisplayRow[]>(() => {
+    const oneoffById = new Map<string, Shift>();
+    for (const s of [...shifts, ...openShifts]) oneoffById.set(s.id, s);
     const combined: DisplayRow[] = [
-      ...shifts.map(
+      ...[...oneoffById.values()].map(
         (s): DisplayRow => ({
           kind: 'oneoff',
           id: s.id,
@@ -591,7 +624,7 @@ function ShiftsView({
     return combined.sort(
       (a, b) => b.date.localeCompare(a.date) || a.start_time.localeCompare(b.start_time),
     );
-  }, [shifts, generated]);
+  }, [shifts, openShifts, generated]);
 
   function toggleDay(v: number) {
     setRDays((prev) => {
@@ -603,21 +636,75 @@ function ShiftsView({
   }
 
   async function handleAddOneOff() {
-    if (!employeeId || !date || !startTime || !endTime) {
-      setError('Employee, date, start and end time are all required');
+    // Open shift: end is omitted; completed shift: end required (unchanged from before).
+    if (!employeeId || !date || !startTime || (!currentlyInShift && !endTime)) {
+      setError(
+        currentlyInShift
+          ? 'Employee, date and start time are required'
+          : 'Employee, date, start and end time are all required',
+      );
+      return;
+    }
+    // Guard (UI): block a 2nd open shift for the same person. The DB partial unique
+    // index is the authoritative backstop; this is the friendly pre-check.
+    if (currentlyInShift && openByEmployee.has(employeeId)) {
+      setError(`${nameById.get(employeeId) || 'This person'} already has an open shift — end it first.`);
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      await onAddOneOff({ employee_id: employeeId, date, start_time: startTime, end_time: endTime });
+      await onAddOneOff({
+        employee_id: employeeId,
+        date,
+        start_time: startTime,
+        end_time: currentlyInShift ? null : endTime,
+      });
       setDate('');
       setStartTime('');
       setEndTime('');
+      setCurrentlyInShift(false);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  // Elapsed since an open shift's start (date + start_time, local wall-clock) → "2h 14m".
+  function elapsedLabel(dateStr: string, startTime: string): string {
+    const start = new Date(`${dateStr}T${startTime}`).getTime();
+    if (!Number.isFinite(start)) return '—';
+    const mins = Math.max(0, Math.floor((nowTick - start) / 60000));
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  // Minutes since midnight for an 'HH:MM[:SS]' time.
+  function minsOf(t: string): number {
+    const [h, m] = t.split(':').map(Number);
+    return (h || 0) * 60 + (m || 0);
+  }
+
+  async function saveEndShift() {
+    if (!endingShift) return;
+    if (!endingShift.end_time) {
+      alert('End time is required');
+      return;
+    }
+    // Reject only a ZERO-LENGTH shift (end exactly equals start). end < start is a
+    // valid OVERNIGHT shift (crossed midnight) — shiftHours() adds 24h for it, matching
+    // how the rest of the app treats past-midnight ranges.
+    if (minsOf(endingShift.end_time) === minsOf(endingShift.start_time)) {
+      alert('End time must be different from the start time.');
+      return;
+    }
+    try {
+      await onEndShift(endingShift.id, endingShift.end_time.length === 5 ? `${endingShift.end_time}:00` : endingShift.end_time);
+      setEndingShift(null);
+    } catch (err) {
+      alert((err as Error).message);
     }
   }
 
@@ -739,9 +826,22 @@ function ShiftsView({
                 <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className={inputCls} />
               </Field>
               <Field label="End">
-                <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className={inputCls} />
+                {currentlyInShift ? (
+                  <div className={`${inputCls} flex items-center text-tt-muted`}>In progress</div>
+                ) : (
+                  <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className={inputCls} />
+                )}
               </Field>
             </div>
+            <label className="mt-3 flex items-center gap-2 cursor-pointer select-none w-fit">
+              <input
+                type="checkbox"
+                checked={currentlyInShift}
+                onChange={(e) => { setCurrentlyInShift(e.target.checked); setError(null); }}
+                className="accent-tt-cyan w-4 h-4"
+              />
+              <span className="text-[13px] text-tt-text">Currently in shift <span className="text-tt-muted">(no end time yet)</span></span>
+            </label>
             {error && <p className="text-xs text-tt-red mt-3">{error}</p>}
             <div className="mt-4">
               <button
@@ -749,7 +849,7 @@ function ShiftsView({
                 disabled={submitting}
                 className="px-4 py-2 rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] text-black text-[13px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {submitting ? 'Adding…' : '+ Add Shift'}
+                {submitting ? 'Adding…' : currentlyInShift ? '+ Start Shift' : '+ Add Shift'}
               </button>
             </div>
           </>
@@ -886,6 +986,7 @@ function ShiftsView({
             <tbody>
               {rows.map((row) => {
                 const skipped = row.kind === 'recurring' && row.skipped;
+                const isOpen = row.kind === 'oneoff' && row.end_time == null;
                 return (
                 <tr key={row.id} className={`border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors ${skipped ? 'opacity-60' : ''}`}>
                   <td className="px-5 py-3 text-xs text-tt-muted">{row.date}</td>
@@ -901,21 +1002,43 @@ function ShiftsView({
                           <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-red/15 text-tt-red">Skipped</span>
                         )}
                       </span>
+                    ) : isOpen ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">
+                        <span className="w-1.5 h-1.5 rounded-full bg-tt-green animate-pulse" />In progress
+                      </span>
                     ) : (
                       <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">One-off</span>
                     )}
                   </td>
                   <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{row.start_time.slice(0, 5)}</td>
-                  <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{row.end_time.slice(0, 5)}</td>
-                  <td className={`px-5 py-3 text-[13px] text-right tabular-nums ${skipped ? 'text-tt-muted line-through' : 'text-tt-text'}`}>{shiftHours(row.start_time, row.end_time).toFixed(2)}</td>
+                  <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{isOpen ? '—' : (row.end_time ?? '').slice(0, 5)}</td>
+                  <td className={`px-5 py-3 text-[13px] text-right tabular-nums ${skipped ? 'text-tt-muted line-through' : isOpen ? 'text-tt-green' : 'text-tt-text'}`}>{isOpen ? elapsedLabel(row.date, row.start_time) : shiftHours(row.start_time, row.end_time).toFixed(2)}</td>
                   <td className="px-5 py-3 text-center whitespace-nowrap">
                     {row.kind === 'oneoff' ? (
-                      <button
-                        onClick={() => onDeleteOneOff(row.id)}
-                        className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
-                      >
-                        Delete
-                      </button>
+                      <>
+                        {isOpen && (
+                          <button
+                            onClick={() =>
+                              setEndingShift({
+                                id: row.id,
+                                name: nameById.get(row.employee_id) || 'Unknown',
+                                date: row.date,
+                                start_time: row.start_time,
+                                end_time: new Date().toTimeString().slice(0, 5), // default: now, editable
+                              })
+                            }
+                            className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                          >
+                            Shift Ended
+                          </button>
+                        )}
+                        <button
+                          onClick={() => onDeleteOneOff(row.id)}
+                          className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </>
                     ) : row.skipped ? (
                       <button
                         onClick={() => handleClear(row)}
@@ -1007,6 +1130,48 @@ function ShiftsView({
                 className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors"
               >
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* End an open shift — end defaults to NOW but is editable before saving. */}
+      {endingShift && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEndingShift(null)} />
+          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+            <div className="flex items-start justify-between mb-1">
+              <h3 className="text-base font-semibold text-tt-text">End Shift</h3>
+              <button onClick={() => setEndingShift(null)} className="text-tt-muted hover:text-tt-text transition-colors p-1">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <p className="text-xs text-tt-muted mb-4">
+              {endingShift.name} · {endingShift.date}, started {endingShift.start_time.slice(0, 5)}. Adjust the end time if it wasn&apos;t just now.
+            </p>
+            <Field label="End time">
+              <input
+                type="time"
+                value={endingShift.end_time}
+                onChange={(e) => setEndingShift({ ...endingShift, end_time: e.target.value })}
+                className={inputCls}
+              />
+            </Field>
+            <div className="flex gap-3 pt-5">
+              <button
+                onClick={() => setEndingShift(null)}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEndShift}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors"
+              >
+                End Shift
               </button>
             </div>
           </div>

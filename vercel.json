@@ -1,3 +1,6 @@
 {
-  "fluid": true
+  "fluid": true,
+  "crons": [
+    { "path": "/api/cron/auto-end-sessions", "schedule": "*/30 * * * *" }
+  ]
 }
