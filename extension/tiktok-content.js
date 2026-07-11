@@ -40,6 +40,8 @@
   var authStatusReceived = false; // keep "Connecting…" until the first auth status arrives
   var capturedOnlyWarnEl = null; // visible "orders captured but not bound" warning
   var lastScanEl = null;         // temporary visible "Last scan: … · <state>" line
+  var diagStatusEl = null;       // dev-only "◉ Diagnostics ON · N events" indicator
+  var diagPollStarted = false;   // single count-refresh interval across re-injects
   var reopenOverlay = null;      // module handle to reopen the overlay from the global scanner
   var shotStatusEl = null;       // [SCREENSHOT] compact counts (inside debug row)
   var shotWarnEl = null;         // [SCREENSHOT] storage/capture warning (debug row)
@@ -616,6 +618,18 @@
       );
     } catch (_) {}
   }
+  // Ask the SW how many events it has recorded and paint the indicator, so the host
+  // can SEE the recorder is actually capturing (not silently empty like the first run).
+  function refreshDiagCount() {
+    if (!diagStatusEl) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'DIAG_COUNT' }, function (resp) {
+        if (chrome.runtime.lastError || !resp || !diagStatusEl) return;
+        diagStatusEl.textContent = '◉ Diagnostics ON · ' + (resp.count || 0) + ' events';
+      });
+    } catch (_) {}
+  }
+
   // Download the SW diagnostic ring as a JSON file (dev-only export button).
   function exportDiagnostics() {
     try {
@@ -1331,6 +1345,29 @@
     // + talking points + captured-only warning. Connection + host move to the top status
     // bar; the screenshot debug row is appended only in dev mode.
     var skuMain = el('div', 'lensed-sku-main');
+    // Dev-only diagnostics indicator: proves the recorder is actually capturing
+    // (count > 0) and gives a manual Test + Export right in the overlay.
+    if (diagOn()) {
+      var diagRow = el('div', '');
+      diagRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;font-size:10px;font-weight:700;color:#a5b4ff;';
+      diagStatusEl = el('span', '', '◉ Diagnostics ON · … events');
+      diagStatusEl.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      var diagTestBtn = el('button', 'lensed-sku-btn', 'Test');
+      diagTestBtn.style.cssText = 'width:auto;padding:0 8px;font-size:10px;height:20px;';
+      diagTestBtn.title = 'Emit a test diagnostic event';
+      diagTestBtn.addEventListener('click', function (e) { e.stopPropagation(); dlog('diag.test', 'info', 'manual test event', { at: Date.now() }); setTimeout(refreshDiagCount, 200); });
+      var diagExpBtn = el('button', 'lensed-sku-btn', 'Export');
+      diagExpBtn.style.cssText = 'width:auto;padding:0 8px;font-size:10px;height:20px;';
+      diagExpBtn.title = 'Download diagnostics JSON';
+      diagExpBtn.addEventListener('click', function (e) { e.stopPropagation(); exportDiagnostics(); setTimeout(refreshDiagCount, 200); });
+      diagRow.appendChild(diagStatusEl);
+      diagRow.appendChild(diagTestBtn);
+      diagRow.appendChild(diagExpBtn);
+      skuMain.appendChild(diagRow);
+      refreshDiagCount();
+      if (!diagPollStarted) { diagPollStarted = true; try { setInterval(refreshDiagCount, 5000); } catch (_) {} }
+    }
+
     skuMain.appendChild(skuRow);
     skuMain.appendChild(resolvedLabelEl);
     skuMain.appendChild(lastScanEl);

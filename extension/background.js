@@ -47,25 +47,55 @@ var DIAG_FLAG = 'lensed_diag_enabled';
 var DIAG_CAP = 3000;
 var diagEnabled = false;
 var diagRing = [];
-var diagDirty = false;
-var diagFlushTimer = null;
-function diagFlush() {
-  diagFlushTimer = null;
-  if (!diagDirty) return;
-  diagDirty = false;
-  try { chrome.storage.local.set({ lensed_diag_log: diagRing }); } catch (_) {}
+var diagWriteInflight = false;
+var diagWritePending = false;
+// Persist the WHOLE ring on every change. A 2s setTimeout is unreliable in an MV3
+// worker — the SW can suspend before it fires, dropping the ring (the cause of the
+// empty export). chrome.storage.local.set keeps the SW alive until it resolves; the
+// inflight/pending guard coalesces bursts while never losing the final write.
+function diagPersist() {
+  if (diagWriteInflight) { diagWritePending = true; return; }
+  diagWriteInflight = true;
+  try {
+    // MERGE-on-write: union the in-memory ring with whatever is already stored, so a
+    // freshly-woken SW that records an event before its restore runs can never clobber
+    // the prior live's history. Also keeps memory in sync with the durable union.
+    chrome.storage.local.get([DIAG_KEY], function (d) {
+      var stored = (d && Array.isArray(d[DIAG_KEY])) ? d[DIAG_KEY] : [];
+      var merged = diagMerge(stored, diagRing);
+      diagRing = merged;
+      chrome.storage.local.set({ lensed_diag_log: merged }, function () {
+        void chrome.runtime.lastError;
+        diagWriteInflight = false;
+        if (diagWritePending) { diagWritePending = false; diagPersist(); }
+      });
+    });
+  } catch (_) { diagWriteInflight = false; }
 }
-function diagPersistSoon() {
-  if (diagFlushTimer) return;
-  try { diagFlushTimer = setTimeout(diagFlush, 2000); } catch (_) { diagFlush(); }
+// Overwrite the durable ring (used by DIAG_CLEAR, which must NOT merge history back).
+function diagWriteRaw(arr) {
+  try { chrome.storage.local.set({ lensed_diag_log: arr || [] }, function () { void chrome.runtime.lastError; }); } catch (_) {}
 }
+// Stable-ish key for dedup when merging rings across SW lives / storage + memory.
+function diagKeyOf(e) { return (e && (e.ts + '|' + (e.comp || '') + '|' + (e.type || '') + '|' + (e.msg || ''))) || Math.random(); }
+function diagMerge(a, b) {
+  var seen = Object.create(null), out = [];
+  var all = (a || []).concat(b || []);
+  for (var i = 0; i < all.length; i++) { var k = diagKeyOf(all[i]); if (seen[k]) continue; seen[k] = 1; out.push(all[i]); }
+  out.sort(function (x, y) { return (x.ts || 0) - (y.ts || 0); });
+  if (out.length > DIAG_CAP) out = out.slice(out.length - DIAG_CAP);
+  return out;
+}
+// NOTE: gate is on the CALLER. diag() checks diagEnabled; diagPush records whatever
+// it is given (DIAG_EVENT arrives only when a dev-gated content/inject sent it, and
+// that handler also flips diagEnabled on) — so a cold-woken SW never drops events
+// while waiting for the async enabled-flag restore.
 function diagPush(ev) {
-  if (!diagEnabled || !ev) return;
+  if (!ev) return;
   try {
     diagRing.push(ev);
     if (diagRing.length > DIAG_CAP) diagRing.splice(0, diagRing.length - DIAG_CAP);
-    diagDirty = true;
-    diagPersistSoon();
+    diagPersist();
   } catch (_) {}
 }
 function diag(type, sev, msg, meta) {
@@ -1247,21 +1277,41 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     diagEnabled = true;
     try { chrome.storage.local.set({ lensed_diag_enabled: true }); } catch (_) {}
     diag('diag.enable', 'info', 'diagnostics enabled', { v: EXT_VERSION });
-    try { sendResponse({ ok: true }); } catch (_) {}
+    // Guarantee a background-origin "awake" event even when the SW was already
+    // running at enable time (so it never cold-starts → no sw.start this life).
+    diag('bg.awake', 'info', 'background service worker awake', { v: EXT_VERSION });
+    try { sendResponse({ ok: true, count: diagRing.length }); } catch (_) {}
     return;
   }
   if (message.type === 'DIAG_EVENT') {
-    if (diagEnabled && message.event) diagPush(message.event);
-    try { sendResponse({ ok: true }); } catch (_) {}
+    // Receiving an event is itself proof diagnostics is on (content/inject only send
+    // when dev-gated) — flip the flag so a cold-woken SW records immediately instead
+    // of dropping events until the async flag-restore resolves.
+    diagEnabled = true;
+    if (message.event) diagPush(message.event);
+    try { sendResponse({ ok: true, count: diagRing.length }); } catch (_) {}
+    return;
+  }
+  if (message.type === 'DIAG_COUNT') {
+    try { sendResponse({ count: diagRing.length, enabled: diagEnabled, v: EXT_VERSION }); } catch (_) {}
     return;
   }
   if (message.type === 'DIAG_EXPORT') {
-    diagFlush();
-    try { sendResponse({ v: EXT_VERSION, count: diagRing.length, events: diagRing }); } catch (_) {}
+    // Read the durable store and MERGE with the in-memory ring, so an export served
+    // by a freshly-woken SW (whose async restore may not have run yet) still returns
+    // everything that was persisted during the live.
+    try {
+      chrome.storage.local.get([DIAG_KEY], function (d) {
+        var stored = (d && Array.isArray(d[DIAG_KEY])) ? d[DIAG_KEY] : [];
+        var merged = diagMerge(stored, diagRing);
+        diagRing = merged;
+        try { sendResponse({ v: EXT_VERSION, count: merged.length, events: merged }); } catch (_) {}
+      });
+    } catch (_) { try { sendResponse({ v: EXT_VERSION, count: diagRing.length, events: diagRing }); } catch (_) {} }
     return true;
   }
   if (message.type === 'DIAG_CLEAR') {
-    diagRing = []; diagDirty = true; diagFlush();
+    diagRing = []; diagWriteRaw([]);
     try { sendResponse({ ok: true }); } catch (_) {}
     return;
   }
@@ -1437,8 +1487,12 @@ console.log('[LENSED][BG] service worker started');
 try {
   chrome.storage.local.get([DIAG_FLAG, DIAG_KEY], function (d) {
     if (chrome.runtime.lastError || !d) return;
-    diagEnabled = !!d[DIAG_FLAG];
-    if (Array.isArray(d[DIAG_KEY])) diagRing = d[DIAG_KEY].slice(-DIAG_CAP);
-    diag('sw.start', 'info', 'service worker awake', { restart: diagRing.length > 0, priorEvents: diagRing.length, v: EXT_VERSION });
+    if (d[DIAG_FLAG]) diagEnabled = true;
+    var stored = Array.isArray(d[DIAG_KEY]) ? d[DIAG_KEY] : [];
+    // MERGE (not overwrite): events may already have been recorded during the async
+    // gap between SW start and this callback — keep them alongside the restored ring.
+    if (stored.length) diagRing = diagMerge(stored, diagRing);
+    // A non-empty restored ring means the SW was evicted and restarted mid-live.
+    diag('sw.start', 'info', 'service worker awake', { restart: stored.length > 0, priorEvents: stored.length, v: EXT_VERSION });
   });
 } catch (_) {}

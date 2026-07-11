@@ -68,7 +68,10 @@
     if (!diagOn()) return;
     try { window.postMessage({ source: 'lensed-diag', event: { ts: Date.now(), comp: 'inject', type: type, sev: sev || 'info', msg: msg || '', meta: meta || null } }, window.location.origin); } catch (_) {}
   }
-  try { diag('inject.load', 'info', 'injected script loaded', { path: (function () { try { return location.pathname; } catch (_) { return null; } })() }); } catch (_) {}
+  // Emit inject.load slightly delayed: MAIN + ISOLATED both run at document_start, so
+  // an immediate post can beat the content script's message listener and be lost. A
+  // short (reliable, page-context) timeout guarantees content is listening to relay it.
+  try { setTimeout(function () { diag('inject.load', 'info', 'injected script loaded', { path: (function () { try { return location.pathname; } catch (_) { return null; } })() }); }, 500); } catch (_) {}
 
   // In-memory dedup — resets on navigation/reload. Sufficient for Phase 1;
   // durable dedup lives in the service worker + Postgres ON CONFLICT later.
