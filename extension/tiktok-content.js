@@ -572,10 +572,49 @@
     return v.slice(0, 2) + '•••' + v.slice(-2);
   }
 
+  // ── Diagnostics (dev-only flight recorder) ─────────────────────────
+  // Forwards redacted events to the SW ring buffer. Gated on lensed_dev /
+  // lensed_diagnostics; no-op + try-wrapped otherwise, so it can never affect
+  // scan/stage/capture. `label`s passed here are already redacted or safe (#num).
+  function diagOn() {
+    if (lensedDevOn()) return true;
+    try { return localStorage.getItem('lensed_diagnostics') === '1'; } catch (_) { return false; }
+  }
+  var DIAG_VERSION = (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '?'; } })();
+  // NOTE: named dlog (not diag) — `diag` is already an in-memory counters object.
+  function dlog(type, sev, msg, meta) {
+    if (!diagOn()) return;
+    try {
+      chrome.runtime.sendMessage(
+        { type: 'DIAG_EVENT', event: { ts: Date.now(), v: DIAG_VERSION, comp: 'content', type: type, sev: sev || 'info', msg: msg || '', meta: meta || null } },
+        function () { void chrome.runtime.lastError; }
+      );
+    } catch (_) {}
+  }
+  // Download the SW diagnostic ring as a JSON file (dev-only export button).
+  function exportDiagnostics() {
+    try {
+      chrome.runtime.sendMessage({ type: 'DIAG_EXPORT' }, function (resp) {
+        if (chrome.runtime.lastError || !resp) return;
+        var payload = { tool: 'lensed-extension', exported_at: new Date().toISOString(), version: resp.v, count: resp.count, events: resp.events || [] };
+        try {
+          var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url; a.download = 'lensed-diagnostics-' + Date.now() + '.json';
+          (document.body || document.documentElement).appendChild(a);
+          a.click();
+          setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (_) {} }, 1500);
+        } catch (_) {}
+      });
+    } catch (_) {}
+  }
+
   // Temporary visible last-scan status so hosts can SEE a scan actually happened.
   // state: detected | searching | staged | notfound | failed. `label` overrides the
   // left value (e.g. the resolved "#14"); pass null to keep it generic.
   function setScanStatus(label, state) {
+    dlog('scan.status', (state === 'notfound' || state === 'failed') ? 'warn' : 'info', 'scan ' + state, { state: state, label: label || null });
     if (!lastScanEl) return;
     var words = { detected: 'detected', searching: 'searching…', staged: 'staged ✓', notfound: 'no SKU matched', failed: 'failed' };
     var cls = (state === 'staged') ? ' ok' : (state === 'notfound' || state === 'failed') ? ' error' : '';
@@ -1006,6 +1045,7 @@
     }
 
     var dispatched = false;
+    dlog('bind.sent', 'info', 'AUTO_BIND dispatched to background', { order: sale.orderId, staged: skusForBind.length, room: !!currentRoomId, session: !!counterSessionId });
     try {
       chrome.runtime.sendMessage({
         type: 'AUTO_BIND',
@@ -1014,11 +1054,18 @@
       }, function (resp) {
         if (chrome.runtime.lastError) {
           console.error('[LENSED][TT] auto-bind sendMessage error:', chrome.runtime.lastError);
+          dlog('bind.reply', 'error', 'AUTO_BIND no reply (runtime error)', { order: sale.orderId, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'lastError' });
+          return;
         }
+        // Log the reply for the post-live audit. NOTE: capture/bind behavior is
+        // unchanged — the overlay's bound/clear logic below still keys on `dispatched`;
+        // this only records what the background reported.
+        dlog('bind.reply', (resp && resp.ok) ? 'info' : 'warn', 'AUTO_BIND reply', { order: sale.orderId, ok: !!(resp && resp.ok) });
       });
       dispatched = true;
     } catch (err) {
       console.error('[LENSED][TT] auto-bind dispatch failed:', err);
+      dlog('bind.dispatch_failed', 'error', 'AUTO_BIND dispatch threw', { order: sale.orderId });
     }
 
     // Commit the dedup token only once the message actually dispatched, so a failed
@@ -1099,6 +1146,16 @@
     var controls = el('div', 'lensed-controls');
     controls.appendChild(closeBtn);
     controls.appendChild(toggle);
+
+    // Diagnostics export — dev-only "⭳" button. Downloads the SW flight-recorder
+    // ring as JSON for a post-live audit. Absent in normal host mode.
+    if (diagOn()) {
+      var diagBtn = el('button', 'lensed-toggle', '⤓');
+      diagBtn.title = 'Export diagnostics (dev)';
+      diagBtn.style.cssText = 'font-size:15px;line-height:1;color:#a5b4ff;';
+      diagBtn.addEventListener('click', function (e) { e.stopPropagation(); exportDiagnostics(); });
+      controls.appendChild(diagBtn);
+    }
 
     // [SCREENSHOT] Tiny header dot — toggles the (default-off) debug section.
     // Muted when disabled; indigo when enabled. No prominent UI in the host flow.
@@ -1748,6 +1805,12 @@
     startPageWiring();
   }
 
+  // Diagnostics: turn on the SW ring buffer + record content load (dev-only, no-op otherwise).
+  if (diagOn()) {
+    try { chrome.runtime.sendMessage({ type: 'DIAG_ENABLE' }, function () { void chrome.runtime.lastError; }); } catch (_) {}
+    dlog('content.load', 'info', 'content script loaded', { frame: window.top === window ? 'top' : 'iframe', path: (function () { try { return location.pathname; } catch (_) { return null; } })(), version: DIAG_VERSION });
+  }
+
   init();
 
   // ── Global keyboard shortcuts (only when the SKU input is NOT focused) ─
@@ -1927,6 +1990,14 @@
     var data = event.data;
     if (!data || typeof data !== 'object') return;
 
+    // Relay MAIN-world (injector) diagnostic events to the SW ring buffer.
+    if (data.source === 'lensed-diag') {
+      if (diagOn() && data.event) {
+        try { chrome.runtime.sendMessage({ type: 'DIAG_EVENT', event: Object.assign({ v: DIAG_VERSION }, data.event) }, function () { void chrome.runtime.lastError; }); } catch (_) {}
+      }
+      return;
+    }
+
     if (data.source === 'lensed-tiktok-sale') {
       var sale = data.sale;
       try {
@@ -1948,6 +2019,7 @@
       // Render in overlay
       renderSale(sale, wasBound, boundSkus);
       diag.lastCaptureTs = Date.now();
+      dlog('order.captured', 'info', 'sale rendered', { order: sale && sale.orderId, brandNew: brandNewOrder, hadStaged: hadStaged, markedBound: !!wasBound });
 
       // [SCREENSHOT] Auction END screenshot — only when the feature is enabled AND
       // lazy-init is complete (shotsReady). shotsReady flips well after page load,
@@ -1977,6 +2049,7 @@
         capturedOnlyCount++;
         renderCapturedOnlyWarning();
         persistCounter();
+        dlog('order.captured_only', 'warn', 'order captured with nothing staged', { order: sale && sale.orderId, total: capturedOnlyCount });
         // Visible overlay warning above is the signal; console line gated to avoid live spam.
         if (SHOTS_DEBUG) console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
       }
@@ -1993,6 +2066,7 @@
     if (data.source === 'lensed-tiktok-room') {
       currentRoomId = data.roomId || currentRoomId; // scope persisted staged SKUs + host
       restoreHostByRoom(); // pre-first-sale reload: recover a host chosen for this room
+      dlog('room.detected', 'info', 'room_id relayed to background', { room: data.roomId || null });
       try {
         chrome.runtime.sendMessage({ type: 'TIKTOK_ROOM', roomId: data.roomId }).catch(function () {});
       } catch (_) {}
@@ -2002,6 +2076,7 @@
     if (data.source === 'lensed-tiktok-account') {
       // Detected host identity from the MAIN-world injector — label the overlay only.
       // Display-only in this PR: NOT forwarded to the worker (no session scoping here).
+      dlog('account.detected', 'info', 'account detected', { handle: (data.account && (data.account.handle || data.account.tag)) || null });
       renderAccount(data.account || null);
       return;
     }
@@ -2136,6 +2211,7 @@
     selectedHostId = val;
     persistSelectedHost();
     renderHostWarning();
+    dlog('host.selected', 'info', 'host selection changed', { host: val ? 'set' : 'none', changingMidLive: changingMidLive });
     try {
       chrome.runtime.sendMessage(
         { type: 'SET_SESSION_HOST', hostId: selectedHostId, roomId: currentRoomId || null },
