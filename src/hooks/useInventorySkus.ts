@@ -48,6 +48,8 @@ export interface SkuFields {
   lead_time_days?: number | null;
   supplier?: string | null;
   reorder_point?: number | null;
+  // FIXED taxonomy: 'squish' | 'electronics' | null (untagged). CHECK-enforced.
+  category?: string | null;
 }
 
 const KEY = 'inventory-skus';
@@ -122,6 +124,36 @@ export function useUpdateSku() {
       return res.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+// Inline category tagging from the SKU table. Optimistic (updates the cache
+// immediately for fast bulk tagging), rolls back on error, and refetches on
+// settle. Reuses the same PATCH path as edit — only the `category` field is sent.
+export function useSetSkuCategory() {
+  const qc = useQueryClient();
+  const { user } = useUser();
+  return useMutation({
+    mutationFn: async ({ id, category }: { id: string; category: string | null }) => {
+      const fd = new FormData();
+      fd.set('category', category ?? ''); // '' => server stores NULL (untagged)
+      const res = await fetch(`/api/inventory/skus/${id}`, { method: 'PATCH', body: fd });
+      if (!res.ok) throw new Error(await readError(res, 'Failed to update category'));
+      return res.json();
+    },
+    onMutate: async ({ id, category }: { id: string; category: string | null }) => {
+      const key = [KEY, user?.id];
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<InventorySku[]>(key);
+      qc.setQueryData<InventorySku[]>(key, (old) =>
+        (old ?? []).map((s) => (s.id === id ? { ...s, category } : s)),
+      );
+      return { prev, key };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(ctx.key, ctx.prev);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: [KEY] }),
   });
 }
 
