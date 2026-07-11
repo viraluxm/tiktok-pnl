@@ -56,6 +56,20 @@
     } catch (_) { return false; }
   }
 
+  // ── Diagnostics relay (dev-only flight recorder) ───────────────────
+  // MAIN world has no chrome.* — postMessage diagnostic events to the content
+  // script, which forwards them to the SW ring buffer. Redacted only: no raw
+  // payloads, no tokens. No-op unless lensed_dev / lensed_diagnostics is set, and
+  // every call is try-wrapped so logging can never affect sniffing/relay.
+  function diagOn() {
+    try { return isDev() || (window.localStorage && window.localStorage.getItem('lensed_diagnostics') === '1'); } catch (_) { return false; }
+  }
+  function diag(type, sev, msg, meta) {
+    if (!diagOn()) return;
+    try { window.postMessage({ source: 'lensed-diag', event: { ts: Date.now(), comp: 'inject', type: type, sev: sev || 'info', msg: msg || '', meta: meta || null } }, window.location.origin); } catch (_) {}
+  }
+  try { diag('inject.load', 'info', 'injected script loaded', { path: (function () { try { return location.pathname; } catch (_) { return null; } })() }); } catch (_) {}
+
   // In-memory dedup — resets on navigation/reload. Sufficient for Phase 1;
   // durable dedup lives in the service worker + Postgres ON CONFLICT later.
   // Keyed by order_id → last-seen payment token so a payment-status FLIP
@@ -80,6 +94,7 @@
 
   // ── Relay helpers ──────────────────────────────────────────────────
   function relaySale(sale) {
+    diag('sale.relay', 'info', 'sale relayed to content', { order: sale && sale.orderId, status: sale && (sale.isPaymentSuccessful === false ? 'failed' : 'ok') });
     window.postMessage({ source: 'lensed-tiktok-sale', sale }, window.location.origin);
   }
 
@@ -87,6 +102,7 @@
     if (!roomId || roomId === lastRoomId) return;
     lastRoomId = roomId;
     console.log('[LENSED][TT] room_id detected:', roomId);
+    diag('room.detected', 'info', 'room_id detected', { room: roomId, source: 'auction_url' });
     window.postMessage({ source: 'lensed-tiktok-room', roomId }, window.location.origin);
   }
 

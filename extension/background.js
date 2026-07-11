@@ -35,6 +35,62 @@ var SK_ROOM_ID = 'lensed_room_id';
 // never resumed — even for the same room.
 var SK_SESSION_TS = 'lensed_session_ts';
 
+// ─── Diagnostics (dev-only flight recorder; no-op unless enabled) ────
+// Local-only ring buffer of redacted events, persisted THROTTLED to
+// chrome.storage.local. The SW is the single sink: content + inject forward
+// their events here (they gate on localStorage; the SW can't read it, so content
+// sends DIAG_ENABLE). NEVER stores tokens/cookies/raw payloads. Every call is
+// try-wrapped so a logging failure can never affect capture/bind.
+var EXT_VERSION = (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '?'; } })();
+var DIAG_KEY = 'lensed_diag_log';
+var DIAG_FLAG = 'lensed_diag_enabled';
+var DIAG_CAP = 3000;
+var diagEnabled = false;
+var diagRing = [];
+var diagDirty = false;
+var diagFlushTimer = null;
+function diagFlush() {
+  diagFlushTimer = null;
+  if (!diagDirty) return;
+  diagDirty = false;
+  try { chrome.storage.local.set({ lensed_diag_log: diagRing }); } catch (_) {}
+}
+function diagPersistSoon() {
+  if (diagFlushTimer) return;
+  try { diagFlushTimer = setTimeout(diagFlush, 2000); } catch (_) { diagFlush(); }
+}
+function diagPush(ev) {
+  if (!diagEnabled || !ev) return;
+  try {
+    diagRing.push(ev);
+    if (diagRing.length > DIAG_CAP) diagRing.splice(0, diagRing.length - DIAG_CAP);
+    diagDirty = true;
+    diagPersistSoon();
+  } catch (_) {}
+}
+function diag(type, sev, msg, meta) {
+  if (!diagEnabled) return;
+  diagPush({ ts: Date.now(), v: EXT_VERSION, comp: 'background', type: type, sev: sev || 'info', msg: msg || '', meta: meta || null });
+}
+// Map a thrown RPC/HTTP error to a stable code for the bind audit.
+function diagClassifyErr(e) {
+  var m = (e && (e.message || e.msg)) || String(e || '');
+  if (/OUT_OF_STOCK/.test(m)) return 'OUT_OF_STOCK';
+  if (/SESSION_ENDED/.test(m)) return 'SESSION_ENDED';
+  if (/SKU_NOT_FOUND/.test(m)) return 'SKU_NOT_FOUND';
+  if (/SESSION_NOT_FOUND/.test(m)) return 'SESSION_NOT_FOUND';
+  if (/NO_ORG/.test(m)) return 'NO_ORG';
+  if (/NOT_AUTHENTICATED|28000/.test(m)) return 'NOT_AUTHENTICATED';
+  if (/Failed to fetch|NetworkError|network|timeout|abort/i.test(m)) return 'network_error';
+  return 'unknown';
+}
+function diagRedactId(v) { v = String(v == null ? '' : v); return v.length <= 4 ? v : ('…' + v.slice(-4)); }
+// SW-level uncaught error/rejection capture (message only — never payloads).
+try {
+  self.addEventListener('error', function (ev) { diag('sw.error', 'error', (ev && ev.message) || 'error', { file: ev && ev.filename, line: ev && ev.lineno }); });
+  self.addEventListener('unhandledrejection', function (ev) { var r = ev && ev.reason; diag('sw.unhandledrejection', 'error', (r && (r.message || String(r))) || 'rejection', null); });
+} catch (_) {}
+
 // ─── State ───────────────────────────────────────────────────────────
 var accessToken = null;
 var refreshToken = null;
@@ -301,15 +357,20 @@ async function rehydrateAuth() {
       // If the stored access token is expired, try refreshing immediately
       if (isTokenExpired(accessToken)) {
         console.log('[LENSED][BG] rehydrated token is expired, refreshing...');
+        diag('auth.refresh', 'info', 'refreshing expired token');
         var refreshed = await tryRefreshToken();
         if (!refreshed) {
           console.warn('[LENSED][BG] rehydrate refresh failed — clearing auth');
+          diag('auth.cleared', 'warn', 'rehydrate refresh failed — auth cleared', { user: diagRedactId(userId) });
           accessToken = null;
           refreshToken = null;
           userId = null;
+        } else {
+          diag('auth.restored', 'info', 'auth restored (refreshed)', { user: diagRedactId(userId) });
         }
       } else {
         console.log('[LENSED][BG] auth rehydrated, user_id:', userId);
+        diag('auth.restored', 'info', 'auth restored', { user: diagRedactId(userId) });
       }
 
       // Restore the pinned live-session identity so a post-reload/eviction bind
@@ -641,15 +702,17 @@ async function logAuction(sessionId, result, skus, idemKey) {
     });
     var row = Array.isArray(data) ? data[0] : data;
     console.log('[LENSED][BG] lensed_log_auction result:', row);
+    diag('bind.rpc_ok', 'info', 'lensed_log_auction ok', { order: idemKey, item: row && row.item_id, status: row && row.status, replayed: row && row.replayed, total_cost_cents: row && row.total_cost_cents });
     return row;
   } catch (e) {
     console.error('[LENSED][BG] lensed_log_auction error:', e);
+    diag('bind.rpc_error', 'error', 'lensed_log_auction failed', { order: idemKey, code: diagClassifyErr(e), msg: (e && e.message) || String(e) });
     return null;
   }
 }
 
 async function upsertCaptureEvent(sale, boundSkuId) {
-  if (!isAuthenticated()) return;
+  if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return; }
   try {
     var row = {
       user_id: userId,
@@ -670,8 +733,10 @@ async function upsertCaptureEvent(sale, boundSkuId) {
     };
     await supabaseUpsert('capture_events', row);
     console.log('[LENSED][BG] capture_events upserted:', sale.orderId);
+    diag('capture.write', 'info', 'capture_events upserted', { order: sale.orderId, bound: !!boundSkuId });
   } catch (e) {
     console.error('[LENSED][BG] capture_events upsert error:', e);
+    diag('capture.error', 'error', 'capture_events upsert failed', { order: sale.orderId, code: diagClassifyErr(e) });
   }
 }
 
@@ -695,10 +760,12 @@ async function handleAutoBind(sale, stagedSkus) {
   var prevToken = loggedOrderStatus.get(sale.orderId);
   if (prevToken === result) {
     console.log('[LENSED][BG] order_id already logged with same status, skipping:', sale.orderId, result);
+    diag('bind.skip_dup', 'info', 'duplicate order+status skipped', { order: sale.orderId, status: result });
     return;
   }
   loggedOrderStatus.set(sale.orderId, result);
   capOrderMaps();
+  diag('bind.received', 'info', 'AUTO_BIND received', { order: sale.orderId, status: result, staged: (stagedSkus ? stagedSkus.length : 0), room: !!sale.roomId });
 
   // A flip = we've processed this order before, with a different status.
   var isFlip = prevToken !== undefined;
@@ -735,33 +802,39 @@ async function handleAutoBind(sale, stagedSkus) {
       // then neither decrements inventory (decrement is gated on p_result='sold')
       // nor counts it toward sold totals/profit. On a later paid re-send the flip
       // branch above transitions it once (migration 027).
+      diag('bind.session', 'info', 'room-scoped session resolved', { order: sale.orderId, session: diagRedactId(sessionId) });
       var logRow = await logAuction(sessionId, result, pSkus, sale.orderId);
       if (logRow) {
         // Only record success on an actual bind so a later flip can target it.
         loggedOrderSession.set(sale.orderId, sessionId);
         capOrderMaps();
         boundSkuId = stagedSkus.length === 1 ? stagedSkus[0].id : null;
+        diag('bind.ok', 'info', 'order bound to auction item', { order: sale.orderId, boundSkuId: boundSkuId || null });
       } else {
         // Bind failed (RPC error/empty). Don't fake success: roll back the status
         // dedup so an identical re-send RETRIES instead of being silently skipped,
         // and surface it (the order still lands in capture_events below).
         loggedOrderStatus.delete(sale.orderId);
         console.error('[LENSED][BG] BIND FAILED — order captured only (will retry on re-send):', sale.orderId, 'session', sessionId);
+        diag('bind.failed', 'error', 'bind failed — order captured only', { order: sale.orderId, session: diagRedactId(sessionId) });
       }
     } else {
       // Staged SKUs existed but no room-scoped session could be resolved (e.g. room
       // unknown). Roll back dedup so a retry can bind once a room is known.
       loggedOrderStatus.delete(sale.orderId);
       console.warn('[LENSED][BG] no room-scoped session — order captured only (will retry):', sale.orderId);
+      diag('bind.no_session', 'warn', 'no room-scoped session — captured only', { order: sale.orderId, room: sale.roomId || null });
     }
   } else if (!isAuthenticated()) {
     console.warn('[LENSED][BG] not authenticated — sale captured but not logged to lensed_log_auction:', sale.orderId);
+    diag('bind.not_authenticated', 'warn', 'not authenticated — captured only', { order: sale.orderId });
   } else {
     // Authenticated, a real new/changed order, but NOTHING was staged → the order is
     // captured raw and NOT bound to an auction item. Surface it (the overlay shows a
     // visible warning; this is the background-side diagnostic) instead of silently
     // dropping the SKU/COGS link — the July-3 captured-only failure mode.
     console.warn('[LENSED][BG] no staged SKUs — order captured only, NOT bound to an auction item:', sale.orderId);
+    diag('bind.no_staged', 'warn', 'no staged SKUs — captured only', { order: sale.orderId });
   }
 
   // Always upsert to capture_events (raw audit log)
@@ -1169,6 +1242,30 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (!message || typeof message !== 'object') return;
 
+  // ── Diagnostics channel (dev-only) ──
+  if (message.type === 'DIAG_ENABLE') {
+    diagEnabled = true;
+    try { chrome.storage.local.set({ lensed_diag_enabled: true }); } catch (_) {}
+    diag('diag.enable', 'info', 'diagnostics enabled', { v: EXT_VERSION });
+    try { sendResponse({ ok: true }); } catch (_) {}
+    return;
+  }
+  if (message.type === 'DIAG_EVENT') {
+    if (diagEnabled && message.event) diagPush(message.event);
+    try { sendResponse({ ok: true }); } catch (_) {}
+    return;
+  }
+  if (message.type === 'DIAG_EXPORT') {
+    diagFlush();
+    try { sendResponse({ v: EXT_VERSION, count: diagRing.length, events: diagRing }); } catch (_) {}
+    return true;
+  }
+  if (message.type === 'DIAG_CLEAR') {
+    diagRing = []; diagDirty = true; diagFlush();
+    try { sendResponse({ ok: true }); } catch (_) {}
+    return;
+  }
+
   if (message.type === 'TIKTOK_ROOM') {
     var newRoom = message.roomId;
     if (!newRoom || newRoom === currentRoomId) return;
@@ -1213,8 +1310,11 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     // resolveSkuByNumber returns { sku, status }; forward it verbatim so the
     // overlay can tell a genuine miss from a not-yet-authenticated worker.
     resolveSkuByNumber(message.skuNumber).then(function (result) {
+      diag('sku.lookup', (result && result.sku) ? 'info' : 'warn', 'lookup ' + (result && result.status),
+        { status: result && result.status, sku_number: result && result.sku && result.sku.sku_number });
       sendResponse(result);
-    }).catch(function () {
+    }).catch(function (e) {
+      diag('sku.lookup', 'error', 'lookup threw', { code: diagClassifyErr(e) });
       sendResponse({ sku: null, status: 'error' });
     });
     return true;
@@ -1330,3 +1430,15 @@ authReadyPromise = rehydrateAuth().then(function () {
 });
 
 console.log('[LENSED][BG] service worker started');
+
+// Diagnostics: restore the enabled flag + prior ring on every cold start. A
+// non-empty restored ring means the SW was evicted and restarted mid-live, which
+// is itself a signal worth recording (sw.start restart=true).
+try {
+  chrome.storage.local.get([DIAG_FLAG, DIAG_KEY], function (d) {
+    if (chrome.runtime.lastError || !d) return;
+    diagEnabled = !!d[DIAG_FLAG];
+    if (Array.isArray(d[DIAG_KEY])) diagRing = d[DIAG_KEY].slice(-DIAG_CAP);
+    diag('sw.start', 'info', 'service worker awake', { restart: diagRing.length > 0, priorEvents: diagRing.length, v: EXT_VERSION });
+  });
+} catch (_) {}
