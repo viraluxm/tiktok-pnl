@@ -50,7 +50,11 @@ export function computePay(employees: Employee[], shifts: ReadonlyArray<ShiftLik
 }
 
 const DAY_MS = 86_400_000;
-const FRIDAY = 5; // getUTCDay(): Sun=0 … Fri=5 … Sat=6
+
+// ONE global biweekly pay cycle for the whole team (replaced the old per-employee,
+// hire-date-anchored paydays). PAY_ANCHOR is a KNOWN payday Friday; every payday is
+// PAY_ANCHOR ± N×14 days. Change this one constant to shift the entire cycle.
+export const PAY_ANCHOR = '2026-07-17'; // Friday
 
 // Parse a 'YYYY-MM-DD' date as UTC midnight. Working purely in UTC-midnight space keeps
 // the weekday/step math free of local-timezone and DST drift.
@@ -63,43 +67,51 @@ function addDaysUTC(d: Date, days: number): Date {
   return new Date(d.getTime() + days * DAY_MS);
 }
 
-// The employee's NEXT upcoming biweekly payday relative to `today`, anchored to
-// hire_date. Rules: paydays fall on Fridays; the first payday is the SECOND Friday
-// after hire_date; then every 14 days. Friday-hire edge case — the hire day itself
-// does not count, so the next Friday is the "1st Friday" (handled by taking the first
-// Friday STRICTLY after hire_date). Returns a formatted date like "Fri, Jul 17", or
-// null when hire_date is missing/unparseable.
-export function nextPayday(hireDate: string | null, today: Date = new Date()): string | null {
-  if (!hireDate) return null;
-  const hire = parseDateUTC(hireDate);
-  if (isNaN(hire.getTime())) return null;
-
-  // 1st Friday strictly after hire_date (a Friday hire rolls forward a full week).
-  const daysToFirstFriday = ((FRIDAY - hire.getUTCDay() + 7) % 7) || 7;
-  const firstFriday = addDaysUTC(hire, daysToFirstFriday);
-  // First payday = 2nd Friday = 1st Friday + 7 days.
-  const firstPayday = addDaysUTC(firstFriday, 7);
-
-  // Compare at day granularity using the local calendar date the user sees as "today".
-  const todayUTC = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
-
-  // Advance in 14-day steps to the first payday that is today or later.
-  let payday = firstPayday;
-  if (payday.getTime() < todayUTC.getTime()) {
-    const periods = Math.ceil((todayUTC.getTime() - payday.getTime()) / (14 * DAY_MS));
-    payday = addDaysUTC(payday, periods * 14);
-  }
-
-  return payday.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    timeZone: 'UTC',
-  });
-}
-
 function toISODateUTC(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+// A discrete pay period: an inclusive 'YYYY-MM-DD' window [start, end] (Mon → Sun).
+export interface PayPeriod {
+  start: string; // Monday
+  end: string;   // Sunday
+}
+
+// The next GLOBAL payday on-or-after `today`, as 'YYYY-MM-DD'. Same for everyone —
+// PAY_ANCHOR ± N×14 days. Steps backward too (past today just yields fewer steps).
+export function nextPayday(today: Date = new Date()): string {
+  const anchor = parseDateUTC(PAY_ANCHOR);
+  const todayUTC = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+  // Whole 14-day steps from the anchor to reach the first payday >= today (ceil so a day
+  // strictly before the anchor rounds toward 0/negative and lands on the anchor itself).
+  const steps = Math.ceil((todayUTC.getTime() - anchor.getTime()) / (14 * DAY_MS));
+  return toISODateUTC(addDaysUTC(anchor, steps * 14));
+}
+
+// The payday `offset` cycles away from the current one (0 = current, -1 = previous,
+// +1 = next), as 'YYYY-MM-DD'. For the prev/next period navigation.
+export function paydayAtOffset(offset: number, today: Date = new Date()): string {
+  return toISODateUTC(addDaysUTC(parseDateUTC(nextPayday(today)), offset * 14));
+}
+
+// The 2-week period a payday PAYS FOR. Lag: the period CLOSES the Sunday BEFORE payday.
+//   end   = payday − 5 days  (the Sunday before a Friday payday)
+//   start = end − 13 days    (14-day inclusive Mon→Sun window)
+// e.g. payPeriodFor('2026-07-17') → { start: '2026-06-29', end: '2026-07-12' }.
+export function payPeriodFor(paydayISO: string): PayPeriod {
+  const payday = parseDateUTC(paydayISO);
+  const end = addDaysUTC(payday, -5);
+  const start = addDaysUTC(end, -13);
+  return { start: toISODateUTC(start), end: toISODateUTC(end) };
+}
+
+// Display helpers (UTC so the calendar date never drifts by timezone).
+// fmtPayDate('2026-07-17') → 'Fri, Jul 17';  fmtMonthDay('2026-06-29') → 'Jun 29'.
+export function fmtPayDate(iso: string): string {
+  return parseDateUTC(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+export function fmtMonthDay(iso: string): string {
+  return parseDateUTC(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 // A recurring shift INSTANCE, computed from a rule (minus/adjusted by exceptions).
