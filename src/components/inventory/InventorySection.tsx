@@ -5,6 +5,7 @@ import {
   useInventorySkus,
   useCreateSku,
   useUpdateSku,
+  useSetSkuCategory,
   useToggleSkuActive,
   useDeleteSku,
   useAddBatch,
@@ -14,6 +15,19 @@ import {
 import { code128ToSvg } from '@/lib/barcode/code128';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
+
+// FIXED category taxonomy (CHECK-enforced in the DB). null = untagged.
+type Category = 'squish' | 'electronics';
+const CATEGORY_OPTIONS: { value: Category; label: string }[] = [
+  { value: 'squish', label: 'Squish' },
+  { value: 'electronics', label: 'Electronics' },
+];
+type CategoryFilter = 'all' | Category;
+const CATEGORY_FILTERS: { value: CategoryFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'squish', label: 'Squish' },
+  { value: 'electronics', label: 'Electronics' },
+];
 
 const escapeHtml = (s: string) =>
   s.replace(/[<>&]/g, (c) => (c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'));
@@ -138,6 +152,7 @@ interface FormState {
   lead_time_days: string;
   supplier: string;
   reorder_point: string;
+  category: '' | Category; // '' = untagged (none)
 }
 
 const EMPTY: FormState = {
@@ -151,12 +166,14 @@ const EMPTY: FormState = {
   lead_time_days: '',
   supplier: '',
   reorder_point: '',
+  category: '',
 };
 
 export default function InventorySection() {
   const { data: skus = [], isLoading } = useInventorySkus();
   const createSku = useCreateSku();
   const updateSku = useUpdateSku();
+  const setCategory = useSetSkuCategory();
   const toggleActive = useToggleSkuActive();
   const deleteSku = useDeleteSku();
   const addBatch = useAddBatch();
@@ -174,6 +191,7 @@ export default function InventorySection() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [labelSize, setLabelSize] = useState<LabelSize>('2x1');
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
 
   // Image state for the form.
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -182,7 +200,15 @@ export default function InventorySection() {
   const [removeImage, setRemoveImage] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  const activeSkus = useMemo(() => skus.filter((s) => s.is_active), [skus]);
+  // Category view: 'all' shows every SKU (untagged included); a specific category
+  // narrows the list to that category only. This scopes BOTH the table rows and
+  // the header totals — the active/inactive logic below is unchanged, applied on
+  // top of this set.
+  const visibleSkus = useMemo(
+    () => (categoryFilter === 'all' ? skus : skus.filter((s) => s.category === categoryFilter)),
+    [skus, categoryFilter],
+  );
+  const activeSkus = useMemo(() => visibleSkus.filter((s) => s.is_active), [visibleSkus]);
   const totalValueCents = useMemo(
     () => activeSkus.reduce((sum, s) => sum + (s.unit_cost_cents ?? 0) * (s.qty_on_hand ?? 0), 0),
     [activeSkus],
@@ -207,7 +233,8 @@ export default function InventorySection() {
     () => skus.filter((s) => selectedIds.has(s.id)),
     [skus, selectedIds],
   );
-  const allSelected = skus.length > 0 && selectedIds.size === skus.length;
+  // Select-all is scoped to the currently visible (filtered) rows.
+  const allSelected = visibleSkus.length > 0 && visibleSkus.every((s) => selectedIds.has(s.id));
 
   function toggleSelected(id: string) {
     setSelectedIds((prev) => {
@@ -219,7 +246,15 @@ export default function InventorySection() {
   }
 
   function toggleSelectAll() {
-    setSelectedIds((prev) => (prev.size === skus.length ? new Set() : new Set(skus.map((s) => s.id))));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (visibleSkus.every((s) => next.has(s.id))) {
+        for (const s of visibleSkus) next.delete(s.id);
+      } else {
+        for (const s of visibleSkus) next.add(s.id);
+      }
+      return next;
+    });
   }
 
   function clearImageState() {
@@ -257,6 +292,9 @@ export default function InventorySection() {
       lead_time_days: s.lead_time_days != null ? String(s.lead_time_days) : '',
       supplier: s.supplier ?? '',
       reorder_point: s.reorder_point != null ? String(s.reorder_point) : '',
+      // Category is tagged inline from the table, not edited here; carried for
+      // form-shape completeness and never re-sent on Save.
+      category: (s.category as Category | null) ?? '',
     });
   }
 
@@ -322,6 +360,7 @@ export default function InventorySection() {
             sku_number: n,
             unit_cost_cents: toCents(form.unit_cost),
             qty_on_hand: form.qty_on_hand.trim() ? Math.trunc(Number(form.qty_on_hand)) : 0,
+            category: form.category || null, // '' => untagged
           },
           image: imageFile,
         });
@@ -381,7 +420,7 @@ export default function InventorySection() {
           <div className="text-2xl font-bold tabular-nums">{fmtCents(totalValueCents)}</div>
           <div className="text-xs text-tt-muted mt-1">
             {activeSkus.length} active {activeSkus.length === 1 ? 'SKU' : 'SKUs'}
-            {skus.length > activeSkus.length ? ` · ${skus.length - activeSkus.length} inactive` : ''}
+            {visibleSkus.length > activeSkus.length ? ` · ${visibleSkus.length - activeSkus.length} inactive` : ''}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -519,6 +558,22 @@ export default function InventorySection() {
                   className="input"
                 />
               </Field>
+              {/* Category at creation (Add only); on existing SKUs it's tagged
+                  inline from the table row. */}
+              {!editingId && (
+                <Field label="Category">
+                  <select
+                    value={form.category}
+                    onChange={(e) => setForm((f) => ({ ...f, category: e.target.value as '' | Category }))}
+                    className="input cursor-pointer"
+                  >
+                    <option value="">—</option>
+                    {CATEGORY_OPTIONS.map((c) => (
+                      <option key={c.value} value={c.value}>{c.label}</option>
+                    ))}
+                  </select>
+                </Field>
+              )}
               {editingId ? (
                 <>
                   {/* FIFO: cost is per-layer and qty = Σ layers — both read-only here,
@@ -734,6 +789,28 @@ export default function InventorySection() {
         </div>
       )}
 
+      {/* Category filter — segmented, styled like the Period buttons. */}
+      {!isLoading && skus.length > 0 && (
+        <div className="flex items-center gap-2 mb-3">
+          <label className="text-[13px] text-tt-muted font-medium">Category:</label>
+          <div className="flex gap-1">
+            {CATEGORY_FILTERS.map((f) => (
+              <button
+                key={f.value}
+                onClick={() => setCategoryFilter(f.value)}
+                className={`px-3 py-1.5 rounded-full border text-xs cursor-pointer transition-all ${
+                  categoryFilter === f.value
+                    ? 'bg-tt-cyan text-black border-tt-cyan font-semibold'
+                    : 'border-tt-border text-tt-muted hover:bg-tt-cyan hover:text-black hover:border-tt-cyan'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       {isLoading ? (
         <div className="flex items-center justify-center py-16 text-tt-muted">
@@ -745,6 +822,14 @@ export default function InventorySection() {
           <div className="text-tt-text font-medium">No SKUs yet</div>
           <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
             Add the items you sell, with their cost, quantity, and a photo, so you can log them fast during a live auction.
+          </p>
+        </div>
+      ) : visibleSkus.length === 0 ? (
+        <div className="rounded-2xl border border-tt-border bg-tt-card py-16 text-center">
+          <div className="text-tt-text font-medium">No SKUs in this category</div>
+          <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
+            Nothing tagged “{CATEGORY_FILTERS.find((f) => f.value === categoryFilter)?.label}” yet — tag SKUs from the {' '}
+            <span className="text-tt-text">All</span> view using the Category dropdown on each row.
           </p>
         </div>
       ) : (
@@ -765,6 +850,7 @@ export default function InventorySection() {
                 <th className="text-left font-medium px-4 py-3">SKU</th>
                 <th className="text-left font-medium px-4 py-3">Shortcut</th>
                 <th className="text-left font-medium px-4 py-3">Item</th>
+                <th className="text-left font-medium px-4 py-3">Category</th>
                 <th className="text-right font-medium px-4 py-3">Unit cost</th>
                 <th className="text-right font-medium px-4 py-3">Qty</th>
                 <th className="text-center font-medium px-4 py-3">Active</th>
@@ -772,7 +858,7 @@ export default function InventorySection() {
               </tr>
             </thead>
             <tbody>
-              {skus.map((s) => (
+              {visibleSkus.map((s) => (
                 <tr
                   key={s.id}
                   className={`border-b border-tt-border last:border-0 ${s.is_active ? '' : 'opacity-50'}`}
@@ -803,6 +889,22 @@ export default function InventorySection() {
                         {s.title || <span className="text-tt-muted">Untitled</span>}
                       </span>
                     </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    {/* Inline category tag — writes immediately (optimistic), no modal. */}
+                    <select
+                      value={s.category ?? ''}
+                      onChange={(e) =>
+                        setCategory.mutate({ id: s.id, category: e.target.value ? (e.target.value as Category) : null })
+                      }
+                      aria-label={`Category for SKU ${s.sku_number}`}
+                      className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text cursor-pointer outline-none focus:border-tt-input-focus"
+                    >
+                      <option value="">—</option>
+                      {CATEGORY_OPTIONS.map((c) => (
+                        <option key={c.value} value={c.value}>{c.label}</option>
+                      ))}
+                    </select>
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums">{fmtCents(s.unit_cost_cents)}</td>
                   <td className="px-4 py-3 text-right tabular-nums">
