@@ -8,10 +8,19 @@ function parseTime(t: string): number {
 
 // Hours worked for a single shift, derived from its time range. A shift whose end is
 // before its start is treated as running past midnight (end rolls into the next day).
-export function shiftHours(startTime: string, endTime: string): number {
+// An OPEN shift (null end_time) has no completed duration → returns 0; callers that
+// sum hours should exclude open shifts entirely (see computePay + isOpenShift).
+export function shiftHours(startTime: string, endTime: string | null): number {
+  if (endTime == null) return 0;
   let mins = parseTime(endTime) - parseTime(startTime);
   if (mins < 0) mins += 24 * 60;
   return mins / 60;
+}
+
+// An open shift is in progress (no end recorded yet). Its hours are indeterminate, so
+// it is excluded from pay/hours totals rather than summed as 0.
+export function isOpenShift(s: { end_time: string | null }): boolean {
+  return s.end_time == null;
 }
 
 export interface EmployeePay {
@@ -30,6 +39,7 @@ export type ShiftLike = Pick<Shift, 'employee_id' | 'start_time' | 'end_time'>;
 export function computePay(employees: Employee[], shifts: ReadonlyArray<ShiftLike>): EmployeePay[] {
   const hoursByEmployee = new Map<string, number>();
   for (const s of shifts) {
+    if (isOpenShift(s)) continue; // open shift → indeterminate hours, excluded from pay
     const prev = hoursByEmployee.get(s.employee_id) || 0;
     hoursByEmployee.set(s.employee_id, prev + shiftHours(s.start_time, s.end_time));
   }
