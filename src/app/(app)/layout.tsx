@@ -16,6 +16,9 @@ export default function AppLayout({
   const router = useRouter();
   const queryClient = useQueryClient();
   const knownUserId = useRef<string | null>(null);
+  // Guards against overlapping /login navigations if SIGNED_OUT fires more than
+  // once. Reset on a valid signed-in session so a later logout still redirects.
+  const signOutRedirecting = useRef(false);
 
   useEffect(() => {
     const supabase = createClient();
@@ -46,6 +49,11 @@ export default function AppLayout({
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
         if (event === 'SIGNED_OUT') {
+          // Sole authority for the signed-out redirect + cache clear (UserMenu no
+          // longer navigates). Guarded so repeated SIGNED_OUT events cannot start
+          // overlapping navigations. Exactly one redirect, no router.refresh().
+          if (signOutRedirecting.current) return;
+          signOutRedirecting.current = true;
           knownUserId.current = null;
           queryClient.clear();
           router.replace('/login');
@@ -54,6 +62,8 @@ export default function AppLayout({
         // A different user signing in on the same tab must not inherit the
         // previous user's cached, user-scoped data.
         if (session?.user) {
+          // Signed in with a valid session — allow a future sign-out to redirect.
+          signOutRedirecting.current = false;
           const id = session.user.id;
           if (knownUserId.current && knownUserId.current !== id) {
             queryClient.clear();
