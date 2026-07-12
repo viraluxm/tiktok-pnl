@@ -42,6 +42,7 @@
   var lastScanEl = null;         // temporary visible "Last scan: … · <state>" line
   var diagStatusEl = null;       // dev-only "◉ Diagnostics ON · N events" indicator
   var diagPollStarted = false;   // single count-refresh interval across re-injects
+  var scanDetectLogged = false;  // collapse per-character 'detected' diag to one per scan attempt
   var reopenOverlay = null;      // module handle to reopen the overlay from the global scanner
   var shotStatusEl = null;       // [SCREENSHOT] compact counts (inside debug row)
   var shotWarnEl = null;         // [SCREENSHOT] storage/capture warning (debug row)
@@ -83,6 +84,8 @@
   // Count of orders captured this session that did NOT bind to a SKU (nothing staged
   // at capture time). Surfaced as a visible overlay warning so it is never silent.
   var capturedOnlyCount = 0;
+  var bindIssueCount = 0;        // orders whose capture/bind WRITE failed (background reported ok:false)
+  var lastBindIssueReason = null;
   // ── [SCREENSHOT] Capture state — OFF by default, opt-in, lazy ───────
   // The screenshot feature must NEVER slow the core flow. It is disabled by
   // default (chrome.storage key LK_SHOTS), initializes lazily well after the
@@ -653,7 +656,16 @@
   // state: detected | searching | staged | notfound | failed. `label` overrides the
   // left value (e.g. the resolved "#14"); pass null to keep it generic.
   function setScanStatus(label, state) {
-    dlog('scan.status', (state === 'notfound' || state === 'failed') ? 'warn' : 'info', 'scan ' + state, { state: state, label: label || null });
+    // Diagnostics noise control: the input path calls this on EVERY keystroke of a
+    // burst with state 'detected'. Log at most ONE scan.detected per attempt; a terminal
+    // state (staged/notfound/failed) re-arms it. searching + terminals stay logged (they
+    // are one-per-attempt), so the flight recorder keeps the useful events without spam.
+    if (state === 'detected') {
+      if (!scanDetectLogged) { scanDetectLogged = true; dlog('scan.detected', 'info', 'scan detected', { label: label || null }); }
+    } else {
+      if (state === 'staged' || state === 'notfound' || state === 'failed') scanDetectLogged = false;
+      dlog('scan.status', (state === 'notfound' || state === 'failed') ? 'warn' : 'info', 'scan ' + state, { state: state, label: label || null });
+    }
     if (!lastScanEl) return;
     var words = { detected: 'detected', searching: 'searching…', staged: 'staged ✓', notfound: 'no SKU matched', failed: 'failed' };
     var cls = (state === 'staged') ? ' ok' : (state === 'notfound' || state === 'failed') ? ' error' : '';
@@ -1096,10 +1108,18 @@
           dlog('bind.reply', 'error', 'AUTO_BIND no reply (runtime error)', { order: sale.orderId, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'lastError' });
           return;
         }
-        // Log the reply for the post-live audit. NOTE: capture/bind behavior is
-        // unchanged — the overlay's bound/clear logic below still keys on `dispatched`;
-        // this only records what the background reported.
-        dlog('bind.reply', (resp && resp.ok) ? 'info' : 'warn', 'AUTO_BIND reply', { order: sale.orderId, ok: !!(resp && resp.ok) });
+        // Record the TRUTHFUL background result. resp.ok is false when the capture_events
+        // write failed (even if the RPC succeeded → resp.partial). Surface it instead of
+        // treating everything as good; the background retries the missing write.
+        var ok = !!(resp && resp.ok);
+        dlog('bind.reply', ok ? 'info' : 'warn', 'AUTO_BIND reply', {
+          order: sale.orderId, ok: ok, bound: !!(resp && resp.bound), captureWritten: !!(resp && resp.captureWritten),
+          partial: !!(resp && resp.partial), reason: (resp && resp.reason) || null, code: (resp && resp.code) || null, status: (resp && resp.status) || null,
+        });
+        if (resp && resp.ok === false && resp.reason !== 'no_staged' && resp.reason !== 'not_authenticated') {
+          console.warn('[LENSED][TT] AUTO_BIND not fully OK:', sale.orderId, resp.reason, resp.code || '');
+          showBindIssue(resp);
+        }
       });
       dispatched = true;
     } catch (err) {
@@ -1663,13 +1683,24 @@
   // Paint (or hide) the captured-only warning from the current count.
   function renderCapturedOnlyWarning() {
     if (!capturedOnlyWarnEl) return;
+    var msgs = [];
     if (capturedOnlyCount > 0) {
-      capturedOnlyWarnEl.textContent = '⚠ ' + capturedOnlyCount + ' order'
-        + (capturedOnlyCount === 1 ? '' : 's')
-        + ' captured but NOT bound to a SKU. Stage a SKU before the sale to bind it.';
-    } else {
-      capturedOnlyWarnEl.textContent = '';
+      msgs.push('⚠ ' + capturedOnlyCount + ' order' + (capturedOnlyCount === 1 ? '' : 's')
+        + ' captured but NOT bound to a SKU. Stage a SKU before the sale to bind it.');
     }
+    if (bindIssueCount > 0) {
+      msgs.push('⚠ ' + bindIssueCount + ' order' + (bindIssueCount === 1 ? '' : 's')
+        + ' had a WRITE problem (' + (lastBindIssueReason || 'error') + '). Auto-retrying — check diagnostics.');
+    }
+    capturedOnlyWarnEl.textContent = msgs.join('  ');
+  }
+
+  // Background reported a non-OK AUTO_BIND (e.g. capture_events write failed even though
+  // the auction RPC succeeded). Surface it visibly instead of the old silent ok:true.
+  function showBindIssue(resp) {
+    bindIssueCount++;
+    lastBindIssueReason = (resp && resp.reason) || 'error';
+    renderCapturedOnlyWarning();
   }
 
   // Background signalled a session reset (room change / user switch / session end):
@@ -2082,13 +2113,31 @@
       // order seen) so we can detect a captured-only order below.
       var brandNewOrder = !!(sale && sale.orderId && !seenOrderIds[sale.orderId]);
       var hadStaged = stagedSkus.length > 0;
+      var fresh = isFreshSale(sale);
+      var hasReliableTs = !!(sale && typeof sale.orderedAtMs === 'number' && isFinite(sale.orderedAtMs) && sale.orderedAtMs > 0);
+
+      // ── Replay/backlog guard (fixes the staged:0 storm) ──────────────────────────
+      // Only suppress orders we are CONFIDENT are historical: brand-new-to-this-tab,
+      // NOTHING staged, AND a reliable order timestamp that is clearly old (a reload
+      // re-sends the cumulative backlog). A staged order always binds (regardless of
+      // timestamp). An order with a MISSING/UNRELIABLE timestamp is never discarded —
+      // it may be a real fresh sale — it processes normally and is logged as ambiguous
+      // below. This prevents both the replay-warning storm AND silently dropping a
+      // potentially fresh sale.
+      if (brandNewOrder && !hadStaged && hasReliableTs && !fresh) {
+        renderSale(sale, false, null); // marks the order seen + shows it in Recent orders
+        dlog('order.replayed_skip', 'info', 'historical order (reliable old timestamp, nothing staged) — bind skipped',
+          { order: sale && sale.orderId, ageMs: Date.now() - sale.orderedAtMs });
+        return;
+      }
+
       var wasBound = boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && hadStaged;
       var boundSkus = autoBind(sale);
 
       // Render in overlay
       renderSale(sale, wasBound, boundSkus);
       diag.lastCaptureTs = Date.now();
-      dlog('order.captured', 'info', 'sale rendered', { order: sale && sale.orderId, brandNew: brandNewOrder, hadStaged: hadStaged, markedBound: !!wasBound });
+      dlog('order.captured', 'info', 'sale rendered', { order: sale && sale.orderId, brandNew: brandNewOrder, hadStaged: hadStaged, fresh: fresh, markedBound: !!wasBound });
 
       // [SCREENSHOT] Auction END screenshot — only when the feature is enabled AND
       // lazy-init is complete (shotsReady). shotsReady flips well after page load,
@@ -2115,12 +2164,21 @@
       // recorded raw but NOT bound to a SKU. Count once + show a visible warning so
       // this failure is never silent again (the July-3 incident).
       if (brandNewOrder && !hadStaged && (!boundSkus || boundSkus.length === 0)) {
-        capturedOnlyCount++;
-        renderCapturedOnlyWarning();
-        persistCounter();
-        dlog('order.captured_only', 'warn', 'order captured with nothing staged', { order: sale && sale.orderId, total: capturedOnlyCount });
-        // Visible overlay warning above is the signal; console line gated to avoid live spam.
-        if (SHOTS_DEBUG) console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
+        if (fresh) {
+          // Genuine live sale, host didn't stage — keep the clear host warning.
+          capturedOnlyCount++;
+          renderCapturedOnlyWarning();
+          persistCounter();
+          dlog('order.captured_only', 'warn', 'FRESH order captured with nothing staged', { order: sale && sale.orderId, total: capturedOnlyCount });
+          // Visible overlay warning above is the signal; console line gated to avoid live spam.
+          if (SHOTS_DEBUG) console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
+        } else {
+          // Not fresh, but timestamp is missing/unreliable (reliable-old rows were already
+          // skipped above). Could be a real fresh sale OR a replay — do NOT inflate the
+          // scary captured-only host warning, but leave a diagnostic trail so a genuine
+          // fresh sale is never silently lost.
+          dlog('order.ambiguous_timestamp_no_staged', 'warn', 'order captured, nothing staged, no reliable timestamp', { order: sale && sale.orderId });
+        }
       }
 
       // A bind just cleared staging — refocus so the host can scan the next item
