@@ -44,7 +44,7 @@ var SK_SESSION_TS = 'lensed_session_ts';
 var EXT_VERSION = (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '?'; } })();
 var DIAG_KEY = 'lensed_diag_log';
 var DIAG_FLAG = 'lensed_diag_enabled';
-var DIAG_CAP = 3000;
+var DIAG_CAP = 15000; // long-live headroom; noise cut (one scan.detected per attempt) keeps this ample
 var diagEnabled = false;
 var diagRing = [];
 var diagWriteInflight = false;
@@ -115,6 +115,19 @@ function diagClassifyErr(e) {
   return 'unknown';
 }
 function diagRedactId(v) { v = String(v == null ? '' : v); return v.length <= 4 ? v : ('…' + v.slice(-4)); }
+// Parse the HTTP status + PostgREST error body ({code,message,details,hint}) out of a
+// thrown "UPSERT x failed (409): {json}" error, so a failure is diagnosable instead of
+// "unknown". Truncated; no tokens (the thrown message never contains auth headers).
+function diagHttpDetail(e) {
+  var m = (e && e.message) || String(e || '');
+  var out = { msg: m.slice(0, 300) };
+  try { var st = m.match(/\((\d{3})\)/); if (st) out.status = Number(st[1]); } catch (_) {}
+  try {
+    var i = m.indexOf('{');
+    if (i >= 0) { var j = JSON.parse(m.slice(i)); out.pgcode = j.code; out.pgmsg = j.message; out.hint = j.hint; out.details = j.details; }
+  } catch (_) {}
+  return out;
+}
 // SW-level uncaught error/rejection capture (message only — never payloads).
 try {
   self.addEventListener('error', function (ev) { diag('sw.error', 'error', (ev && ev.message) || 'error', { file: ev && ev.filename, line: ev && ev.lineno }); });
@@ -741,39 +754,50 @@ async function logAuction(sessionId, result, skus, idemKey) {
   }
 }
 
+// Upsert the raw capture_events row. Returns { ok, ... } so the caller can tell the
+// content script the truth (capture_events feeds P&L). Idempotent: on_conflict targets
+// the real (user_id, order_id) unique index, so a re-sent/replayed order MERGES instead
+// of raising 23505 (the empty-upsert bug that failed 135× during the replay storm).
 async function upsertCaptureEvent(sale, boundSkuId) {
-  if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return; }
+  if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return { ok: false, reason: 'not_authenticated' }; }
+  var row = {
+    user_id: userId,
+    order_id: sale.orderId,
+    room_id: sale.roomId || currentRoomId,
+    buyer_username: sale.buyerUsername || null,
+    selling_price_cents: parsePriceToCents(sale.sellingPrice),
+    product_name: sale.productName || null,
+    platform_sku_ref: sale.platformSkuRef || null,
+    tiktok_sku_id: sale.skuId || null,
+    tiktok_product_id: sale.productId || null,
+    item_image_url: sale.imageUrl || null,
+    ordered_at: sale.orderedAtMs ? new Date(sale.orderedAtMs).toISOString() : null,
+    is_payment_successful: sale.isPaymentSuccessful,
+    order_status: sale.orderStatus,
+    bound_sku_id: boundSkuId || null,
+    raw_payload: sale,
+  };
   try {
-    var row = {
-      user_id: userId,
-      order_id: sale.orderId,
-      room_id: sale.roomId || currentRoomId,
-      buyer_username: sale.buyerUsername || null,
-      selling_price_cents: parsePriceToCents(sale.sellingPrice),
-      product_name: sale.productName || null,
-      platform_sku_ref: sale.platformSkuRef || null,
-      tiktok_sku_id: sale.skuId || null,
-      tiktok_product_id: sale.productId || null,
-      item_image_url: sale.imageUrl || null,
-      ordered_at: sale.orderedAtMs ? new Date(sale.orderedAtMs).toISOString() : null,
-      is_payment_successful: sale.isPaymentSuccessful,
-      order_status: sale.orderStatus,
-      bound_sku_id: boundSkuId || null,
-      raw_payload: sale,
-    };
-    await supabaseUpsert('capture_events', row);
+    await supabaseUpsert('capture_events', row, 'user_id,order_id');
     console.log('[LENSED][BG] capture_events upserted:', sale.orderId);
     diag('capture.write', 'info', 'capture_events upserted', { order: sale.orderId, bound: !!boundSkuId });
+    return { ok: true };
   } catch (e) {
+    var d = diagHttpDetail(e);
     console.error('[LENSED][BG] capture_events upsert error:', e);
-    diag('capture.error', 'error', 'capture_events upsert failed', { order: sale.orderId, code: diagClassifyErr(e) });
+    // Full, diagnosable error — status + PostgREST code/message/hint/details (no "unknown").
+    diag('capture.error', 'error', 'capture_events upsert failed', {
+      order: sale.orderId, status: d.status || null, code: d.pgcode || diagClassifyErr(e),
+      message: d.pgmsg || d.msg, hint: d.hint || null, details: (d.details || '').slice(0, 200) || null,
+    });
+    return { ok: false, reason: 'capture_write_failed', status: d.status || null, code: d.pgcode || diagClassifyErr(e), message: d.pgmsg || d.msg };
   }
 }
 
 // ─── Auto-bind: sale + staged SKUs → lensed_log_auction + capture_events
 
 async function handleAutoBind(sale, stagedSkus) {
-  if (!sale || !sale.orderId) return;
+  if (!sale || !sale.orderId) return { ok: false, reason: 'no_order' };
 
   // A sale event can wake a cold worker; wait for the rehydrate so the
   // isAuthenticated() gates below don't skip logging on the first bind.
@@ -791,7 +815,7 @@ async function handleAutoBind(sale, stagedSkus) {
   if (prevToken === result) {
     console.log('[LENSED][BG] order_id already logged with same status, skipping:', sale.orderId, result);
     diag('bind.skip_dup', 'info', 'duplicate order+status skipped', { order: sale.orderId, status: result });
-    return;
+    return { ok: true, skipped: true, reason: 'duplicate' };
   }
   loggedOrderStatus.set(sale.orderId, result);
   capOrderMaps();
@@ -800,6 +824,8 @@ async function handleAutoBind(sale, stagedSkus) {
   // A flip = we've processed this order before, with a different status.
   var isFlip = prevToken !== undefined;
   var boundSkuId = null;
+  var bound = false;         // did lensed_log_auction actually write/replay an auction row?
+  var bindReason = null;     // why not bound (no_staged / no_session / rpc_failed / not_authenticated)
 
   if (isFlip && isAuthenticated() && loggedOrderSession.has(sale.orderId)) {
     // ── Status-flip transition (e.g. failed→paid) ───────────────────────────
@@ -811,7 +837,8 @@ async function handleAutoBind(sale, stagedSkus) {
     // placeholder only to satisfy the RPC's NO_SKUS guard.
     var flipSession = loggedOrderSession.get(sale.orderId);
     console.log('[LENSED][BG] status flip — re-calling RPC for transition:', sale.orderId, prevToken, '->', result);
-    await logAuction(flipSession, result, TRANSITION_PLACEHOLDER_SKUS, sale.orderId);
+    var flipRow = await logAuction(flipSession, result, TRANSITION_PLACEHOLDER_SKUS, sale.orderId);
+    if (flipRow) { bound = true; } else { bindReason = 'rpc_failed'; loggedOrderStatus.delete(sale.orderId); }
   } else if (stagedSkus && stagedSkus.length > 0 && isAuthenticated()) {
     // ── Fresh bind: requires staged SKUs + a room-scoped session ───────────────
     // Pass the sale's own room so a stale in-memory/persisted session (different
@@ -839,12 +866,14 @@ async function handleAutoBind(sale, stagedSkus) {
         loggedOrderSession.set(sale.orderId, sessionId);
         capOrderMaps();
         boundSkuId = stagedSkus.length === 1 ? stagedSkus[0].id : null;
+        bound = true;
         diag('bind.ok', 'info', 'order bound to auction item', { order: sale.orderId, boundSkuId: boundSkuId || null });
       } else {
         // Bind failed (RPC error/empty). Don't fake success: roll back the status
         // dedup so an identical re-send RETRIES instead of being silently skipped,
         // and surface it (the order still lands in capture_events below).
         loggedOrderStatus.delete(sale.orderId);
+        bindReason = 'rpc_failed';
         console.error('[LENSED][BG] BIND FAILED — order captured only (will retry on re-send):', sale.orderId, 'session', sessionId);
         diag('bind.failed', 'error', 'bind failed — order captured only', { order: sale.orderId, session: diagRedactId(sessionId) });
       }
@@ -852,10 +881,12 @@ async function handleAutoBind(sale, stagedSkus) {
       // Staged SKUs existed but no room-scoped session could be resolved (e.g. room
       // unknown). Roll back dedup so a retry can bind once a room is known.
       loggedOrderStatus.delete(sale.orderId);
+      bindReason = 'no_session';
       console.warn('[LENSED][BG] no room-scoped session — order captured only (will retry):', sale.orderId);
       diag('bind.no_session', 'warn', 'no room-scoped session — captured only', { order: sale.orderId, room: sale.roomId || null });
     }
   } else if (!isAuthenticated()) {
+    bindReason = 'not_authenticated';
     console.warn('[LENSED][BG] not authenticated — sale captured but not logged to lensed_log_auction:', sale.orderId);
     diag('bind.not_authenticated', 'warn', 'not authenticated — captured only', { order: sale.orderId });
   } else {
@@ -863,12 +894,40 @@ async function handleAutoBind(sale, stagedSkus) {
     // captured raw and NOT bound to an auction item. Surface it (the overlay shows a
     // visible warning; this is the background-side diagnostic) instead of silently
     // dropping the SKU/COGS link — the July-3 captured-only failure mode.
+    bindReason = 'no_staged';
     console.warn('[LENSED][BG] no staged SKUs — order captured only, NOT bound to an auction item:', sale.orderId);
     diag('bind.no_staged', 'warn', 'no staged SKUs — captured only', { order: sale.orderId });
   }
 
-  // Always upsert to capture_events (raw audit log)
-  await upsertCaptureEvent(sale, boundSkuId);
+  // Always upsert to capture_events (raw revenue/audit row that P&L joins on).
+  var cap = await upsertCaptureEvent(sale, boundSkuId);
+  if (!cap.ok && cap.reason === 'capture_write_failed') {
+    // One immediate idempotent retry (on_conflict=user_id,order_id makes re-upsert a
+    // MERGE, never a second row) — clears transient blips. Does NOT touch inventory.
+    cap = await upsertCaptureEvent(sale, boundSkuId);
+  }
+  if (!cap.ok) {
+    // The capture row is missing — roll back the status dedup so a later cumulative
+    // re-send retries the write. If the RPC already ran, its replay is idempotent on
+    // (user_id, order_id) so a retry NEVER double-decrements inventory.
+    loggedOrderStatus.delete(sale.orderId);
+  }
+
+  // Truthful result for the content script — never claim ok:true when the P&L-critical
+  // capture write failed (the "silent green-but-broken" case).
+  var partial = bound && !cap.ok;
+  return {
+    ok: !!cap.ok,
+    bound: bound,
+    captureWritten: !!cap.ok,
+    partial: partial,
+    reason: !cap.ok
+      ? (partial ? 'capture_write_failed_after_rpc' : (cap.reason || 'capture_write_failed'))
+      : (bound ? null : bindReason),
+    code: cap.code || null,
+    status: cap.status || null,
+    order: sale.orderId,
+  };
 }
 
 // ── [SCREENSHOT] Upload-first store (Storage + live_order_screenshots) ────────
@@ -1371,11 +1430,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'AUTO_BIND') {
-    handleAutoBind(message.sale, message.stagedSkus).then(function () {
-      sendResponse({ ok: true });
+    handleAutoBind(message.sale, message.stagedSkus).then(function (res) {
+      // Reply the TRUTHFUL result — ok:false when the capture_events write failed even
+      // if lensed_log_auction succeeded (partial:true), so the content script never
+      // reports success on a P&L-breaking failure.
+      sendResponse(res || { ok: true });
     }).catch(function (err) {
       console.error('[LENSED][BG] auto-bind error:', err);
-      sendResponse({ ok: false, error: err.message });
+      diag('bind.exception', 'error', 'handleAutoBind threw', { order: message.sale && message.sale.orderId, msg: (err && err.message) || String(err) });
+      sendResponse({ ok: false, bound: false, reason: 'exception', error: err.message });
     });
     return true;
   }
