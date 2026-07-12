@@ -7,10 +7,11 @@ import { useUser } from '@/hooks/useUser';
 
 export default function UserMenu() {
   const [open, setOpen] = useState(false);
+  const [signOutError, setSignOutError] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
   const supabase = createClient();
-  const { user } = useUser();
+  const { user, loading } = useUser();
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -24,14 +25,31 @@ export default function UserMenu() {
   }, []);
 
   async function handleSignOut() {
-    await supabase.auth.signOut();
-    router.push('/login');
-    router.refresh();
+    // Single-source navigation: do NOT navigate here. On success, auth-js emits
+    // SIGNED_OUT and the (app) layout's onAuthStateChange is the sole authority
+    // that clears React Query and redirects to /login. Navigating here as well
+    // (push + refresh) raced the layout's replace and left the URL on /dashboard.
+    // Logout scope is unchanged (global — no { scope } argument).
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      // Sign-out failed (e.g. network): do not fake a logout or navigate. Keep
+      // the session/UI intact and surface the error; a redirect only happens if
+      // a real SIGNED_OUT event is emitted.
+      setSignOutError(error.message);
+    }
   }
 
-  const displayName = user?.user_metadata?.display_name || user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'User';
+  const resolvedName =
+    user?.user_metadata?.display_name ||
+    user?.user_metadata?.full_name ||
+    user?.email?.split('@')[0] ||
+    '';
+  // Never show a misleading generic username. Distinguish the three states:
+  // still resolving → "Loading…"; a transient auth blip with no user → "Account";
+  // a real user → their name. (A genuine sign-out redirects away via the layout.)
+  const displayName = resolvedName || (loading ? 'Loading…' : 'Account');
   const displayEmail = user?.email || '';
-  const initial = displayName.charAt(0).toUpperCase();
+  const initial = resolvedName ? resolvedName.charAt(0).toUpperCase() : '';
 
   return (
     <div className="relative" ref={menuRef}>
@@ -98,6 +116,9 @@ export default function UserMenu() {
               onClick={handleSignOut}
               danger
             />
+            {signOutError && (
+              <p className="px-4 py-1.5 text-[11px] text-tt-red">{signOutError}</p>
+            )}
           </div>
         </div>
       )}
