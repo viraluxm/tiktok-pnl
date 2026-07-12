@@ -1308,20 +1308,52 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
     return;
   }
 
-  persistAuth(at, rt || '').then(function () {
-    cachedSkus = null; // invalidate SKU cache for new user
-    currentSessionId = null; // re-resolve session for new user
-    currentRoomId = null;
-    sessionRoomId = null;
-    selectedHostId = null;      // a new user's live must not inherit the prior host
-    hostAppliedForSession = null;
-    // Drop the previous user's pinned session/room so the new user never resumes
-    // it; broadcast the reset so overlays clear staged SKUs and re-scope their counter.
-    try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]); } catch (_) {}
-    broadcastAuthStatus();
-    broadcastSession();
-    sendResponse({ ok: true, userId: userId });
-  });
+  // Resolve the incoming Lensed identity up front so we can compare it to the
+  // PREVIOUSLY persisted user before persistAuth() overwrites the stored id.
+  var incomingUserId = getUserIdFromToken(at);
+
+  // Wait for the one-time startup rehydrate so a cold service worker has restored
+  // the persisted session/identity before we decide to preserve vs. reset.
+  ensureAuthReady()
+    // Authoritative previous identity comes from STORAGE — the in-memory userId is
+    // null after every MV3 service-worker restart until rehydrate runs.
+    .then(function () { return chrome.storage.local.get(SK_USER_ID); })
+    .then(function (prev) {
+      var previousUserId = (prev && prev[SK_USER_ID]) || null;
+      return persistAuth(at, rt || '').then(function () {
+        // Same Lensed user + resolvable ids → a routine token refresh: preserve live
+        // context. Otherwise (no known previous user, unresolvable incoming user, or a
+        // genuine user switch) run the existing full user-switch reset.
+        var identityChanged =
+          !previousUserId || !incomingUserId || previousUserId !== incomingUserId;
+
+        if (identityChanged) {
+          cachedSkus = null; // invalidate SKU cache for the new/unknown user
+          currentSessionId = null; // re-resolve session for the new user
+          currentRoomId = null;
+          sessionRoomId = null;
+          selectedHostId = null;      // a new user's live must not inherit the prior host
+          hostAppliedForSession = null;
+          // Drop the previous user's pinned session/room so the new user never resumes
+          // it; broadcast the reset so overlays clear staged SKUs and re-scope their counter.
+          try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]); } catch (_) {}
+          broadcastAuthStatus();
+          broadcastSession();
+          console.log('[LENSED][BG] LENSED_AUTH: identity changed — live state reset');
+        } else {
+          // Routine same-user refresh: tokens already rotated by persistAuth above.
+          // Preserve session / room mapping / host / cached SKUs / dedup state; refresh
+          // the content auth status but do NOT broadcast a null session or reset overlays.
+          broadcastAuthStatus();
+          console.log('[LENSED][BG] LENSED_AUTH: same-user token refresh — live state preserved');
+        }
+        sendResponse({ ok: true, userId: userId });
+      });
+    })
+    .catch(function (e) {
+      console.error('[LENSED][BG] LENSED_AUTH relay failed:', e);
+      try { sendResponse({ ok: false, error: (e && e.message) || 'relay failed' }); } catch (_) {}
+    });
 
   return true; // async sendResponse
 });
