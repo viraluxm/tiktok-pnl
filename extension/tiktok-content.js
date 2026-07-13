@@ -658,7 +658,7 @@
     try {
       chrome.runtime.sendMessage({ type: 'DIAG_EXPORT' }, function (resp) {
         if (chrome.runtime.lastError || !resp) return;
-        var payload = { tool: 'lensed-extension', exported_at: new Date().toISOString(), version: resp.v, count: resp.count, events: resp.events || [] };
+        var payload = { tool: 'lensed-extension', exported_at: new Date().toISOString(), version: resp.v, diag_build: resp.build || null, commit: resp.commit || null, count: resp.count, events: resp.events || [] };
         try {
           var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
           var url = URL.createObjectURL(blob);

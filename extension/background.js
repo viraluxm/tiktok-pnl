@@ -42,6 +42,12 @@ var SK_SESSION_TS = 'lensed_session_ts';
 // sends DIAG_ENABLE). NEVER stores tokens/cookies/raw payloads. Every call is
 // try-wrapped so a logging failure can never affect capture/bind.
 var EXT_VERSION = (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '?'; } })();
+// Build marker — identifies THIS canonical combined build in the diagnostics export,
+// so there is never confusion about which zip a host loaded. DIAG_BUILD_SHA is the
+// literal token '__BUILD_SHA__' in source; build.sh stamps the real short commit SHA
+// into the dist copy at build time.
+var DIAG_BUILD = 'v0.2.25-main-plus-start-auction';
+var DIAG_BUILD_SHA = '__BUILD_SHA__';
 var DIAG_KEY = 'lensed_diag_log';
 var DIAG_FLAG = 'lensed_diag_enabled';
 var DIAG_CAP = 15000; // long-live headroom; noise cut (one scan.detected per attempt) keeps this ample
@@ -1399,7 +1405,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         var stored = (d && Array.isArray(d[DIAG_KEY])) ? d[DIAG_KEY] : [];
         var merged = diagMerge(stored, diagRing);
         diagRing = merged;
-        try { sendResponse({ v: EXT_VERSION, count: merged.length, events: merged }); } catch (_) {}
+        try { sendResponse({ v: EXT_VERSION, build: DIAG_BUILD, commit: DIAG_BUILD_SHA, count: merged.length, events: merged }); } catch (_) {}
       });
     } catch (_) { try { sendResponse({ v: EXT_VERSION, count: diagRing.length, events: diagRing }); } catch (_) {} }
     return true;
