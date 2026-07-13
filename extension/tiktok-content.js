@@ -10,7 +10,9 @@
  * SKU flow:
  * - Host types a sku_number into the input, resolved via background -> inventory_skus
  * - Staged SKUs shown as pills; multiple supported for bundles
- * - Three buttons: -> (re-run previous), + (add/stage), - (remove last)
+ * - Overlay controls: Start (TikTok auction), + (add/stage), ↻ (re-run previous)
+ * - Macro/numpad hotkeys: NumpadAdd → Start auction (discovery only this phase;
+ *   activation pending live-test), NumpadSubtract → add unit, NumpadMultiply → restage
  * - On new sale: auto-bind fires, logs to lensed_log_auction + capture_events
  * - order_id locks after logging (no double-bind on cumulative re-polls)
  */
@@ -365,6 +367,14 @@
       background: rgba(99,102,241,0.16); border-color: #4f46e5; color: #a5b4ff;\
     }\
     .lensed-sku-btn.restage:hover { background: rgba(99,102,241,0.32); border-color: #6366f1; color: #fff; }\
+    /* Start: page-affecting action — visually distinct from the indigo inventory\
+       controls (green accent, text label, separated by a right margin). */\
+    .lensed-sku-btn.start {\
+      width: auto; padding: 0 12px; height: 34px; font-size: 12px; font-weight: 600;\
+      letter-spacing: 0.02em; margin-right: 4px;\
+      background: #10b981; border-color: #059669; color: #fff;\
+    }\
+    .lensed-sku-btn.start:hover { background: #0ea371; border-color: #10b981; color: #fff; }\
     .lensed-resolved {\
       font-size: 11px; color: #34d399; margin-top: 4px; min-height: 16px;\
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
@@ -911,20 +921,8 @@
     persistStaged();
   }
 
-  function removeLast() {
-    if (stagedSkus.length === 0) return;
-    // Decrement the most-recent pill; drop it entirely once quantity hits zero.
-    var last = stagedSkus[stagedSkus.length - 1];
-    last.qty = (last.qty || 1) - 1;
-    if (last.qty <= 0) stagedSkus.pop();
-    renderStagedPills();
-    clearResolveLine();
-    updateStagedLabel();
-    persistStaged();
-  }
-
   // Add another unit of the most recently staged SKU (respects the stock cap).
-  // Used by the "+" keyboard shortcut.
+  // Bound to the NumpadSubtract macro key (macro button 2) and the standalone "-".
   function addAnotherUnitOfLast() {
     if (stagedSkus.length === 0) return;
     var last = stagedSkus[stagedSkus.length - 1];
@@ -1283,6 +1281,14 @@
       }
     });
 
+    // Start button: triggers the guarded Start-auction routine (macro NumpadAdd routes
+    // to the SAME routine). Visually distinct (green) \u2014 it is page-affecting, unlike the
+    // inventory controls. This phase performs discovery/state-validation only and stops
+    // before clicking TikTok (activation pending live-test).
+    var startBtn = el('button', 'lensed-sku-btn start', 'Start');
+    startBtn.title = 'Start TikTok auction';
+    startBtn.addEventListener('click', function () { runStartAuction('overlay'); });
+
     // + button: stage the resolved SKU (or another unit)
     var addBtn = el('button', 'lensed-sku-btn primary', '+');
     addBtn.title = 'Stage SKU';
@@ -1293,19 +1299,14 @@
       focusScanInput();
     });
 
-    // - button: remove last staged
-    var removeBtn = el('button', 'lensed-sku-btn', '\u2212');
-    removeBtn.title = 'Remove last SKU';
-    removeBtn.addEventListener('click', function () { removeLast(); focusScanInput(); });
-
     // \u21bb restage button \u2014 prominent secondary action (re-runs the last bound set)
     var rerunBtn = el('button', 'lensed-sku-btn restage', '\u21bb');
     rerunBtn.title = 'Restage previous SKUs';
     rerunBtn.addEventListener('click', function () { rerunPrevious(); focusScanInput(); });
 
     skuRow.appendChild(skuInputEl);
+    skuRow.appendChild(startBtn);
     skuRow.appendChild(addBtn);
-    skuRow.appendChild(removeBtn);
     skuRow.appendChild(rerunBtn);
 
     resolvedLabelEl = el('div', 'lensed-resolved', '');
@@ -1914,9 +1915,10 @@
   init();
 
   // ── Global keyboard shortcuts (only when the SKU input is NOT focused) ─
-  // +  / NumpadAdd       add another unit of the most recently staged SKU
-  // -  / NumpadSubtract  remove the last staged unit
-  // *  / NumpadMultiply  trigger re-run (the ↻ restage button)
+  // NumpadAdd       (button 1) Start the TikTok auction (discovery-only this phase)
+  // -  / NumpadSubtract (button 2) add another unit of the most recently staged SKU
+  // *  / NumpadMultiply (button 3) trigger re-run (the ↻ restage button)
+  // Start responds ONLY to the NumpadAdd event.code — a printable '+' never starts.
   // Physical numpad / macro-pad keys are matched by event.code so pads that emit
   // only a code (no printable key) still work. When the SKU input (or any other
   // editable field) is focused these keys type normally — we bail before handling.
@@ -1958,13 +1960,204 @@
       if (stagedSkus.length === 0) { hlog('matched but no staged item to add'); return; }
       addAnotherUnitOfLast(); hlog('fired add'); return;
     }
-    if (action === 'remove') {
-      if (stagedSkus.length === 0) { hlog('matched but no removable item'); return; }
-      removeLast(); hlog('fired remove'); return;
-    }
     if (action === 'rerun') {
       if (previousSkus.length === 0) { hlog('matched but no previous item to rerun'); return; }
       rerunPrevious(); hlog('fired rerun'); return;
+    }
+  }
+
+  // ── One-button Start-auction (discovery + fail-closed state only) ─────────────
+  // NumpadAdd (macro button 1) and the overlay "Start" button both route into
+  // runStartAuction(). THIS PHASE ONLY discovers the TikTok auction panel and
+  // classifies its state — it NEVER clicks TikTok, dispatches synthetic events, or
+  // calls a TikTok handler/endpoint. The verified activation method is added AFTER a
+  // live-broadcast test; until then a single ready auction reports "Start ready —
+  // activation not enabled" and stops. All selectors are structural/role/exact-text —
+  // no generated class names (Arco's `arco-btn-disabled` is used only as a state flag).
+  var START_DEBOUNCE_MS = 1800;   // ignore repeat Start presses within ~1.8s (no auto-retry)
+  var startDiscoverUntil = 0;     // debounce window end (timestamp via nowMs())
+  var startInFlight = false;      // re-entrancy guard; always released in finally
+
+  // Feedback copy — surfaced through the existing overlay resolve line.
+  var MSG_START_WRONG_SCREEN = 'Wrong TikTok screen';
+  var MSG_START_UNAVAILABLE = 'Start button unavailable';
+  var MSG_START_MULTIPLE = 'Multiple auctions ready';
+  var MSG_START_READY = 'Start ready — activation not enabled';
+
+  // Start-flow diagnostics — reuse the existing hotkey-debug opt-in
+  // (localStorage 'lensed_hotkey_debug' = '1'). Never sent to any backend/Supabase.
+  function startLog(msg, data) {
+    if (!hotkeyDebugOn()) return;
+    if (data !== undefined) console.log('[LENSED][START] ' + msg, data);
+    else console.log('[LENSED][START] ' + msg);
+  }
+
+  function startFeedback(text, isError) {
+    try { setResolveLine(text, !!isError); } catch (_) {}
+  }
+
+  function startIsVisible(node) {
+    if (!node) return false;
+    var r = node.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    var cs;
+    try { cs = getComputedStyle(node); } catch (_) { return true; }
+    return cs.visibility !== 'hidden' && cs.display !== 'none';
+  }
+
+  // The selected Auctions tab: role=tab, aria-selected=true, visible text begins with
+  // "Auctions". Never hard-codes the Arco panel id nor trusts aria-controls resolving.
+  function findAuctionsTab() {
+    var tabs = document.querySelectorAll('[role="tab"]');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      if (t.getAttribute('aria-selected') !== 'true') continue;
+      if (/^\s*Auctions\b/.test(t.textContent || '')) return t;
+    }
+    return null;
+  }
+
+  // Structural signature of an auction row: an index (#N) + a starting price + a
+  // quantity. Text-based, NOT class-based (analytics panels lack this signature).
+  function looksLikeAuctionRow(text) {
+    return /#\d+/.test(text) && /Starting price/i.test(text) && /Quantity/i.test(text);
+  }
+
+  // Every structurally-valid auction row: the SMALLEST visible ancestor carrying the
+  // signature and at least one native <button>. Returns ALL candidates — never picks
+  // the first. Multiple configured rows are expected during a live.
+  function findAuctionRows() {
+    var divs = document.querySelectorAll('div');
+    var matches = [];
+    for (var i = 0; i < divs.length; i++) {
+      var d = divs[i];
+      var txt = d.innerText || '';
+      if (txt.length > 500) continue;                 // too large to be a single row
+      if (!looksLikeAuctionRow(txt)) continue;
+      if (!d.querySelector('button')) continue;
+      matches.push(d);
+    }
+    // Keep only innermost matches (drop any that contains another match).
+    var minimal = matches.filter(function (m) {
+      for (var j = 0; j < matches.length; j++) {
+        if (matches[j] !== m && m.contains(matches[j])) return false;
+      }
+      return true;
+    });
+    return minimal.filter(startIsVisible);
+  }
+
+  // Row title for diagnostics: the "#N …" line, trimmed.
+  function auctionRowTitle(row) {
+    try {
+      var m = (row.innerText || '').match(/#\d+[^\n]*/);
+      return m ? m[0].trim().slice(0, 60) : null;
+    } catch (_) { return null; }
+  }
+
+  // Enabled means: no native `disabled`, no `arco-btn-disabled` class, and computed
+  // pointer-events !== 'none' (the observed disabled markup uses all three).
+  function isStartButtonEnabled(b) {
+    if (b.disabled) return false;
+    if ((' ' + b.className + ' ').indexOf(' arco-btn-disabled ') !== -1) return false;
+    try { if (getComputedStyle(b).pointerEvents === 'none') return false; } catch (_) {}
+    return true;
+  }
+
+  // True if the row contains ANY native <button> whose exact text is "Start"
+  // (regardless of enabled state) — used to tell "disabled" from "no Start at all".
+  function rowHasStartText(row) {
+    var btns = row.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if ((btns[i].textContent || '').trim() === 'Start') return true;
+    }
+    return false;
+  }
+
+  // The single visible + enabled native "Start" button in a row, or null when zero OR
+  // more than one qualify. Exact text "Start" excludes "Go LIVE"/"Go LIVE now".
+  // data-tid="m4b_button" is NOT used (it is present on many page buttons).
+  function enabledStartButtonInRow(row) {
+    var btns = row.querySelectorAll('button');
+    var hits = [];
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      var label = (b.textContent || '').trim();
+      if (label !== 'Start') continue;                // excludes Go LIVE / Go LIVE now
+      if (!startIsVisible(b)) continue;
+      if (!isStartButtonEnabled(b)) continue;
+      hits.push(b);
+    }
+    return hits.length === 1 ? hits[0] : null;
+  }
+
+  // Guarded Start entry point. Discovery + fail-closed classification ONLY — never
+  // clicks TikTok this phase. `source` is a diagnostic label ('macro' | 'overlay').
+  function runStartAuction(source) {
+    var now = nowMs();
+    if (startInFlight || now < startDiscoverUntil) { startLog('debounced', { source: source }); return; }
+    startInFlight = true;
+    startDiscoverUntil = now + START_DEBOUNCE_MS;
+    try {
+      var tab = findAuctionsTab();
+      if (!tab) {
+        startLog('wrong screen — Auctions tab not selected/found', { source: source });
+        startFeedback(MSG_START_WRONG_SCREEN, true);
+        return;
+      }
+
+      var rows = findAuctionRows();
+      var setupPresent = /Temporary auction|Add auction products/i.test(document.body.innerText || '');
+      startLog('discovery', { source: source, rows: rows.length, setupPresent: setupPresent });
+
+      if (rows.length === 0) {
+        startLog(setupPresent ? 'empty (setup content present)' : 'empty (no auction rows)');
+        startFeedback(MSG_START_UNAVAILABLE, true);
+        return;
+      }
+
+      var startable = [];   // rows with EXACTLY ONE visible + enabled Start button
+      var disabledRows = 0; // configured rows whose Start button is disabled
+      var noStartRows = 0;  // configured rows with NO Start button (running/unknown)
+      for (var i = 0; i < rows.length; i++) {
+        if (enabledStartButtonInRow(rows[i])) {
+          startable.push({ title: auctionRowTitle(rows[i]) });
+        } else if (rowHasStartText(rows[i])) {
+          disabledRows++;
+        } else {
+          noStartRows++;
+        }
+      }
+      startLog('classified', { startable: startable.length, disabledRows: disabledRows, noStartRows: noStartRows });
+
+      if (startable.length > 1) {
+        // Ambiguous — never guess which auction to start.
+        startLog('ambiguous — multiple startable rows', { titles: startable.map(function (s) { return s.title; }) });
+        startFeedback(MSG_START_MULTIPLE, true);
+        return;
+      }
+      if (startable.length === 1) {
+        // READY_UNVERIFIED — a single startable auction. Activation is INTENTIONALLY
+        // NOT performed: the verified click method is pending a live-broadcast test.
+        startLog('READY_UNVERIFIED — activation not enabled', { title: startable[0].title });
+        startFeedback(MSG_START_READY, false);
+        return;
+      }
+      // Zero startable rows.
+      if (disabledRows > 0) {
+        startLog('configured but disabled', { reason: 'not_live_or_disabled', disabledRows: disabledRows });
+        startFeedback(MSG_START_UNAVAILABLE, true);
+        return;
+      }
+      // Configured rows but no Start button anywhere → RUNNING_OR_UNKNOWN. Never claim
+      // "already running" — the running-state DOM is not yet observed on a live broadcast.
+      startLog('running_or_unknown — configured rows without a Start button', { rows: rows.length });
+      startFeedback(MSG_START_UNAVAILABLE, true);
+    } catch (err) {
+      startLog('error during discovery', { error: String((err && err.message) || err) });
+      startFeedback(MSG_START_UNAVAILABLE, true);
+    } finally {
+      startInFlight = false; // release the temporary discovery lock (timestamp still debounces repeats)
     }
   }
 
@@ -2052,24 +2245,30 @@
 
     // Physical numpad / macro-pad keys map to overlay actions by event.code — these
     // codes are produced only by real numpad keys, never by a wedge-scanner burst.
-    var padAction = e.code === 'NumpadAdd' ? 'add'
-                  : e.code === 'NumpadSubtract' ? 'remove'
+    //   NumpadAdd (button 1) → Start auction   NumpadSubtract (button 2) → add unit
+    //   NumpadMultiply (button 3) → restage.   (The old "remove last" action is gone.)
+    // Start responds ONLY to NumpadAdd (never a printable '+', handled below).
+    var padAction = e.code === 'NumpadAdd' ? 'start'
+                  : e.code === 'NumpadSubtract' ? 'add'
                   : e.code === 'NumpadMultiply' ? 'rerun'
                   : null;
     if (padAction) {
       hlog('matched numpad code', { code: e.code, action: padAction });
       e.preventDefault();
       e.stopPropagation();
-      fireHotkey(padAction);
+      if (padAction === 'start') runStartAuction('macro');
+      else fireHotkey(padAction);
       resetGlobalScan(); // consumed as a shortcut, not part of a scan
       return;
     }
 
-    // Standalone +/-/* shortcut — fires ONLY for a deliberate, human-paced press.
-    // A +/-/* arriving mid machine-burst was already buffered/swallowed in (A), so it
+    // Standalone -/* shortcut — fires ONLY for a deliberate, human-paced press.
+    // A -/* arriving mid machine-burst was already buffered/swallowed in (A), so it
     // never reaches here; the standalone check uses the timing captured in (A).
-    if (e.key === '+' || e.key === '-' || e.key === '*') {
-      var action = e.key === '+' ? 'add' : e.key === '-' ? 'remove' : 'rerun';
+    // A printable '+' is intentionally NOT a shortcut: Start responds only to the
+    // NumpadAdd event.code, so a typed '+' can never start an auction.
+    if (e.key === '-' || e.key === '*') {
+      var action = e.key === '-' ? 'add' : 'rerun';
       var standalone = gScanCount <= 1 || gLastInterkey > SCAN_MAX_INTERKEY_MS;
       hlog('matched symbol key', { key: e.key, action: action, standalone: standalone, gScanCount: gScanCount, interkey: gLastInterkey });
       if (standalone) {
