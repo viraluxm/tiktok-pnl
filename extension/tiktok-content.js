@@ -71,6 +71,16 @@
   // Manager reload / SW restart / reconnect so a mid-auction selection survives;
   // cleared on session/room change so a new live never inherits it.
   var LK_STAGED = 'lensed_staged_skus';
+  // Pre-first-sale durable state. Before the first bound sale creates a live session
+  // there is no session id, so LK_COUNTER/LK_STAGED (session-scoped) cannot persist.
+  // This ONE record holds staged SKUs + counter + host BEFORE a session exists, scoped
+  // by the strongest available context (Lensed user id + TikTok room id + timestamp).
+  // adoptSession() migrates it into the session-scoped records once a session is
+  // created, then removes it. Written only when BOTH user and room are known.
+  var LK_PRESESSION = 'lensed_presession_state';
+  var PRESESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h — mirrors background session-reuse cutoff
+  var preSessionRestoreDone = false;               // restore pre-session state once per user+room
+  var authUserId = null;                           // current Lensed user id (from auth status) — for user-scoping
   // The live's detected tiktok room (mirrors what inject relays to background). Used
   // to scope persisted staged SKUs.
   var currentRoomId = null;
@@ -1644,7 +1654,7 @@
   // same session. persistCounter is a no-op until the session id is known, so
   // nothing durable is ever written unscoped.
   function persistCounter() {
-    if (!counterSessionId) return;
+    if (!counterSessionId) { persistPreSession(); return; }
     try {
       var rec = {};
       rec[LK_COUNTER] = {
@@ -1673,12 +1683,91 @@
   // Live Manager reload / SW restart restores it. A no-op until the session id is
   // known (nothing durable is written unscoped). Called on every staged-set change.
   function persistStaged() {
-    if (!counterSessionId) return;
+    if (!counterSessionId) { persistPreSession(); return; }
     try {
       var rec = {};
       rec[LK_STAGED] = { sessionId: counterSessionId, roomId: currentRoomId || null, skus: stagedSkus };
       chrome.storage.local.set(rec);
     } catch (_) {}
+  }
+
+  // ── Pre-session (pre-first-sale) durable state ─────────────────────────────
+  // Persist staged SKUs + counter + host under ONE (userId, roomId, ts) record while no
+  // session exists. Written ONLY with both a user and a room (never unscoped).
+  function persistPreSession() {
+    if (counterSessionId) return;              // a session exists → session-scoped persistence owns it
+    if (!authUserId || !currentRoomId) return; // never persist without BOTH user and room
+    try {
+      var rec = {};
+      rec[LK_PRESESSION] = {
+        v: 1,
+        userId: authUserId,
+        roomId: currentRoomId,
+        ts: Date.now(),
+        skus: stagedSkus,
+        salesCount: salesCount,
+        orderIds: Object.keys(seenOrderIds),
+        capturedOnly: capturedOnlyCount,
+        hostId: selectedHostId || null
+      };
+      chrome.storage.local.set(rec);
+    } catch (_) {}
+  }
+
+  // A stored pre-session record is restorable only for the SAME user + room, a well-formed
+  // shape, and within the freshness window. Anything else is rejected (and cleared).
+  function presessionMatches(rec) {
+    return !!(rec && rec.v === 1 && authUserId && currentRoomId
+      && rec.userId === authUserId && rec.roomId === currentRoomId
+      && typeof rec.ts === 'number' && (Date.now() - rec.ts) <= PRESESSION_MAX_AGE_MS
+      && Array.isArray(rec.skus));
+  }
+
+  // Restore pre-session staged/counter/host for the current user+room when no session
+  // exists yet. Rejects+clears a record for a different user/room, stale, or malformed.
+  // Runs at most once per user+room (re-armed on identity/room change and reset).
+  function restorePreSession() {
+    if (counterSessionId || preSessionRestoreDone) return;
+    if (!authUserId || !currentRoomId) return;
+    preSessionRestoreDone = true;
+    try {
+      chrome.storage.local.get([LK_PRESESSION], function (data) {
+        if (chrome.runtime.lastError || !data) return;
+        var rec = data[LK_PRESESSION];
+        var userMatches = !!(rec && rec.userId === authUserId);
+        var roomMatches = !!(rec && rec.roomId === currentRoomId);
+        if (!presessionMatches(rec)) {
+          if (rec) { try { chrome.storage.local.remove([LK_PRESESSION]); } catch (_) {} } // reject → clear
+          // Flush any PRE-ROOM in-memory selection (host and/or staged SKUs picked BEFORE
+          // the room was known — when persistPreSession no-ops for lack of a room) into a
+          // durable record for THIS user+room, now that both are known. This runs AFTER the
+          // read above, so it can never clobber a record mid-restore. persistSelectedHost
+          // also refreshes the room-scoped LK_HOST; persistPreSession covers staged-only.
+          if (!counterSessionId && (selectedHostId || stagedSkus.length > 0)) {
+            if (selectedHostId) persistSelectedHost(); else persistPreSession();
+          }
+          console.log('[LENSED][TT] PRESESSION restore', { userMatches: userMatches, roomMatches: roomMatches, stagedCount: stagedSkus.length, hasHost: !!selectedHostId, hasCounter: salesCount > 0 });
+          return;
+        }
+        stagedSkus = rec.skus.map(function (s) {
+          return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+        });
+        seenOrderIds = Object.create(null);
+        if (Array.isArray(rec.orderIds)) { for (var i = 0; i < rec.orderIds.length; i++) seenOrderIds[rec.orderIds[i]] = true; }
+        salesCount = typeof rec.salesCount === 'number' ? rec.salesCount : 0;
+        capturedOnlyCount = typeof rec.capturedOnly === 'number' ? rec.capturedOnly : 0;
+        if (rec.hostId && !selectedHostId) selectedHostId = rec.hostId;
+        try { renderStagedPills(); updateStagedLabel(); } catch (_) {}
+        try { if (countEl) countEl.textContent = String(salesCount); renderCapturedOnlyWarning(); } catch (_) {}
+        try { renderHostOptions(); } catch (_) {}
+        console.log('[LENSED][TT] PRESESSION restore', { userMatches: true, roomMatches: true, stagedCount: stagedSkus.length, hasHost: !!selectedHostId, hasCounter: salesCount > 0 });
+      });
+    } catch (_) {}
+  }
+
+  // Attempt a pre-session restore only when it is safe and not yet done.
+  function maybeRestorePreSession() {
+    if (!counterSessionId && !preSessionRestoreDone && authUserId && currentRoomId) restorePreSession();
   }
 
   // Paint (or hide) the captured-only warning from the current count.
@@ -1706,7 +1795,8 @@
 
   // Background signalled a session reset (room change / user switch / session end):
   // clear the staged selection and the per-live counter so the next live starts clean.
-  function onSessionReset() {
+  function onSessionReset(reason) {
+    var hadHost = !!selectedHostId, hadStaged = stagedSkus.length > 0, prevSession = counterSessionId || null;
     counterSessionId = null;
     seenOrderIds = Object.create(null);
     shotEndOrderIds = Object.create(null); // new live → its own auction_end dedup set
@@ -1723,8 +1813,11 @@
     // the next live never inherits the prior host. The overlay re-prompts.
     selectedHostId = null;
     renderHostOptions();
-    try { chrome.storage.local.remove([LK_HOST]); } catch (_) {}
-    console.log('[LENSED][TT] session reset — cleared staged SKUs + counter + dedup maps + host');
+    // A genuine reset also discards any pre-session record, and re-arms the pre-session
+    // restore guard so the NEXT user+room can restore its own state.
+    try { chrome.storage.local.remove([LK_HOST, LK_PRESESSION]); } catch (_) {}
+    preSessionRestoreDone = false;
+    console.log('[LENSED][TT] CONTENT onSessionReset', { reason: reason || 'unspecified', previousSessionId: prevSession, hadHost: hadHost, hadStagedSku: hadStaged });
   }
 
   // Adopt the live session id reported by the background worker (via
@@ -1736,8 +1829,12 @@
     if (!sessionId || sessionId === counterSessionId) return;
     counterSessionId = sessionId;
     try {
-      chrome.storage.local.get([LK_COUNTER, LK_STAGED, LK_HOST, LK_SHOT_ENDS], function (data) {
+      chrome.storage.local.get([LK_COUNTER, LK_STAGED, LK_HOST, LK_SHOT_ENDS, LK_PRESESSION], function (data) {
         if (chrome.runtime.lastError || !data) return;
+        // Pre-session → session migration: a matching (user+room) pre-session record means
+        // the in-memory staged/counter/host were restored pre-session and must be carried
+        // into this new session (never cleared), then the pre-session record removed.
+        var migrating = presessionMatches(data[LK_PRESESSION]);
         // Restore the auction_end dedup set for THIS session (skip re-upload after reload).
         var srec = data[LK_SHOT_ENDS];
         shotEndOrderIds = Object.create(null);
@@ -1756,8 +1853,10 @@
           renderCapturedOnlyWarning();
           console.log('[LENSED][TT] counter restored for session', counterSessionId, '→', salesCount, '· captured-only', capturedOnlyCount);
         } else {
-          console.log('[LENSED][TT] counter scoped to new session', counterSessionId);
-          capturedOnlyCount = 0;
+          // New session. On a pre-session migration, KEEP the restored in-memory counter;
+          // otherwise start this session's captured-only tally clean. Persist either way.
+          console.log('[LENSED][TT] counter scoped to new session', counterSessionId, migrating ? '(migrated)' : '');
+          if (!migrating) capturedOnlyCount = 0;
           renderCapturedOnlyWarning();
           persistCounter();
         }
@@ -1773,6 +1872,12 @@
           renderStagedPills();
           updateStagedLabel();
           console.log('[LENSED][TT] staged SKUs restored for session', counterSessionId, '→', stagedSkus.length);
+        } else if (migrating) {
+          // Migration: the in-memory staged selection was restored from the pre-session
+          // record for THIS user+room. Keep it and persist it under the new session id —
+          // never clear it (persistStaged is now session-scoped since counterSessionId is set).
+          persistStaged();
+          console.log('[LENSED][TT] staged SKUs migrated pre-session → session', counterSessionId, '→', stagedSkus.length);
         } else if (stagedSkus.length > 0) {
           clearStaged();
         }
@@ -1792,7 +1897,22 @@
             );
           } catch (_) {}
           console.log('[LENSED][TT] host restored for session', counterSessionId, '→', selectedHostId);
+        } else if (migrating && selectedHostId) {
+          // Migrate the pre-session host under the new session id and re-assert it.
+          persistSelectedHost();
+          try {
+            chrome.runtime.sendMessage(
+              { type: 'SET_SESSION_HOST', hostId: selectedHostId, roomId: currentRoomId || null },
+              function () { if (chrome.runtime.lastError) return; }
+            );
+          } catch (_) {}
+          console.log('[LENSED][TT] host migrated pre-session → session', counterSessionId, '→', selectedHostId);
         }
+
+        // Migration complete → remove the obsolete pre-session record so it can never be
+        // re-applied to a later live. Done only AFTER the state above was re-persisted
+        // under the new session id.
+        if (migrating) { try { chrome.storage.local.remove([LK_PRESESSION]); } catch (_) {} }
       });
     } catch (_) {}
   }
@@ -2392,6 +2512,7 @@
     if (data.source === 'lensed-tiktok-room') {
       currentRoomId = data.roomId || currentRoomId; // scope persisted staged SKUs + host
       restoreHostByRoom(); // pre-first-sale reload: recover a host chosen for this room
+      maybeRestorePreSession(); // pre-first-sale reload: recover staged SKUs + counter + host
       dlog('room.detected', 'info', 'room_id relayed to background', { room: data.roomId || null });
       try {
         chrome.runtime.sendMessage({ type: 'TIKTOK_ROOM', roomId: data.roomId }).catch(function () {});
@@ -2412,12 +2533,19 @@
 
   function updateAuthStatus(authenticated, uid) {
     var wasConnected = authConnected;
+    var prevUser = authUserId;
     authConnected = !!authenticated;
     authStatusReceived = true;
+    authUserId = uid || null;
+    // A different Lensed user must not inherit the previous user's pre-session state:
+    // re-arm the one-shot restore guard so it re-evaluates (and rejects a mismatch).
+    if (authUserId !== prevUser) preSessionRestoreDone = false;
     renderStatusLine();
     renderHostWarning();
     // Load the host roster on (re)connect, or if we became connected without one yet.
     if (authConnected && (!wasConnected || hosts.length === 0)) fetchHosts();
+    // If a room is already known, attempt a pre-session restore now that we have a user.
+    maybeRestorePreSession();
   }
 
   // API-sourced host identity (from tiktok-inject.js / background). Authoritative \u2014
@@ -2559,6 +2687,10 @@
       rec[LK_HOST] = { sessionId: counterSessionId || null, roomId: currentRoomId || null, hostId: selectedHostId || null };
       chrome.storage.local.set(rec);
     } catch (_) {}
+    // Before a session exists, also fold the host into the user+room pre-session record
+    // so it survives a reload/SW-restart even when the room id later differs.
+    if (!counterSessionId) persistPreSession();
+    console.log('[LENSED][TT] HOST persisted', { userPresent: !!authUserId, roomPresent: !!currentRoomId, sessionPresent: !!counterSessionId });
   }
 
   // Pre-first-sale reload path: no session yet, so adoptSession() won't fire. When the
@@ -2570,7 +2702,10 @@
       chrome.storage.local.get([LK_HOST], function (data) {
         if (chrome.runtime.lastError || !data) return;
         var hrec = data[LK_HOST];
-        if (hrec && hrec.hostId && hrec.roomId && hrec.roomId === currentRoomId && !selectedHostId) {
+        var found = !!(hrec && hrec.hostId);
+        var roomMatches = !!(hrec && hrec.roomId && hrec.roomId === currentRoomId);
+        var restored = false;
+        if (found && roomMatches && !selectedHostId) {
           selectedHostId = hrec.hostId;
           renderHostOptions();
           try {
@@ -2579,7 +2714,11 @@
               function () { if (chrome.runtime.lastError) return; }
             );
           } catch (_) {}
+          restored = true;
         }
+        // userMatches is null: LK_HOST is the legacy room-only fallback (the user+room
+        // pre-session record carries user-scoped host); logged for runtime diagnosis.
+        console.log('[LENSED][TT] HOST restore', { found: found, roomMatches: roomMatches, userMatches: null, restored: restored });
       });
     } catch (_) {}
   }
@@ -2737,9 +2876,10 @@
     } else if (message.type === 'LENSED_SESSION') {
       // Background resolved/changed the live session — scope our counter to it.
       // A null sessionId means the session was reset (room change / user switch),
-      // so clear staged SKUs + counter for a clean next live.
+      // so clear staged SKUs + counter for a clean next live. `reason` (when present)
+      // explains why; older background builds omit it (backward compatible).
       if (message.sessionId) adoptSession(message.sessionId);
-      else onSessionReset();
+      else onSessionReset(message.reason || 'session_null');
     } else if (message.type === 'SHOT_STATUS') {
       // [SCREENSHOT] Background pushed updated counters after a store/clear.
       applyShotStatus(message.status);
