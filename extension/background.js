@@ -1281,7 +1281,7 @@ function persistSession() {
 
 // Tell open TikTok tabs which live session they're attached to, so each overlay
 // can scope its persisted order counter to this session id.
-function broadcastSession() {
+function broadcastSession(reason) {
   chrome.tabs.query({ url: 'https://shop.tiktok.com/*' }, function (tabs) {
     if (chrome.runtime.lastError) return;
     for (var i = 0; i < tabs.length; i++) {
@@ -1290,6 +1290,7 @@ function broadcastSession() {
           type: 'LENSED_SESSION',
           sessionId: currentSessionId || null,
           roomId: currentRoomId || null,
+          reason: reason || null,
         }).catch(function () {});
       } catch (_) {}
     }
@@ -1328,6 +1329,7 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
           !previousUserId || !incomingUserId || previousUserId !== incomingUserId;
 
         if (identityChanged) {
+          var hadSession = !!currentSessionId, hadHost = !!selectedHostId;
           cachedSkus = null; // invalidate SKU cache for the new/unknown user
           currentSessionId = null; // re-resolve session for the new user
           currentRoomId = null;
@@ -1335,11 +1337,12 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
           selectedHostId = null;      // a new user's live must not inherit the prior host
           hostAppliedForSession = null;
           // Drop the previous user's pinned session/room so the new user never resumes
-          // it; broadcast the reset so overlays clear staged SKUs and re-scope their counter.
+          // it; broadcast the reset (with a reason) so overlays clear staged SKUs and
+          // re-scope their counter.
           try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]); } catch (_) {}
           broadcastAuthStatus();
-          broadcastSession();
-          console.log('[LENSED][BG] LENSED_AUTH: identity changed — live state reset');
+          broadcastSession('user_changed');
+          console.log('[LENSED][BG] SESSION RESET', { reason: 'user_changed', source: 'LENSED_AUTH', hadSession: hadSession, hadHost: hadHost, hadStagedSku: null });
         } else {
           // Routine same-user refresh: tokens already rotated by persistAuth above.
           // Preserve session / room mapping / host / cached SKUs / dedup state; refresh
@@ -1430,7 +1433,8 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       loggedOrderStatus.clear();
       loggedOrderSession.clear();
       persistSession();   // clears SK_SESSION_ID / SK_ROOM_ID
-      broadcastSession(); // sessionId=null → overlays clear staged SKUs + counter
+      broadcastSession('room_changed'); // sessionId=null → overlays clear staged SKUs + counter
+      console.log('[LENSED][BG] SESSION RESET', { reason: 'room_changed', source: 'TIKTOK_ROOM', hadSession: true, hadHost: null, hadStagedSku: null });
     } else if (currentSessionId && sessionRoomId === newRoom) {
       // Restored session's room confirmed by the live page — safe to keep it.
       console.log('[LENSED][BG] session room confirmed:', currentSessionId, 'room', newRoom);
