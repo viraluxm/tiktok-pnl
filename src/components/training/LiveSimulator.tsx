@@ -12,6 +12,7 @@ import {
 } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import { useVideoPublish } from '@/lib/training/useVideoPublish';
+import { shortTrainingSessionLabel } from '@/lib/training/session';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
 type AuctionPhase = 'idle' | 'running' | 'ended';
@@ -479,6 +480,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
           sessionSeconds > 0 && sessionSeconds <= SESSION_ENDING_SECONDS ? sessionSeconds : null
         }
       />
+
+      {/* Session label: unobtrusive, so a trainer can confirm host↔controller pairing. */}
+      <div
+        className="pointer-events-none absolute left-3 z-30 rounded-md bg-black/40 px-2 py-1 text-[10px] font-medium tabular-nums text-white/70 backdrop-blur-sm"
+        style={{ top: 'calc(env(safe-area-inset-top) + 0.75rem)' }}
+      >
+        Session: {shortTrainingSessionLabel(sessionId)}
+      </div>
 
       {sessionState === 'complete' && (
         <div

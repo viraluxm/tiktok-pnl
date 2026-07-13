@@ -10,6 +10,7 @@ import {
   type TrainerEvent,
 } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
+import { shortTrainingSessionLabel } from '@/lib/training/session';
 import TrainerVideoView from './TrainerVideoView';
 
 // ---- Auto-bid tuning (module-level: stable identity, no per-render churn) ----
@@ -239,7 +240,12 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
       )}
       <div className="mx-auto w-full max-w-md lg:max-w-4xl">
         <header className="flex items-center justify-between">
-          <h1 className="text-lg font-bold">Practice Controller</h1>
+          <div className="flex items-baseline gap-2">
+            <h1 className="text-lg font-bold">Practice Controller</h1>
+            <span className="text-[12px] font-medium tabular-nums text-tt-muted">
+              Session: {shortTrainingSessionLabel(sessionId)}
+            </span>
+          </div>
           <span className={`flex items-center gap-1.5 text-[13px] font-medium ${connColor}`}>
             <span className="h-2 w-2 rounded-full bg-current" />
             {connLabel}

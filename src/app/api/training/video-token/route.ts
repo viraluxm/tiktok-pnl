@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { AccessToken } from 'livekit-server-sdk';
 import { createClient } from '@/lib/supabase/server';
+import { isValidTrainingSessionId, trainingLiveKitRoom } from '@/lib/training/session';
 
 // LiveKit video token route for the Practice Mode camera preview.
 // Admin-gated independently: /api routes are NOT covered by the (app)/admin
@@ -9,7 +10,6 @@ export const runtime = 'nodejs'; // JWT signing needs Node, not the edge runtime
 export const dynamic = 'force-dynamic';
 
 type Role = 'host' | 'controller';
-const DEFAULT_ROOM = 'live-simulator-default';
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -36,11 +36,15 @@ export async function POST(request: Request) {
     role?: Role;
     session?: string;
   };
+
+  // Never trust a raw room name from the client. Re-validate the practice
+  // sessionId server-side and derive the LiveKit room here, so a token is only
+  // ever issued for `training:<validated-session>` (no shared-room fallback).
+  if (!isValidTrainingSessionId(body.session)) {
+    return NextResponse.json({ error: 'Invalid session' }, { status: 400 });
+  }
   const isHost = body.role === 'host';
-  const room =
-    typeof body.session === 'string' && body.session.trim()
-      ? body.session.trim()
-      : DEFAULT_ROOM;
+  const room = trainingLiveKitRoom(body.session);
 
   const at = new AccessToken(apiKey, apiSecret, {
     identity: `${isHost ? 'host' : 'ctrl'}-${user.id}`,
