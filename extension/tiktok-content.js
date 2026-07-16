@@ -39,6 +39,8 @@
   var authConnected = false;     // last auth state (drives the status row)
   var authStatusReceived = false; // keep "Connecting…" until the first auth status arrives
   var capturedOnlyWarnEl = null; // visible "orders captured but not bound" warning
+  var queueBannerEl = null;      // FAIL-LOUD: "NOT SIGNED IN — N sales queued, not saved"
+  var queuedSalesCount = 0;      // sales captured-but-unsaved (from background auth status)
   var lastScanEl = null;         // temporary visible "Last scan: … · <state>" line
   var diagStatusEl = null;       // dev-only "◉ Diagnostics ON · N events" indicator
   var diagPollStarted = false;   // single count-refresh interval across re-injects
@@ -71,6 +73,11 @@
   // The live's detected tiktok room (mirrors what inject relays to background). Used
   // to scope persisted staged SKUs.
   var currentRoomId = null;
+  // Tab-alive heartbeat: while this live tab is open, ping the background every
+  // HEARTBEAT_MS so it can advance live_sessions.last_seen_at (a tab-alive signal,
+  // independent of auctions). The interval dies with the content script on tab close.
+  var HEARTBEAT_MS = 45000;
+  var heartbeatTimer = null;
   // Detected tiktok host account from the MAIN-world injector's API path (room
   // owner/anchor, relayed as 'lensed-tiktok-account'). Display only — labels the
   // overlay; takes priority over the DOM label. See renderAccount / renderStatusLine.
@@ -80,6 +87,10 @@
   // background/session logic. API detection (currentAccount) takes priority. See
   // detectVisibleAccount / renderStatusLine.
   var domAccountLabel = null;
+  // Half-2: the DOM-read channel name is sent to the background (→ persisted on the
+  // session, → mapped to a store). Dedup key = name|room so it re-sends when either
+  // changes (e.g. label detected before the room, then the room arrives).
+  var lastChannelNameSentKey = null;
   // Count of orders captured this session that did NOT bind to a SKU (nothing staged
   // at capture time). Surfaced as a visible overlay warning so it is never silent.
   var capturedOnlyCount = 0;
@@ -443,6 +454,15 @@
       white-space: normal;\
     }\
     .lensed-warn:empty { display: none; }\
+    /* FAIL-LOUD: sales queued but NOT saved while signed out. Unmissable. */\
+    .lensed-queue-banner {\
+      margin: 0 0 8px 0; padding: 9px 11px; border-radius: 8px;\
+      background: #7f1d1d; border: 1px solid #ef4444; color: #fee2e2;\
+      font-size: 12px; font-weight: 800; line-height: 1.35; text-align: center;\
+      animation: lensed-queue-pulse 1.6s ease-in-out infinite;\
+    }\
+    .lensed-queue-banner:empty { display: none; }\
+    @keyframes lensed-queue-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.55); } 50% { box-shadow: 0 0 0 4px rgba(239,68,68,0); } }\
     \
     /* Talking points (grouped per staged SKU) */\
     .lensed-notes {\
@@ -1307,6 +1327,8 @@
     hostRowEl.appendChild(hostWarnEl);
     renderHostOptions(); // paint from in-memory roster + current selection (self-guards on empty)
 
+    queueBannerEl = el('div', 'lensed-queue-banner', '');
+    renderQueueWarning(); // repaint on re-inject if sales are already queued
     capturedOnlyWarnEl = el('div', 'lensed-warn', '');
     renderCapturedOnlyWarning(); // repaint if a re-inject happens with a live count
 
@@ -1405,6 +1427,7 @@
     statusBar.appendChild(hostRowEl);
 
     panel.appendChild(header);
+    panel.appendChild(queueBannerEl); // top of panel, under the header — most visible
     panel.appendChild(statusBar);
     panel.appendChild(skuBar);
     panel.appendChild(body);
@@ -1542,7 +1565,7 @@
       chrome.runtime.sendMessage({ type: 'GET_AUTH_STATUS' }, function (resp) {
         if (chrome.runtime.lastError) return;
         if (resp) {
-          updateAuthStatus(resp.authenticated, resp.userId);
+          updateAuthStatus(resp.authenticated, resp.userId, resp.queuedSales);
           if (resp.sessionId) adoptSession(resp.sessionId);
         }
       });
@@ -1825,12 +1848,31 @@
     pageWiringActive = true;
     createOverlay();
     scheduleAccountDetection(); // detection-verification only (display + logs)
+    startHeartbeat();
     overlayObserver = new MutationObserver(onBodyMutation);
     overlayObserver.observe(document.body, { childList: true, subtree: false });
     // Keep the overlay inside the rendered subtree on fullscreen enter/exit (webkit*
     // is a defensive fallback for older Chromium).
     document.addEventListener('fullscreenchange', ensureOverlayMountedInCorrectRoot);
     document.addEventListener('webkitfullscreenchange', ensureOverlayMountedInCorrectRoot);
+  }
+
+  // Tab-alive heartbeat loop. Idempotent (one timer per wired page). Only pings once a
+  // live room is known — during a no-sale lull the room stays set, so the heartbeat
+  // keeps advancing last_seen_at. Torn down with the page (teardown / tab close).
+  function startHeartbeat() {
+    if (heartbeatTimer) return;
+    try {
+      heartbeatTimer = setInterval(function () {
+        // Always ping (roomId may be null early); the background resolves the live
+        // session by room — from this roomId, its own detected room, or the pinned
+        // session — so a mid-live load with a lagging content-side room still heartbeats.
+        try {
+          console.log('[LENSED][content] heartbeat → bg (room ' + currentRoomId + ')');
+          chrome.runtime.sendMessage({ type: 'TIKTOK_HEARTBEAT', roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
+        } catch (_) {}
+      }, HEARTBEAT_MS);
+    } catch (_) {}
   }
 
   // Tear down everything page-scoped so a navigation / bfcache eviction leaves nothing
@@ -1840,6 +1882,7 @@
   // eagerly, so no save is needed here.
   function teardown() {
     pageWiringActive = false;
+    try { if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; } } catch (_) {}
     try { if (overlayObserver) { overlayObserver.disconnect(); overlayObserver = null; } } catch (_) {}
     try { document.removeEventListener('mousemove', onDocMouseMove); } catch (_) {}
     try { document.removeEventListener('mouseup', onDocMouseUp); } catch (_) {}
@@ -1851,7 +1894,7 @@
     shadowRoot = null; salesListEl = null; countEl = null; stagedListEl = null; notesListEl = null;
     skuInputEl = null; resolvedLabelEl = null; lastScanEl = null; stagedCountEl = null; sessionStatusEl = null;
     capturedOnlyWarnEl = null; aspValueEl = null; breakEvenValueEl = null; activePanel = null;
-    hostRowEl = null; hostSelectEl = null; hostWarnEl = null;
+    hostRowEl = null; hostSelectEl = null; hostWarnEl = null; queueBannerEl = null;
   }
 
   function init() {
@@ -2139,28 +2182,52 @@
       try {
         chrome.runtime.sendMessage({ type: 'TIKTOK_ROOM', roomId: data.roomId }).catch(function () {});
       } catch (_) {}
+      maybeSendChannelName(); // room now known → (re)send the DOM channel name scoped to it
       return;
     }
 
     if (data.source === 'lensed-tiktok-account') {
-      // Detected host identity from the MAIN-world injector — label the overlay only.
-      // Display-only in this PR: NOT forwarded to the worker (no session scoping here).
+      // Detected CHANNEL/CREATOR identity (room owner/anchor) from the MAIN-world
+      // injector. This is the streaming channel (e.g. "onlybids"), NOT the shop —
+      // they differ by design. Label the overlay AND forward to the worker so it can
+      // persist/log the channel for the eventual channel→store mapping.
       dlog('account.detected', 'info', 'account detected', { handle: (data.account && (data.account.handle || data.account.tag)) || null });
       renderAccount(data.account || null);
+      if (data.account) {
+        try {
+          chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: data.account, roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
+        } catch (_) {}
+      }
       return;
     }
   });
 
   // ── Auth status display ─────────────────────────────────────────────
 
-  function updateAuthStatus(authenticated, uid) {
+  function updateAuthStatus(authenticated, uid, queuedSales) {
     var wasConnected = authConnected;
     authConnected = !!authenticated;
     authStatusReceived = true;
+    if (typeof queuedSales === 'number') queuedSalesCount = queuedSales;
     renderStatusLine();
     renderHostWarning();
+    renderQueueWarning();
     // Load the host roster on (re)connect, or if we became connected without one yet.
     if (authConnected && (!wasConnected || hosts.length === 0)) fetchHosts();
+  }
+
+  // FAIL-LOUD: while signed OUT with queued sales, show an unmissable red banner. This is
+  // the safety net — queue-and-flush only saves data if auth returns; if it never does
+  // (app closed / token fully expired) this banner is what tells the host to act. Once
+  // signed in the queue flushes and the banner clears (queuedSalesCount → 0).
+  function renderQueueWarning() {
+    if (!queueBannerEl) return;
+    if (!authConnected && queuedSalesCount > 0) {
+      queueBannerEl.textContent = '⚠ NOT SIGNED IN — ' + queuedSalesCount + ' sale'
+        + (queuedSalesCount === 1 ? '' : 's') + ' queued, NOT yet saved. Sign in to Lensed to save them.';
+    } else {
+      queueBannerEl.textContent = '';
+    }
   }
 
   // API-sourced host identity (from tiktok-inject.js / background). Authoritative \u2014
@@ -2440,6 +2507,20 @@
   // Run one detection pass. Logs the required success line on a new/changed label and
   // updates the overlay; logs a redacted diagnostic on failure (only when asked, to
   // avoid console spam). Never touches session logic.
+  // Half-2: forward the DOM-read channel name to the background so it can persist it on
+  // the session (resolved by room, like the heartbeat) for the channel→store mapping.
+  // Reuses the TIKTOK_ACCOUNT plumbing; source:'dom' distinguishes it from the (dead on
+  // Seller Center) network path. Self-dedups by name|room so it isn't chatty.
+  function maybeSendChannelName() {
+    if (!domAccountLabel) return;
+    var key = domAccountLabel + '|' + (currentRoomId || '');
+    if (key === lastChannelNameSentKey) return;
+    lastChannelNameSentKey = key;
+    try {
+      chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: { handle: domAccountLabel, source: 'dom' }, roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
+    } catch (_) {}
+  }
+
   function runAccountDomDetection(logFailure) {
     var res;
     try { res = detectVisibleAccount(); } catch (e) { return; }
@@ -2449,6 +2530,7 @@
         console.log('[LENSED][TT] visible account label detected:', res.label, '(via ' + res.why + ')');
         renderStatusLine();
       }
+      maybeSendChannelName(); // self-dedups; sends on name or room change
       return;
     }
     if (logFailure && !domAccountLabel && !currentAccount) {
@@ -2476,7 +2558,7 @@
   chrome.runtime.onMessage.addListener(function (message) {
     if (!message || typeof message !== 'object') return;
     if (message.type === 'LENSED_AUTH_STATUS') {
-      updateAuthStatus(message.authenticated, message.userId);
+      updateAuthStatus(message.authenticated, message.userId, message.queuedSales);
     } else if (message.type === 'LENSED_SESSION') {
       // Background resolved/changed the live session — scope our counter to it.
       // A null sessionId means the session was reset (room change / user switch),
