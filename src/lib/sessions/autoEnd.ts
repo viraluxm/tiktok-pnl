@@ -9,10 +9,17 @@ import { createAdminClient } from '@/lib/supabase/admin';
 // On close we stamp ended_at = that LAST CAPTURE (never now()). A session whose
 // captures show a large internal gap is FLAGGED (multi-live) and never auto-closed.
 
-export const IDLE_THRESHOLD_MIN = 45;   // no captures for this long ⇒ live is over
+export const IDLE_THRESHOLD_MIN = 45;   // no CAPTURES for this long ⇒ live is over (fallback signal)
 export const MULTI_LIVE_GAP_HOURS = 6;  // an internal capture gap this large ⇒ separate lives
+// HYBRID SIGNAL (added with the extension heartbeat): last_seen_at is a tab-alive ping
+// written every ~45s while the live tab is open, so it keeps advancing through a no-sale
+// lull (unlike captures). When a session HAS a last_seen_at we trust it and use this
+// tighter threshold; when it's NULL (pre-heartbeat sessions) we fall back to the verified
+// capture-idle logic below. Existing orphans that never heartbeated are handled by the
+// one-time cleanup, not here.
+export const AUTO_END_MINUTES = 10;     // no HEARTBEAT for this long ⇒ tab gone ⇒ live over
 
-interface Session { id: string; user_id: string; store_id: string | null; started_at: string; ended_at: string | null }
+interface Session { id: string; user_id: string; store_id: string | null; started_at: string; ended_at: string | null; last_seen_at: string | null }
 
 export interface AutoEndResult {
   dry_run: boolean;
@@ -41,7 +48,7 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
   // for the same user+store — otherwise a session's window bleeds into later lives).
   const { data: allSessions, error: sErr } = await admin
     .from('live_sessions')
-    .select('id, user_id, store_id, started_at, ended_at')
+    .select('id, user_id, store_id, started_at, ended_at, last_seen_at')
     .order('started_at', { ascending: true });
   if (sErr) throw new Error(`sessions read failed: ${sErr.message}`);
   const sessions = (allSessions ?? []) as Session[];
@@ -80,9 +87,28 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     const { data: caps, error: cErr } = await q;
     if (cErr) throw new Error(`capture read failed: ${cErr.message}`);
 
+    // HYBRID: last_seen_at (heartbeat) is the primary tab-alive signal when present.
+    const hasHeartbeat = !!s.last_seen_at;
+    const hbLastMs = hasHeartbeat ? new Date(s.last_seen_at as string).getTime() : NaN;
+    const hbIdleMin = hasHeartbeat ? Math.round((nowMs - hbLastMs) / 60000) : null;
+
     const times = (caps ?? []).map((c) => new Date(c.created_at as string).getTime()).filter(Number.isFinite);
     if (times.length === 0) {
-      noCaptures.push({ id: s.id, store_id: s.store_id, started_at: s.started_at });
+      // No captures → can only judge by heartbeat. A session that heartbeated then went
+      // silent (tab closed) is closeable via last_seen_at; one that NEVER heartbeated is
+      // left for the one-time cleanup (we can't tell if it's genuinely over).
+      if (hasHeartbeat && (hbIdleMin as number) > AUTO_END_MINUTES) {
+        wouldClose.push({
+          id: s.id, store_id: s.store_id, started_at: s.started_at, captures: 0,
+          signal: 'heartbeat', idle_minutes: hbIdleMin, last_seen_at: s.last_seen_at,
+          proposed_ended_at: s.last_seen_at,
+          duration_hours: +((hbLastMs - new Date(s.started_at).getTime()) / 3_600_000).toFixed(2),
+        });
+      } else if (hasHeartbeat) {
+        stillActive.push({ id: s.id, store_id: s.store_id, started_at: s.started_at, captures: 0, signal: 'heartbeat', idle_minutes: hbIdleMin, note: `heartbeat ${hbIdleMin}m ago (< ${AUTO_END_MINUTES}m) — still live` });
+      } else {
+        noCaptures.push({ id: s.id, store_id: s.store_id, started_at: s.started_at });
+      }
       continue;
     }
 
@@ -107,12 +133,22 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     };
 
     // Genuine multi-live = 2+ PT days AND a real internal gap (not just midnight crossing).
+    // This safety guard stays FIRST and applies regardless of signal — a session spanning
+    // separate lives needs a manual split, never an auto-close.
     if (distinctPtDays >= 2 && maxGapHours > MULTI_LIVE_GAP_HOURS) {
-      multiLive.push({ ...base, reason: `internal gap ${maxGapHours}h across ${distinctPtDays} days — needs manual split` });
+      multiLive.push({ ...base, last_seen_at: s.last_seen_at, reason: `internal gap ${maxGapHours}h across ${distinctPtDays} days — needs manual split` });
+    } else if (hasHeartbeat) {
+      // Primary signal: trust the heartbeat. ended_at = last_seen_at (last known alive).
+      if ((hbIdleMin as number) > AUTO_END_MINUTES) {
+        wouldClose.push({ ...base, signal: 'heartbeat', idle_minutes: hbIdleMin, last_seen_at: s.last_seen_at, proposed_ended_at: s.last_seen_at, duration_hours: +((hbLastMs - new Date(s.started_at).getTime()) / 3_600_000).toFixed(2) });
+      } else {
+        stillActive.push({ ...base, signal: 'heartbeat', idle_minutes: hbIdleMin, note: `heartbeat ${hbIdleMin}m ago (< ${AUTO_END_MINUTES}m) — still live` });
+      }
     } else if (idleMin > IDLE_THRESHOLD_MIN) {
-      wouldClose.push({ ...base, proposed_ended_at: lastCaptureIso, duration_hours: durationHours });
+      // Fallback signal (no heartbeat yet): verified capture-idle logic, unchanged.
+      wouldClose.push({ ...base, signal: 'capture', proposed_ended_at: lastCaptureIso, duration_hours: durationHours });
     } else {
-      stillActive.push({ ...base, note: `last capture ${idleMin}m ago (< ${IDLE_THRESHOLD_MIN}m) — still live` });
+      stillActive.push({ ...base, signal: 'capture', note: `last capture ${idleMin}m ago (< ${IDLE_THRESHOLD_MIN}m) — still live` });
     }
   }
 
@@ -121,7 +157,7 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     for (const w of wouldClose) {
       const { error } = await admin
         .from('live_sessions')
-        .update({ status: 'ended', ended_at: w.proposed_ended_at as string })
+        .update({ status: 'ended', ended_at: w.proposed_ended_at as string, end_source: 'auto_ender' })
         .eq('id', w.id as string)
         .is('ended_at', null); // never overwrite an already-ended session
       if (error) console.error('[auto-end] update error', w.id, error.message);

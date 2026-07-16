@@ -4,6 +4,7 @@ import { useState, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
+import UnmappedSessionsBanner from '@/components/admin/UnmappedSessionsBanner';
 import SummaryCards from '@/components/dashboard/SummaryCards';
 import ForecastCard from '@/components/dashboard/ForecastCard';
 import InventorySection from '@/components/inventory/InventorySection';
@@ -252,6 +253,7 @@ export default function RealDashboard() {
       <Header />
 
       <div className="px-8 py-6">
+        <UnmappedSessionsBanner />
         <TikTokConnect />
 
         {/* Ad Account Connection */}
