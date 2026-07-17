@@ -44,7 +44,7 @@ function boot() {
       set: (o, cb) => cb ? setTimeout(() => { Object.assign(store, o); cb(); }, 1) : new Promise((r) => setTimeout(() => { Object.assign(store, o); r(); }, 1)),
       remove: (k, cb) => cb && cb(),
     } },
-    tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => Promise.resolve() },
+    tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => Promise.resolve(), onRemoved: { addListener() {} } },
   };
   const captureCalls = [];
   let captureQueue = [];
