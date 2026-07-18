@@ -63,6 +63,7 @@ function boot(seed) {
     tabs: {
       query: (q, cb) => { const t = [{ id: 1 }]; if (cb) { cb(t); return; } return Promise.resolve(t); },
       sendMessage: (id, msg) => { broadcasts.push(msg); return Promise.resolve(); },
+      onRemoved: { addListener() {} },
     },
   };
   window.fetch = (url, opts) => {

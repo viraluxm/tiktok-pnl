@@ -7,6 +7,9 @@ import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules, type ShiftRuleInput } from '@/hooks/useShiftRules';
 import type { Employee, EmployeeStatus, Shift, ShiftRule } from '@/types';
+import AuctionPerformanceCard from './AuctionPerformanceCard';
+import { AspHitBadge, BelowBreakEvenBadge } from './HostPerformanceBadges';
+import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
 
 interface EmployeesTabProps {
   // The selected pay period, driven by the dashboard's global FiltersBar. Nulls = all time.
@@ -14,7 +17,7 @@ interface EmployeesTabProps {
   dateTo: string | null;
 }
 
-type SubView = 'roster' | 'shifts' | 'pay';
+type SubView = 'roster' | 'shifts' | 'pay' | 'auctions';
 
 const ROLE_PRESETS = ['host', 'fulfillment', 'manager', 'support', 'other'];
 const STATUSES: EmployeeStatus[] = ['active', 'probation', 'former'];
@@ -51,6 +54,8 @@ function StatusBadge({ status }: { status: string }) {
 export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   const [subView, setSubView] = useState<SubView>('roster');
   const { employees, isLoading, addEmployee, updateEmployee, deleteEmployee } = useEmployees();
+  // Per-host auction badges (Roster). Read-only; empty until 056 attribution accrues.
+  const { data: hostPerf } = useHostPerformance();
   const { shifts, openShifts, isLoading: shiftsLoading, addShift, endShift, deleteShift } = useShifts(dateFrom, dateTo);
   const {
     rules,
@@ -190,7 +195,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
       {/* Sub navigation */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex gap-2">
-          {(['roster', 'shifts', 'pay'] as SubView[]).map((v) => (
+          {(['roster', 'shifts', 'pay', 'auctions'] as SubView[]).map((v) => (
             <button
               key={v}
               onClick={() => setSubView(v)}
@@ -198,14 +203,14 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                 subView === v ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text hover:bg-white/5'
               }`}
             >
-              {v === 'roster' ? 'Roster' : v === 'shifts' ? 'Shifts' : 'Pay'}
+              {v === 'roster' ? 'Roster' : v === 'shifts' ? 'Shifts' : v === 'pay' ? 'Pay' : 'Auctions'}
             </button>
           ))}
         </div>
         {/* The FiltersBar drives Roster/Shifts, but the Pay view is scoped to its OWN
             biweekly pay period (independent of the filter). Hide this label there so it
             can't imply the pay numbers respond to the dashboard filter. */}
-        {subView !== 'pay' && (
+        {subView !== 'pay' && subView !== 'auctions' && (
           <span className="text-xs text-tt-muted">
             Period: <span className="text-tt-text font-medium">{periodLabel}</span>
           </span>
@@ -216,6 +221,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
         <RosterView
           employees={employees}
           isLoading={isLoading}
+          hostPerf={hostPerf?.hosts ?? {}}
           onAdd={openAdd}
           onEdit={openEdit}
           onDelete={handleDelete}
@@ -265,6 +271,8 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
           }}
         />
       )}
+
+      {subView === 'auctions' && <AuctionPerformanceCard />}
 
       {subView === 'pay' && (
         <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
@@ -469,12 +477,14 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function RosterView({
   employees,
   isLoading,
+  hostPerf,
   onAdd,
   onEdit,
   onDelete,
 }: {
   employees: Employee[];
   isLoading: boolean;
+  hostPerf: Record<string, HostAgg>;
   onAdd: () => void;
   onEdit: (e: Employee) => void;
   onDelete: (e: Employee) => void;
@@ -500,6 +510,8 @@ function RosterView({
               <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hourly Rate</th>
               <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hire Date</th>
               <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Probation Ends</th>
+              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">ASP Hit (7d)</th>
+              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Below Break-even (14d)</th>
               <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Actions</th>
             </tr>
           </thead>
@@ -512,6 +524,13 @@ function RosterView({
                 <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(e.hourly_rate)}</td>
                 <td className="px-5 py-3 text-xs text-tt-muted">{e.hire_date || '—'}</td>
                 <td className="px-5 py-3 text-xs text-tt-muted">{e.probation_end_date || '—'}</td>
+                {/* Performance badges: HOSTS ONLY. Other roles (e.g. fulfillment) show nothing. */}
+                <td className="px-5 py-3 text-center">
+                  {e.role?.toLowerCase() === 'host' ? <AspHitBadge agg={hostPerf[e.id]} /> : null}
+                </td>
+                <td className="px-5 py-3 text-center">
+                  {e.role?.toLowerCase() === 'host' ? <BelowBreakEvenBadge agg={hostPerf[e.id]} /> : null}
+                </td>
                 <td className="px-5 py-3 text-center whitespace-nowrap">
                   <button
                     onClick={() => onEdit(e)}
@@ -530,7 +549,7 @@ function RosterView({
             ))}
             {employees.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-5 py-12 text-center text-tt-muted text-sm">
+                <td colSpan={9} className="px-5 py-12 text-center text-tt-muted text-sm">
                   {isLoading ? 'Loading…' : 'No employees yet — add your first team member'}
                 </td>
               </tr>

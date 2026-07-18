@@ -7,6 +7,7 @@ import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus 
 import { useAuctionBoard, type AuctionItem } from '@/hooks/useLiveAuctions';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
+import { useStores } from '@/hooks/useStores';
 
 interface UnboundOrder {
   order_id: string;
@@ -74,6 +75,43 @@ function aspPerUnitCents(s: ShowSummary): number {
   return s.unitsSold > 0 ? Math.round(s.saleCents / s.unitsSold) : 0;
 }
 
+// Per-show ASP-hit / below-break-even rates, same definitions as the roster badges but
+// scoped to this session. break_even = Σ cost snapshots; asp_goal = break_even × 3;
+// final_price = captured won price. CRITICAL: only auctions with status='sold' AND a
+// realized won price AND a known break-even count — payment-failed / unsold / uncosted
+// rows are excluded from BOTH numerator and denominator (a failed payment is NOT a loss).
+interface ShowRates { soldCount: number; aspHitPct: number | null; belowBePct: number | null }
+function showRates(items: AuctionItem[]): ShowRates {
+  let n = 0, hits = 0, below = 0;
+  for (const it of items) {
+    if (it.status !== 'sold') continue;
+    const finalPrice = it.won_price_cents;
+    const breakEven = it.total_cost_cents;
+    if (finalPrice == null || breakEven == null) continue; // exclude non-sales / uncosted
+    n += 1;
+    if (finalPrice >= breakEven * 3) hits += 1;
+    if (finalPrice < breakEven) below += 1;
+  }
+  return {
+    soldCount: n,
+    aspHitPct: n > 0 ? (hits / n) * 100 : null,
+    belowBePct: n > 0 ? (below / n) * 100 : null,
+  };
+}
+
+// ASP-hit tone: green at/above the 35% bonus bar, neutral otherwise.
+function aspHitClass(pct: number | null): string {
+  return pct != null && pct >= 35 ? 'text-tt-green' : 'text-tt-text';
+}
+// Below-break-even tone (placeholder GLOBAL thresholds — same as the roster badges;
+// may become store-relative later): red ≥20%, amber 12–20%, green <12%.
+function belowBeClass(pct: number | null): string {
+  if (pct == null) return 'text-tt-text';
+  if (pct >= 20) return 'text-tt-red';
+  if (pct >= 12) return 'text-tt-yellow';
+  return 'text-tt-green';
+}
+
 function StatusBadge({ status }: { status: SessionStatus }) {
   const live = status === 'live';
   return (
@@ -121,8 +159,18 @@ function shortConfirmMessage(short: { n: number; cur: number; qty: number; large
 export default function ShowsTab() {
   const { data: sessions = [], isLoading } = useLiveSessions();
   const { user } = useUser();
+  const { data: storesData } = useStores();
   const isAdmin = user?.app_metadata?.role === 'admin';
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Respect the active-store filter (previously only metrics did; the Shows list showed
+  // all). Unmapped sessions (store_id null) ALWAYS show, under every filter — an
+  // unattributed stream must never hide behind a store selection (Part D flag).
+  const activeStore = storesData?.activeStore ?? 'all';
+  const visibleSessions = useMemo(
+    () => sessions.filter((s) => activeStore === 'all' || s.store_id === activeStore || !s.store_id),
+    [sessions, activeStore],
+  );
 
   const selected = useMemo(
     () => sessions.find((s) => s.id === selectedId) ?? null,
@@ -143,7 +191,7 @@ export default function ShowsTab() {
           <div className="w-5 h-5 border-2 border-tt-muted border-t-transparent rounded-full animate-spin mr-3" />
           Loading shows…
         </div>
-      ) : sessions.length === 0 ? (
+      ) : visibleSessions.length === 0 ? (
         <div className="rounded-2xl border border-tt-border bg-tt-card py-16 text-center">
           <div className="text-tt-text font-medium">No shows yet</div>
           <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
@@ -165,7 +213,7 @@ export default function ShowsTab() {
               </tr>
             </thead>
             <tbody>
-              {sessions.map((s) => (
+              {visibleSessions.map((s) => (
                 <ShowRow key={s.id} session={s} onOpen={setSelectedId} />
               ))}
             </tbody>
@@ -206,7 +254,13 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
       className="border-b border-tt-border last:border-0 cursor-pointer hover:bg-tt-card-hover transition-colors"
     >
       <td className="px-4 py-3">
-        <div className="font-medium text-tt-text">{session.title || 'Untitled show'}</div>
+        <div className="font-medium text-tt-text">
+          {session.title || 'Untitled show'}
+          {/* Part D flag: a session with no store attribution stands out in every view. */}
+          {!session.store_id && (
+            <span className="ml-2 align-middle text-[10px] font-semibold px-2 py-0.5 rounded-md bg-tt-red/15 text-tt-red">Unmapped store</span>
+          )}
+        </div>
         <div className="text-xs text-tt-muted mt-0.5">
           {session.store_name ? <span className="text-tt-text/70">{session.store_name}</span> : null}
           {session.store_name ? ' · ' : ''}
@@ -230,6 +284,7 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
 function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => void }) {
   const { data: items = [], isLoading } = useAuctionBoard(session.id);
   const sum = useMemo(() => summarize(items), [items]);
+  const rates = useMemo(() => showRates(items), [items]);
   // Net profit (so far) + its cost base, over costed sold items that HAVE a
   // payout figure (orders without a payout are excluded, not zeroed). The same
   // restricted set drives ROI so numerator and denominator stay aligned.
@@ -660,6 +715,20 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
             />
           </>
         )}
+        {/* Per-show performance rates over SOLD auctions only (payment-failed/unsold
+            excluded). "—" when the show has no sold auctions (never "0%"). */}
+        <SummaryCard
+          label="ASP Hit Rate"
+          value={isLoading ? '…' : rates.aspHitPct == null ? '—' : `${Math.round(rates.aspHitPct)}%`}
+          valueClass={isLoading ? '' : aspHitClass(rates.aspHitPct)}
+          sub={rates.soldCount > 0 ? `of ${rates.soldCount} sold` : undefined}
+        />
+        <SummaryCard
+          label="Below Break-even"
+          value={isLoading ? '…' : rates.belowBePct == null ? '—' : `${Math.round(rates.belowBePct)}%`}
+          valueClass={isLoading ? '' : belowBeClass(rates.belowBePct)}
+          sub={rates.soldCount > 0 ? `of ${rates.soldCount} sold` : undefined}
+        />
       </div>
       {recon && (
         <div className={`text-xs text-tt-muted ${payout ? 'mb-2' : 'mb-6'}`}>
@@ -898,11 +967,12 @@ function CoveragePanel({ sessionId }: { sessionId: string }) {
   );
 }
 
-function SummaryCard({ label, value, valueClass = '' }: { label: string; value: string; valueClass?: string }) {
+function SummaryCard({ label, value, valueClass = '', sub }: { label: string; value: string; valueClass?: string; sub?: string }) {
   return (
     <div className="rounded-xl border border-tt-border bg-tt-card px-4 py-3">
       <div className="text-xs text-tt-muted">{label}</div>
       <div className={`text-lg font-bold tabular-nums mt-0.5 ${valueClass}`}>{value}</div>
+      {sub && <div className="text-[10px] text-tt-muted mt-0.5 tabular-nums">{sub}</div>}
     </div>
   );
 }

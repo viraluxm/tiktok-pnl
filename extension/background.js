@@ -34,6 +34,16 @@ var SK_ROOM_ID = 'lensed_room_id';
 // longer ago than the reuse cutoff, so a session left 'live' from a previous day is
 // never resumed — even for the same room.
 var SK_SESSION_TS = 'lensed_session_ts';
+// Persisted queue of sales captured while UNAUTHENTICATED. MV3 workers suspend, so
+// this MUST live in chrome.storage.local (an in-memory queue would be lost on restart,
+// reintroducing the silent data loss). Flushed to lensed_log_auction + capture_events
+// when auth returns. See enqueueSale / flushSaleQueue.
+var SK_SALE_QUEUE = 'lensed_sale_queue';
+// Captured streaming CHANNEL/creator identities (room owner/anchor), keyed by room.
+// The channel (e.g. "onlybids") is NOT the shop (e.g. "Snore") — kept to later seed a
+// channel→store mapping. Persisted here (safe, no DB change) in addition to the console
+// log + best-effort live_sessions.channel_* write (a no-op until migration 058).
+var SK_CHANNEL_ACCOUNTS = 'lensed_channel_accounts';
 
 // ─── Diagnostics (dev-only flight recorder; no-op unless enabled) ────
 // Local-only ring buffer of redacted events, persisted THROTTLED to
@@ -164,6 +174,152 @@ var selectedHostId = null;
 // The session id we've already pushed selectedHostId to — so the attach RPC fires at
 // most once per (session, host) and never per-order on the hot bind path.
 var hostAppliedForSession = null;
+
+// ─── Tab-alive heartbeat ─────────────────────────────────────────────
+// The live tab pings us every HEARTBEAT_MS (content script) while open; we stamp
+// live_sessions.last_seen_at so the server-side auto-ender can distinguish a genuinely
+// live show from an orphaned session. This is a TAB-ALIVE signal, independent of
+// whether auctions are closing — a host in a no-sale lull must still heartbeat.
+var HEARTBEAT_MIN_WRITE_MS = 30 * 1000; // throttle DB writes (content pings ~45s; dedups multi-tab)
+var lastHeartbeatWriteTs = 0;
+// The tab id the live heartbeats/sales come from — used for a best-effort "mark ended"
+// when that specific tab closes. In-memory only (a SW restart forfeits it; the
+// auto-ender is the real backstop, so that's acceptable).
+var liveTabId = null;
+
+// Read-only resolve of the session id to heartbeat. Prefers the in-memory pointer (set
+// by the sale path); otherwise looks it up BY ROOM — the SAME room→session mapping the
+// sale path uses — so a mid-live load (extension attached to a session it did NOT create,
+// or authenticated only partway through) still stamps last_seen_at. Never creates a
+// session; if there's no live session for the room there is nothing to heartbeat.
+// A tiny cache avoids re-querying every ping once resolved.
+var heartbeatResolvedRoom = null;
+var heartbeatResolvedSid = null;
+async function resolveHeartbeatSessionId(room) {
+  // Fast path: the sale path already pinned a session for this exact room.
+  if (currentSessionId && sessionRoomId && room && sessionRoomId === room) return currentSessionId;
+  if (currentSessionId && !room) return currentSessionId; // no room hint — use what we have
+  if (!room) return null;
+  if (heartbeatResolvedSid && heartbeatResolvedRoom === room) return heartbeatResolvedSid;
+  try {
+    var rows = await supabaseGet(
+      'live_sessions',
+      'select=id&tiktok_live_id=eq.' + encodeURIComponent(room) + '&status=eq.live&order=started_at.desc&limit=1'
+    );
+    if (rows && rows.length > 0) {
+      heartbeatResolvedRoom = room;
+      heartbeatResolvedSid = rows[0].id;
+      return heartbeatResolvedSid;
+    }
+    console.log('[LENSED][BG] heartbeat: no live session found for room', room);
+  } catch (e) {
+    console.warn('[LENSED][BG] heartbeat session resolve failed:', String((e && e.message) || e));
+  }
+  return null;
+}
+
+// Stamp last_seen_at=now() for the current live session (throttled). Best-effort: a
+// failed heartbeat just means the auto-ender waits one more cycle. Never throws.
+async function heartbeatSession(room) {
+  if (!isAuthenticated()) { console.log('[LENSED][BG] heartbeat skip — not authenticated'); return; }
+  var now = Date.now();
+  if (now - lastHeartbeatWriteTs < HEARTBEAT_MIN_WRITE_MS) return;
+  var sid = currentSessionId || await resolveHeartbeatSessionId(room);
+  console.log('[LENSED][BG] heartbeat: currentSessionId=' + currentSessionId + ' resolvedSid=' + sid + ' room=' + room);
+  if (!sid) { console.log('[LENSED][BG] heartbeat skip — no live session to stamp (room ' + room + ')'); return; }
+  lastHeartbeatWriteTs = now;
+  try {
+    await supabasePatch('live_sessions', 'id=eq.' + encodeURIComponent(sid), { last_seen_at: new Date().toISOString() });
+    console.log('[LENSED][BG] heartbeat OK — last_seen_at stamped for session ' + sid);
+  } catch (e) {
+    lastHeartbeatWriteTs = 0; // let the next ping retry promptly
+    console.warn('[LENSED][BG] heartbeat failed (non-fatal):', String((e && e.message) || e));
+  }
+}
+
+// ─── Channel/creator account capture (Half 1) ────────────────────────
+// Persist the DETECTED streaming channel (room owner/anchor: secUid / handle / nickname
+// / numeric id). The channel (e.g. "onlybids") is NOT the shop (e.g. "Snore") — they
+// differ by design; this is the creator identity that will seed a channel→store mapping.
+// TONIGHT: capture to console + chrome.storage.local (zero DB risk). The best-effort
+// live_sessions.channel_* write is a NO-OP until migration 058 adds those columns — a
+// missing-column PATCH is caught and can never affect session creation (separate UPDATE).
+var CHANNEL_ACCOUNTS_MAX = 50;
+async function handleAccountDetected(account, room) {
+  if (!account) return;
+  var r = room || currentRoomId || sessionRoomId || null;
+  // Resolve the session the SAME robust way the heartbeat does (by room) — works even on
+  // a mid-live load where this worker never set currentSessionId.
+  var sid = currentSessionId || (r ? await resolveHeartbeatSessionId(r) : null);
+
+  console.log('[LENSED] account detected: handle=' + (account.handle || '?')
+    + ' secUid=' + (account.secUid || '?')
+    + ' nickname=' + (account.nickname || '?')
+    + ' id=' + (account.id || '?')
+    + ' room=' + (r || '?')
+    + ' → session ' + (sid || '(unresolved)'));
+  diag('account.captured', 'info', 'channel account detected', { handle: account.handle || null, secUid: account.secUid || null, room: r || null, session: sid ? diagRedactId(sid) : null });
+
+  // 1) Persist to chrome.storage.local (safe, survives SW restart), keyed by room, capped.
+  //    Read it any time with: chrome.storage.local.get('lensed_channel_accounts')
+  try {
+    var d = await chrome.storage.local.get([SK_CHANNEL_ACCOUNTS]);
+    var map = (d && d[SK_CHANNEL_ACCOUNTS] && typeof d[SK_CHANNEL_ACCOUNTS] === 'object') ? d[SK_CHANNEL_ACCOUNTS] : {};
+    var mapKey = r || (sid ? ('session:' + sid) : (account.key || account.secUid || account.handle));
+    map[mapKey] = {
+      sec_uid: account.secUid || null,
+      account_id: account.id != null ? String(account.id) : null,
+      handle: account.handle || null,
+      nickname: account.nickname || null,
+      room_id: r || null,
+      session_id: sid || null,
+      detected_at: new Date().toISOString(),
+    };
+    var keys = Object.keys(map);
+    if (keys.length > CHANNEL_ACCOUNTS_MAX) {
+      keys.sort(function (a, b) { return (map[a].detected_at || '').localeCompare(map[b].detected_at || ''); });
+      for (var i = 0; i < keys.length - CHANNEL_ACCOUNTS_MAX; i++) delete map[keys[i]];
+    }
+    var toSet = {}; toSet[SK_CHANNEL_ACCOUNTS] = map;
+    await chrome.storage.local.set(toSet);
+  } catch (e) {
+    console.warn('[LENSED][BG] channel storage write failed (non-fatal):', String((e && e.message) || e));
+  }
+
+  // 2) Best-effort DB persist to live_sessions.channel_* — DEFERRED until migration 058
+  //    adds the columns. Until then this catches a missing-column 400 and no-ops; once
+  //    058 is applied it starts succeeding with no extension rebuild.
+  if (sid && isAuthenticated()) {
+    try {
+      await supabasePatch('live_sessions', 'id=eq.' + encodeURIComponent(sid), {
+        channel_sec_uid: account.secUid || null,
+        channel_handle: account.handle || null,
+        channel_nickname: account.nickname || null,
+        channel_account_id: account.id != null ? String(account.id) : null,
+      });
+      console.log('[LENSED][BG] channel persisted to live_sessions ' + sid);
+    } catch (e) {
+      console.log('[LENSED][BG] channel DB persist deferred (captured in storage + console; add migration 058 to enable):', String((e && e.message) || e));
+    }
+  }
+}
+
+// Best-effort "mark ended" when the live tab closes. Close handlers are unreliable in
+// MV3 (the SW may already be gone), so this is opportunistic — the server auto-ender is
+// the authoritative backstop. Sets end_source so an auto/tab-close end is distinguishable.
+async function markSessionEndedOnTabClose(sid) {
+  if (!isAuthenticated() || !sid) return;
+  try {
+    await supabasePatch(
+      'live_sessions',
+      'id=eq.' + encodeURIComponent(sid) + '&status=eq.live',
+      { status: 'ended', ended_at: new Date().toISOString(), end_source: 'tab_closed' }
+    );
+    console.log('[LENSED][BG] marked session ended on tab close:', sid);
+  } catch (e) {
+    console.warn('[LENSED][BG] mark-ended-on-close failed (non-fatal):', String((e && e.message) || e));
+  }
+}
 
 // Never auto-reuse an extension-created session older than this. A session left in
 // 'live' for days (the extension never calls /end) must NOT be adopted for a new
@@ -351,6 +507,37 @@ async function supabaseUpsert(table, body, onConflict) {
   return res.json();
 }
 
+async function supabasePatch(table, query, body) {
+  // Column update via PostgREST. `query` is a PostgREST filter (e.g. 'id=eq.<uuid>').
+  // allowRetry=true: the only caller (heartbeat / mark-ended) is idempotent — it sets
+  // an absolute value (last_seen_at=now / status=ended), so a replayed PATCH is a no-op.
+  var url = SUPABASE_URL + '/rest/v1/' + table + '?' + query;
+  var headers = supabaseHeaders();
+  headers['Prefer'] = 'return=minimal';
+  var res = await sbFetch(url, {
+    method: 'PATCH',
+    headers: headers,
+    body: JSON.stringify(body),
+  }, FETCH_TIMEOUT_WRITE_MS, true);
+  if (res.status === 401) {
+    var refreshed = await tryRefreshToken();
+    if (refreshed) {
+      headers = supabaseHeaders();
+      headers['Prefer'] = 'return=minimal';
+      res = await sbFetch(url, {
+        method: 'PATCH',
+        headers: headers,
+        body: JSON.stringify(body),
+      }, FETCH_TIMEOUT_WRITE_MS, true);
+    }
+  }
+  if (!res.ok) {
+    var err = await res.text().catch(function () { return res.statusText; });
+    throw new Error('PATCH ' + table + ' failed (' + res.status + '): ' + err);
+  }
+  return true;
+}
+
 async function supabaseRpc(fnName, params) {
   var url = SUPABASE_URL + '/rest/v1/rpc/' + fnName;
   // allowRetry=true: lensed_log_auction is idempotent on (session_id, idem_key=
@@ -390,6 +577,9 @@ async function persistAuth(at, rt) {
   if (userId) data[SK_USER_ID] = userId;
   await chrome.storage.local.set(data);
   console.log('[LENSED][BG] auth persisted, user_id:', userId);
+  // Auth just became available (login / web-app relay / token refresh) → drain any sales
+  // captured while signed out. Fire-and-forget; never blocks the auth path.
+  try { flushSaleQueue(); } catch (_) {}
 }
 
 async function rehydrateAuth() {
@@ -760,6 +950,28 @@ async function logAuction(sessionId, result, skus, idemKey) {
   }
 }
 
+// Build the capture_events row — shared by upsertCaptureEvent and the unauth-queue
+// flush replay (replayQueuedSale) so both write the identical shape.
+function buildCaptureRow(sale, boundSkuId) {
+  return {
+    user_id: userId,
+    order_id: sale.orderId,
+    room_id: sale.roomId || currentRoomId,
+    buyer_username: sale.buyerUsername || null,
+    selling_price_cents: parsePriceToCents(sale.sellingPrice),
+    product_name: sale.productName || null,
+    platform_sku_ref: sale.platformSkuRef || null,
+    tiktok_sku_id: sale.skuId || null,
+    tiktok_product_id: sale.productId || null,
+    item_image_url: sale.imageUrl || null,
+    ordered_at: sale.orderedAtMs ? new Date(sale.orderedAtMs).toISOString() : null,
+    is_payment_successful: sale.isPaymentSuccessful,
+    order_status: sale.orderStatus,
+    bound_sku_id: boundSkuId || null,
+    raw_payload: sale,
+  };
+}
+
 // Upsert the raw capture_events row. Returns { ok, ... } so the caller can tell the
 // content script the truth (capture_events feeds P&L). Idempotent: on_conflict targets
 // the real (user_id, order_id) unique index, so a re-sent/replayed order MERGES instead
@@ -798,6 +1010,116 @@ async function upsertCaptureEvent(sale, boundSkuId) {
     });
     return { ok: false, reason: 'capture_write_failed', status: d.status || null, code: d.pgcode || diagClassifyErr(e), message: d.pgmsg || d.msg };
   }
+}
+
+// ─── Unauthenticated sale queue (persisted; flushed on sign-in) ───────
+// When a sale is captured but we're not authenticated, we ENQUEUE it (persisted to
+// chrome.storage.local) instead of discarding it. On auth return we flush in order to
+// capture_events + lensed_log_auction. The popup/overlay shows a loud warning while the
+// queue is non-empty and unauthenticated — because queue-and-flush only saves data if
+// auth eventually returns; the warning is the safety net if it never does.
+var SALE_QUEUE_MAX = 1000;
+var saleQueue = [];          // [{ sale, stagedSkus, result, enqueuedAt }]
+var saleQueueLoaded = false;
+var flushingSaleQueue = false;
+
+async function loadSaleQueue() {
+  if (saleQueueLoaded) return;
+  try {
+    var d = await chrome.storage.local.get([SK_SALE_QUEUE]);
+    if (Array.isArray(d[SK_SALE_QUEUE])) saleQueue = d[SK_SALE_QUEUE];
+  } catch (_) {}
+  saleQueueLoaded = true;
+}
+
+function persistSaleQueue() {
+  try { var d = {}; d[SK_SALE_QUEUE] = saleQueue; chrome.storage.local.set(d); } catch (_) {}
+}
+
+async function enqueueSale(sale, stagedSkus, result) {
+  await loadSaleQueue();
+  // Dedup: the sale snapshot re-arrives every few seconds — don't pile duplicates of
+  // the same (order, status). A status flip (not_sold→sold) is a distinct entry.
+  for (var i = 0; i < saleQueue.length; i++) {
+    if (saleQueue[i].sale && saleQueue[i].sale.orderId === sale.orderId && saleQueue[i].result === result) return;
+  }
+  saleQueue.push({ sale: sale, stagedSkus: stagedSkus || [], result: result, enqueuedAt: Date.now() });
+  if (saleQueue.length > SALE_QUEUE_MAX) {
+    var dropped = saleQueue.length - SALE_QUEUE_MAX;
+    saleQueue.splice(0, dropped); // oldest-dropped
+    console.warn('[LENSED][BG] sale queue over cap (' + SALE_QUEUE_MAX + ') — dropped ' + dropped + ' oldest queued sale(s)');
+    diag('queue.overflow', 'warn', 'sale queue overflow — oldest dropped', { dropped: dropped });
+  }
+  persistSaleQueue();
+  console.warn('[LENSED][BG] sale QUEUED (unauthenticated) — ' + saleQueue.length + ' pending:', sale.orderId);
+  diag('queue.enqueue', 'warn', 'sale queued (unauthenticated)', { order: sale.orderId, queued: saleQueue.length });
+  broadcastAuthStatus(); // refresh the overlay's loud "N queued" warning
+}
+
+// Replay one queued sale. Returns true when it is safely logged (or a confirmed dup) and
+// may be dropped; false when the attempt failed transiently and it must stay for retry.
+async function replayQueuedSale(item) {
+  var sale = item && item.sale;
+  if (!sale || !sale.orderId) return true; // malformed → drop
+  // 1) capture_events — the realized price / audit row (the data that would be LOST).
+  //    Idempotent on (user_id, order_id); a dup merges. A throw = transient → retry.
+  try {
+    await supabaseUpsert('capture_events', buildCaptureRow(sale, null), 'user_id,order_id');
+  } catch (e) {
+    var msg = String((e && e.message) || e);
+    if (msg.indexOf('23505') >= 0 || msg.indexOf('409') >= 0) {
+      // Already saved (e.g. via Order-API reconciliation) → treat as dup, drop from queue.
+      console.log('[LENSED][BG] flush: capture already exists (dup), dropping:', sale.orderId);
+    } else {
+      console.warn('[LENSED][BG] flush: capture write failed — will retry:', sale.orderId, msg);
+      return false;
+    }
+  }
+  // 2) bind to an auction item (best-effort). The RPC is idempotent on (session, order).
+  //    If it can't bind (no room/session/skus), the sale is still SAVED in capture_events
+  //    (never lost) — same as the app's normal "captured only" state.
+  try {
+    if (item.stagedSkus && item.stagedSkus.length > 0 && sale.roomId) {
+      var sessionId = await getOrCreateSession(sale.roomId);
+      if (sessionId) {
+        var byId = {};
+        for (var i = 0; i < item.stagedSkus.length; i++) {
+          var s = item.stagedSkus[i];
+          var q = Math.max(1, Math.trunc(Number(s.qty) || 1));
+          if (byId[s.id]) byId[s.id].qty += q; else byId[s.id] = { sku_id: s.id, qty: q };
+        }
+        var pSkus = Object.keys(byId).map(function (k) { return byId[k]; });
+        await logAuction(sessionId, item.result, pSkus, sale.orderId);
+      }
+    }
+  } catch (_) { /* best-effort; capture already saved so nothing is lost */ }
+  return true;
+}
+
+async function flushSaleQueue() {
+  await ensureAuthReady();
+  if (!isAuthenticated()) return;
+  await loadSaleQueue();
+  if (saleQueue.length === 0 || flushingSaleQueue) return;
+  flushingSaleQueue = true;
+  var startCount = saleQueue.length;
+  console.log('[LENSED][BG] flushing ' + startCount + ' queued sale(s)…');
+  diag('queue.flush_start', 'info', 'flushing queued sales', { count: startCount });
+  try {
+    // Process in order. Remove an item ONLY after it is confirmed logged/dup; a failed
+    // attempt leaves it (and the rest) queued for the next flush.
+    while (saleQueue.length > 0 && isAuthenticated()) {
+      var ok = await replayQueuedSale(saleQueue[0]);
+      if (!ok) { console.warn('[LENSED][BG] flush paused — leaving ' + saleQueue.length + ' queued for retry'); break; }
+      saleQueue.shift();
+      persistSaleQueue();
+    }
+  } finally {
+    flushingSaleQueue = false;
+    broadcastAuthStatus();
+  }
+  console.log('[LENSED][BG] flush done — ' + saleQueue.length + ' still queued');
+  diag('queue.flush_done', 'info', 'flush complete', { flushed: startCount - saleQueue.length, remaining: saleQueue.length });
 }
 
 // ─── Auto-bind: sale + staged SKUs → lensed_log_auction + capture_events
@@ -892,9 +1214,17 @@ async function handleAutoBind(sale, stagedSkus) {
       diag('bind.no_session', 'warn', 'no room-scoped session — captured only', { order: sale.orderId, room: sale.roomId || null });
     }
   } else if (!isAuthenticated()) {
+    // FIX A + truthful reporting: signed out, so we do NOT discard the sale — ENQUEUE it
+    // (persisted to chrome.storage.local) so it survives an SW restart and flushes to
+    // capture_events + lensed_log_auction on sign-in. We return early with a TRUTHFUL
+    // result: ok:false (nothing is written to the DB yet — it's only locally queued) with
+    // queued:true. The overlay's fail-loud "NOT SIGNED IN" banner tells the host until
+    // auth returns. Never claims ok:true for a sale that isn't persisted.
     bindReason = 'not_authenticated';
-    console.warn('[LENSED][BG] not authenticated — sale captured but not logged to lensed_log_auction:', sale.orderId);
-    diag('bind.not_authenticated', 'warn', 'not authenticated — captured only', { order: sale.orderId });
+    console.warn('[LENSED][BG] not authenticated — sale QUEUED for flush on sign-in:', sale.orderId);
+    diag('bind.not_authenticated', 'warn', 'not authenticated — sale queued', { order: sale.orderId });
+    await enqueueSale(sale, stagedSkus, result);
+    return { ok: false, bound: false, captureWritten: false, partial: false, queued: true, reason: 'queued_unauthenticated', order: sale.orderId };
   } else {
     // Authenticated, a real new/changed order, but NOTHING was staged → the order is
     // captured raw and NOT bound to an auction item. Surface it (the overlay shows a
@@ -1267,6 +1597,7 @@ function broadcastAuthStatus() {
           type: 'LENSED_AUTH_STATUS',
           authenticated: isAuthenticated(),
           userId: userId,
+          queuedSales: (saleQueue && saleQueue.length) || 0,
         }).catch(function () {});
       } catch (_) {}
     }
@@ -1369,6 +1700,22 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
 
 // ─── Internal message handler (from content scripts) ─────────────────
 
+// Best-effort session close when the live tab goes away. onRemoved needs no "tabs"
+// permission (it still delivers the tabId). Only acts on the tracked live tab, and
+// clears the in-memory session so a reconnect starts a fresh room-scoped session
+// (the hot-path reuse at getOrCreateSession keys off in-memory state regardless of
+// DB status, so it MUST be cleared here). The server auto-ender is the real backstop.
+chrome.tabs.onRemoved.addListener(function (tabId) {
+  if (liveTabId == null || tabId !== liveTabId) return;
+  var sid = currentSessionId;
+  liveTabId = null;
+  currentSessionId = null;
+  sessionRoomId = null;
+  lastHeartbeatWriteTs = 0;
+  try { persistSession(); } catch (_) {} // clears SK_SESSION_ID / SK_ROOM_ID
+  if (sid) markSessionEndedOnTabClose(sid);
+});
+
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (!message || typeof message !== 'object') return;
 
@@ -1450,9 +1797,32 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     return;
   }
 
+  if (message.type === 'TIKTOK_HEARTBEAT') {
+    // Tab-alive ping from the live content script. Remember which tab it is (for the
+    // close-listener), resolve the room (message → background-detected → session-pinned),
+    // then stamp last_seen_at. Does NOT require currentSessionId — a mid-live load never
+    // set it, so heartbeatSession() resolves the session by room. Only a DEFINITE room
+    // mismatch (in-memory session pinned to a different room) is skipped.
+    if (sender && sender.tab && sender.tab.id != null) liveTabId = sender.tab.id;
+    var hbRoom = message.roomId || currentRoomId || sessionRoomId || null;
+    console.log('[LENSED][BG] TIKTOK_HEARTBEAT recv; msgRoom=' + message.roomId + ' currentRoomId=' + currentRoomId + ' sessionRoomId=' + sessionRoomId + ' currentSessionId=' + currentSessionId);
+    var mismatch = currentSessionId && sessionRoomId && message.roomId && message.roomId !== sessionRoomId;
+    if (!mismatch) heartbeatSession(hbRoom);
+    return;
+  }
+
+  if (message.type === 'TIKTOK_ACCOUNT') {
+    // Detected streaming channel/creator identity forwarded from content. Capture it
+    // (console + storage + best-effort DB). Fire-and-forget; never blocks anything.
+    if (sender && sender.tab && sender.tab.id != null) liveTabId = sender.tab.id;
+    handleAccountDetected(message.account, message.roomId);
+    return;
+  }
+
   if (message.type === 'TIKTOK_SALE') {
     var sale = message.sale;
     if (!sale) return;
+    if (sender && sender.tab && sender.tab.id != null) liveTabId = sender.tab.id;
     console.log('[LENSED][BG] sale received:', sale.orderId, sale.buyerUsername, sale.sellingPrice);
     return;
   }
@@ -1524,11 +1894,14 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     // Wait for the startup rehydrate so a cold worker doesn't report a false
     // "Not connected" on the overlay's first paint.
     ensureAuthReady().then(function () {
-      sendResponse({
-        authenticated: isAuthenticated(),
-        userId: userId,
-        sessionId: currentSessionId || null,
-        roomId: currentRoomId || null,
+      return loadSaleQueue().then(function () {
+        sendResponse({
+          authenticated: isAuthenticated(),
+          userId: userId,
+          sessionId: currentSessionId || null,
+          roomId: currentRoomId || null,
+          queuedSales: saleQueue.length,
+        });
       });
     }).catch(function () {
       try { sendResponse({ authenticated: false, userId: null, sessionId: null, roomId: null }); } catch (_) {}
@@ -1579,6 +1952,8 @@ authReadyPromise = rehydrateAuth().then(function () {
   broadcastAuthStatus();
   // [SCREENSHOT] Opportunistic drain of any queued failed uploads on SW start.
   try { drainOutbox(); } catch (_) {}
+  // Drain any sales captured while signed out on a prior (evicted) worker life.
+  try { flushSaleQueue(); } catch (_) {}
 }).catch(function (e) {
   // ensureAuthReady() must always settle so no handler hangs on a rejected gate.
   console.error('[LENSED][BG] startup rehydrate failed:', e);
