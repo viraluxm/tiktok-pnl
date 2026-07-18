@@ -27,9 +27,13 @@ create policy channel_store_map_admin_all on public.channel_store_map
   using ((auth.jwt() -> 'app_metadata' ->> 'role') = 'admin')
   with check ((auth.jwt() -> 'app_metadata' ->> 'role') = 'admin');
 
--- Seed: the ONE confirmed channel. Others are intentionally left unmapped (flag via Part D).
+-- Seed: the confirmed channels. Others are intentionally left unmapped (flag via Part D).
+-- Idempotent (on conflict do nothing) — live already carries all three rows.
 insert into public.channel_store_map (channel_name, store_id)
-values ('onlybidss', '1d71a4c9-16b1-45f2-858e-64b41c548e9e')  -- Snore
+values
+  ('onlybidss',    '1d71a4c9-16b1-45f2-858e-64b41c548e9e'),  -- Snore
+  ('jumbosteals',  '1d71a4c9-16b1-45f2-858e-64b41c548e9e'),  -- Snore
+  ('lotsofsteals', 'afd1c76e-1d92-4c7d-9edf-0468ae7aa3df')   -- lots of steals
 on conflict (channel_name) do nothing;
 
 commit;
