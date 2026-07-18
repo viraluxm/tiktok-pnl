@@ -32,6 +32,14 @@ rsync -a \
 
 echo "Copied source files to dist/"
 
+# Stamp the diagnostics build marker with the real short commit SHA (source keeps the
+# literal '__BUILD_SHA__' placeholder; only the built dist carries the resolved SHA).
+BUILD_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "nogit")
+if [ -f "$DIST/background.js" ]; then
+  (sed -i '' "s/__BUILD_SHA__/${BUILD_SHA}/g" "$DIST/background.js" 2>/dev/null || sed -i "s/__BUILD_SHA__/${BUILD_SHA}/g" "$DIST/background.js")
+  echo "Stamped build SHA: $BUILD_SHA"
+fi
+
 find "$DIST" -name '*.js' -type f | while read -r jsfile; do
   relpath="${jsfile#$DIST/}"
   "$TERSER" "$jsfile" \

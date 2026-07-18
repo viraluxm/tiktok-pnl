@@ -84,6 +84,11 @@ async function run() {
   await sleep(40);
   ok('ON: scan.status events emitted', diagEvents().some((e) => e && e.type === 'scan.status'));
   ok('ON: staging still works (pill rendered)', !!sr(w).querySelector('.lensed-staged-item'));
+  // E: per-character spam collapsed — exactly ONE scan.detected per attempt, and no
+  // 'detected' logged via scan.status.
+  ok('E: one scan.detected per scan (no per-char spam)', diagEvents().filter((e) => e && e.type === 'scan.detected').length === 1,
+    'detected=' + diagEvents().filter((e) => e && e.type === 'scan.detected').length);
+  ok('E: no scan.status carries state "detected"', !diagEvents().some((e) => e && e.type === 'scan.status' && e.meta && e.meta.state === 'detected'));
 
   // Redaction: the full raw barcode must never appear inside any DIAG event.
   const diagJson = JSON.stringify(diagEvents());
@@ -107,6 +112,35 @@ async function run() {
   if (btn) { btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true })); await sleep(20); }
   ok('ON: export issued DIAG_EXPORT', sent.some((m) => m.type === 'DIAG_EXPORT'));
   ok('ON: export downloaded a .json file', clicks === 1 && /lensed-diagnostics-.*\.json/.test(lastDownload || ''), 'clicks=' + clicks + ' name=' + lastDownload);
+
+  // ── D: replay/backlog gate ── a fresh build, nothing staged, dispatch a stale vs a
+  // fresh no-staged order and assert the historical one is skipped (no bind, no warn).
+  const w3 = build(true);
+  await sleep(50);
+  const dispatchSale = (win, s) => { const ev = new win.MessageEvent('message', { data: { source: 'lensed-tiktok-sale', sale: s } }); Object.defineProperty(ev, 'source', { value: win }); win.dispatchEvent(ev); };
+  const sentBefore = sent.length;
+  // Stale (10 min old) order, nothing staged → historical/replayed → skipped.
+  dispatchSale(w3, { orderId: 'stale-1', sellingPrice: '$3', isPaymentSuccessful: true, orderedAtMs: Date.now() - 10 * 60 * 1000 });
+  await sleep(30);
+  ok('D: stale no-staged order → NO AUTO_BIND dispatched', !sent.slice(sentBefore).some((m) => m.type === 'AUTO_BIND'));
+  ok('D: stale order logs order.replayed_skip', diagEvents().some((e) => e && e.type === 'order.replayed_skip' && e.meta && e.meta.order === 'stale-1'));
+  ok('D: stale order NOT counted captured_only', !diagEvents().some((e) => e && e.type === 'order.captured_only' && e.meta && e.meta.order === 'stale-1'));
+  // Fresh order, nothing staged → genuine live unbound → warns + binds (dispatched).
+  const sentBefore2 = sent.length;
+  dispatchSale(w3, { orderId: 'fresh-1', sellingPrice: '$3', isPaymentSuccessful: true, orderedAtMs: Date.now() });
+  await sleep(30);
+  ok('D: fresh no-staged order → AUTO_BIND dispatched', sent.slice(sentBefore2).some((m) => m.type === 'AUTO_BIND'));
+  ok('D: fresh no-staged order → captured_only warning kept', diagEvents().some((e) => e && e.type === 'order.captured_only' && e.meta && e.meta.order === 'fresh-1'));
+  // Ambiguous: NO orderedAtMs + nothing staged → must NOT be discarded (may be fresh).
+  // Processed (bind dispatched) + logged ambiguous, but NOT counted captured_only and
+  // NOT skipped as replayed.
+  const sentBefore3 = sent.length;
+  dispatchSale(w3, { orderId: 'ambig-1', sellingPrice: '$3', isPaymentSuccessful: true }); // no orderedAtMs
+  await sleep(30);
+  ok('D: ambiguous (no timestamp) no-staged → still processed (AUTO_BIND dispatched)', sent.slice(sentBefore3).some((m) => m.type === 'AUTO_BIND'));
+  ok('D: ambiguous → order.ambiguous_timestamp_no_staged logged', diagEvents().some((e) => e && e.type === 'order.ambiguous_timestamp_no_staged' && e.meta && e.meta.order === 'ambig-1'));
+  ok('D: ambiguous → NOT skipped as replayed', !diagEvents().some((e) => e && e.type === 'order.replayed_skip' && e.meta && e.meta.order === 'ambig-1'));
+  ok('D: ambiguous → NOT counted captured_only', !diagEvents().some((e) => e && e.type === 'order.captured_only' && e.meta && e.meta.order === 'ambig-1'));
 
   console.log('\n' + (fail === 0 ? 'ALL PASS' : 'FAILURES') + `: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);

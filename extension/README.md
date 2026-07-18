@@ -69,26 +69,39 @@ status is logged once; a `failed → paid` flip is allowed through once.
 
 ### Keyboard / macro‑pad hotkeys
 
-The overlay's three action buttons have global hotkeys, so a host can drive them
-from a physical 3‑button macro pad instead of the mouse. They fire only when the
-overlay is open and no editable field (input/textarea/select — incl. the **Host**
-dropdown — or contenteditable) is focused, and `preventDefault` runs only when a
-hotkey actually fires.
+The overlay's action buttons have global hotkeys, so a host can drive them from a
+physical 3‑button macro pad instead of the mouse. They fire only when the overlay
+is open and no editable field (input/textarea/select — incl. the **Host** dropdown
+— or contenteditable) **outside** the overlay is focused, and `preventDefault` runs
+only when a hotkey actually fires. (A numpad code still fires while the overlay's
+own SKU input is focused, so the pad works hands‑free during scanning.)
 
-| Macro‑pad key | `event.key` | `event.code` | Overlay button | Action |
+| Macro‑pad button | `event.code` | `event.key` | Overlay control | Action |
 | --- | --- | --- | --- | --- |
-| **+** | `+` | `NumpadAdd` | `+` | add another unit of the last staged SKU |
-| **−** | `-` | `NumpadSubtract` | `−` | remove the last staged unit |
-| **✱** | `*` | `NumpadMultiply` | `↻` | re‑run / restage the previous set |
+| **1** | `NumpadAdd` | `+` (ignored) | **Start** | Start the TikTok auction |
+| **2** | `NumpadSubtract` | `-` | `+` | add another unit of the last staged SKU |
+| **3** | `NumpadMultiply` | `*` | `↻` | re‑run / restage the previous set |
 
-Note: the **+** hotkey adds another unit of the *last staged* SKU (equivalent to
-re‑pressing `+` for the same item); the on‑screen `+` button stages the *currently
-resolved* SKU. All others match their buttons exactly.
+**Start responds ONLY to `event.code === "NumpadAdd"`** — a printable `+` typed on
+the main keyboard never starts an auction. Start is a *page‑affecting* action, so it
+also stays blocked while focus is inside a TikTok input/textarea/select/contenteditable
+(the numpad allowance applies only to the overlay's own SKU input). Barcode scanners
+emit digit/letter `event.code`s, never `Numpad*`, so a scanner can never start an auction.
 
-Both the top‑row symbols and the numpad codes are accepted — pads that send only
-the `Numpad*` code (no printable key) still work. Symbol presses defer to the
-scan‑burst heuristic so a barcode's `-` isn't read as "remove"; `Numpad*` codes
-are never part of a wedge burst and fire immediately.
+> **Start activation is not yet enabled.** This phase performs fail‑closed *discovery
+> and state validation only* — it never clicks TikTok, dispatches synthetic events, or
+> calls a TikTok handler/endpoint. A single ready auction reports **"Start ready —
+> activation not enabled"** and stops. The verified click method is added after a
+> live‑broadcast test. Feedback strings: `Wrong TikTok screen`, `Start button
+> unavailable`, `Multiple auctions ready`, `Start ready — activation not enabled`.
+
+The old **remove‑last** action (the former `−` button / `NumpadSubtract` mapping) has
+been removed. Add‑unit now lives on macro button 2 (`NumpadSubtract`). Symbol presses
+(`-`, `*`) defer to the scan‑burst heuristic so a barcode's `-` isn't read as an action;
+`Numpad*` codes are never part of a wedge burst and fire immediately.
+
+Note: the **add‑unit** hotkey (button 2 / `NumpadSubtract`) adds another unit of the
+*last staged* SKU; the on‑screen `+` button stages the *currently resolved* SKU.
 - Staged SKUs are held **in memory** in the content script (no persistence). When
   a sale arrives, the currently‑staged SKU(s) are bound to that order and the
   staging then clears for the next item — for **both** a paid sale and a failed

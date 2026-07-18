@@ -10,7 +10,9 @@
  * SKU flow:
  * - Host types a sku_number into the input, resolved via background -> inventory_skus
  * - Staged SKUs shown as pills; multiple supported for bundles
- * - Three buttons: -> (re-run previous), + (add/stage), - (remove last)
+ * - Overlay controls: Start (TikTok auction), + (add/stage), ↻ (re-run previous)
+ * - Macro/numpad hotkeys: NumpadAdd → Start auction (discovery only this phase;
+ *   activation pending live-test), NumpadSubtract → add unit, NumpadMultiply → restage
  * - On new sale: auto-bind fires, logs to lensed_log_auction + capture_events
  * - order_id locks after logging (no double-bind on cumulative re-polls)
  */
@@ -44,6 +46,7 @@
   var lastScanEl = null;         // temporary visible "Last scan: … · <state>" line
   var diagStatusEl = null;       // dev-only "◉ Diagnostics ON · N events" indicator
   var diagPollStarted = false;   // single count-refresh interval across re-injects
+  var scanDetectLogged = false;  // collapse per-character 'detected' diag to one per scan attempt
   var reopenOverlay = null;      // module handle to reopen the overlay from the global scanner
   var shotStatusEl = null;       // [SCREENSHOT] compact counts (inside debug row)
   var shotWarnEl = null;         // [SCREENSHOT] storage/capture warning (debug row)
@@ -70,6 +73,16 @@
   // Manager reload / SW restart / reconnect so a mid-auction selection survives;
   // cleared on session/room change so a new live never inherits it.
   var LK_STAGED = 'lensed_staged_skus';
+  // Pre-first-sale durable state. Before the first bound sale creates a live session
+  // there is no session id, so LK_COUNTER/LK_STAGED (session-scoped) cannot persist.
+  // This ONE record holds staged SKUs + counter + host BEFORE a session exists, scoped
+  // by the strongest available context (Lensed user id + TikTok room id + timestamp).
+  // adoptSession() migrates it into the session-scoped records once a session is
+  // created, then removes it. Written only when BOTH user and room are known.
+  var LK_PRESESSION = 'lensed_presession_state';
+  var PRESESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h — mirrors background session-reuse cutoff
+  var preSessionRestoreDone = false;               // restore pre-session state once per user+room
+  var authUserId = null;                           // current Lensed user id (from auth status) — for user-scoping
   // The live's detected tiktok room (mirrors what inject relays to background). Used
   // to scope persisted staged SKUs.
   var currentRoomId = null;
@@ -94,6 +107,8 @@
   // Count of orders captured this session that did NOT bind to a SKU (nothing staged
   // at capture time). Surfaced as a visible overlay warning so it is never silent.
   var capturedOnlyCount = 0;
+  var bindIssueCount = 0;        // orders whose capture/bind WRITE failed (background reported ok:false)
+  var lastBindIssueReason = null;
   // ── [SCREENSHOT] Capture state — OFF by default, opt-in, lazy ───────
   // The screenshot feature must NEVER slow the core flow. It is disabled by
   // default (chrome.storage key LK_SHOTS), initializes lazily well after the
@@ -373,6 +388,14 @@
       background: rgba(99,102,241,0.16); border-color: #4f46e5; color: #a5b4ff;\
     }\
     .lensed-sku-btn.restage:hover { background: rgba(99,102,241,0.32); border-color: #6366f1; color: #fff; }\
+    /* Start: page-affecting action — visually distinct from the indigo inventory\
+       controls (green accent, text label, separated by a right margin). */\
+    .lensed-sku-btn.start {\
+      width: auto; padding: 0 12px; height: 34px; font-size: 12px; font-weight: 600;\
+      letter-spacing: 0.02em; margin-right: 4px;\
+      background: #10b981; border-color: #059669; color: #fff;\
+    }\
+    .lensed-sku-btn.start:hover { background: #0ea371; border-color: #10b981; color: #fff; }\
     .lensed-resolved {\
       font-size: 11px; color: #34d399; margin-top: 4px; min-height: 16px;\
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;\
@@ -655,7 +678,7 @@
     try {
       chrome.runtime.sendMessage({ type: 'DIAG_EXPORT' }, function (resp) {
         if (chrome.runtime.lastError || !resp) return;
-        var payload = { tool: 'lensed-extension', exported_at: new Date().toISOString(), version: resp.v, count: resp.count, events: resp.events || [] };
+        var payload = { tool: 'lensed-extension', exported_at: new Date().toISOString(), version: resp.v, diag_build: resp.build || null, commit: resp.commit || null, count: resp.count, events: resp.events || [] };
         try {
           var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
           var url = URL.createObjectURL(blob);
@@ -673,7 +696,16 @@
   // state: detected | searching | staged | notfound | failed. `label` overrides the
   // left value (e.g. the resolved "#14"); pass null to keep it generic.
   function setScanStatus(label, state) {
-    dlog('scan.status', (state === 'notfound' || state === 'failed') ? 'warn' : 'info', 'scan ' + state, { state: state, label: label || null });
+    // Diagnostics noise control: the input path calls this on EVERY keystroke of a
+    // burst with state 'detected'. Log at most ONE scan.detected per attempt; a terminal
+    // state (staged/notfound/failed) re-arms it. searching + terminals stay logged (they
+    // are one-per-attempt), so the flight recorder keeps the useful events without spam.
+    if (state === 'detected') {
+      if (!scanDetectLogged) { scanDetectLogged = true; dlog('scan.detected', 'info', 'scan detected', { label: label || null }); }
+    } else {
+      if (state === 'staged' || state === 'notfound' || state === 'failed') scanDetectLogged = false;
+      dlog('scan.status', (state === 'notfound' || state === 'failed') ? 'warn' : 'info', 'scan ' + state, { state: state, label: label || null });
+    }
     if (!lastScanEl) return;
     var words = { detected: 'detected', searching: 'searching…', staged: 'staged ✓', notfound: 'no SKU matched', failed: 'failed' };
     var cls = (state === 'staged') ? ' ok' : (state === 'notfound' || state === 'failed') ? ' error' : '';
@@ -919,20 +951,8 @@
     persistStaged();
   }
 
-  function removeLast() {
-    if (stagedSkus.length === 0) return;
-    // Decrement the most-recent pill; drop it entirely once quantity hits zero.
-    var last = stagedSkus[stagedSkus.length - 1];
-    last.qty = (last.qty || 1) - 1;
-    if (last.qty <= 0) stagedSkus.pop();
-    renderStagedPills();
-    clearResolveLine();
-    updateStagedLabel();
-    persistStaged();
-  }
-
   // Add another unit of the most recently staged SKU (respects the stock cap).
-  // Used by the "+" keyboard shortcut.
+  // Bound to the NumpadSubtract macro key (macro button 2) and the standalone "-".
   function addAnotherUnitOfLast() {
     if (stagedSkus.length === 0) return;
     var last = stagedSkus[stagedSkus.length - 1];
@@ -1116,10 +1136,18 @@
           dlog('bind.reply', 'error', 'AUTO_BIND no reply (runtime error)', { order: sale.orderId, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'lastError' });
           return;
         }
-        // Log the reply for the post-live audit. NOTE: capture/bind behavior is
-        // unchanged — the overlay's bound/clear logic below still keys on `dispatched`;
-        // this only records what the background reported.
-        dlog('bind.reply', (resp && resp.ok) ? 'info' : 'warn', 'AUTO_BIND reply', { order: sale.orderId, ok: !!(resp && resp.ok) });
+        // Record the TRUTHFUL background result. resp.ok is false when the capture_events
+        // write failed (even if the RPC succeeded → resp.partial). Surface it instead of
+        // treating everything as good; the background retries the missing write.
+        var ok = !!(resp && resp.ok);
+        dlog('bind.reply', ok ? 'info' : 'warn', 'AUTO_BIND reply', {
+          order: sale.orderId, ok: ok, bound: !!(resp && resp.bound), captureWritten: !!(resp && resp.captureWritten),
+          partial: !!(resp && resp.partial), reason: (resp && resp.reason) || null, code: (resp && resp.code) || null, status: (resp && resp.status) || null,
+        });
+        if (resp && resp.ok === false && resp.reason !== 'no_staged' && resp.reason !== 'not_authenticated') {
+          console.warn('[LENSED][TT] AUTO_BIND not fully OK:', sale.orderId, resp.reason, resp.code || '');
+          showBindIssue(resp);
+        }
       });
       dispatched = true;
     } catch (err) {
@@ -1283,6 +1311,14 @@
       }
     });
 
+    // Start button: triggers the guarded Start-auction routine (macro NumpadAdd routes
+    // to the SAME routine). Visually distinct (green) \u2014 it is page-affecting, unlike the
+    // inventory controls. This phase performs discovery/state-validation only and stops
+    // before clicking TikTok (activation pending live-test).
+    var startBtn = el('button', 'lensed-sku-btn start', 'Start');
+    startBtn.title = 'Start TikTok auction';
+    startBtn.addEventListener('click', function () { runStartAuction('overlay'); });
+
     // + button: stage the resolved SKU (or another unit)
     var addBtn = el('button', 'lensed-sku-btn primary', '+');
     addBtn.title = 'Stage SKU';
@@ -1293,19 +1329,14 @@
       focusScanInput();
     });
 
-    // - button: remove last staged
-    var removeBtn = el('button', 'lensed-sku-btn', '\u2212');
-    removeBtn.title = 'Remove last SKU';
-    removeBtn.addEventListener('click', function () { removeLast(); focusScanInput(); });
-
     // \u21bb restage button \u2014 prominent secondary action (re-runs the last bound set)
     var rerunBtn = el('button', 'lensed-sku-btn restage', '\u21bb');
     rerunBtn.title = 'Restage previous SKUs';
     rerunBtn.addEventListener('click', function () { rerunPrevious(); focusScanInput(); });
 
     skuRow.appendChild(skuInputEl);
+    skuRow.appendChild(startBtn);
     skuRow.appendChild(addBtn);
-    skuRow.appendChild(removeBtn);
     skuRow.appendChild(rerunBtn);
 
     resolvedLabelEl = el('div', 'lensed-resolved', '');
@@ -1646,7 +1677,7 @@
   // same session. persistCounter is a no-op until the session id is known, so
   // nothing durable is ever written unscoped.
   function persistCounter() {
-    if (!counterSessionId) return;
+    if (!counterSessionId) { persistPreSession(); return; }
     try {
       var rec = {};
       rec[LK_COUNTER] = {
@@ -1675,7 +1706,7 @@
   // Live Manager reload / SW restart restores it. A no-op until the session id is
   // known (nothing durable is written unscoped). Called on every staged-set change.
   function persistStaged() {
-    if (!counterSessionId) return;
+    if (!counterSessionId) { persistPreSession(); return; }
     try {
       var rec = {};
       rec[LK_STAGED] = { sessionId: counterSessionId, roomId: currentRoomId || null, skus: stagedSkus };
@@ -1683,21 +1714,112 @@
     } catch (_) {}
   }
 
+  // ── Pre-session (pre-first-sale) durable state ─────────────────────────────
+  // Persist staged SKUs + counter + host under ONE (userId, roomId, ts) record while no
+  // session exists. Written ONLY with both a user and a room (never unscoped).
+  function persistPreSession() {
+    if (counterSessionId) return;              // a session exists → session-scoped persistence owns it
+    if (!authUserId || !currentRoomId) return; // never persist without BOTH user and room
+    try {
+      var rec = {};
+      rec[LK_PRESESSION] = {
+        v: 1,
+        userId: authUserId,
+        roomId: currentRoomId,
+        ts: Date.now(),
+        skus: stagedSkus,
+        salesCount: salesCount,
+        orderIds: Object.keys(seenOrderIds),
+        capturedOnly: capturedOnlyCount,
+        hostId: selectedHostId || null
+      };
+      chrome.storage.local.set(rec);
+    } catch (_) {}
+  }
+
+  // A stored pre-session record is restorable only for the SAME user + room, a well-formed
+  // shape, and within the freshness window. Anything else is rejected (and cleared).
+  function presessionMatches(rec) {
+    return !!(rec && rec.v === 1 && authUserId && currentRoomId
+      && rec.userId === authUserId && rec.roomId === currentRoomId
+      && typeof rec.ts === 'number' && (Date.now() - rec.ts) <= PRESESSION_MAX_AGE_MS
+      && Array.isArray(rec.skus));
+  }
+
+  // Restore pre-session staged/counter/host for the current user+room when no session
+  // exists yet. Rejects+clears a record for a different user/room, stale, or malformed.
+  // Runs at most once per user+room (re-armed on identity/room change and reset).
+  function restorePreSession() {
+    if (counterSessionId || preSessionRestoreDone) return;
+    if (!authUserId || !currentRoomId) return;
+    preSessionRestoreDone = true;
+    try {
+      chrome.storage.local.get([LK_PRESESSION], function (data) {
+        if (chrome.runtime.lastError || !data) return;
+        var rec = data[LK_PRESESSION];
+        var userMatches = !!(rec && rec.userId === authUserId);
+        var roomMatches = !!(rec && rec.roomId === currentRoomId);
+        if (!presessionMatches(rec)) {
+          if (rec) { try { chrome.storage.local.remove([LK_PRESESSION]); } catch (_) {} } // reject → clear
+          // Flush any PRE-ROOM in-memory selection (host and/or staged SKUs picked BEFORE
+          // the room was known — when persistPreSession no-ops for lack of a room) into a
+          // durable record for THIS user+room, now that both are known. This runs AFTER the
+          // read above, so it can never clobber a record mid-restore. persistSelectedHost
+          // also refreshes the room-scoped LK_HOST; persistPreSession covers staged-only.
+          if (!counterSessionId && (selectedHostId || stagedSkus.length > 0)) {
+            if (selectedHostId) persistSelectedHost(); else persistPreSession();
+          }
+          console.log('[LENSED][TT] PRESESSION restore', { userMatches: userMatches, roomMatches: roomMatches, stagedCount: stagedSkus.length, hasHost: !!selectedHostId, hasCounter: salesCount > 0 });
+          return;
+        }
+        stagedSkus = rec.skus.map(function (s) {
+          return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+        });
+        seenOrderIds = Object.create(null);
+        if (Array.isArray(rec.orderIds)) { for (var i = 0; i < rec.orderIds.length; i++) seenOrderIds[rec.orderIds[i]] = true; }
+        salesCount = typeof rec.salesCount === 'number' ? rec.salesCount : 0;
+        capturedOnlyCount = typeof rec.capturedOnly === 'number' ? rec.capturedOnly : 0;
+        if (rec.hostId && !selectedHostId) selectedHostId = rec.hostId;
+        try { renderStagedPills(); updateStagedLabel(); } catch (_) {}
+        try { if (countEl) countEl.textContent = String(salesCount); renderCapturedOnlyWarning(); } catch (_) {}
+        try { renderHostOptions(); } catch (_) {}
+        console.log('[LENSED][TT] PRESESSION restore', { userMatches: true, roomMatches: true, stagedCount: stagedSkus.length, hasHost: !!selectedHostId, hasCounter: salesCount > 0 });
+      });
+    } catch (_) {}
+  }
+
+  // Attempt a pre-session restore only when it is safe and not yet done.
+  function maybeRestorePreSession() {
+    if (!counterSessionId && !preSessionRestoreDone && authUserId && currentRoomId) restorePreSession();
+  }
+
   // Paint (or hide) the captured-only warning from the current count.
   function renderCapturedOnlyWarning() {
     if (!capturedOnlyWarnEl) return;
+    var msgs = [];
     if (capturedOnlyCount > 0) {
-      capturedOnlyWarnEl.textContent = '⚠ ' + capturedOnlyCount + ' order'
-        + (capturedOnlyCount === 1 ? '' : 's')
-        + ' captured but NOT bound to a SKU. Stage a SKU before the sale to bind it.';
-    } else {
-      capturedOnlyWarnEl.textContent = '';
+      msgs.push('⚠ ' + capturedOnlyCount + ' order' + (capturedOnlyCount === 1 ? '' : 's')
+        + ' captured but NOT bound to a SKU. Stage a SKU before the sale to bind it.');
     }
+    if (bindIssueCount > 0) {
+      msgs.push('⚠ ' + bindIssueCount + ' order' + (bindIssueCount === 1 ? '' : 's')
+        + ' had a WRITE problem (' + (lastBindIssueReason || 'error') + '). Auto-retrying — check diagnostics.');
+    }
+    capturedOnlyWarnEl.textContent = msgs.join('  ');
+  }
+
+  // Background reported a non-OK AUTO_BIND (e.g. capture_events write failed even though
+  // the auction RPC succeeded). Surface it visibly instead of the old silent ok:true.
+  function showBindIssue(resp) {
+    bindIssueCount++;
+    lastBindIssueReason = (resp && resp.reason) || 'error';
+    renderCapturedOnlyWarning();
   }
 
   // Background signalled a session reset (room change / user switch / session end):
   // clear the staged selection and the per-live counter so the next live starts clean.
-  function onSessionReset() {
+  function onSessionReset(reason) {
+    var hadHost = !!selectedHostId, hadStaged = stagedSkus.length > 0, prevSession = counterSessionId || null;
     counterSessionId = null;
     seenOrderIds = Object.create(null);
     shotEndOrderIds = Object.create(null); // new live → its own auction_end dedup set
@@ -1714,8 +1836,11 @@
     // the next live never inherits the prior host. The overlay re-prompts.
     selectedHostId = null;
     renderHostOptions();
-    try { chrome.storage.local.remove([LK_HOST]); } catch (_) {}
-    console.log('[LENSED][TT] session reset — cleared staged SKUs + counter + dedup maps + host');
+    // A genuine reset also discards any pre-session record, and re-arms the pre-session
+    // restore guard so the NEXT user+room can restore its own state.
+    try { chrome.storage.local.remove([LK_HOST, LK_PRESESSION]); } catch (_) {}
+    preSessionRestoreDone = false;
+    console.log('[LENSED][TT] CONTENT onSessionReset', { reason: reason || 'unspecified', previousSessionId: prevSession, hadHost: hadHost, hadStagedSku: hadStaged });
   }
 
   // Adopt the live session id reported by the background worker (via
@@ -1727,8 +1852,12 @@
     if (!sessionId || sessionId === counterSessionId) return;
     counterSessionId = sessionId;
     try {
-      chrome.storage.local.get([LK_COUNTER, LK_STAGED, LK_HOST, LK_SHOT_ENDS], function (data) {
+      chrome.storage.local.get([LK_COUNTER, LK_STAGED, LK_HOST, LK_SHOT_ENDS, LK_PRESESSION], function (data) {
         if (chrome.runtime.lastError || !data) return;
+        // Pre-session → session migration: a matching (user+room) pre-session record means
+        // the in-memory staged/counter/host were restored pre-session and must be carried
+        // into this new session (never cleared), then the pre-session record removed.
+        var migrating = presessionMatches(data[LK_PRESESSION]);
         // Restore the auction_end dedup set for THIS session (skip re-upload after reload).
         var srec = data[LK_SHOT_ENDS];
         shotEndOrderIds = Object.create(null);
@@ -1747,8 +1876,10 @@
           renderCapturedOnlyWarning();
           console.log('[LENSED][TT] counter restored for session', counterSessionId, '→', salesCount, '· captured-only', capturedOnlyCount);
         } else {
-          console.log('[LENSED][TT] counter scoped to new session', counterSessionId);
-          capturedOnlyCount = 0;
+          // New session. On a pre-session migration, KEEP the restored in-memory counter;
+          // otherwise start this session's captured-only tally clean. Persist either way.
+          console.log('[LENSED][TT] counter scoped to new session', counterSessionId, migrating ? '(migrated)' : '');
+          if (!migrating) capturedOnlyCount = 0;
           renderCapturedOnlyWarning();
           persistCounter();
         }
@@ -1764,6 +1895,12 @@
           renderStagedPills();
           updateStagedLabel();
           console.log('[LENSED][TT] staged SKUs restored for session', counterSessionId, '→', stagedSkus.length);
+        } else if (migrating) {
+          // Migration: the in-memory staged selection was restored from the pre-session
+          // record for THIS user+room. Keep it and persist it under the new session id —
+          // never clear it (persistStaged is now session-scoped since counterSessionId is set).
+          persistStaged();
+          console.log('[LENSED][TT] staged SKUs migrated pre-session → session', counterSessionId, '→', stagedSkus.length);
         } else if (stagedSkus.length > 0) {
           clearStaged();
         }
@@ -1783,7 +1920,22 @@
             );
           } catch (_) {}
           console.log('[LENSED][TT] host restored for session', counterSessionId, '→', selectedHostId);
+        } else if (migrating && selectedHostId) {
+          // Migrate the pre-session host under the new session id and re-assert it.
+          persistSelectedHost();
+          try {
+            chrome.runtime.sendMessage(
+              { type: 'SET_SESSION_HOST', hostId: selectedHostId, roomId: currentRoomId || null },
+              function () { if (chrome.runtime.lastError) return; }
+            );
+          } catch (_) {}
+          console.log('[LENSED][TT] host migrated pre-session → session', counterSessionId, '→', selectedHostId);
         }
+
+        // Migration complete → remove the obsolete pre-session record so it can never be
+        // re-applied to a later live. Done only AFTER the state above was re-persisted
+        // under the new session id.
+        if (migrating) { try { chrome.storage.local.remove([LK_PRESESSION]); } catch (_) {} }
       });
     } catch (_) {}
   }
@@ -1926,9 +2078,10 @@
   init();
 
   // ── Global keyboard shortcuts (only when the SKU input is NOT focused) ─
-  // +  / NumpadAdd       add another unit of the most recently staged SKU
-  // -  / NumpadSubtract  remove the last staged unit
-  // *  / NumpadMultiply  trigger re-run (the ↻ restage button)
+  // NumpadAdd       (button 1) Start the TikTok auction (discovery-only this phase)
+  // -  / NumpadSubtract (button 2) add another unit of the most recently staged SKU
+  // *  / NumpadMultiply (button 3) trigger re-run (the ↻ restage button)
+  // Start responds ONLY to the NumpadAdd event.code — a printable '+' never starts.
   // Physical numpad / macro-pad keys are matched by event.code so pads that emit
   // only a code (no printable key) still work. When the SKU input (or any other
   // editable field) is focused these keys type normally — we bail before handling.
@@ -1970,13 +2123,204 @@
       if (stagedSkus.length === 0) { hlog('matched but no staged item to add'); return; }
       addAnotherUnitOfLast(); hlog('fired add'); return;
     }
-    if (action === 'remove') {
-      if (stagedSkus.length === 0) { hlog('matched but no removable item'); return; }
-      removeLast(); hlog('fired remove'); return;
-    }
     if (action === 'rerun') {
       if (previousSkus.length === 0) { hlog('matched but no previous item to rerun'); return; }
       rerunPrevious(); hlog('fired rerun'); return;
+    }
+  }
+
+  // ── One-button Start-auction (discovery + fail-closed state only) ─────────────
+  // NumpadAdd (macro button 1) and the overlay "Start" button both route into
+  // runStartAuction(). THIS PHASE ONLY discovers the TikTok auction panel and
+  // classifies its state — it NEVER clicks TikTok, dispatches synthetic events, or
+  // calls a TikTok handler/endpoint. The verified activation method is added AFTER a
+  // live-broadcast test; until then a single ready auction reports "Start ready —
+  // activation not enabled" and stops. All selectors are structural/role/exact-text —
+  // no generated class names (Arco's `arco-btn-disabled` is used only as a state flag).
+  var START_DEBOUNCE_MS = 1800;   // ignore repeat Start presses within ~1.8s (no auto-retry)
+  var startDiscoverUntil = 0;     // debounce window end (timestamp via nowMs())
+  var startInFlight = false;      // re-entrancy guard; always released in finally
+
+  // Feedback copy — surfaced through the existing overlay resolve line.
+  var MSG_START_WRONG_SCREEN = 'Wrong TikTok screen';
+  var MSG_START_UNAVAILABLE = 'Start button unavailable';
+  var MSG_START_MULTIPLE = 'Multiple auctions ready';
+  var MSG_START_READY = 'Start ready — activation not enabled';
+
+  // Start-flow diagnostics — reuse the existing hotkey-debug opt-in
+  // (localStorage 'lensed_hotkey_debug' = '1'). Never sent to any backend/Supabase.
+  function startLog(msg, data) {
+    if (!hotkeyDebugOn()) return;
+    if (data !== undefined) console.log('[LENSED][START] ' + msg, data);
+    else console.log('[LENSED][START] ' + msg);
+  }
+
+  function startFeedback(text, isError) {
+    try { setResolveLine(text, !!isError); } catch (_) {}
+  }
+
+  function startIsVisible(node) {
+    if (!node) return false;
+    var r = node.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return false;
+    var cs;
+    try { cs = getComputedStyle(node); } catch (_) { return true; }
+    return cs.visibility !== 'hidden' && cs.display !== 'none';
+  }
+
+  // The selected Auctions tab: role=tab, aria-selected=true, visible text begins with
+  // "Auctions". Never hard-codes the Arco panel id nor trusts aria-controls resolving.
+  function findAuctionsTab() {
+    var tabs = document.querySelectorAll('[role="tab"]');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      if (t.getAttribute('aria-selected') !== 'true') continue;
+      if (/^\s*Auctions\b/.test(t.textContent || '')) return t;
+    }
+    return null;
+  }
+
+  // Structural signature of an auction row: an index (#N) + a starting price + a
+  // quantity. Text-based, NOT class-based (analytics panels lack this signature).
+  function looksLikeAuctionRow(text) {
+    return /#\d+/.test(text) && /Starting price/i.test(text) && /Quantity/i.test(text);
+  }
+
+  // Every structurally-valid auction row: the SMALLEST visible ancestor carrying the
+  // signature and at least one native <button>. Returns ALL candidates — never picks
+  // the first. Multiple configured rows are expected during a live.
+  function findAuctionRows() {
+    var divs = document.querySelectorAll('div');
+    var matches = [];
+    for (var i = 0; i < divs.length; i++) {
+      var d = divs[i];
+      var txt = d.innerText || '';
+      if (txt.length > 500) continue;                 // too large to be a single row
+      if (!looksLikeAuctionRow(txt)) continue;
+      if (!d.querySelector('button')) continue;
+      matches.push(d);
+    }
+    // Keep only innermost matches (drop any that contains another match).
+    var minimal = matches.filter(function (m) {
+      for (var j = 0; j < matches.length; j++) {
+        if (matches[j] !== m && m.contains(matches[j])) return false;
+      }
+      return true;
+    });
+    return minimal.filter(startIsVisible);
+  }
+
+  // Row title for diagnostics: the "#N …" line, trimmed.
+  function auctionRowTitle(row) {
+    try {
+      var m = (row.innerText || '').match(/#\d+[^\n]*/);
+      return m ? m[0].trim().slice(0, 60) : null;
+    } catch (_) { return null; }
+  }
+
+  // Enabled means: no native `disabled`, no `arco-btn-disabled` class, and computed
+  // pointer-events !== 'none' (the observed disabled markup uses all three).
+  function isStartButtonEnabled(b) {
+    if (b.disabled) return false;
+    if ((' ' + b.className + ' ').indexOf(' arco-btn-disabled ') !== -1) return false;
+    try { if (getComputedStyle(b).pointerEvents === 'none') return false; } catch (_) {}
+    return true;
+  }
+
+  // True if the row contains ANY native <button> whose exact text is "Start"
+  // (regardless of enabled state) — used to tell "disabled" from "no Start at all".
+  function rowHasStartText(row) {
+    var btns = row.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if ((btns[i].textContent || '').trim() === 'Start') return true;
+    }
+    return false;
+  }
+
+  // The single visible + enabled native "Start" button in a row, or null when zero OR
+  // more than one qualify. Exact text "Start" excludes "Go LIVE"/"Go LIVE now".
+  // data-tid="m4b_button" is NOT used (it is present on many page buttons).
+  function enabledStartButtonInRow(row) {
+    var btns = row.querySelectorAll('button');
+    var hits = [];
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      var label = (b.textContent || '').trim();
+      if (label !== 'Start') continue;                // excludes Go LIVE / Go LIVE now
+      if (!startIsVisible(b)) continue;
+      if (!isStartButtonEnabled(b)) continue;
+      hits.push(b);
+    }
+    return hits.length === 1 ? hits[0] : null;
+  }
+
+  // Guarded Start entry point. Discovery + fail-closed classification ONLY — never
+  // clicks TikTok this phase. `source` is a diagnostic label ('macro' | 'overlay').
+  function runStartAuction(source) {
+    var now = nowMs();
+    if (startInFlight || now < startDiscoverUntil) { startLog('debounced', { source: source }); return; }
+    startInFlight = true;
+    startDiscoverUntil = now + START_DEBOUNCE_MS;
+    try {
+      var tab = findAuctionsTab();
+      if (!tab) {
+        startLog('wrong screen — Auctions tab not selected/found', { source: source });
+        startFeedback(MSG_START_WRONG_SCREEN, true);
+        return;
+      }
+
+      var rows = findAuctionRows();
+      var setupPresent = /Temporary auction|Add auction products/i.test(document.body.innerText || '');
+      startLog('discovery', { source: source, rows: rows.length, setupPresent: setupPresent });
+
+      if (rows.length === 0) {
+        startLog(setupPresent ? 'empty (setup content present)' : 'empty (no auction rows)');
+        startFeedback(MSG_START_UNAVAILABLE, true);
+        return;
+      }
+
+      var startable = [];   // rows with EXACTLY ONE visible + enabled Start button
+      var disabledRows = 0; // configured rows whose Start button is disabled
+      var noStartRows = 0;  // configured rows with NO Start button (running/unknown)
+      for (var i = 0; i < rows.length; i++) {
+        if (enabledStartButtonInRow(rows[i])) {
+          startable.push({ title: auctionRowTitle(rows[i]) });
+        } else if (rowHasStartText(rows[i])) {
+          disabledRows++;
+        } else {
+          noStartRows++;
+        }
+      }
+      startLog('classified', { startable: startable.length, disabledRows: disabledRows, noStartRows: noStartRows });
+
+      if (startable.length > 1) {
+        // Ambiguous — never guess which auction to start.
+        startLog('ambiguous — multiple startable rows', { titles: startable.map(function (s) { return s.title; }) });
+        startFeedback(MSG_START_MULTIPLE, true);
+        return;
+      }
+      if (startable.length === 1) {
+        // READY_UNVERIFIED — a single startable auction. Activation is INTENTIONALLY
+        // NOT performed: the verified click method is pending a live-broadcast test.
+        startLog('READY_UNVERIFIED — activation not enabled', { title: startable[0].title });
+        startFeedback(MSG_START_READY, false);
+        return;
+      }
+      // Zero startable rows.
+      if (disabledRows > 0) {
+        startLog('configured but disabled', { reason: 'not_live_or_disabled', disabledRows: disabledRows });
+        startFeedback(MSG_START_UNAVAILABLE, true);
+        return;
+      }
+      // Configured rows but no Start button anywhere → RUNNING_OR_UNKNOWN. Never claim
+      // "already running" — the running-state DOM is not yet observed on a live broadcast.
+      startLog('running_or_unknown — configured rows without a Start button', { rows: rows.length });
+      startFeedback(MSG_START_UNAVAILABLE, true);
+    } catch (err) {
+      startLog('error during discovery', { error: String((err && err.message) || err) });
+      startFeedback(MSG_START_UNAVAILABLE, true);
+    } finally {
+      startInFlight = false; // release the temporary discovery lock (timestamp still debounces repeats)
     }
   }
 
@@ -2064,24 +2408,30 @@
 
     // Physical numpad / macro-pad keys map to overlay actions by event.code — these
     // codes are produced only by real numpad keys, never by a wedge-scanner burst.
-    var padAction = e.code === 'NumpadAdd' ? 'add'
-                  : e.code === 'NumpadSubtract' ? 'remove'
+    //   NumpadAdd (button 1) → Start auction   NumpadSubtract (button 2) → add unit
+    //   NumpadMultiply (button 3) → restage.   (The old "remove last" action is gone.)
+    // Start responds ONLY to NumpadAdd (never a printable '+', handled below).
+    var padAction = e.code === 'NumpadAdd' ? 'start'
+                  : e.code === 'NumpadSubtract' ? 'add'
                   : e.code === 'NumpadMultiply' ? 'rerun'
                   : null;
     if (padAction) {
       hlog('matched numpad code', { code: e.code, action: padAction });
       e.preventDefault();
       e.stopPropagation();
-      fireHotkey(padAction);
+      if (padAction === 'start') runStartAuction('macro');
+      else fireHotkey(padAction);
       resetGlobalScan(); // consumed as a shortcut, not part of a scan
       return;
     }
 
-    // Standalone +/-/* shortcut — fires ONLY for a deliberate, human-paced press.
-    // A +/-/* arriving mid machine-burst was already buffered/swallowed in (A), so it
+    // Standalone -/* shortcut — fires ONLY for a deliberate, human-paced press.
+    // A -/* arriving mid machine-burst was already buffered/swallowed in (A), so it
     // never reaches here; the standalone check uses the timing captured in (A).
-    if (e.key === '+' || e.key === '-' || e.key === '*') {
-      var action = e.key === '+' ? 'add' : e.key === '-' ? 'remove' : 'rerun';
+    // A printable '+' is intentionally NOT a shortcut: Start responds only to the
+    // NumpadAdd event.code, so a typed '+' can never start an auction.
+    if (e.key === '-' || e.key === '*') {
+      var action = e.key === '-' ? 'add' : 'rerun';
       var standalone = gScanCount <= 1 || gLastInterkey > SCAN_MAX_INTERKEY_MS;
       hlog('matched symbol key', { key: e.key, action: action, standalone: standalone, gScanCount: gScanCount, interkey: gLastInterkey });
       if (standalone) {
@@ -2125,13 +2475,31 @@
       // order seen) so we can detect a captured-only order below.
       var brandNewOrder = !!(sale && sale.orderId && !seenOrderIds[sale.orderId]);
       var hadStaged = stagedSkus.length > 0;
+      var fresh = isFreshSale(sale);
+      var hasReliableTs = !!(sale && typeof sale.orderedAtMs === 'number' && isFinite(sale.orderedAtMs) && sale.orderedAtMs > 0);
+
+      // ── Replay/backlog guard (fixes the staged:0 storm) ──────────────────────────
+      // Only suppress orders we are CONFIDENT are historical: brand-new-to-this-tab,
+      // NOTHING staged, AND a reliable order timestamp that is clearly old (a reload
+      // re-sends the cumulative backlog). A staged order always binds (regardless of
+      // timestamp). An order with a MISSING/UNRELIABLE timestamp is never discarded —
+      // it may be a real fresh sale — it processes normally and is logged as ambiguous
+      // below. This prevents both the replay-warning storm AND silently dropping a
+      // potentially fresh sale.
+      if (brandNewOrder && !hadStaged && hasReliableTs && !fresh) {
+        renderSale(sale, false, null); // marks the order seen + shows it in Recent orders
+        dlog('order.replayed_skip', 'info', 'historical order (reliable old timestamp, nothing staged) — bind skipped',
+          { order: sale && sale.orderId, ageMs: Date.now() - sale.orderedAtMs });
+        return;
+      }
+
       var wasBound = boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && hadStaged;
       var boundSkus = autoBind(sale);
 
       // Render in overlay
       renderSale(sale, wasBound, boundSkus);
       diag.lastCaptureTs = Date.now();
-      dlog('order.captured', 'info', 'sale rendered', { order: sale && sale.orderId, brandNew: brandNewOrder, hadStaged: hadStaged, markedBound: !!wasBound });
+      dlog('order.captured', 'info', 'sale rendered', { order: sale && sale.orderId, brandNew: brandNewOrder, hadStaged: hadStaged, fresh: fresh, markedBound: !!wasBound });
 
       // [SCREENSHOT] Auction END screenshot — only when the feature is enabled AND
       // lazy-init is complete (shotsReady). shotsReady flips well after page load,
@@ -2158,12 +2526,21 @@
       // recorded raw but NOT bound to a SKU. Count once + show a visible warning so
       // this failure is never silent again (the July-3 incident).
       if (brandNewOrder && !hadStaged && (!boundSkus || boundSkus.length === 0)) {
-        capturedOnlyCount++;
-        renderCapturedOnlyWarning();
-        persistCounter();
-        dlog('order.captured_only', 'warn', 'order captured with nothing staged', { order: sale && sale.orderId, total: capturedOnlyCount });
-        // Visible overlay warning above is the signal; console line gated to avoid live spam.
-        if (SHOTS_DEBUG) console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
+        if (fresh) {
+          // Genuine live sale, host didn't stage — keep the clear host warning.
+          capturedOnlyCount++;
+          renderCapturedOnlyWarning();
+          persistCounter();
+          dlog('order.captured_only', 'warn', 'FRESH order captured with nothing staged', { order: sale && sale.orderId, total: capturedOnlyCount });
+          // Visible overlay warning above is the signal; console line gated to avoid live spam.
+          if (SHOTS_DEBUG) console.warn('[LENSED][TT] captured-only order (no staged SKU):', sale.orderId, '— total this live:', capturedOnlyCount);
+        } else {
+          // Not fresh, but timestamp is missing/unreliable (reliable-old rows were already
+          // skipped above). Could be a real fresh sale OR a replay — do NOT inflate the
+          // scary captured-only host warning, but leave a diagnostic trail so a genuine
+          // fresh sale is never silently lost.
+          dlog('order.ambiguous_timestamp_no_staged', 'warn', 'order captured, nothing staged, no reliable timestamp', { order: sale && sale.orderId });
+        }
       }
 
       // A bind just cleared staging — refocus so the host can scan the next item
@@ -2178,6 +2555,7 @@
     if (data.source === 'lensed-tiktok-room') {
       currentRoomId = data.roomId || currentRoomId; // scope persisted staged SKUs + host
       restoreHostByRoom(); // pre-first-sale reload: recover a host chosen for this room
+      maybeRestorePreSession(); // pre-first-sale reload: recover staged SKUs + counter + host
       dlog('room.detected', 'info', 'room_id relayed to background', { room: data.roomId || null });
       try {
         chrome.runtime.sendMessage({ type: 'TIKTOK_ROOM', roomId: data.roomId }).catch(function () {});
@@ -2206,14 +2584,21 @@
 
   function updateAuthStatus(authenticated, uid, queuedSales) {
     var wasConnected = authConnected;
+    var prevUser = authUserId;
     authConnected = !!authenticated;
     authStatusReceived = true;
+    authUserId = uid || null;
+    // A different Lensed user must not inherit the previous user's pre-session state:
+    // re-arm the one-shot restore guard so it re-evaluates (and rejects a mismatch).
+    if (authUserId !== prevUser) preSessionRestoreDone = false;
     if (typeof queuedSales === 'number') queuedSalesCount = queuedSales;
     renderStatusLine();
     renderHostWarning();
     renderQueueWarning();
     // Load the host roster on (re)connect, or if we became connected without one yet.
     if (authConnected && (!wasConnected || hosts.length === 0)) fetchHosts();
+    // If a room is already known, attempt a pre-session restore now that we have a user.
+    maybeRestorePreSession();
   }
 
   // FAIL-LOUD: while signed OUT with queued sales, show an unmissable red banner. This is
@@ -2369,6 +2754,10 @@
       rec[LK_HOST] = { sessionId: counterSessionId || null, roomId: currentRoomId || null, hostId: selectedHostId || null };
       chrome.storage.local.set(rec);
     } catch (_) {}
+    // Before a session exists, also fold the host into the user+room pre-session record
+    // so it survives a reload/SW-restart even when the room id later differs.
+    if (!counterSessionId) persistPreSession();
+    console.log('[LENSED][TT] HOST persisted', { userPresent: !!authUserId, roomPresent: !!currentRoomId, sessionPresent: !!counterSessionId });
   }
 
   // Pre-first-sale reload path: no session yet, so adoptSession() won't fire. When the
@@ -2380,7 +2769,10 @@
       chrome.storage.local.get([LK_HOST], function (data) {
         if (chrome.runtime.lastError || !data) return;
         var hrec = data[LK_HOST];
-        if (hrec && hrec.hostId && hrec.roomId && hrec.roomId === currentRoomId && !selectedHostId) {
+        var found = !!(hrec && hrec.hostId);
+        var roomMatches = !!(hrec && hrec.roomId && hrec.roomId === currentRoomId);
+        var restored = false;
+        if (found && roomMatches && !selectedHostId) {
           selectedHostId = hrec.hostId;
           renderHostOptions();
           try {
@@ -2389,7 +2781,11 @@
               function () { if (chrome.runtime.lastError) return; }
             );
           } catch (_) {}
+          restored = true;
         }
+        // userMatches is null: LK_HOST is the legacy room-only fallback (the user+room
+        // pre-session record carries user-scoped host); logged for runtime diagnosis.
+        console.log('[LENSED][TT] HOST restore', { found: found, roomMatches: roomMatches, userMatches: null, restored: restored });
       });
     } catch (_) {}
   }
@@ -2562,9 +2958,10 @@
     } else if (message.type === 'LENSED_SESSION') {
       // Background resolved/changed the live session — scope our counter to it.
       // A null sessionId means the session was reset (room change / user switch),
-      // so clear staged SKUs + counter for a clean next live.
+      // so clear staged SKUs + counter for a clean next live. `reason` (when present)
+      // explains why; older background builds omit it (backward compatible).
       if (message.sessionId) adoptSession(message.sessionId);
-      else onSessionReset();
+      else onSessionReset(message.reason || 'session_null');
     } else if (message.type === 'SHOT_STATUS') {
       // [SCREENSHOT] Background pushed updated counters after a store/clear.
       applyShotStatus(message.status);

@@ -52,9 +52,15 @@ var SK_CHANNEL_ACCOUNTS = 'lensed_channel_accounts';
 // sends DIAG_ENABLE). NEVER stores tokens/cookies/raw payloads. Every call is
 // try-wrapped so a logging failure can never affect capture/bind.
 var EXT_VERSION = (function () { try { return chrome.runtime.getManifest().version; } catch (_) { return '?'; } })();
+// Build marker — identifies THIS canonical combined build in the diagnostics export,
+// so there is never confusion about which zip a host loaded. DIAG_BUILD_SHA is the
+// literal token '__BUILD_SHA__' in source; build.sh stamps the real short commit SHA
+// into the dist copy at build time.
+var DIAG_BUILD = 'v0.2.25-main-plus-start-auction';
+var DIAG_BUILD_SHA = '__BUILD_SHA__';
 var DIAG_KEY = 'lensed_diag_log';
 var DIAG_FLAG = 'lensed_diag_enabled';
-var DIAG_CAP = 3000;
+var DIAG_CAP = 15000; // long-live headroom; noise cut (one scan.detected per attempt) keeps this ample
 var diagEnabled = false;
 var diagRing = [];
 var diagWriteInflight = false;
@@ -125,6 +131,19 @@ function diagClassifyErr(e) {
   return 'unknown';
 }
 function diagRedactId(v) { v = String(v == null ? '' : v); return v.length <= 4 ? v : ('…' + v.slice(-4)); }
+// Parse the HTTP status + PostgREST error body ({code,message,details,hint}) out of a
+// thrown "UPSERT x failed (409): {json}" error, so a failure is diagnosable instead of
+// "unknown". Truncated; no tokens (the thrown message never contains auth headers).
+function diagHttpDetail(e) {
+  var m = (e && e.message) || String(e || '');
+  var out = { msg: m.slice(0, 300) };
+  try { var st = m.match(/\((\d{3})\)/); if (st) out.status = Number(st[1]); } catch (_) {}
+  try {
+    var i = m.indexOf('{');
+    if (i >= 0) { var j = JSON.parse(m.slice(i)); out.pgcode = j.code; out.pgmsg = j.message; out.hint = j.hint; out.details = j.details; }
+  } catch (_) {}
+  return out;
+}
 // SW-level uncaught error/rejection capture (message only — never payloads).
 try {
   self.addEventListener('error', function (ev) { diag('sw.error', 'error', (ev && ev.message) || 'error', { file: ev && ev.filename, line: ev && ev.lineno }); });
@@ -931,6 +950,8 @@ async function logAuction(sessionId, result, skus, idemKey) {
   }
 }
 
+// Build the capture_events row — shared by upsertCaptureEvent and the unauth-queue
+// flush replay (replayQueuedSale) so both write the identical shape.
 function buildCaptureRow(sale, boundSkuId) {
   return {
     user_id: userId,
@@ -951,19 +972,43 @@ function buildCaptureRow(sale, boundSkuId) {
   };
 }
 
+// Upsert the raw capture_events row. Returns { ok, ... } so the caller can tell the
+// content script the truth (capture_events feeds P&L). Idempotent: on_conflict targets
+// the real (user_id, order_id) unique index, so a re-sent/replayed order MERGES instead
+// of raising 23505 (the empty-upsert bug that failed 135× during the replay storm).
 async function upsertCaptureEvent(sale, boundSkuId) {
-  if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return; }
+  if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return { ok: false, reason: 'not_authenticated' }; }
+  var row = {
+    user_id: userId,
+    order_id: sale.orderId,
+    room_id: sale.roomId || currentRoomId,
+    buyer_username: sale.buyerUsername || null,
+    selling_price_cents: parsePriceToCents(sale.sellingPrice),
+    product_name: sale.productName || null,
+    platform_sku_ref: sale.platformSkuRef || null,
+    tiktok_sku_id: sale.skuId || null,
+    tiktok_product_id: sale.productId || null,
+    item_image_url: sale.imageUrl || null,
+    ordered_at: sale.orderedAtMs ? new Date(sale.orderedAtMs).toISOString() : null,
+    is_payment_successful: sale.isPaymentSuccessful,
+    order_status: sale.orderStatus,
+    bound_sku_id: boundSkuId || null,
+    raw_payload: sale,
+  };
   try {
-    // on_conflict=(user_id,order_id) → PostgREST does ON CONFLICT DO UPDATE against
-    // idx_capture_events_user_order instead of a blind INSERT that trips the unique
-    // index. This makes the write truly idempotent and kills the benign 23505/409 spam
-    // when a settled order's snapshot re-arrives.
-    await supabaseUpsert('capture_events', buildCaptureRow(sale, boundSkuId), 'user_id,order_id');
+    await supabaseUpsert('capture_events', row, 'user_id,order_id');
     console.log('[LENSED][BG] capture_events upserted:', sale.orderId);
     diag('capture.write', 'info', 'capture_events upserted', { order: sale.orderId, bound: !!boundSkuId });
+    return { ok: true };
   } catch (e) {
+    var d = diagHttpDetail(e);
     console.error('[LENSED][BG] capture_events upsert error:', e);
-    diag('capture.error', 'error', 'capture_events upsert failed', { order: sale.orderId, code: diagClassifyErr(e) });
+    // Full, diagnosable error — status + PostgREST code/message/hint/details (no "unknown").
+    diag('capture.error', 'error', 'capture_events upsert failed', {
+      order: sale.orderId, status: d.status || null, code: d.pgcode || diagClassifyErr(e),
+      message: d.pgmsg || d.msg, hint: d.hint || null, details: (d.details || '').slice(0, 200) || null,
+    });
+    return { ok: false, reason: 'capture_write_failed', status: d.status || null, code: d.pgcode || diagClassifyErr(e), message: d.pgmsg || d.msg };
   }
 }
 
@@ -1080,7 +1125,7 @@ async function flushSaleQueue() {
 // ─── Auto-bind: sale + staged SKUs → lensed_log_auction + capture_events
 
 async function handleAutoBind(sale, stagedSkus) {
-  if (!sale || !sale.orderId) return;
+  if (!sale || !sale.orderId) return { ok: false, reason: 'no_order' };
 
   // A sale event can wake a cold worker; wait for the rehydrate so the
   // isAuthenticated() gates below don't skip logging on the first bind.
@@ -1098,7 +1143,7 @@ async function handleAutoBind(sale, stagedSkus) {
   if (prevToken === result) {
     console.log('[LENSED][BG] order_id already logged with same status, skipping:', sale.orderId, result);
     diag('bind.skip_dup', 'info', 'duplicate order+status skipped', { order: sale.orderId, status: result });
-    return;
+    return { ok: true, skipped: true, reason: 'duplicate' };
   }
   loggedOrderStatus.set(sale.orderId, result);
   capOrderMaps();
@@ -1107,6 +1152,8 @@ async function handleAutoBind(sale, stagedSkus) {
   // A flip = we've processed this order before, with a different status.
   var isFlip = prevToken !== undefined;
   var boundSkuId = null;
+  var bound = false;         // did lensed_log_auction actually write/replay an auction row?
+  var bindReason = null;     // why not bound (no_staged / no_session / rpc_failed / not_authenticated)
 
   if (isFlip && isAuthenticated() && loggedOrderSession.has(sale.orderId)) {
     // ── Status-flip transition (e.g. failed→paid) ───────────────────────────
@@ -1118,7 +1165,8 @@ async function handleAutoBind(sale, stagedSkus) {
     // placeholder only to satisfy the RPC's NO_SKUS guard.
     var flipSession = loggedOrderSession.get(sale.orderId);
     console.log('[LENSED][BG] status flip — re-calling RPC for transition:', sale.orderId, prevToken, '->', result);
-    await logAuction(flipSession, result, TRANSITION_PLACEHOLDER_SKUS, sale.orderId);
+    var flipRow = await logAuction(flipSession, result, TRANSITION_PLACEHOLDER_SKUS, sale.orderId);
+    if (flipRow) { bound = true; } else { bindReason = 'rpc_failed'; loggedOrderStatus.delete(sale.orderId); }
   } else if (stagedSkus && stagedSkus.length > 0 && isAuthenticated()) {
     // ── Fresh bind: requires staged SKUs + a room-scoped session ───────────────
     // Pass the sale's own room so a stale in-memory/persisted session (different
@@ -1146,12 +1194,14 @@ async function handleAutoBind(sale, stagedSkus) {
         loggedOrderSession.set(sale.orderId, sessionId);
         capOrderMaps();
         boundSkuId = stagedSkus.length === 1 ? stagedSkus[0].id : null;
+        bound = true;
         diag('bind.ok', 'info', 'order bound to auction item', { order: sale.orderId, boundSkuId: boundSkuId || null });
       } else {
         // Bind failed (RPC error/empty). Don't fake success: roll back the status
         // dedup so an identical re-send RETRIES instead of being silently skipped,
         // and surface it (the order still lands in capture_events below).
         loggedOrderStatus.delete(sale.orderId);
+        bindReason = 'rpc_failed';
         console.error('[LENSED][BG] BIND FAILED — order captured only (will retry on re-send):', sale.orderId, 'session', sessionId);
         diag('bind.failed', 'error', 'bind failed — order captured only', { order: sale.orderId, session: diagRedactId(sessionId) });
       }
@@ -1159,27 +1209,61 @@ async function handleAutoBind(sale, stagedSkus) {
       // Staged SKUs existed but no room-scoped session could be resolved (e.g. room
       // unknown). Roll back dedup so a retry can bind once a room is known.
       loggedOrderStatus.delete(sale.orderId);
+      bindReason = 'no_session';
       console.warn('[LENSED][BG] no room-scoped session — order captured only (will retry):', sale.orderId);
       diag('bind.no_session', 'warn', 'no room-scoped session — captured only', { order: sale.orderId, room: sale.roomId || null });
     }
   } else if (!isAuthenticated()) {
-    // FIX A: do NOT discard. Persist the sale (+ its staged SKUs) so it survives a SW
-    // restart, and flush it to capture_events + lensed_log_auction when auth returns.
+    // FIX A + truthful reporting: signed out, so we do NOT discard the sale — ENQUEUE it
+    // (persisted to chrome.storage.local) so it survives an SW restart and flushes to
+    // capture_events + lensed_log_auction on sign-in. We return early with a TRUTHFUL
+    // result: ok:false (nothing is written to the DB yet — it's only locally queued) with
+    // queued:true. The overlay's fail-loud "NOT SIGNED IN" banner tells the host until
+    // auth returns. Never claims ok:true for a sale that isn't persisted.
+    bindReason = 'not_authenticated';
     console.warn('[LENSED][BG] not authenticated — sale QUEUED for flush on sign-in:', sale.orderId);
     diag('bind.not_authenticated', 'warn', 'not authenticated — sale queued', { order: sale.orderId });
     await enqueueSale(sale, stagedSkus, result);
-    return; // capture_events is written by the flush; skip the unauth no-op upsert below
+    return { ok: false, bound: false, captureWritten: false, partial: false, queued: true, reason: 'queued_unauthenticated', order: sale.orderId };
   } else {
     // Authenticated, a real new/changed order, but NOTHING was staged → the order is
     // captured raw and NOT bound to an auction item. Surface it (the overlay shows a
     // visible warning; this is the background-side diagnostic) instead of silently
     // dropping the SKU/COGS link — the July-3 captured-only failure mode.
+    bindReason = 'no_staged';
     console.warn('[LENSED][BG] no staged SKUs — order captured only, NOT bound to an auction item:', sale.orderId);
     diag('bind.no_staged', 'warn', 'no staged SKUs — captured only', { order: sale.orderId });
   }
 
-  // Always upsert to capture_events (raw audit log)
-  await upsertCaptureEvent(sale, boundSkuId);
+  // Always upsert to capture_events (raw revenue/audit row that P&L joins on).
+  var cap = await upsertCaptureEvent(sale, boundSkuId);
+  if (!cap.ok && cap.reason === 'capture_write_failed') {
+    // One immediate idempotent retry (on_conflict=user_id,order_id makes re-upsert a
+    // MERGE, never a second row) — clears transient blips. Does NOT touch inventory.
+    cap = await upsertCaptureEvent(sale, boundSkuId);
+  }
+  if (!cap.ok) {
+    // The capture row is missing — roll back the status dedup so a later cumulative
+    // re-send retries the write. If the RPC already ran, its replay is idempotent on
+    // (user_id, order_id) so a retry NEVER double-decrements inventory.
+    loggedOrderStatus.delete(sale.orderId);
+  }
+
+  // Truthful result for the content script — never claim ok:true when the P&L-critical
+  // capture write failed (the "silent green-but-broken" case).
+  var partial = bound && !cap.ok;
+  return {
+    ok: !!cap.ok,
+    bound: bound,
+    captureWritten: !!cap.ok,
+    partial: partial,
+    reason: !cap.ok
+      ? (partial ? 'capture_write_failed_after_rpc' : (cap.reason || 'capture_write_failed'))
+      : (bound ? null : bindReason),
+    code: cap.code || null,
+    status: cap.status || null,
+    order: sale.orderId,
+  };
 }
 
 // ── [SCREENSHOT] Upload-first store (Storage + live_order_screenshots) ────────
@@ -1534,7 +1618,7 @@ function persistSession() {
 
 // Tell open TikTok tabs which live session they're attached to, so each overlay
 // can scope its persisted order counter to this session id.
-function broadcastSession() {
+function broadcastSession(reason) {
   chrome.tabs.query({ url: 'https://shop.tiktok.com/*' }, function (tabs) {
     if (chrome.runtime.lastError) return;
     for (var i = 0; i < tabs.length; i++) {
@@ -1543,6 +1627,7 @@ function broadcastSession() {
           type: 'LENSED_SESSION',
           sessionId: currentSessionId || null,
           roomId: currentRoomId || null,
+          reason: reason || null,
         }).catch(function () {});
       } catch (_) {}
     }
@@ -1561,20 +1646,54 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
     return;
   }
 
-  persistAuth(at, rt || '').then(function () {
-    cachedSkus = null; // invalidate SKU cache for new user
-    currentSessionId = null; // re-resolve session for new user
-    currentRoomId = null;
-    sessionRoomId = null;
-    selectedHostId = null;      // a new user's live must not inherit the prior host
-    hostAppliedForSession = null;
-    // Drop the previous user's pinned session/room so the new user never resumes
-    // it; broadcast the reset so overlays clear staged SKUs and re-scope their counter.
-    try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]); } catch (_) {}
-    broadcastAuthStatus();
-    broadcastSession();
-    sendResponse({ ok: true, userId: userId });
-  });
+  // Resolve the incoming Lensed identity up front so we can compare it to the
+  // PREVIOUSLY persisted user before persistAuth() overwrites the stored id.
+  var incomingUserId = getUserIdFromToken(at);
+
+  // Wait for the one-time startup rehydrate so a cold service worker has restored
+  // the persisted session/identity before we decide to preserve vs. reset.
+  ensureAuthReady()
+    // Authoritative previous identity comes from STORAGE — the in-memory userId is
+    // null after every MV3 service-worker restart until rehydrate runs.
+    .then(function () { return chrome.storage.local.get(SK_USER_ID); })
+    .then(function (prev) {
+      var previousUserId = (prev && prev[SK_USER_ID]) || null;
+      return persistAuth(at, rt || '').then(function () {
+        // Same Lensed user + resolvable ids → a routine token refresh: preserve live
+        // context. Otherwise (no known previous user, unresolvable incoming user, or a
+        // genuine user switch) run the existing full user-switch reset.
+        var identityChanged =
+          !previousUserId || !incomingUserId || previousUserId !== incomingUserId;
+
+        if (identityChanged) {
+          var hadSession = !!currentSessionId, hadHost = !!selectedHostId;
+          cachedSkus = null; // invalidate SKU cache for the new/unknown user
+          currentSessionId = null; // re-resolve session for the new user
+          currentRoomId = null;
+          sessionRoomId = null;
+          selectedHostId = null;      // a new user's live must not inherit the prior host
+          hostAppliedForSession = null;
+          // Drop the previous user's pinned session/room so the new user never resumes
+          // it; broadcast the reset (with a reason) so overlays clear staged SKUs and
+          // re-scope their counter.
+          try { chrome.storage.local.remove([SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]); } catch (_) {}
+          broadcastAuthStatus();
+          broadcastSession('user_changed');
+          console.log('[LENSED][BG] SESSION RESET', { reason: 'user_changed', source: 'LENSED_AUTH', hadSession: hadSession, hadHost: hadHost, hadStagedSku: null });
+        } else {
+          // Routine same-user refresh: tokens already rotated by persistAuth above.
+          // Preserve session / room mapping / host / cached SKUs / dedup state; refresh
+          // the content auth status but do NOT broadcast a null session or reset overlays.
+          broadcastAuthStatus();
+          console.log('[LENSED][BG] LENSED_AUTH: same-user token refresh — live state preserved');
+        }
+        sendResponse({ ok: true, userId: userId });
+      });
+    })
+    .catch(function (e) {
+      console.error('[LENSED][BG] LENSED_AUTH relay failed:', e);
+      try { sendResponse({ ok: false, error: (e && e.message) || 'relay failed' }); } catch (_) {}
+    });
 
   return true; // async sendResponse
 });
@@ -1633,7 +1752,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
         var stored = (d && Array.isArray(d[DIAG_KEY])) ? d[DIAG_KEY] : [];
         var merged = diagMerge(stored, diagRing);
         diagRing = merged;
-        try { sendResponse({ v: EXT_VERSION, count: merged.length, events: merged }); } catch (_) {}
+        try { sendResponse({ v: EXT_VERSION, build: DIAG_BUILD, commit: DIAG_BUILD_SHA, count: merged.length, events: merged }); } catch (_) {}
       });
     } catch (_) { try { sendResponse({ v: EXT_VERSION, count: diagRing.length, events: diagRing }); } catch (_) {} }
     return true;
@@ -1667,7 +1786,8 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       loggedOrderStatus.clear();
       loggedOrderSession.clear();
       persistSession();   // clears SK_SESSION_ID / SK_ROOM_ID
-      broadcastSession(); // sessionId=null → overlays clear staged SKUs + counter
+      broadcastSession('room_changed'); // sessionId=null → overlays clear staged SKUs + counter
+      console.log('[LENSED][BG] SESSION RESET', { reason: 'room_changed', source: 'TIKTOK_ROOM', hadSession: true, hadHost: null, hadStagedSku: null });
     } else if (currentSessionId && sessionRoomId === newRoom) {
       // Restored session's room confirmed by the live page — safe to keep it.
       console.log('[LENSED][BG] session room confirmed:', currentSessionId, 'room', newRoom);
@@ -1722,11 +1842,15 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'AUTO_BIND') {
-    handleAutoBind(message.sale, message.stagedSkus).then(function () {
-      sendResponse({ ok: true });
+    handleAutoBind(message.sale, message.stagedSkus).then(function (res) {
+      // Reply the TRUTHFUL result — ok:false when the capture_events write failed even
+      // if lensed_log_auction succeeded (partial:true), so the content script never
+      // reports success on a P&L-breaking failure.
+      sendResponse(res || { ok: true });
     }).catch(function (err) {
       console.error('[LENSED][BG] auto-bind error:', err);
-      sendResponse({ ok: false, error: err.message });
+      diag('bind.exception', 'error', 'handleAutoBind threw', { order: message.sale && message.sale.orderId, msg: (err && err.message) || String(err) });
+      sendResponse({ ok: false, bound: false, reason: 'exception', error: err.message });
     });
     return true;
   }

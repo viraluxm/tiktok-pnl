@@ -48,7 +48,7 @@ function boot(store) {
       sendMessage: () => {},
     },
     storage: { local: { get: asyncGet, set: asyncSet, remove: (k, cb) => cb && cb() } },
-    tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => Promise.resolve() },
+    tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => Promise.resolve(), onRemoved: { addListener() {} } },
   };
   window.fetch = () => Promise.reject(new Error('no network in test'));
   window.eval(bgText);
