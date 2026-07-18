@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 import { TRAINER_EVENT, type TrainerEvent } from '@/components/training/trainerEvents';
+import { isValidTrainingSessionId, trainingRealtimeChannel } from '@/lib/training/session';
 
 export type ChannelStatus = 'connecting' | 'connected' | 'error';
 type Role = 'host' | 'controller';
@@ -25,8 +26,16 @@ export function useSessionChannel(
   });
 
   useEffect(() => {
+    // Defense in depth: the pages already fail closed on an invalid id, so this
+    // hook is never mounted with one. Guard anyway — never open a channel for an
+    // invalid session (the previous channel, if any, was already torn down by the
+    // prior effect's cleanup).
+    if (!isValidTrainingSessionId(sessionId)) {
+      channelRef.current = null;
+      return;
+    }
     const supabase = createClient();
-    const channel = supabase.channel(`trainer:${sessionId}`, {
+    const channel = supabase.channel(trainingRealtimeChannel(sessionId), {
       config: { broadcast: { self: false }, presence: { key: role } },
     });
     channelRef.current = channel;

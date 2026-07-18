@@ -2,6 +2,7 @@
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
+import { useUser } from './useUser';
 
 interface BusinessStatus {
   connected: boolean;
@@ -12,9 +13,13 @@ interface BusinessStatus {
 
 export function useTikTokBusiness() {
   const queryClient = useQueryClient();
+  const { user } = useUser();
 
   const statusQuery = useQuery<BusinessStatus>({
-    queryKey: ['tiktok-business-status'],
+    // Scope by user id so a same-tab user switch can't read the previous user's
+    // cached ad-account status; gate on user so we never fetch pre-auth.
+    queryKey: ['tiktok-business-status', user?.id],
+    enabled: !!user,
     queryFn: async () => {
       const res = await fetch('/api/tiktok-business/status');
       if (!res.ok) return { connected: false };
