@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
 import { useAuctionBoard, type AuctionItem } from '@/hooks/useLiveAuctions';
+import { notSoldBadge } from '@/lib/paymentStatus';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
 import { useStores } from '@/hooks/useStores';
@@ -810,13 +811,15 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums">{it.units}</td>
                     <td className="px-4 py-3 text-center">
-                      <span
-                        className={`text-xs font-medium ${
-                          sold ? 'text-tt-green' : it.payment_failed ? 'text-tt-red' : 'text-tt-muted'
-                        }`}
-                      >
-                        {sold ? 'Sold' : it.payment_failed ? 'Payment failed' : 'Not sold'}
-                      </span>
+                      {sold ? (
+                        <span className="text-xs font-medium text-tt-green">Sold</span>
+                      ) : (
+                        (() => {
+                          // not_sold → show the payment-recovery state from order_status.
+                          const b = notSoldBadge(it.order_status, it.payment_failed);
+                          return <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>;
+                        })()
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums text-tt-muted">{money(it.expected_price_cents)}</td>
                     <td className="px-4 py-3 text-right tabular-nums">{money(sold ? won : null)}</td>

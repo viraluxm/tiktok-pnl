@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useLiveSession, useEndSession } from '@/hooks/useLiveSessions';
 import { useInventorySkus, type InventorySku } from '@/hooks/useInventorySkus';
 import { useAuctionBoard, useQuickClose, useDeleteAuctionItem, type AuctionResult } from '@/hooks/useLiveAuctions';
+import { notSoldBadge } from '@/lib/paymentStatus';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
 const EXPECTED_MULTIPLIER = 3;
@@ -294,6 +295,8 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
           loggedAt: null as string | null,
           pendingState: x.state,
           error: x.error,
+          order_status: null as number | null, // optimistic rows have no capture yet
+          payment_failed: false,
         };
       });
     const s = board.map((b) => ({
@@ -309,6 +312,8 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
       loggedAt: b.logged_at,
       pendingState: undefined as PendingRow['state'] | undefined,
       error: undefined as string | undefined,
+      order_status: b.order_status,
+      payment_failed: b.payment_failed,
     }));
     return [...p, ...s].sort((a, b) => b.number - a.number);
   }, [pending, board, boardNumbers]);
@@ -526,7 +531,14 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
                           <td className="px-4 py-3 font-bold tabular-nums">{r.number}</td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
-                              <span className={`text-xs font-medium px-2 py-0.5 rounded-md ${STATUS_META[r.status].cls}`}>{STATUS_META[r.status].label}</span>
+                              {r.status === 'not_sold' ? (
+                                // Show the payment-recovery state (order_status) on not_sold rows.
+                                (() => { const b = notSoldBadge(r.order_status, r.payment_failed); return (
+                                  <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>
+                                ); })()
+                              ) : (
+                                <span className={`text-xs font-medium px-2 py-0.5 rounded-md ${STATUS_META[r.status].cls}`}>{STATUS_META[r.status].label}</span>
+                              )}
                               {r.pendingState === 'saving' && <span className="text-xs text-tt-muted">Saving…</span>}
                               {r.pendingState === 'failed' && (
                                 <span className="inline-flex items-center gap-1.5">
