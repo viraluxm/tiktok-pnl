@@ -2942,9 +2942,20 @@
     if (!domAccountLabel) return;
     var key = domAccountLabel + '|' + (currentRoomId || '');
     if (key === lastChannelNameSentKey) return;
-    lastChannelNameSentKey = key;
+    // Bug 3 fix: do NOT dedup on send — dedup on a SUCCESSFUL PERSIST. Set the key only
+    // when the background acks { persisted:true } (session resolved + authenticated + DB
+    // PATCH ok). If auth/sid wasn't ready (or the SW restarted mid-send), the ack is
+    // false/absent, the key stays unset, and the 12s detection loop re-sends until it
+    // lands — so channel_handle stops getting stuck NULL. On re-auth the background also
+    // re-attempts via retryDeferredChannel().
     try {
-      chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: { handle: domAccountLabel, source: 'dom' }, roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
+      chrome.runtime.sendMessage(
+        { type: 'TIKTOK_ACCOUNT', account: { handle: domAccountLabel, source: 'dom' }, roomId: currentRoomId || null },
+        function (resp) {
+          if (chrome.runtime.lastError) return;            // not delivered → retry next tick
+          if (resp && resp.persisted) lastChannelNameSentKey = key;  // landed → stop re-sending
+        }
+      );
     } catch (_) {}
   }
 

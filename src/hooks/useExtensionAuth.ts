@@ -62,6 +62,28 @@ export function useExtensionAuth() {
       }
     });
 
-    return () => subscription.unsubscribe();
+    // Belt-and-suspenders re-push so the extension (a PASSIVE token follower that never
+    // refreshes on its own) always holds the newest token: after an MV3 service-worker
+    // restart or while this tab is backgrounded, an onAuthStateChange may have been
+    // missed. Re-push the CURRENT session on tab focus/visibility and on a ~5-min
+    // interval. This does NOT mint or extend tokens — it just re-delivers whatever the
+    // web client currently holds (which autorefreshes ~hourly), keeping the extension
+    // topped up well before its access token expires.
+    const repush = () => {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session) sendToExtension(session.access_token, session.refresh_token);
+      });
+    };
+    const onVisible = () => { if (document.visibilityState === 'visible') repush(); };
+    window.addEventListener('focus', repush);
+    document.addEventListener('visibilitychange', onVisible);
+    const interval = window.setInterval(repush, 5 * 60 * 1000);
+
+    return () => {
+      subscription.unsubscribe();
+      window.removeEventListener('focus', repush);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.clearInterval(interval);
+    };
   }, []);
 }

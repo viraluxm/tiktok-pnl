@@ -152,8 +152,12 @@ try {
 
 // ─── State ───────────────────────────────────────────────────────────
 var accessToken = null;
-var refreshToken = null;
+var refreshToken = null;  // PASSIVE FOLLOWER: stored for backward-compat, NEVER used to refresh.
 var userId = null;
+// Set true when a write is rejected 401 / the access token lapses; makes
+// isAuthenticated() read false so we degrade (queue) instead of refreshing.
+// Cleared by persistAuth() when the web app relays a fresh token.
+var authRejected = false;
 var currentRoomId = null;          // the live's DETECTED tiktok room (from the page)
 var currentSessionId = null;
 // Room that currentSessionId is scoped to (persisted as SK_ROOM_ID). A session is
@@ -289,6 +293,10 @@ async function handleAccountDetected(account, room) {
   // 2) Best-effort DB persist to live_sessions.channel_* — DEFERRED until migration 058
   //    adds the columns. Until then this catches a missing-column 400 and no-ops; once
   //    058 is applied it starts succeeding with no extension rebuild.
+  // Return whether the DB persist actually landed, so the content script only stops
+  // re-sending (dedups) once the channel is truly in live_sessions. If we're stale/unauth
+  // or the session isn't resolved yet, we return false → the content script's 12s detection
+  // loop keeps re-sending, and retryDeferredChannel() re-attempts on re-auth (Bug 3 fix).
   if (sid && isAuthenticated()) {
     try {
       await supabasePatch('live_sessions', 'id=eq.' + encodeURIComponent(sid), {
@@ -298,10 +306,13 @@ async function handleAccountDetected(account, room) {
         channel_account_id: account.id != null ? String(account.id) : null,
       });
       console.log('[LENSED][BG] channel persisted to live_sessions ' + sid);
+      return true;
     } catch (e) {
       console.log('[LENSED][BG] channel DB persist deferred (captured in storage + console; add migration 058 to enable):', String((e && e.message) || e));
+      return false;
     }
   }
+  return false;
 }
 
 // Best-effort "mark ended" when the live tab closes. Close handlers are unreliable in
@@ -439,10 +450,9 @@ async function supabaseGet(table, query) {
   var url = SUPABASE_URL + '/rest/v1/' + table + '?' + query;
   var res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
-    var refreshed = await tryRefreshToken();
-    if (refreshed) {
-      res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
-    }
+    // PASSIVE FOLLOWER: do NOT refresh. Mark stale → degrade; the throw below is
+    // handled by callers that gate on isAuthenticated() (now false).
+    markAuthStale('GET ' + table);
   }
   if (!res.ok) {
     var err = await res.text().catch(function () { return res.statusText; });
@@ -461,14 +471,7 @@ async function supabasePost(table, body) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, false);
   if (res.status === 401) {
-    var refreshed = await tryRefreshToken();
-    if (refreshed) {
-      res = await sbFetch(url, {
-        method: 'POST',
-        headers: supabaseHeaders(),
-        body: JSON.stringify(body),
-      }, FETCH_TIMEOUT_WRITE_MS, false);
-    }
+    markAuthStale('POST ' + table);  // PASSIVE FOLLOWER: degrade, never refresh.
   }
   if (!res.ok) {
     var err = await res.text().catch(function () { return res.statusText; });
@@ -489,16 +492,7 @@ async function supabaseUpsert(table, body, onConflict) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, true);
   if (res.status === 401) {
-    var refreshed = await tryRefreshToken();
-    if (refreshed) {
-      headers = supabaseHeaders();
-      headers['Prefer'] = 'resolution=merge-duplicates,return=representation';
-      res = await sbFetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(body),
-      }, FETCH_TIMEOUT_WRITE_MS, true);
-    }
+    markAuthStale('UPSERT ' + table);  // PASSIVE FOLLOWER: degrade, never refresh.
   }
   if (!res.ok) {
     var err = await res.text().catch(function () { return res.statusText; });
@@ -520,16 +514,7 @@ async function supabasePatch(table, query, body) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, true);
   if (res.status === 401) {
-    var refreshed = await tryRefreshToken();
-    if (refreshed) {
-      headers = supabaseHeaders();
-      headers['Prefer'] = 'return=minimal';
-      res = await sbFetch(url, {
-        method: 'PATCH',
-        headers: headers,
-        body: JSON.stringify(body),
-      }, FETCH_TIMEOUT_WRITE_MS, true);
-    }
+    markAuthStale('PATCH ' + table);  // PASSIVE FOLLOWER: degrade, never refresh.
   }
   if (!res.ok) {
     var err = await res.text().catch(function () { return res.statusText; });
@@ -549,14 +534,7 @@ async function supabaseRpc(fnName, params) {
     body: JSON.stringify(params),
   }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
-    var refreshed = await tryRefreshToken();
-    if (refreshed) {
-      res = await sbFetch(url, {
-        method: 'POST',
-        headers: supabaseHeaders(),
-        body: JSON.stringify(params),
-      }, FETCH_TIMEOUT_MS, true);
-    }
+    markAuthStale('RPC ' + fnName);  // PASSIVE FOLLOWER: degrade, never refresh.
   }
   if (!res.ok) {
     var err = await res.text().catch(function () { return res.statusText; });
@@ -569,17 +547,48 @@ async function supabaseRpc(fnName, params) {
 
 async function persistAuth(at, rt) {
   accessToken = at;
-  refreshToken = rt;
+  refreshToken = rt;  // stored for backward-compat only; NEVER used to refresh (passive follower).
   userId = getUserIdFromToken(at);
+  authRejected = false;  // a fresh token just arrived → clear the stale flag (re-authed).
   var data = {};
   data[SK_ACCESS_TOKEN] = at;
   data[SK_REFRESH_TOKEN] = rt;
   if (userId) data[SK_USER_ID] = userId;
   await chrome.storage.local.set(data);
   console.log('[LENSED][BG] auth persisted, user_id:', userId);
-  // Auth just became available (login / web-app relay / token refresh) → drain any sales
-  // captured while signed out. Fire-and-forget; never blocks the auth path.
+  // Auth just became available (login / web-app relay) → run the ONE re-auth flush:
+  // drain sales captured while signed out AND re-attempt any deferred channel PATCH
+  // (Bug 3). Fire-and-forget; never blocks the auth path.
   try { flushSaleQueue(); } catch (_) {}
+  try { retryDeferredChannel(); } catch (_) {}
+}
+
+// On re-auth, re-persist the channel identity for the CURRENT room's session if it was
+// captured-but-not-persisted while we were stale (Bug 3: the DB PATCH is auth-gated and
+// has no queue of its own). Best-effort and idempotent — the channel_* PATCH only fills
+// NULLs and set_store_id derivation runs on the UPDATE. Reads the last detected account
+// from the room-keyed storage map that handleAccountDetected always writes.
+async function retryDeferredChannel() {
+  try {
+    if (!isAuthenticated()) return;
+    var r = currentRoomId || sessionRoomId || null;
+    if (!r) return;
+    var d = await chrome.storage.local.get([SK_CHANNEL_ACCOUNTS]);
+    var map = (d && d[SK_CHANNEL_ACCOUNTS]) || {};
+    var acct = map[r];
+    if (!acct || !(acct.handle || acct.sec_uid)) return;
+    console.log('[LENSED][BG] re-auth: re-attempting deferred channel persist for room', r);
+    // Re-run the same persist path (resolves session by room, PATCHes channel_*).
+    // Map the storage shape (sec_uid/account_id) back to the account shape handleAccountDetected expects.
+    await handleAccountDetected({
+      handle: acct.handle || null,
+      secUid: acct.sec_uid || null,
+      nickname: acct.nickname || null,
+      id: acct.account_id != null ? acct.account_id : null,
+    }, r);
+  } catch (e) {
+    console.log('[LENSED][BG] retryDeferredChannel non-fatal:', String((e && e.message) || e));
+  }
 }
 
 async function rehydrateAuth() {
@@ -593,20 +602,14 @@ async function rehydrateAuth() {
       refreshToken = data[SK_REFRESH_TOKEN] || null;
       userId = data[SK_USER_ID] || getUserIdFromToken(accessToken);
 
-      // If the stored access token is expired, try refreshing immediately
-      if (isTokenExpired(accessToken)) {
-        console.log('[LENSED][BG] rehydrated token is expired, refreshing...');
-        diag('auth.refresh', 'info', 'refreshing expired token');
-        var refreshed = await tryRefreshToken();
-        if (!refreshed) {
-          console.warn('[LENSED][BG] rehydrate refresh failed — clearing auth');
-          diag('auth.cleared', 'warn', 'rehydrate refresh failed — auth cleared', { user: diagRedactId(userId) });
-          accessToken = null;
-          refreshToken = null;
-          userId = null;
-        } else {
-          diag('auth.restored', 'info', 'auth restored (refreshed)', { user: diagRedactId(userId) });
-        }
+      // PASSIVE FOLLOWER: if the stored token is expired we do NOT refresh (we can't —
+      // only the web app can). Keep the stored identity but stay degraded: isAuthenticated()
+      // reads false via its expiry gate, so writes queue until the web app relays a fresh
+      // token (LENSED_AUTH), which persistAuth() then flushes. No /auth/v1/token call.
+      if (isTokenExpired(accessToken, 45)) {
+        console.log('[LENSED][BG] rehydrated token expired — waiting for web-app relay (no refresh)');
+        diag('auth.stale', 'warn', 'rehydrated token expired — waiting for relay', { user: diagRedactId(userId) });
+        try { broadcastAuthStatus(); } catch (_) {}
       } else {
         console.log('[LENSED][BG] auth rehydrated, user_id:', userId);
         diag('auth.restored', 'info', 'auth restored', { user: diagRedactId(userId) });
@@ -645,34 +648,30 @@ async function rehydrateAuth() {
   }
 }
 
+// PASSIVE FOLLOWER: the extension is NOT a token refresher. It MUST NEVER call
+// POST /auth/v1/token — an independent refresh here rotates the shared Supabase
+// refresh-token family out from under the web app, tripping Supabase's refresh-token
+// reuse-detection, which revokes the whole session → the "random full logout" bug.
+//
+// The web app (the sole refresher) pushes every fresh access token via the
+// LENSED_AUTH relay (onMessageExternal → persistAuth). This function is retained as a
+// hard no-op so any lingering call site can never re-introduce the /token call, and
+// so the 401 paths fall through to markAuthStale() → degrade (queue + "open Lensed").
 async function tryRefreshToken() {
-  if (!refreshToken) return false;
-  try {
-    // allowRetry=true (one retry): a transient network blip shouldn't drop auth. The
-    // aborted/failed path returns false below, so callers fall through to their own
-    // isAuthenticated() guards and nothing hangs (rehydrate always settles authReady).
-    var res = await sbFetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
-      method: 'POST',
-      headers: {
-        'apikey': SUPABASE_ANON_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    }, FETCH_TIMEOUT_MS, true);
-    if (!res.ok) {
-      console.error('[LENSED][BG] token refresh failed:', res.status);
-      return false;
-    }
-    var json = await res.json();
-    if (json.access_token && json.refresh_token) {
-      await persistAuth(json.access_token, json.refresh_token);
-      console.log('[LENSED][BG] token refreshed successfully');
-      return true;
-    }
-    return false;
-  } catch (e) {
-    console.error('[LENSED][BG] token refresh error:', e);
-    return false;
+  console.warn('[LENSED][BG] refresh suppressed (passive follower) — waiting for web-app relay');
+  return false;
+}
+
+// A write was rejected with 401 (or the token lapsed). We do NOT refresh; we mark the
+// session stale so isAuthenticated() reads false and callers DEGRADE (enqueue sales,
+// defer heartbeat/channel), and we surface the loud "NOT SIGNED IN — open Lensed"
+// overlay. persistAuth() clears authRejected when the next relayed token arrives.
+function markAuthStale(where) {
+  if (!authRejected) {
+    authRejected = true;
+    console.warn('[LENSED][BG] auth stale (401/expired) at ' + (where || '?') + ' — degrading; open Lensed to restore');
+    try { diag('auth.stale', 'warn', 'auth stale — degrading to queue', { where: where || null }); } catch (_) {}
+    try { broadcastAuthStatus(); } catch (_) {}
   }
 }
 
@@ -691,7 +690,10 @@ async function clearAuth() {
 }
 
 function isAuthenticated() {
-  return !!accessToken && !!userId;
+  // PASSIVE FOLLOWER: a token within ~45s of expiry counts as NOT authenticated, so a
+  // write never starts on a token that lapses mid-flight (we can't refresh it — only
+  // the web-app relay can). authRejected covers a 401 on a not-yet-expired token.
+  return !!accessToken && !!userId && !authRejected && !isTokenExpired(accessToken, 45);
 }
 
 // ─── Real Supabase calls ─────────────────────────────────────────────
@@ -1362,12 +1364,10 @@ async function uploadShotObject(objectKey, bytes) {
   try { res = await sbFetch(url, { method: 'POST', headers: headers, body: bytes }, FETCH_TIMEOUT_WRITE_MS, false); }
   catch (e) { return { ok: false, retryable: true, err: String(e && e.name || e) }; } // abort/network → retry
   if (res.status === 401) {
-    var refreshed = await tryRefreshToken();
-    if (refreshed) {
-      headers.Authorization = 'Bearer ' + accessToken;
-      try { res = await sbFetch(url, { method: 'POST', headers: headers, body: bytes }, FETCH_TIMEOUT_WRITE_MS, false); }
-      catch (e2) { return { ok: false, retryable: true, err: String(e2 && e2.name || e2) }; }
-    }
+    // PASSIVE FOLLOWER: no refresh. Mark stale and report retryable so the caller can
+    // try again once the web app relays a fresh token.
+    markAuthStale('image upload');
+    return { ok: false, retryable: true, err: '401' };
   }
   if (res.ok) return { ok: true };
   // 4xx (except 401 handled) are non-retryable client errors; 5xx retry later.
@@ -1813,10 +1813,14 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
   if (message.type === 'TIKTOK_ACCOUNT') {
     // Detected streaming channel/creator identity forwarded from content. Capture it
-    // (console + storage + best-effort DB). Fire-and-forget; never blocks anything.
+    // (console + storage + best-effort DB). ACK with { persisted } so the content script
+    // only dedups (stops re-sending) once the channel actually landed in live_sessions —
+    // an unacked/false send is retried by its 12s detection loop (Bug 3 no-retry fix).
     if (sender && sender.tab && sender.tab.id != null) liveTabId = sender.tab.id;
-    handleAccountDetected(message.account, message.roomId);
-    return;
+    handleAccountDetected(message.account, message.roomId)
+      .then(function (persisted) { try { sendResponse({ persisted: !!persisted }); } catch (_) {} })
+      .catch(function () { try { sendResponse({ persisted: false }); } catch (_) {} });
+    return true; // async sendResponse
   }
 
   if (message.type === 'TIKTOK_SALE') {
