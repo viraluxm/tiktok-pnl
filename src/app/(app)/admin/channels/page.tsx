@@ -5,7 +5,9 @@ import {
   useChannelMap,
   useSaveChannelMapping,
   useDeleteChannelMapping,
+  useAssignSessionStore,
   type UnmappedChannel,
+  type NullSession,
 } from '@/hooks/useChannelMap';
 
 // Admin: channel → store mapping + unmapped-session flagging (Part D).
@@ -14,6 +16,7 @@ export default function ChannelMapPage() {
   const { data, isLoading, isError } = useChannelMap();
   const save = useSaveChannelMapping();
   const del = useDeleteChannelMapping();
+  const assign = useAssignSessionStore();
 
   const [newName, setNewName] = useState('');
   const [newStore, setNewStore] = useState('');
@@ -29,6 +32,16 @@ export default function ChannelMapPage() {
       const r = await save.mutateAsync({ channel_name: channel_name.trim(), store_id });
       setNote(`Mapped “${r.mapping.channel_name}” → store · backfilled ${r.backfilled_count} session${r.backfilled_count === 1 ? '' : 's'}.`);
       setNewName(''); setNewStore('');
+    } catch (e) { setErr((e as Error).message); }
+  }
+
+  async function doAssign(session_id: string, store_id: string) {
+    setErr(null); setNote(null);
+    if (!store_id) { setErr('Select a store to assign.'); return; }
+    try {
+      await assign.mutateAsync({ session_id, store_id });
+      const storeLabel = stores.find((s) => s.id === store_id)?.name ?? 'store';
+      setNote(`Session assigned to ${storeLabel}.`);
     } catch (e) { setErr((e as Error).message); }
   }
 
@@ -68,13 +81,34 @@ export default function ChannelMapPage() {
         <div className="p-5 space-y-3">
           {isLoading ? (
             <p className="text-sm text-tt-muted">Loading…</p>
-          ) : (data?.unmapped_by_channel.length ?? 0) === 0 ? (
-            <p className="text-sm text-tt-green">✓ All sessions are attributed to a store.</p>
-          ) : (
-            data!.unmapped_by_channel.map((c) => (
-              <UnmappedRow key={c.channel_handle ?? '__none'} c={c} stores={stores} onMap={doSave} saving={save.isPending} />
-            ))
-          )}
+          ) : (() => {
+            // Captured-handle groups: map the channel once (backfills all its sessions).
+            const mappable = (data?.unmapped_by_channel ?? []).filter((c) => c.channel_handle);
+            // Null-handle sessions: no channel to map by name → assign each directly.
+            const nulls = data?.null_sessions ?? [];
+            if (mappable.length === 0 && nulls.length === 0) {
+              return <p className="text-sm text-tt-green">✓ All sessions are attributed to a store.</p>;
+            }
+            return (
+              <>
+                {mappable.map((c) => (
+                  <UnmappedRow key={c.channel_handle} c={c} stores={stores} onMap={doSave} saving={save.isPending} />
+                ))}
+                {nulls.length > 0 && (
+                  <div className="pt-1">
+                    <p className="text-[11px] text-tt-muted mb-2">
+                      No channel captured (extension didn’t persist a handle) — assign each session to a store directly.
+                    </p>
+                    <div className="space-y-2">
+                      {nulls.map((s) => (
+                        <NullSessionRow key={s.id} s={s} stores={stores} onAssign={doAssign} saving={assign.isPending} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       </section>
 
@@ -182,6 +216,52 @@ function UnmappedRow({
       ) : (
         <span className="text-[11px] text-tt-muted">Needs a channel name — reload the extension on this live to capture it.</span>
       )}
+    </div>
+  );
+}
+
+function fmtWhen(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// A single null-handle unmapped session, assigned DIRECTLY to a store by session id
+// (no channel handle to map by name). Identified by title · date · status · last-seen.
+function NullSessionRow({
+  s, stores, onAssign, saving,
+}: {
+  s: NullSession;
+  stores: { id: string; name: string }[];
+  onAssign: (sessionId: string, storeId: string) => void;
+  saving: boolean;
+}) {
+  const [store, setStore] = useState('');
+  const title = s.title?.trim() || 'Untitled session';
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-tt-red/30 bg-tt-red/[0.04] px-3 py-2">
+      <div className="flex-1 min-w-[12rem]">
+        <div className="text-[13px] font-semibold text-tt-text truncate">{title}</div>
+        <div className="text-[11px] text-tt-muted">
+          {s.status ?? '—'} · started {fmtWhen(s.started_at)}
+          {s.last_seen_at ? ` · last seen ${fmtWhen(s.last_seen_at)}` : ''}
+          <span className="ml-1 font-mono opacity-70">#{s.id.slice(0, 8)}</span>
+        </div>
+      </div>
+      <select
+        value={store} onChange={(e) => setStore(e.target.value)}
+        className="rounded-lg border border-tt-border bg-white/5 px-2 py-1.5 text-xs text-tt-text outline-none appearance-none"
+      >
+        <option value="" className="bg-tt-card">Assign to store…</option>
+        {stores.map((st) => <option key={st.id} value={st.id} className="bg-tt-card">{st.name}</option>)}
+      </select>
+      <button
+        onClick={() => onAssign(s.id, store)} disabled={!store || saving}
+        className="rounded-lg bg-tt-cyan px-3 py-1.5 text-xs font-semibold text-black hover:opacity-90 disabled:opacity-40"
+      >
+        Assign to store
+      </button>
     </div>
   );
 }
