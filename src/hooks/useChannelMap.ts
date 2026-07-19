@@ -15,11 +15,22 @@ export interface UnmappedChannel {
   session_count: number;
   session_ids: string[];
 }
+export interface NullSession {
+  id: string;
+  title: string | null;
+  status: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  last_seen_at: string | null;
+}
 export interface ChannelMapResponse {
   mappings: ChannelMapping[];
   stores: { id: string; name: string }[];
   unmapped_total: number;
   unmapped_by_channel: UnmappedChannel[];
+  // Unmapped sessions with NO captured channel_handle — assignable directly to a store
+  // by session id (they can't be mapped by channel name). May be absent on older API.
+  null_sessions?: NullSession[];
 }
 
 const KEY = ['admin-channels'];
@@ -56,6 +67,28 @@ export function useSaveChannelMapping() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: KEY });
       // Backfill changed session store_ids → refresh the shows/sessions list too.
+      qc.invalidateQueries({ queryKey: ['live-sessions'] });
+    },
+  });
+}
+
+// Directly attribute a single null-handle session to a store (by session id).
+// Rescues sessions the channel-name mapping can't reach (channel_handle is null).
+export function useAssignSessionStore() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { session_id: string; store_id: string }) => {
+      const res = await fetch(`/api/admin/sessions/${input.session_id}/store`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_id: input.store_id }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || 'Failed to assign store');
+      return res.json() as Promise<{ id: string; store_id: string }>;
+    },
+    onSuccess: () => {
+      // Session now has a store_id → drops out of the unmapped list; refresh shows too.
+      qc.invalidateQueries({ queryKey: KEY });
       qc.invalidateQueries({ queryKey: ['live-sessions'] });
     },
   });
