@@ -4,7 +4,7 @@ import { createClient } from '@/lib/supabase/server';
 export const dynamic = 'force-dynamic';
 
 const SELECT_COLS =
-  'id, title, status, started_at, ended_at, tiktok_live_id, source, created_at, updated_at, store_id';
+  'id, title, status, started_at, ended_at, tiktok_live_id, source, created_at, updated_at, store_id, channel_handle';
 
 // Resolve store_id -> store name via a manual join, matching the existing pattern
 // in src/app/api/stores/route.ts (this codebase joins by id list rather than using
