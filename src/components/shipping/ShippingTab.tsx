@@ -26,6 +26,9 @@ interface BoxSku {
 }
 
 interface Box {
+  scanned_value?: string;
+  resolved_via?: 'tracking' | 'order_id';
+  tracking_number?: string | null;
   scanned_order_id: string;
   group_key: string;
   group_id: string | null;
@@ -69,18 +72,21 @@ export default function ShippingTab() {
     focusInput();
   }
 
-  async function loadSlip(orderId: string) {
+  async function loadSlip(scan: string) {
     setLoading(true);
     setMsg(null);
     try {
       const res = await fetch('/api/shipping/pick-list', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId }),
+        body: JSON.stringify({ scan }),
       });
       const json = await res.json();
       if (!res.ok) {
-        setMsg({ kind: 'error', text: json.error === 'Order not found' ? `Order ${orderId} not found` : (json.error || 'Failed to load order') });
+        // Echo exactly what was scanned (+ parsed tracking) so the picker can flag a
+        // mis-scan / unknown label rather than see a generic failure.
+        const t = json.parsed_tracking ? ` (tracking ${json.parsed_tracking})` : '';
+        setMsg({ kind: 'error', text: `No matching order for “${json.scanned_value ?? scan}”${t}` });
         return;
       }
       const loaded = json as Box;
@@ -88,9 +94,11 @@ export default function ShippingTab() {
       setCounts({});
       setVerified(false);
       if (loaded.skus.length === 0) {
-        setMsg({ kind: 'error', text: 'No bound items for this box — nothing recorded to pick.' });
+        // Resolved to a real order, but nothing bound (~23% of wins). Picker must flag it.
+        setMsg({ kind: 'error', text: `Order ${loaded.scanned_order_id} resolved but NOT bound — no internal SKUs recorded. Flag it (do not guess).` });
       } else {
-        setMsg({ kind: 'info', text: `Box loaded: ${loaded.skus.length} SKU${loaded.skus.length === 1 ? '' : 's'} across ${loaded.order_count} order${loaded.order_count === 1 ? '' : 's'}. Scan items.` });
+        const via = loaded.resolved_via === 'tracking' ? 'shipping label' : 'order id';
+        setMsg({ kind: 'info', text: `Box loaded via ${via}: ${loaded.skus.length} SKU${loaded.skus.length === 1 ? '' : 's'} across ${loaded.order_count} order${loaded.order_count === 1 ? '' : 's'}. Scan items.` });
       }
     } catch {
       setMsg({ kind: 'error', text: 'Network error loading order' });
@@ -159,7 +167,7 @@ export default function ShippingTab() {
         <div>
           <div className="text-xl font-bold">Packing station</div>
           <div className="text-sm text-tt-muted mt-1">
-            Scan a packing slip to load the box, then scan each item to verify before shipping.
+            Scan a shipping label to load the box, then scan each item to verify before shipping.
           </div>
         </div>
         {box && (
@@ -175,14 +183,14 @@ export default function ShippingTab() {
       {/* Scan input */}
       <div className="rounded-2xl border border-tt-border bg-tt-card p-4 mb-4">
         <label className="block text-xs uppercase tracking-wide text-tt-muted mb-2">
-          {box ? 'Scan item barcode' : 'Scan packing slip'}
+          {box ? 'Scan item barcode' : 'Scan shipping label'}
         </label>
         <input
           ref={inputRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onSubmit(); } }}
-          placeholder={box ? 'Scan an item label…' : 'Scan slip order ID…'}
+          placeholder={box ? 'Scan an item label…' : 'Scan shipping label…'}
           className="w-full bg-tt-input-bg border border-tt-input-border rounded-xl px-4 py-4 text-lg font-mono text-tt-text outline-none focus:border-tt-input-focus"
         />
         {loading && <div className="text-sm text-tt-muted mt-2">Loading box…</div>}
@@ -197,7 +205,10 @@ export default function ShippingTab() {
       {box && (
         <>
           <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-tt-muted mb-3">
-            <span>Slip order <span className="font-mono text-tt-text">{box.scanned_order_id}</span></span>
+            <span>Order <span className="font-mono text-tt-text">{box.scanned_order_id}</span></span>
+            {box.resolved_via === 'tracking' && box.tracking_number && (
+              <span>label <span className="font-mono text-tt-text">{box.tracking_number}</span></span>
+            )}
             <span>{box.order_count} order{box.order_count === 1 ? '' : 's'} in box</span>
             <span>group <span className="font-mono">{box.group_id ?? '— (single order)'}</span></span>
             {box.already_verified_at && !verified && (
