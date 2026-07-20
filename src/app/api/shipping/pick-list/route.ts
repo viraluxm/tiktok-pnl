@@ -36,28 +36,22 @@ export async function POST(req: Request) {
   if (/^420\d{27,}$/.test(digits)) tracking = digits.slice(-22);        // (a) IMpb label
   else if (/^9\d{21}$/.test(digits)) tracking = digits;                 // (b) bare tracking
 
-  let scanned: { order_id: string; auto_combine_group_id: string | null } | null = null;
+  // Seed rows for the scan. A tracking (physical label) maps to MANY orders — do NOT
+  // limit(1): that made which box rendered arbitrary/nondeterministic. Pull them all.
+  type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null };
+  const SEL = 'order_id, auto_combine_group_id, tracking_number';
   const resolvedVia: 'tracking' | 'order_id' = tracking ? 'tracking' : 'order_id';
+  let seed: SeedRow[] = [];
   if (tracking) {
-    // A combined shipment can share one tracking across sibling orders — any match resolves
-    // the box (group expansion below pulls the rest), so limit(1) is fine.
-    const { data: rows } = await supabase
-      .from('synced_order_ids')
-      .select('order_id, auto_combine_group_id')
-      .eq('user_id', user.id)
-      .eq('tracking_number', tracking)
-      .limit(1);
-    scanned = rows?.[0] ?? null;
+    const { data } = await supabase.from('synced_order_ids').select(SEL)
+      .eq('user_id', user.id).eq('tracking_number', tracking);
+    seed = (data ?? []) as SeedRow[];
   } else {
-    const { data } = await supabase
-      .from('synced_order_ids')
-      .select('order_id, auto_combine_group_id')
-      .eq('user_id', user.id)
-      .eq('order_id', digits)
-      .maybeSingle();
-    scanned = data ?? null;
+    const { data } = await supabase.from('synced_order_ids').select(SEL)
+      .eq('user_id', user.id).eq('order_id', digits).maybeSingle();
+    if (data) seed = [data as SeedRow];
   }
-  if (!scanned) {
+  if (!seed.length) {
     // Echo exactly what was scanned (+ the parsed tracking) so the picker can flag it.
     return NextResponse.json(
       { error: 'No matching order', scanned_value: raw, parsed_tracking: tracking, resolved_via: resolvedVia },
@@ -65,21 +59,41 @@ export async function POST(req: Request) {
     );
   }
 
-  const orderId = String(scanned.order_id);
-  const groupId: string | null = scanned.auto_combine_group_id ?? null;
-  const groupKey = groupId ? groupId : `order:${orderId}`;
+  // ── 2) Resolve the FULL physical box. The box is the physical PACKAGE; its authoritative
+  //   key is tracking_number (one label = one package). TikTok can split one package across
+  //   MULTIPLE auto_combine_group_ids, so grouping by combine-group alone SILENTLY under-shows
+  //   the box → the picker omits an order's items → wrong shipment. So resolve by TRACKING
+  //   (primary, never under-counted) UNION combine-group (fallback for rows whose tracking
+  //   isn't populated yet — older / pre-backfill / unshipped edge cases).
+  const boxTrackings = [...new Set(seed.map((s) => s.tracking_number).filter((t): t is string => !!t))];
+  const boxGroups = [...new Set(seed.map((s) => s.auto_combine_group_id).filter((g): g is string => !!g))];
 
-  // 2) Resolve the box: all orders sharing the group (or just this one).
-  let orderIds: string[] = [orderId];
-  if (groupId) {
-    const { data: siblings } = await supabase
-      .from('synced_order_ids')
-      .select('order_id')
-      .eq('user_id', user.id)
-      .eq('auto_combine_group_id', groupId);
-    const ids = (siblings ?? []).map((s) => String(s.order_id)).filter(Boolean);
-    if (ids.length) orderIds = [...new Set(ids)];
+  const boxRows = new Map<string, SeedRow>();
+  seed.forEach((s) => boxRows.set(String(s.order_id), s));
+  // (a) same tracking = same physical package. Authoritative — must never be under-counted.
+  if (boxTrackings.length) {
+    const { data } = await supabase.from('synced_order_ids').select(SEL)
+      .eq('user_id', user.id).in('tracking_number', boxTrackings);
+    (data ?? []).forEach((r) => boxRows.set(String(r.order_id), r as SeedRow));
   }
+  // (b) fallback: same combine-group. Only add a group sibling whose tracking is null or one
+  //   of the box's trackings — so a group that ever spanned packages can't pull an order from
+  //   ANOTHER box (prevalence check: 0 such groups today; this stays correct if that changes).
+  if (boxGroups.length) {
+    const { data } = await supabase.from('synced_order_ids').select(SEL)
+      .eq('user_id', user.id).in('auto_combine_group_id', boxGroups);
+    for (const r of (data ?? []) as SeedRow[]) {
+      const t = r.tracking_number;
+      if (!boxTrackings.length || t === null || boxTrackings.includes(t)) boxRows.set(String(r.order_id), r);
+    }
+  }
+
+  const orderIds = [...boxRows.keys()];
+  const orderId = String(seed[0].order_id); // representative (scanned) order, for display
+  const groupId: string | null = boxGroups[0] ?? null;
+  // Stable idempotency key for the physical box: tracking (label) when present, else the
+  // combine-group, else the single order. Drives the verify/confirm dedup below.
+  const groupKey = boxTrackings[0] ? `trk:${boxTrackings[0]}` : (groupId ?? `order:${orderId}`);
 
   // 3) Bound auction items for those orders (client_idempotency_key = order_id).
   const { data: items } = await supabase
