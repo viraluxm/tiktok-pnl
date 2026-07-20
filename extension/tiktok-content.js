@@ -442,6 +442,12 @@
     .lensed-si-title { min-width: 0; overflow: hidden; word-break: break-word; }\
     .lensed-si-num { color: #a5b4ff; font-weight: 700; font-size: 15px; flex-shrink: 0; }\
     .lensed-si-num::before { content: "\\00B7 "; }\
+    .lensed-si-remove {\
+      margin-left: auto; flex-shrink: 0; cursor: pointer; align-self: center;\
+      background: transparent; border: none; color: #9aa0aa;\
+      font-size: 16px; line-height: 1; padding: 2px 7px; border-radius: 6px;\
+    }\
+    .lensed-si-remove:hover { color: #ff6b6b; background: rgba(255,107,107,0.14); }\
     .lensed-session-status {\
       font-size: 10px; color: #555; margin-top: 4px;\
     }\
@@ -822,10 +828,35 @@
         item.appendChild(el('span', 'lensed-si-num', '#' + s.sku_number));
         item.title = title;
       }
+      // Per-pill remove (✕): drops THIS specific staged SKU (better than "remove last"
+      // — lets the host clear a mis-scanned item). IIFE captures this row's id.
+      var rm = el('button', 'lensed-si-remove', '✕');
+      rm.title = 'Remove ' + (title || ('#' + s.sku_number));
+      (function (id) {
+        rm.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          removeStagedItem(id);
+        });
+      })(s.id);
+      item.appendChild(rm);
       stagedListEl.appendChild(item);
     }
     updateAspGoal();
     renderTalkingPoints();
+  }
+
+  // Remove ONE staged SKU by id, then refresh the stage exactly like add-unit does
+  // (renderStagedPills re-runs updateAspGoal + renderTalkingPoints, so the ASP-goal /
+  // break-even display and talking points update too). No-op if the id isn't staged.
+  function removeStagedItem(id) {
+    var before = stagedSkus.length;
+    stagedSkus = stagedSkus.filter(function (s) { return s.id !== id; });
+    if (stagedSkus.length === before) return;
+    renderStagedPills();
+    clearResolveLine();
+    updateStagedLabel();
+    persistStaged();
   }
 
   // Max bullets shown per SKU before collapsing to "+N more".
