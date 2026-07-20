@@ -263,8 +263,13 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
           )}
         </div>
         <div className="text-xs text-tt-muted mt-0.5">
+          {/* Captured channel handle · store · date. Null handle → just store · date
+              (unchanged); null store (unmapped) → handle · date; neither → date. No
+              stray separators, never "null". */}
+          {session.channel_handle ? <span className="text-tt-text/70">{session.channel_handle}</span> : null}
+          {session.channel_handle && session.store_name ? ' · ' : ''}
           {session.store_name ? <span className="text-tt-text/70">{session.store_name}</span> : null}
-          {session.store_name ? ' · ' : ''}
+          {(session.channel_handle || session.store_name) ? ' · ' : ''}
           {fmtDate(session.started_at)}
         </div>
       </td>
@@ -539,7 +544,12 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           </button>
           <div className="text-xl font-bold">{session.title || 'Untitled show'}</div>
           <div className="text-sm text-tt-muted mt-1 flex items-center gap-3">
-            {session.store_name && <span className="text-tt-text/70">{session.store_name}</span>}
+            {/* channel handle · store (either may be absent) */}
+            {(session.channel_handle || session.store_name) && (
+              <span className="text-tt-text/70">
+                {[session.channel_handle, session.store_name].filter(Boolean).join(' · ')}
+              </span>
+            )}
             <span>{fmtDate(session.started_at)}</span>
             <StatusBadge status={session.status} />
             {durationLabel && (

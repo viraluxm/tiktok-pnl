@@ -18,6 +18,9 @@ export interface LiveSession {
   store_id: string | null;
   // Resolved from store_id by the sessions API; null when no store / not readable.
   store_name: string | null;
+  // Captured streaming-channel handle (e.g. "onlybidss"); null on old sessions or
+  // before the extension's channel capture has landed. Display-only.
+  channel_handle: string | null;
 }
 
 const KEY = 'live-sessions';
