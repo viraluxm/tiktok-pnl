@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { fetchOrdersPage } from '@/lib/tiktok/client';
-import { decryptOrFallback } from '@/lib/crypto';
+import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
 import { getOrgId } from '@/lib/org';
 import { getActiveStore } from '@/lib/tiktok/activeStore';
 
@@ -58,10 +58,20 @@ export async function POST() {
     try {
       perStore.push(await syncConnection(admin, connection, userId, orgId, batchStart));
     } catch (err) {
-      console.error(`[Sync] store ${connection.store_id} failed:`, (err as Error).message);
-      await admin.from('tiktok_connections').update({ sync_started_at: null })
-        .eq('user_id', userId).eq('store_id', connection.store_id);
-      perStore.push({ store_id: connection.store_id, error: 'sync_failed' });
+      const msg = (err as Error).message;
+      console.error(`[Sync] store ${connection.store_id} failed:`, msg);
+      // OBSERVABILITY: never leave a failed store silent (a silent skip is how the 7-day
+      // outage went unnoticed). syncConnection already writes a day-specific sync_error on a
+      // fetch abort AND leaves the cursor on the failed day; this is the catch-all so ANY
+      // other failure (token, catalog, etc.) is still surfaced. Does NOT touch sync_cursor.
+      await admin.from('tiktok_connections').update({
+        sync_started_at: null,
+        sync_error: msg.slice(0, 500),
+        sync_error_at: new Date().toISOString(),
+      }).eq('user_id', userId).eq('store_id', connection.store_id);
+      // isCaughtUp:false so summary.isCaughtUp is truthful (a stuck store is NOT caught up)
+      // and the caller knows to run again — the cursor is parked on the failed day to retry.
+      perStore.push({ store_id: connection.store_id, error: 'sync_failed', isCaughtUp: false, message: msg });
     }
   }
 
@@ -104,7 +114,43 @@ async function syncConnection(
 ) {
   const storeId = connection.store_id as string;
   const shopCipher = connection.shop_cipher as string;
-  const accessToken = decryptOrFallback(connection.access_token as string, 'access_token');
+
+  // Token lifecycle (mirrors the reconcile route). connRow carries the ENCRYPTED columns.
+  const connRow: ConnRow = {
+    id: connection.id as string,
+    access_token: connection.access_token as string,
+    refresh_token: (connection.refresh_token as string) ?? null,
+    shop_cipher: shopCipher ?? null,
+    token_expires_at: (connection.token_expires_at as string) ?? null,
+  };
+  // Proactively refresh if the (corrected) expiry is near/past; else use the current token.
+  const fresh = await getFreshToken(admin, connRow, { skewMinutes: 30 });
+  let accessToken = fresh.accessToken;
+
+  // 105002 refresh-on-use net for order fetches: 3 attempts w/ backoff, and on an
+  // "expired credentials" error refresh ONCE (persist-on-success) + retry with the new
+  // token. Throws only after all recovery is exhausted → the caller treats that as a hard
+  // day failure (abort, do not advance). This is the sync-path twin of reconcile's net.
+  let refreshedOnce = false;
+  async function fetchPageWithRefresh(sTs: number, eTs: number, pageToken: string | null) {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await fetchOrdersPage(accessToken, shopCipher, sTs, eTs, pageToken);
+      } catch (e) {
+        lastErr = e;
+        if (!refreshedOnce && isExpiredCredsError(e)) {
+          refreshedOnce = true;
+          try {
+            accessToken = (await refreshConnection(admin, connRow)).accessToken;
+            continue; // immediate retry with the freshly-refreshed token
+          } catch { /* refresh failed — fall through to backoff/next attempt */ }
+        }
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt));
+      }
+    }
+    throw lastErr;
+  }
 
   // Sync shop logo via Business API (GMV Max store/list has thumbnail_url)
   try {
@@ -170,7 +216,15 @@ async function syncConnection(
   let daysProcessed = 0;
 
   // ===== MAIN LOOP: one day at a time, paginate within each day =====
-  while (currentDay <= todayStr && Date.now() - batchStart < TIME_BUDGET_MS) {
+  // HARDENED: a day advances ONLY after it fully syncs. A hard fetch failure (an
+  // expired-credentials / network error that survives refresh + retries) ABORTS the run
+  // with the cursor LEFT on the failed day (+ a visible sync_error) — never a silent skip
+  // (the root cause of the 7-day outage). A time-budget cut mid-day also does NOT advance:
+  // the day is redone (idempotent upsert) on the next run, so no partial day is ever lost.
+  while (currentDay <= todayStr) {
+    // Only START a new day if budget remains — keeps the request within maxDuration while
+    // making each day all-or-nothing (no half-synced day that then advances the cursor).
+    if (Date.now() - batchStart >= TIME_BUDGET_MS) break;
     const nextDay = advanceDay(currentDay);
     const startTs = dayToTs(currentDay);
     const endTs = dayToTs(nextDay);
@@ -178,14 +232,17 @@ async function syncConnection(
     let pageToken: string | null = null;
     let dayOrders = 0;
     let pageNum = 0;
+    let budgetCut = false;
 
-    do {
-      if (Date.now() - batchStart >= TIME_BUDGET_MS) break;
-      if (pageNum >= 500) break; // Safety: max 500 pages per day (25,000 orders)
-      pageNum++;
+    try {
+      do {
+        if (Date.now() - batchStart >= TIME_BUDGET_MS) { budgetCut = true; break; }
+        if (pageNum >= 500) break; // Safety: max 500 pages per day (25,000 orders)
+        pageNum++;
 
-      try {
-        const { orders, nextCursor } = await fetchOrdersPage(accessToken, shopCipher, startTs, endTs, pageToken);
+        // Throws only after refresh-on-use + retries are exhausted → a hard day failure,
+        // caught below (abort, do NOT advance).
+        const { orders, nextCursor } = await fetchPageWithRefresh(startTs, endTs, pageToken);
 
         if (orders.length > 0) {
           // Parse and deduplicate by order_id
@@ -225,14 +282,30 @@ async function syncConnection(
         }
 
         pageToken = nextCursor;
-      } catch (err) {
-        console.error(`[Sync] Fetch error ${currentDay} p${pageNum}:`, (err as Error).message);
-        pageToken = null;
-      }
-    } while (pageToken);
+      } while (pageToken);
+    } catch (dayErr) {
+      // FAIL-ABORT: this day could not sync even after refresh + retries. Do NOT advance
+      // past it. Persist the cursor ON the failed day + a visible sync_error, then abort
+      // this store (the POST-level catch records the per-store failure).
+      const msg = (dayErr as Error).message;
+      console.error(`[Sync] store=${storeId} ABORT on day ${currentDay} (p${pageNum}): ${msg}`);
+      await admin.from('tiktok_connections').update({
+        sync_cursor: currentDay,            // stay on the failed day → next run retries it
+        sync_started_at: null,
+        sync_progress_orders: startProgress + totalNew,
+        sync_progress_day: currentDay,
+        sync_error: `sync failed on ${currentDay}: ${msg}`.slice(0, 500),
+        sync_error_at: new Date().toISOString(),
+      }).eq('user_id', userId).eq('store_id', storeId);
+      throw new Error(`store ${storeId} sync aborted on day ${currentDay}: ${msg}`);
+    }
+
+    // Time-budget cut mid-day: leave the cursor on currentDay (redone next run) — not an error.
+    if (budgetCut) break;
 
     if (dayOrders > 50) console.log(`[Sync] store=${storeId} Day ${currentDay}: ${pageNum} pages, ${dayOrders} orders`);
 
+    // Day fully synced → safe to advance.
     currentDay = nextDay;
     daysProcessed++;
 
@@ -248,13 +321,16 @@ async function syncConnection(
 
   const isCaughtUp = currentDay > todayStr;
 
-  // Save cursor + clear lock
+  // Save cursor + clear lock. Clear sync_error too: reaching here means this store synced
+  // cleanly (caught up, or stopped only on the time budget) — a previously-stuck store recovers.
   const { error: saveErr } = await admin.from('tiktok_connections').update({
     sync_cursor: isCaughtUp ? todayStr : currentDay,
     sync_started_at: null,
     sync_progress_orders: startProgress + totalNew,
     sync_progress_day: currentDay,
     last_synced_at: new Date().toISOString(),
+    sync_error: null,
+    sync_error_at: null,
   }).eq('user_id', userId).eq('store_id', storeId);
   if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
 
