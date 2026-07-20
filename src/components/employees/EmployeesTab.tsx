@@ -627,8 +627,8 @@ function ShiftsView({
   onClearException: (ruleId: string, date: string) => Promise<void>;
 }) {
   const [mode, setMode] = useState<'oneoff' | 'recurring'>('oneoff');
-  // List (default, current behavior) vs read-only Calendar view of the same rows.
-  const [view, setView] = useState<'list' | 'calendar'>('list');
+  // Default to the read-only Calendar view (List remains a fully-working toggle).
+  const [view, setView] = useState<'list' | 'calendar'>('calendar');
 
   // One-off form
   const [employeeId, setEmployeeId] = useState('');

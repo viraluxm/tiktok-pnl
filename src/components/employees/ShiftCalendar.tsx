@@ -86,7 +86,7 @@ export default function ShiftCalendar({
   nameById: Map<string, string>;
   employees: { id: string }[];
 }) {
-  const [grain, setGrain] = useState<'week' | 'month'>('week');
+  const [grain, setGrain] = useState<'week' | 'month'>('month');
 
   // Live tick so open ("in progress") shifts extend to "now".
   const [nowTick, setNowTick] = useState(() => 0);
