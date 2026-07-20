@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { decryptOrFallback } from '@/lib/crypto';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
+import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,14 +13,31 @@ const PLACEHOLDER_SKUS = [{ sku_id: '00000000-0000-0000-0000-000000000000', qty:
 interface StatusInfo { paid: boolean; status: string; seller_sku: string; quantity: number }
 
 // Batch Get Order Detail (≤50/call) → current status + seller_sku hint + qty.
-async function fetchStatuses(token: string, cipher: string, ids: string[]): Promise<Map<string, StatusInfo>> {
+// onExpired: called ONCE on a 105002 (expired credentials) to obtain a freshly-refreshed
+// access token (persist-on-success), then the call is retried — the refresh-on-use net so
+// a lapsed/mis-dated token self-heals mid-reconcile instead of failing the whole sync.
+async function fetchStatuses(
+  tokenInit: string,
+  cipher: string,
+  ids: string[],
+  onExpired?: () => Promise<string>,
+): Promise<Map<string, StatusInfo>> {
   const map = new Map<string, StatusInfo>();
+  let token = tokenInit;
+  let refreshedOnce = false;
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50);
     let orders: Record<string, unknown>[] = [];
     for (let attempt = 1; attempt <= 3; attempt++) {
       try { orders = await getOrderById(token, cipher, chunk); break; }
-      catch { if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt)); }
+      catch (e) {
+        if (onExpired && !refreshedOnce && isExpiredCredsError(e)) {
+          refreshedOnce = true;
+          try { token = await onExpired(); orders = await getOrderById(token, cipher, chunk); break; }
+          catch { /* refresh or retry failed → fall through to backoff/next attempt */ }
+        }
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt));
+      }
     }
     for (const o of orders) {
       const lineItems = (o.line_items as Record<string, unknown>[]) || [];
@@ -51,16 +69,22 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
 
   // Session-scoped: use the connection for THIS session's store (not the active-store
-  // cookie — a session knows its own store).
-  const { data: conn } = await supabase
+  // cookie — a session knows its own store). Admin client so a token refresh can persist.
+  const admin = createAdminClient();
+  const { data: conn } = await admin
     .from('tiktok_connections')
-    .select('shop_cipher, access_token')
+    .select('id, access_token, refresh_token, shop_cipher, token_expires_at')
     .eq('user_id', user.id).eq('store_id', session.store_id).maybeSingle();
   if (!conn?.access_token || !conn?.shop_cipher) {
     return NextResponse.json({ error: 'No TikTok connection' }, { status: 400 });
   }
-  const token = decryptOrFallback(conn.access_token as string, 'access_token');
-  const cipher = conn.shop_cipher as string;
+  const connRow = conn as ConnRow;
+  // Proactively refresh if the (corrected) expiry is near/past; else use the current token.
+  const fresh = await getFreshToken(admin, connRow, { skewMinutes: 30 });
+  const token = fresh.accessToken;
+  const cipher = connRow.shop_cipher as string;
+  // 105002 safety net for both fetchStatuses passes: refresh once + retry.
+  const onExpired = async () => (await refreshConnection(admin, connRow)).accessToken;
 
   // Bound orders for this session.
   const { data: items } = await supabase
@@ -70,7 +94,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const bound = (items ?? []).filter((i) => i.client_idempotency_key);
   const boundIds = [...new Set(bound.map((i) => String(i.client_idempotency_key)))];
 
-  const statuses = await fetchStatuses(token, cipher, boundIds);
+  const statuses = await fetchStatuses(token, cipher, boundIds, onExpired);
 
   // ── PART A: flip not_sold + paid → sold. Price is NOT written here; won price
   //    is always read from capture_events. Status is only the flip trigger.
@@ -109,7 +133,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     if (o === '0' || boundSet.has(o) || seen.has(o)) return false;
     seen.add(o); return true;
   });
-  const ub = await fetchStatuses(token, cipher, unboundCaps.map((c) => String(c.order_id)));
+  const ub = await fetchStatuses(token, cipher, unboundCaps.map((c) => String(c.order_id)), onExpired);
   const unbound = unboundCaps
     .filter((c) => ub.get(String(c.order_id))?.paid)
     .map((c) => {
