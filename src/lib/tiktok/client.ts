@@ -67,24 +67,29 @@ export async function exchangeCodeForToken(code: string): Promise<TikTokShopToke
 }
 
 export async function refreshAccessToken(refreshToken: string): Promise<TikTokShopTokenResponse> {
-  // POST with form-encoded body to keep app_secret out of URLs
-  const body = new URLSearchParams({
+  // TikTok Shop token endpoints are GET with QUERY params (same shape as
+  // exchangeCodeForToken). The old POST+form-body variant 404'd ("page not found") —
+  // it was never exercised because refreshAccessToken had zero callers, so the bug hid.
+  const params = new URLSearchParams({
     app_key: TIKTOK_SHOP_APP_KEY,
     app_secret: TIKTOK_SHOP_APP_SECRET,
     refresh_token: refreshToken,
     grant_type: 'refresh_token',
   });
+  const url = `${TIKTOK_SHOP_REFRESH_URL}?${params.toString()}`;
 
-  const res = await fetch(TIKTOK_SHOP_REFRESH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+  const res = await fetch(url, { method: 'GET' });
+  const rawText = await res.text();
 
-  const json = await res.json();
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(rawText);
+  } catch {
+    throw new Error(`TikTok token refresh response is not JSON (HTTP ${res.status}): ${rawText.slice(0, 300)}`);
+  }
 
   if (json.code !== 0) {
-    throw new Error(`TikTok Shop token refresh failed: ${json.message || 'unknown error'}`);
+    throw new Error(`TikTok Shop token refresh failed: ${(json as { message?: string }).message || 'unknown error'} (code: ${json.code})`);
   }
 
   return json.data as TikTokShopTokenResponse;

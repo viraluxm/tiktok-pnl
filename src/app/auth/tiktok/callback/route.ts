@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import { exchangeCodeForToken, getAuthorizedShops } from '@/lib/tiktok/client';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { encrypt } from '@/lib/crypto';
+import { expiriesFromToken } from '@/lib/tiktok/tokens';
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
@@ -84,7 +85,10 @@ export async function GET(request: Request) {
       return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=invalid_store`);
     }
 
-    const tokenExpiresAt = new Date(Date.now() + tokenData.access_token_expire_in * 1000).toISOString();
+    // access_token_expire_in / refresh_token_expire_in are ABSOLUTE Unix epoch seconds —
+    // NOT durations. Use them directly; adding Date.now() double-counts the epoch and
+    // yields a year-~2081 expiry (the incident that silently disabled token refresh).
+    const { token_expires_at, refresh_token_expires_at } = expiriesFromToken(tokenData);
 
     // Per-store connection: upsert on (user_id, store_id) so re-authing one store
     // updates only that store's row and never clobbers another store's connection.
@@ -95,7 +99,8 @@ export async function GET(request: Request) {
         store_id: storeId,
         access_token: encrypt(tokenData.access_token),
         refresh_token: encrypt(tokenData.refresh_token),
-        token_expires_at: tokenExpiresAt,
+        token_expires_at,
+        refresh_token_expires_at,
         shop_cipher: shopCipher,
         shop_name: shopName || tokenData.seller_name || 'TikTok Shop',
         connected_at: new Date().toISOString(),
