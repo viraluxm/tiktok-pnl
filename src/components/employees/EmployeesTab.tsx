@@ -10,6 +10,7 @@ import type { Employee, EmployeeStatus, Shift, ShiftRule } from '@/types';
 import AuctionPerformanceCard from './AuctionPerformanceCard';
 import { AspHitBadge, BelowBreakEvenBadge } from './HostPerformanceBadges';
 import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
+import ShiftCalendar, { type CalendarShift } from './ShiftCalendar';
 
 interface EmployeesTabProps {
   // The selected pay period, driven by the dashboard's global FiltersBar. Nulls = all time.
@@ -626,6 +627,8 @@ function ShiftsView({
   onClearException: (ruleId: string, date: string) => Promise<void>;
 }) {
   const [mode, setMode] = useState<'oneoff' | 'recurring'>('oneoff');
+  // List (default, current behavior) vs read-only Calendar view of the same rows.
+  const [view, setView] = useState<'list' | 'calendar'>('list');
 
   // One-off form
   const [employeeId, setEmployeeId] = useState('');
@@ -710,6 +713,23 @@ function ShiftsView({
       (a, b) => b.date.localeCompare(a.date) || a.start_time.localeCompare(b.start_time),
     );
   }, [shifts, openShifts, generated]);
+
+  // Same rows, shaped for the read-only calendar. Skipped recurring instances are
+  // excluded (a skipped day is NOT coverage). No new data — a pure re-projection.
+  const calendarShifts = useMemo<CalendarShift[]>(
+    () =>
+      rows
+        .filter((r) => !(r.kind === 'recurring' && r.skipped))
+        .map((r) => ({
+          id: r.id,
+          kind: r.kind,
+          employee_id: r.employee_id,
+          date: r.date,
+          start_time: r.start_time,
+          end_time: r.end_time,
+        })),
+    [rows],
+  );
 
   function toggleDay(v: number) {
     setRDays((prev) => {
@@ -865,6 +885,27 @@ function ShiftsView({
 
   return (
     <div className="space-y-6">
+      {/* List | Calendar view toggle (List is the default, unchanged view). */}
+      <div className="flex items-center justify-end">
+        <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
+          {(['list', 'calendar'] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                view === v ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'
+              }`}
+            >
+              {v === 'list' ? 'List' : 'Calendar'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {view === 'calendar' ? (
+        <ShiftCalendar rows={calendarShifts} nameById={nameById} employees={employees} />
+      ) : (
+      <>
       {/* Add shift */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl p-6">
         <div className="flex items-center justify-between mb-4">
@@ -1261,6 +1302,8 @@ function ShiftsView({
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );
