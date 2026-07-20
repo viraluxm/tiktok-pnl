@@ -18,22 +18,54 @@ export async function POST(req: Request) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  let body: { orderId?: string };
+  let body: { scan?: string; orderId?: string };
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
-  const orderId = typeof body.orderId === 'string' ? body.orderId.trim() : '';
-  if (!orderId) return NextResponse.json({ error: 'Scan a packing slip order ID' }, { status: 400 });
+  // Accept `scan` (raw scanned value: a shipping label OR an order id). `orderId` is kept
+  // for backward-compat with older clients that sent the order id directly.
+  const raw = (typeof body.scan === 'string' ? body.scan : typeof body.orderId === 'string' ? body.orderId : '').trim();
+  if (!raw) return NextResponse.json({ error: 'Scan a shipping label or order ID' }, { status: 400 });
 
-  // 1) The scanned order must be one of ours.
-  const { data: scanned } = await supabase
-    .from('synced_order_ids')
-    .select('order_id, auto_combine_group_id')
-    .eq('user_id', user.id)
-    .eq('order_id', orderId)
-    .maybeSingle();
+  // ── 1) Resolve the scanned value → one of our order rows. Three shapes:
+  //   (a) USPS IMpb shipping label: "420" + ZIP(5 or 9) + 22-digit tracking. The tracking
+  //       is the trailing 22 digits — slice(-22) == slice(8) for ZIP5 and is also correct
+  //       for ZIP+4, so it's more robust than a fixed 8-char strip.
+  //   (b) A bare 22-digit USPS tracking number (the tracking barcode scanned on its own).
+  //   (c) A raw TikTok order_id (16–20 digits) — the original / back-compat path.
+  const digits = raw.replace(/\s/g, '');
+  let tracking: string | null = null;
+  if (/^420\d{27,}$/.test(digits)) tracking = digits.slice(-22);        // (a) IMpb label
+  else if (/^9\d{21}$/.test(digits)) tracking = digits;                 // (b) bare tracking
+
+  let scanned: { order_id: string; auto_combine_group_id: string | null } | null = null;
+  const resolvedVia: 'tracking' | 'order_id' = tracking ? 'tracking' : 'order_id';
+  if (tracking) {
+    // A combined shipment can share one tracking across sibling orders — any match resolves
+    // the box (group expansion below pulls the rest), so limit(1) is fine.
+    const { data: rows } = await supabase
+      .from('synced_order_ids')
+      .select('order_id, auto_combine_group_id')
+      .eq('user_id', user.id)
+      .eq('tracking_number', tracking)
+      .limit(1);
+    scanned = rows?.[0] ?? null;
+  } else {
+    const { data } = await supabase
+      .from('synced_order_ids')
+      .select('order_id, auto_combine_group_id')
+      .eq('user_id', user.id)
+      .eq('order_id', digits)
+      .maybeSingle();
+    scanned = data ?? null;
+  }
   if (!scanned) {
-    return NextResponse.json({ error: 'Order not found', orderId }, { status: 404 });
+    // Echo exactly what was scanned (+ the parsed tracking) so the picker can flag it.
+    return NextResponse.json(
+      { error: 'No matching order', scanned_value: raw, parsed_tracking: tracking, resolved_via: resolvedVia },
+      { status: 404 },
+    );
   }
 
+  const orderId = String(scanned.order_id);
   const groupId: string | null = scanned.auto_combine_group_id ?? null;
   const groupKey = groupId ? groupId : `order:${orderId}`;
 
@@ -61,45 +93,62 @@ export async function POST(req: Request) {
   // A win that was never bound during the live → no auction item for its order.
   const missingOrderIds = orderIds.filter((id) => !orderIdsWithItems.has(id));
 
-  // 4) SKU lines for those items.
-  let skuLines: { inventory_sku_id: string; qty: number }[] = [];
+  // 4) SKU lines for those items. Snapshot fields (sku_number_snapshot / title_snapshot)
+  //    are the authoritative "what was sold" — they survive later inventory edits/deletes.
+  //    Aggregate required qty per inventory SKU across the whole box.
+  const agg = new Map<string, { sku_number: number | null; title: string; qty: number }>();
   if (itemIds.length) {
     const { data: lines } = await supabase
       .from('live_auction_item_skus')
-      .select('inventory_sku_id, qty')
+      .select('inventory_sku_id, qty, sku_number_snapshot, title_snapshot')
       .eq('user_id', user.id)
       .in('auction_item_id', itemIds);
-    skuLines = (lines ?? []).map((l) => ({ inventory_sku_id: String(l.inventory_sku_id), qty: Number(l.qty) || 1 }));
+    for (const l of lines ?? []) {
+      const key = String(l.inventory_sku_id);
+      const cur = agg.get(key) ?? {
+        sku_number: (l.sku_number_snapshot as number | null) ?? null,
+        title: (l.title_snapshot as string | null) || 'Untitled',
+        qty: 0,
+      };
+      cur.qty += Number(l.qty) || 1;
+      agg.set(key, cur);
+    }
   }
 
-  // Aggregate required qty per inventory SKU across the whole box.
-  const requiredBySku = new Map<string, number>();
-  for (const l of skuLines) requiredBySku.set(l.inventory_sku_id, (requiredBySku.get(l.inventory_sku_id) ?? 0) + l.qty);
-
-  // 5) Enrich with live inventory details (title / image / barcode for matching).
-  const skuIds = [...requiredBySku.keys()];
-  let skus: Array<Record<string, unknown>> = [];
+  // 5) Best-effort enrichment from live inventory: barcode (drives the item-verify scan)
+  //    + thumbnail. Number/title/qty come from the snapshot, so a SKU still displays even
+  //    if its inventory row was deleted (barcode just null → can't green-verify, still pick).
+  const skuIds = [...agg.keys()];
+  const invById = new Map<string, { barcode: string | null; thumbnail_url: string | null }>();
   if (skuIds.length) {
     const { data: inv } = await supabase
       .from('inventory_skus')
-      .select('id, sku_number, title, barcode, thumbnail_path')
+      .select('id, barcode, thumbnail_path')
       .eq('user_id', user.id)
       .in('id', skuIds);
-    skus = (inv ?? []).map((s) => {
+    for (const s of inv ?? []) {
       const path = (s.thumbnail_path as string | null) ?? null;
-      const thumbnail_url = path ? supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : null;
-      return {
-        inventory_sku_id: String(s.id),
-        sku_number: s.sku_number,
-        title: s.title || 'Untitled',
-        barcode: s.barcode,
-        thumbnail_url,
-        required_qty: requiredBySku.get(String(s.id)) ?? 1,
-      };
-    });
-    // Stable order: lowest SKU# first.
-    skus.sort((a, b) => Number(a.sku_number) - Number(b.sku_number));
+      invById.set(String(s.id), {
+        barcode: (s.barcode as string | null) ?? null,
+        thumbnail_url: path ? supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : null,
+      });
+    }
   }
+  const skus = skuIds
+    .map((id) => {
+      const a = agg.get(id)!;
+      const inv = invById.get(id);
+      return {
+        inventory_sku_id: id,
+        sku_number: a.sku_number,
+        title: a.title,
+        barcode: inv?.barcode ?? null,
+        thumbnail_url: inv?.thumbnail_url ?? null,
+        required_qty: a.qty,
+      };
+    })
+    // Stable order: lowest SKU# first.
+    .sort((a, b) => (Number(a.sku_number) || 0) - (Number(b.sku_number) || 0));
 
   // 6) Already verified?
   const { data: verified } = await supabase
@@ -110,6 +159,9 @@ export async function POST(req: Request) {
     .maybeSingle();
 
   return NextResponse.json({
+    scanned_value: raw,
+    resolved_via: resolvedVia,       // 'tracking' (shipping label) | 'order_id'
+    tracking_number: tracking,        // the parsed tracking when resolved via a label
     scanned_order_id: orderId,
     group_key: groupKey,
     group_id: groupId,

@@ -399,6 +399,9 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
   // TikTok's combine-shipment group id (assigned at order time; groups a buyer's
   // multiple orders into one shipment). Stored so pick-verify reads it from our DB.
   const autoCombineGroupId = o.auto_combine_group_id != null ? String(o.auto_combine_group_id) || null : null;
+  // Shipping label tracking (USPS IMpb etc.) — returned inline by order search/detail.
+  // Stored so a scanned shipping label resolves to this order in the packing station.
+  const trackingNumber = String(o.tracking_number || '') || null;
   const payment = (o.payment || {}) as Record<string, unknown>;
   // TikTok GMV = Price × Items + Shipping - Seller promotions - Platform co-funding (excludes tax)
   const productPrice = toNum(payment.original_total_product_price) || toNum(payment.sub_total) || 0;
@@ -436,6 +439,7 @@ function parseOrder(userId: string, o: Record<string, unknown>): Record<string, 
     gmv, shipping, affiliate, platform_fee: platformFee, units,
     tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName,
     product_name: productName, status, auto_combine_group_id: autoCombineGroupId,
+    tracking_number: trackingNumber,
   };
 }
 
