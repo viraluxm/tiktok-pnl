@@ -118,6 +118,14 @@ function diag(type, sev, msg, meta) {
   if (!diagEnabled) return;
   diagPush({ ts: Date.now(), v: EXT_VERSION, comp: 'background', type: type, sev: sev || 'info', msg: msg || '', meta: meta || null });
 }
+// ALWAYS-ON critical lifecycle logging (ungated). The verbose diag() above stays gated on
+// diagEnabled (dev opt-in); this small high-signal subset — worker lifecycle, auth, 401,
+// queue, heartbeat/ping stalls, recovery, session resolve — records REGARDLESS, so an
+// incident is always diagnosable. The gated ring being off by default is exactly why the
+// onlybidss evidence was lost. Same ring/cap/redaction; just not gated. crit:1 marks it.
+function diagCrit(type, sev, msg, meta) {
+  diagPush({ ts: Date.now(), v: EXT_VERSION, comp: 'background', type: type, sev: sev || 'info', msg: msg || '', meta: meta || null, crit: 1 });
+}
 // Map a thrown RPC/HTTP error to a stable code for the bind audit.
 function diagClassifyErr(e) {
   var m = (e && (e.message || e.msg)) || String(e || '');
@@ -182,6 +190,18 @@ var hostAppliedForSession = null;
 // whether auctions are closing — a host in a no-sale lull must still heartbeat.
 var HEARTBEAT_MIN_WRITE_MS = 30 * 1000; // throttle DB writes (content pings ~45s; dedups multi-tab)
 var lastHeartbeatWriteTs = 0;
+// ─── Recovery alarm + content-ping stall tracking (self-healing) ─────
+// The SW has no self-timer; it only wakes on content-script pings. When pings stop
+// (tab discarded / worker evicted) nothing refreshed/flushed/heartbeated until a manual
+// re-sign-in. A chrome.alarms tick gives the SW its own wake source.
+var RECOVERY_ALARM = 'lensed_recovery';
+var lastContentPingTs = 0;             // when the live content script last pinged us
+var lastHeartbeatLoggedSid = null;     // so heartbeat.start logs once per session
+var CONTENT_PING_STALL_MS = 90 * 1000; // >2 missed content pings (they arrive ~45s) → stalled
+var HEARTBEAT_BACKSTOP_MAX_MS = 5 * 60 * 1000; // keep the session alive via alarm for at most
+                                       // 5 min of ping silence; past that a truly-dead tab must
+                                       // NOT zombie-heartbeat — let the server auto-ender reap it.
+var NEAR_EXPIRY_BUF_SEC = 180;         // refresh proactively when the token is within 3 min of exp
 // The tab id the live heartbeats/sales come from — used for a best-effort "mark ended"
 // when that specific tab closes. In-memory only (a SW restart forfeits it; the
 // auto-ender is the real backstop, so that's acceptable).
@@ -231,6 +251,7 @@ async function heartbeatSession(room) {
   try {
     await supabasePatch('live_sessions', 'id=eq.' + encodeURIComponent(sid), { last_seen_at: new Date().toISOString() });
     console.log('[LENSED][BG] heartbeat OK — last_seen_at stamped for session ' + sid);
+    if (sid !== lastHeartbeatLoggedSid) { lastHeartbeatLoggedSid = sid; diagCrit('heartbeat.start', 'info', 'heartbeat stamping', { session: diagRedactId(sid) }); }
   } catch (e) {
     lastHeartbeatWriteTs = 0; // let the next ping retry promptly
     console.warn('[LENSED][BG] heartbeat failed (non-fatal):', String((e && e.message) || e));
@@ -439,6 +460,7 @@ async function supabaseGet(table, query) {
   var url = SUPABASE_URL + '/rest/v1/' + table + '?' + query;
   var res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
+    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
     var refreshed = await tryRefreshToken();
     if (refreshed) {
       res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
@@ -461,6 +483,7 @@ async function supabasePost(table, body) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, false);
   if (res.status === 401) {
+    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
     var refreshed = await tryRefreshToken();
     if (refreshed) {
       res = await sbFetch(url, {
@@ -489,6 +512,7 @@ async function supabaseUpsert(table, body, onConflict) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, true);
   if (res.status === 401) {
+    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
     var refreshed = await tryRefreshToken();
     if (refreshed) {
       headers = supabaseHeaders();
@@ -520,6 +544,7 @@ async function supabasePatch(table, query, body) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, true);
   if (res.status === 401) {
+    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
     var refreshed = await tryRefreshToken();
     if (refreshed) {
       headers = supabaseHeaders();
@@ -549,6 +574,7 @@ async function supabaseRpc(fnName, params) {
     body: JSON.stringify(params),
   }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
+    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
     var refreshed = await tryRefreshToken();
     if (refreshed) {
       res = await sbFetch(url, {
@@ -577,6 +603,7 @@ async function persistAuth(at, rt) {
   if (userId) data[SK_USER_ID] = userId;
   await chrome.storage.local.set(data);
   console.log('[LENSED][BG] auth persisted, user_id:', userId);
+  diagCrit('auth.acquired', 'info', 'auth acquired/persisted', { user: diagRedactId(userId), queued: saleQueue.length });
   // Auth just became available (login / web-app relay / token refresh) → drain any sales
   // captured while signed out. Fire-and-forget; never blocks the auth path.
   try { flushSaleQueue(); } catch (_) {}
@@ -596,20 +623,20 @@ async function rehydrateAuth() {
       // If the stored access token is expired, try refreshing immediately
       if (isTokenExpired(accessToken)) {
         console.log('[LENSED][BG] rehydrated token is expired, refreshing...');
-        diag('auth.refresh', 'info', 'refreshing expired token');
+        diagCrit('auth.refresh', 'info', 'rehydrate: refreshing expired token', null);
         var refreshed = await tryRefreshToken();
         if (!refreshed) {
           console.warn('[LENSED][BG] rehydrate refresh failed — clearing auth');
-          diag('auth.cleared', 'warn', 'rehydrate refresh failed — auth cleared', { user: diagRedactId(userId) });
+          diagCrit('auth.lost', 'warn', 'rehydrate refresh failed — auth cleared', { user: diagRedactId(userId) });
           accessToken = null;
           refreshToken = null;
           userId = null;
         } else {
-          diag('auth.restored', 'info', 'auth restored (refreshed)', { user: diagRedactId(userId) });
+          diagCrit('auth.acquired', 'info', 'auth restored (refreshed on rehydrate)', { user: diagRedactId(userId) });
         }
       } else {
         console.log('[LENSED][BG] auth rehydrated, user_id:', userId);
-        diag('auth.restored', 'info', 'auth restored', { user: diagRedactId(userId) });
+        diagCrit('auth.acquired', 'info', 'auth restored from storage', { user: diagRedactId(userId) });
       }
 
       // Restore the pinned live-session identity so a post-reload/eviction bind
@@ -661,17 +688,21 @@ async function tryRefreshToken() {
     }, FETCH_TIMEOUT_MS, true);
     if (!res.ok) {
       console.error('[LENSED][BG] token refresh failed:', res.status);
+      diagCrit('auth.refresh_fail', 'error', 'token refresh rejected', { status: res.status });
       return false;
     }
     var json = await res.json();
     if (json.access_token && json.refresh_token) {
       await persistAuth(json.access_token, json.refresh_token);
       console.log('[LENSED][BG] token refreshed successfully');
+      diagCrit('auth.refresh_ok', 'info', 'token refreshed', null);
       return true;
     }
+    diagCrit('auth.refresh_fail', 'error', 'token refresh response missing tokens', null);
     return false;
   } catch (e) {
     console.error('[LENSED][BG] token refresh error:', e);
+    diagCrit('auth.refresh_fail', 'error', 'token refresh threw', { code: diagClassifyErr(e) });
     return false;
   }
 }
@@ -688,6 +719,7 @@ async function clearAuth() {
   hostAppliedForSession = null;
   await chrome.storage.local.remove([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
   console.log('[LENSED][BG] auth cleared');
+  diagCrit('auth.lost', 'warn', 'auth cleared', null);
 }
 
 function isAuthenticated() {
@@ -888,6 +920,7 @@ async function getOrCreateSession(roomId) {
       currentSessionId = rows[0].id;
       sessionRoomId = room;
       console.log('[LENSED][BG] reusing room-scoped session:', currentSessionId, 'room', room);
+      diagCrit('session.resolve', 'info', 'reused room-scoped session', { session: diagRedactId(currentSessionId), room: room, created: false });
       persistSession();
       broadcastSession();
       maybeApplyHost();
@@ -910,6 +943,7 @@ async function getOrCreateSession(roomId) {
       currentSessionId = created[0].id;
       sessionRoomId = room;
       console.log('[LENSED][BG] created room-scoped session:', currentSessionId, 'room', room);
+      diagCrit('session.resolve', 'info', 'created room-scoped session', { session: diagRedactId(currentSessionId), room: room, created: true });
       persistSession();
       broadcastSession();
       maybeApplyHost();
@@ -921,6 +955,32 @@ async function getOrCreateSession(roomId) {
     console.error('[LENSED][BG] session get-or-create error:', e);
     return null;
   }
+}
+
+// Resolve — but NEVER create — a session for a queued sale being flushed. A stale queue
+// (e.g. a previous live's tail flushed hours later) must attach to that room's EXISTING
+// session, not mint a fresh 'live' row (the e4b58b91 ghost). If the room has no session,
+// the sale stays captured-only (correct for backfill; it's still saved in capture_events).
+// Unlike getOrCreateSession there is NO recency cutoff — a 14h-old flush still finds the
+// room's real session — and NO INSERT path.
+async function resolveSessionForFlush(room) {
+  if (!room) return null;
+  // Same-room in-memory session (a mid-show auth drop that just recovered) → use it.
+  if (currentSessionId && sessionRoomId && sessionRoomId === room) return currentSessionId;
+  if (!isAuthenticated()) return null;
+  try {
+    var rows = await supabaseGet(
+      'live_sessions',
+      'select=id,status&tiktok_live_id=eq.' + encodeURIComponent(room)
+        + '&source=eq.extension&order=started_at.desc&limit=1'
+    );
+    if (rows && rows.length > 0) {
+      diagCrit('session.resolve', 'info', 'flush resolved to existing session (no create)', { session: diagRedactId(rows[0].id), room: room, status: rows[0].status });
+      return rows[0].id;
+    }
+  } catch (_) { /* fall through — captured-only */ }
+  diagCrit('session.resolve', 'warn', 'flush found no session for room — captured-only (no ghost row)', { room: room });
+  return null;
 }
 
 function parsePriceToCents(priceStr) {
@@ -1048,11 +1108,11 @@ async function enqueueSale(sale, stagedSkus, result) {
     var dropped = saleQueue.length - SALE_QUEUE_MAX;
     saleQueue.splice(0, dropped); // oldest-dropped
     console.warn('[LENSED][BG] sale queue over cap (' + SALE_QUEUE_MAX + ') — dropped ' + dropped + ' oldest queued sale(s)');
-    diag('queue.overflow', 'warn', 'sale queue overflow — oldest dropped', { dropped: dropped });
+    diagCrit('queue.overflow', 'warn', 'sale queue overflow — oldest dropped', { dropped: dropped });
   }
   persistSaleQueue();
   console.warn('[LENSED][BG] sale QUEUED (unauthenticated) — ' + saleQueue.length + ' pending:', sale.orderId);
-  diag('queue.enqueue', 'warn', 'sale queued (unauthenticated)', { order: sale.orderId, queued: saleQueue.length });
+  diagCrit('queue.enqueue', 'warn', 'sale queued (unauthenticated)', { order: sale.orderId, queued: saleQueue.length });
   broadcastAuthStatus(); // refresh the overlay's loud "N queued" warning
 }
 
@@ -1080,7 +1140,10 @@ async function replayQueuedSale(item) {
   //    (never lost) — same as the app's normal "captured only" state.
   try {
     if (item.stagedSkus && item.stagedSkus.length > 0 && sale.roomId) {
-      var sessionId = await getOrCreateSession(sale.roomId);
+      // Resolve-DON'T-create on flush: a stale-queue flush must never mint a new 'live'
+      // session row (that's how the e4b58b91 ghost appeared). Attach to the room's existing
+      // session, or stay captured-only. The live-path bind still uses getOrCreateSession.
+      var sessionId = await resolveSessionForFlush(sale.roomId);
       if (sessionId) {
         var byId = {};
         for (var i = 0; i < item.stagedSkus.length; i++) {
@@ -1104,7 +1167,7 @@ async function flushSaleQueue() {
   flushingSaleQueue = true;
   var startCount = saleQueue.length;
   console.log('[LENSED][BG] flushing ' + startCount + ' queued sale(s)…');
-  diag('queue.flush_start', 'info', 'flushing queued sales', { count: startCount });
+  diagCrit('queue.flush_start', 'info', 'flushing queued sales', { count: startCount });
   try {
     // Process in order. Remove an item ONLY after it is confirmed logged/dup; a failed
     // attempt leaves it (and the rest) queued for the next flush.
@@ -1119,7 +1182,7 @@ async function flushSaleQueue() {
     broadcastAuthStatus();
   }
   console.log('[LENSED][BG] flush done — ' + saleQueue.length + ' still queued');
-  diag('queue.flush_done', 'info', 'flush complete', { flushed: startCount - saleQueue.length, remaining: saleQueue.length });
+  diagCrit('queue.flush_done', 'info', 'flush complete', { flushed: startCount - saleQueue.length, remaining: saleQueue.length });
 }
 
 // ─── Auto-bind: sale + staged SKUs → lensed_log_auction + capture_events
@@ -1362,6 +1425,7 @@ async function uploadShotObject(objectKey, bytes) {
   try { res = await sbFetch(url, { method: 'POST', headers: headers, body: bytes }, FETCH_TIMEOUT_WRITE_MS, false); }
   catch (e) { return { ok: false, retryable: true, err: String(e && e.name || e) }; } // abort/network → retry
   if (res.status === 401) {
+    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
     var refreshed = await tryRefreshToken();
     if (refreshed) {
       headers.Authorization = 'Bearer ' + accessToken;
@@ -1804,6 +1868,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     // set it, so heartbeatSession() resolves the session by room. Only a DEFINITE room
     // mismatch (in-memory session pinned to a different room) is skipped.
     if (sender && sender.tab && sender.tab.id != null) liveTabId = sender.tab.id;
+    lastContentPingTs = Date.now(); // for the recovery alarm's ping-stall / backstop logic
     var hbRoom = message.roomId || currentRoomId || sessionRoomId || null;
     console.log('[LENSED][BG] TIKTOK_HEARTBEAT recv; msgRoom=' + message.roomId + ' currentRoomId=' + currentRoomId + ' sessionRoomId=' + sessionRoomId + ' currentSessionId=' + currentSessionId);
     var mismatch = currentSessionId && sessionRoomId && message.roomId && message.roomId !== sessionRoomId;
@@ -1965,14 +2030,75 @@ console.log('[LENSED][BG] service worker started');
 // non-empty restored ring means the SW was evicted and restarted mid-live, which
 // is itself a signal worth recording (sw.start restart=true).
 try {
-  chrome.storage.local.get([DIAG_FLAG, DIAG_KEY], function (d) {
+  chrome.storage.local.get([DIAG_FLAG, DIAG_KEY, SK_SESSION_ID, SK_SESSION_TS], function (d) {
     if (chrome.runtime.lastError || !d) return;
     if (d[DIAG_FLAG]) diagEnabled = true;
     var stored = Array.isArray(d[DIAG_KEY]) ? d[DIAG_KEY] : [];
     // MERGE (not overwrite): events may already have been recorded during the async
     // gap between SW start and this callback — keep them alongside the restored ring.
     if (stored.length) diagRing = diagMerge(stored, diagRing);
-    // A non-empty restored ring means the SW was evicted and restarted mid-live.
-    diag('sw.start', 'info', 'service worker awake', { restart: stored.length > 0, priorEvents: stored.length, v: EXT_VERSION });
+    // Gap since the last recorded event: a long gap while a live session was pinned means
+    // the SW was SUSPENDED/EVICTED mid-live (no crash log) — the worker-lifecycle signature.
+    var lastTs = stored.length ? (stored[stored.length - 1].ts || 0) : 0;
+    var gapMs = lastTs ? (Date.now() - lastTs) : null;
+    var livePinned = !!d[SK_SESSION_ID];
+    // ALWAYS-ON: this is the primary discriminator for suspension vs auth-death next time.
+    diagCrit('sw.start', 'info', 'service worker awake', {
+      restart: stored.length > 0, priorEvents: stored.length,
+      gapMsSinceLastEvent: gapMs, livePinned: livePinned, v: EXT_VERSION,
+    });
   });
 } catch (_) {}
+
+// ─── Recovery alarm: the SW's own wake source (self-healing) ─────────
+// MV3 has no self-timer and this ext is woken only by content-script pings. When pings
+// stop, nothing refreshed/flushed/heartbeated until a manual re-sign-in. A ~60s alarm
+// (chrome.alarms survives SW suspension — it re-wakes the worker) gives the SW its own
+// tick to proactively refresh, flush the queue, and heartbeat — no human needed. Reuses
+// the existing tryRefreshToken / flushSaleQueue / heartbeatSession.
+try {
+  chrome.alarms.create(RECOVERY_ALARM, { periodInMinutes: 1 }); // MV3 min period; ~60s cadence
+} catch (_) {}
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener(function (alarm) {
+    if (!alarm || alarm.name !== RECOVERY_ALARM) return;
+    runRecoveryTick();
+  });
+}
+async function runRecoveryTick() {
+  try {
+    await ensureAuthReady();
+    var room = sessionRoomId || currentRoomId || null;
+    var pinned = !!(currentSessionId && room);
+    // Idle ticks (no live pinned) are gated/verbose only — keeps the always-on ring signal-dense.
+    if (!pinned) { diag('recovery.idle', 'info', 'recovery tick — no live pinned', null); return; }
+
+    // (a) Proactive refresh: don't wait for a 401 that never comes because no fetch is firing.
+    if (accessToken && refreshToken && isTokenExpired(accessToken, NEAR_EXPIRY_BUF_SEC)) {
+      diagCrit('recovery.refresh', 'info', 'proactive refresh (token near-expiry)', null);
+      await tryRefreshToken();
+    }
+    // (b) Flush any buffered sales the moment auth is usable — no manual re-sign-in needed.
+    if (isAuthenticated() && saleQueue.length > 0) {
+      diagCrit('recovery.flush', 'info', 'recovery flushing queued sales', { queued: saleQueue.length });
+      try { await flushSaleQueue(); } catch (_) {}
+    }
+    // (c) Bounded heartbeat backstop: if content pings have stalled but we're still within
+    //     the backstop window, keep last_seen_at fresh so a transient stall doesn't read as
+    //     "dead". Past HEARTBEAT_BACKSTOP_MAX_MS of silence, STOP — a truly-dead tab must not
+    //     zombie-heartbeat; let the server auto-ender reap the session.
+    if (isAuthenticated() && lastContentPingTs > 0) {
+      var pingAge = Date.now() - lastContentPingTs;
+      if (pingAge > CONTENT_PING_STALL_MS) {
+        if (pingAge <= HEARTBEAT_BACKSTOP_MAX_MS) {
+          diagCrit('content.ping_stall', 'warn', 'content ping stalled — alarm heartbeat backstop', { ageMs: pingAge });
+          try { await heartbeatSession(room); } catch (_) {}
+        } else {
+          diagCrit('content.ping_stall', 'warn', 'content ping stalled past backstop — releasing (no zombie heartbeat)', { ageMs: pingAge });
+        }
+      }
+    }
+  } catch (e) {
+    diagCrit('recovery.error', 'error', 'recovery tick threw', { msg: String((e && e.message) || e) });
+  }
+}
