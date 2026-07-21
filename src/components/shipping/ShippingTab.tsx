@@ -25,6 +25,12 @@ interface BoxSku {
   required_qty: number;
 }
 
+interface ExcludedOrder {
+  order_id: string;
+  reason: string;      // CANCELLED / ON_HOLD / IN_TRANSIT / DELIVERED / COMPLETED / UNKNOWN
+  skus: string[];      // what would have been packed (for awareness)
+}
+
 interface Box {
   scanned_value?: string;
   resolved_via?: 'tracking' | 'order_id';
@@ -36,6 +42,9 @@ interface Box {
   order_count: number;
   skus: BoxSku[];
   missing_order_ids: string[];
+  excluded?: ExcludedOrder[];
+  excluded_count?: number;
+  status_unverified?: boolean;
   already_verified_at: string | null;
 }
 
@@ -93,12 +102,16 @@ export default function ShippingTab() {
       setBox(loaded);
       setCounts({});
       setVerified(false);
-      if (loaded.skus.length === 0) {
+      if (loaded.order_count === 0 && (loaded.excluded_count ?? 0) > 0) {
+        // Every order in this physical box is do-not-pack (cancelled / on-hold / already shipped).
+        setMsg({ kind: 'error', text: `Nothing to pack — all ${loaded.excluded_count} order${loaded.excluded_count === 1 ? '' : 's'} in this box are DO NOT PACK (see below). Do not ship.` });
+      } else if (loaded.skus.length === 0) {
         // Resolved to a real order, but nothing bound (~23% of wins). Picker must flag it.
         setMsg({ kind: 'error', text: `Order ${loaded.scanned_order_id} resolved but NOT bound — no internal SKUs recorded. Flag it (do not guess).` });
       } else {
         const via = loaded.resolved_via === 'tracking' ? 'shipping label' : 'order id';
-        setMsg({ kind: 'info', text: `Box loaded via ${via}: ${loaded.skus.length} SKU${loaded.skus.length === 1 ? '' : 's'} across ${loaded.order_count} order${loaded.order_count === 1 ? '' : 's'}. Scan items.` });
+        const ex = (loaded.excluded_count ?? 0) > 0 ? ` (${loaded.excluded_count} excluded — do not pack)` : '';
+        setMsg({ kind: 'info', text: `Box loaded via ${via}: ${loaded.skus.length} SKU${loaded.skus.length === 1 ? '' : 's'} across ${loaded.order_count} order${loaded.order_count === 1 ? '' : 's'}${ex}. Scan items.` });
       }
     } catch {
       setMsg({ kind: 'error', text: 'Network error loading order' });
@@ -215,6 +228,37 @@ export default function ShippingTab() {
               <span className="text-tt-cyan">already verified earlier</span>
             )}
           </div>
+
+          {/* Loud stale-status warning (live status could not be verified → data may be stale) */}
+          {box.status_unverified && (
+            <div className="mb-4 rounded-xl border-2 border-tt-red bg-tt-red/15 px-5 py-4 text-tt-red">
+              <div className="text-lg font-extrabold">⚠ Live status UNVERIFIED</div>
+              <div className="text-sm font-medium mt-1">
+                Could not confirm current order status with TikTok — the list may be stale (a cancelled
+                order could still show as packable). <span className="font-bold">Cross-check the paper slip before shipping.</span>
+              </div>
+            </div>
+          )}
+
+          {/* EXCLUDED — DO NOT PACK: cancelled / on-hold / already-shipped orders in this box.
+              Kept visible so the screen reconciles with the paper slip; excluded from the pick list/count. */}
+          {box.excluded && box.excluded.length > 0 && (
+            <div className="mb-4 rounded-xl border-2 border-tt-red/60 bg-tt-red/10 px-5 py-4">
+              <div className="text-base font-extrabold text-tt-red mb-2">
+                🚫 DO NOT PACK — {box.excluded.length} order{box.excluded.length === 1 ? '' : 's'} in this box {box.excluded.length === 1 ? 'is' : 'are'} not shippable
+              </div>
+              <div className="flex flex-col gap-2">
+                {box.excluded.map((e) => (
+                  <div key={e.order_id} className="text-sm text-tt-red flex flex-wrap items-baseline gap-x-3">
+                    <span className="font-mono">{e.order_id}</span>
+                    <span className="font-bold uppercase">{e.reason}</span>
+                    <span className="text-tt-muted">{e.skus.length ? e.skus.join(', ') : '(no recorded items)'}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="text-xs text-tt-muted mt-2">These are excluded from the pick list and count below — do not add them to the box.</div>
+            </div>
+          )}
 
           {/* Missing wins flag */}
           {box.missing_order_ids.length > 0 && (
