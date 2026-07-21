@@ -279,21 +279,60 @@ async function handleAccountDetected(account, room) {
     + ' id=' + (account.id || '?')
     + ' room=' + (r || '?')
     + ' → session ' + (sid || '(unresolved)'));
-  diag('account.captured', 'info', 'channel account detected', { handle: account.handle || null, secUid: account.secUid || null, room: r || null, session: sid ? diagRedactId(sid) : null });
+  // Confidence: an identity carrying a sec_uid is the STRONG API anchor; a DOM label
+  // (source:'dom', no sec_uid) is WEAK. This drives GUARDRAIL 1 below.
+  var incomingStrong = !!account.secUid;
+  var src = account.source || (incomingStrong ? 'api' : 'dom');
+  // ALWAYS-ON: what was detected, from where, at what confidence (channel logging was gated,
+  // which is why the "Close" corruption was invisible).
+  diagCrit('channel.detected', 'info', 'channel identity detected', {
+    handle: account.handle || null, secUid: account.secUid ? diagRedactId(account.secUid) : null,
+    nickname: account.nickname || null, source: src, strategy: account.strategy || null,
+    score: account.score || null, strong: incomingStrong, room: r || null, session: sid ? diagRedactId(sid) : null,
+  });
 
-  // 1) Persist to chrome.storage.local (safe, survives SW restart), keyed by room, capped.
-  //    Read it any time with: chrome.storage.local.get('lensed_channel_accounts')
+  // Read the current channel_handle FIRST (authoritative), then the storage map, so the
+  // non-destructive guard can compare against what's already persisted.
+  var existingHandle = null;
+  if (sid && isAuthenticated()) {
+    try {
+      var exRows = await supabaseGet('live_sessions', 'select=channel_handle&id=eq.' + encodeURIComponent(sid) + '&limit=1');
+      if (exRows && exRows[0]) existingHandle = exRows[0].channel_handle || null;
+    } catch (_) {}
+  }
+
+  // 1) Storage-map telemetry cache — MERGE (never null an existing field), keyed by room.
+  var prevHandle = null;
+  var acceptHandle = null; // GUARDRAIL 1 decision, shared with the DB-persist step below
   try {
     var d = await chrome.storage.local.get([SK_CHANNEL_ACCOUNTS]);
     var map = (d && d[SK_CHANNEL_ACCOUNTS] && typeof d[SK_CHANNEL_ACCOUNTS] === 'object') ? d[SK_CHANNEL_ACCOUNTS] : {};
     var mapKey = r || (sid ? ('session:' + sid) : (account.key || account.secUid || account.handle));
+    var prev = map[mapKey] || {};
+    prevHandle = prev.handle || null;
+    if (existingHandle == null) existingHandle = prevHandle; // fall back to cache when DB unread (e.g. unauthenticated)
+
+    // GUARDRAIL 1 — decide if the incoming handle may be written. Never let a WEAK handle
+    // OVERWRITE a DIFFERENT already-set handle (the jumbosteals→"Close" corruption). First
+    // write is allowed; identical is a no-op; only a STRONG (sec_uid) identity may overwrite.
+    var decision;
+    if (!account.handle) decision = 'no_handle';
+    else if (!existingHandle) { acceptHandle = account.handle; decision = 'first_write'; }
+    else if (existingHandle === account.handle) decision = 'unchanged';
+    else if (incomingStrong) { acceptHandle = account.handle; decision = 'overwrite_strong'; }
+    else decision = 'rejected_weak_overwrite'; // KEEP existing — do NOT clobber
+    if (account.handle && existingHandle && existingHandle !== account.handle) {
+      diagCrit('channel.overwrite', decision === 'rejected_weak_overwrite' ? 'warn' : 'info',
+        'channel_handle "' + existingHandle + '" → "' + account.handle + '" (' + decision + ')',
+        { old: existingHandle, new: account.handle, source: src, strong: incomingStrong, applied: decision !== 'rejected_weak_overwrite' });
+    }
     map[mapKey] = {
-      sec_uid: account.secUid || null,
-      account_id: account.id != null ? String(account.id) : null,
-      handle: account.handle || null,
-      nickname: account.nickname || null,
-      room_id: r || null,
-      session_id: sid || null,
+      sec_uid: account.secUid || prev.sec_uid || null,
+      account_id: account.id != null ? String(account.id) : (prev.account_id || null),
+      handle: acceptHandle || prev.handle || existingHandle || null,
+      nickname: account.nickname || prev.nickname || null,
+      room_id: r || prev.room_id || null,
+      session_id: sid || prev.session_id || null,
       detected_at: new Date().toISOString(),
     };
     var keys = Object.keys(map);
@@ -307,20 +346,22 @@ async function handleAccountDetected(account, room) {
     console.warn('[LENSED][BG] channel storage write failed (non-fatal):', String((e && e.message) || e));
   }
 
-  // 2) Best-effort DB persist to live_sessions.channel_* — DEFERRED until migration 058
-  //    adds the columns. Until then this catches a missing-column 400 and no-ops; once
-  //    058 is applied it starts succeeding with no extension rebuild.
+  // 2) DB persist to live_sessions.channel_* — PARTIAL patch: include ONLY fields the message
+  //    actually carries (GUARDRAIL 1). A DOM-only message never NULLs an existing sec_uid /
+  //    nickname / account_id, and the handle is only written when the guard above accepted it.
   if (sid && isAuthenticated()) {
-    try {
-      await supabasePatch('live_sessions', 'id=eq.' + encodeURIComponent(sid), {
-        channel_sec_uid: account.secUid || null,
-        channel_handle: account.handle || null,
-        channel_nickname: account.nickname || null,
-        channel_account_id: account.id != null ? String(account.id) : null,
-      });
-      console.log('[LENSED][BG] channel persisted to live_sessions ' + sid);
-    } catch (e) {
-      console.log('[LENSED][BG] channel DB persist deferred (captured in storage + console; add migration 058 to enable):', String((e && e.message) || e));
+    var patch = {};
+    if (account.secUid) patch.channel_sec_uid = account.secUid;
+    if (account.nickname) patch.channel_nickname = account.nickname;
+    if (account.id != null) patch.channel_account_id = String(account.id);
+    if (acceptHandle) patch.channel_handle = acceptHandle;
+    if (Object.keys(patch).length > 0) {
+      try {
+        await supabasePatch('live_sessions', 'id=eq.' + encodeURIComponent(sid), patch);
+        console.log('[LENSED][BG] channel persisted to live_sessions ' + sid + ' (' + Object.keys(patch).join(',') + ')');
+      } catch (e) {
+        console.log('[LENSED][BG] channel DB persist deferred:', String((e && e.message) || e));
+      }
     }
   }
 }
