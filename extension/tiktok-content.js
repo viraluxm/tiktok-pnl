@@ -104,6 +104,11 @@
   // session, → mapped to a store). Dedup key = name|room so it re-sends when either
   // changes (e.g. label detected before the room, then the room arrives).
   var lastChannelNameSentKey = null;
+  // GUARDRAIL 2 corroboration: a weak (S3, score-6) DOM label must be seen twice in a row
+  // before it's trusted; strategy/score are threaded to the SW for always-on logging.
+  var weakCandidateLabel = null;
+  var lastDetectWhy = null;
+  var lastDetectScore = null;
   // Count of orders captured this session that did NOT bind to a SKU (nothing staged
   // at capture time). Surfaced as a visible overlay warning so it is never silent.
   var capturedOnlyCount = 0;
@@ -2830,7 +2835,7 @@
 
   // Common Live-Manager UI chrome that is handle-SHAPED (single word) but is NOT an
   // account \u2014 rejected so plain top-right text can't produce a false positive.
-  var UI_STOPWORDS = /^(settings?|profile|account|accounts|notifications?|messages?|message|help|support|live|golive|go|end|start|logout|signout|signin|login|menu|search|home|dashboard|more|share|gift|gifts|wallet|studio|manage|manager|create|upload|explore|following|followers?|follower|inbox|activity|analytics|balance|coins|recharge|feedback|language)$/i;
+  var UI_STOPWORDS = /^(settings?|profile|account|accounts|notifications?|messages?|message|help|support|live|golive|go|end|start|logout|signout|signin|login|menu|search|home|dashboard|more|share|gift|gifts|wallet|studio|manage|manager|create|upload|explore|following|followers?|follower|inbox|activity|analytics|balance|coins|recharge|feedback|language|close|cancel|ok|okay|done|save|saved|back|next|prev|previous|skip|apply|submit|confirm|continue|got|mute|unmute|chat|edit|delete|remove|view|hide|show|retry|reload|refresh|yes|no|accept|decline|dismiss|expand|collapse)$/i;
 
   function looksLikeHandle(s) {
     if (!s) return false;
@@ -2910,12 +2915,16 @@
     } catch (_) {}
 
     // Strategy 3 \u2014 short handle-like text sitting in the top-right corner.
+    // GUARDRAIL 2: buttons are ACTIONS, never identities \u2014 a modal/dialog "Close" button
+    // in this region was matching and overwriting the real handle (the v0.4.0 "Close" bug).
+    // Exclude <button> and [role=button] entirely; only inert text nodes are considered.
     try {
-      var nodes = document.querySelectorAll('a,button,span,div,p');
+      var nodes = document.querySelectorAll('a,span,div,p');
       for (var k = 0; k < nodes.length && scanned < domDetectScanCap; k++) {
         scanned++;
         var n = nodes[k];
         if (!isTopRight(n)) continue;
+        if (n.tagName === 'BUTTON' || n.getAttribute('role') === 'button' || n.closest('button,[role="button"]')) continue;
         topRightCount++;
         var txt = directText(n);
         if (txt) consider(txt, 6, 'top-right-text');
@@ -2925,6 +2934,7 @@
     return {
       label: best ? best.text : null,
       why: best ? best.why : null,
+      score: best ? best.score : null,
       scanned: scanned,
       topRightCount: topRightCount,
       samples: samples,
@@ -2944,7 +2954,7 @@
     if (key === lastChannelNameSentKey) return;
     lastChannelNameSentKey = key;
     try {
-      chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: { handle: domAccountLabel, source: 'dom' }, roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
+      chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: { handle: domAccountLabel, source: 'dom', strategy: lastDetectWhy || null, score: lastDetectScore || null }, roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
     } catch (_) {}
   }
 
@@ -2952,9 +2962,18 @@
     var res;
     try { res = detectVisibleAccount(); } catch (e) { return; }
     if (res.label) {
+      // GUARDRAIL 2: a WEAK match (S3 direct-text, score <=6) must be corroborated across
+      // two consecutive passes before we trust it — filters one-off transient garbage
+      // (e.g. a modal label flashing through the scan region). S1/S2 (avatar alt / aria,
+      // score >=7) are trusted immediately.
+      var weak = (res.score != null && res.score <= 6);
+      if (weak && res.label !== domAccountLabel) {
+        if (res.label !== weakCandidateLabel) { weakCandidateLabel = res.label; return; } // stage; await 2nd sighting
+      }
+      weakCandidateLabel = null;
       if (res.label !== domAccountLabel) {
-        domAccountLabel = res.label;
-        console.log('[LENSED][TT] visible account label detected:', res.label, '(via ' + res.why + ')');
+        domAccountLabel = res.label; lastDetectWhy = res.why; lastDetectScore = res.score;
+        console.log('[LENSED][TT] visible account label detected:', res.label, '(via ' + res.why + ', score ' + res.score + ')');
         renderStatusLine();
       }
       maybeSendChannelName(); // self-dedups; sends on name or room change
