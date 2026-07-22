@@ -12,6 +12,57 @@ const DO_NOT_PACK = new Set(['CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 
 
 const BUCKET = 'inventory-thumbnails';
 
+// USPS IMpb mod-10 check digit, computed over the first 21 of a 22-digit tracking.
+// (Rightmost of the 21 weighted ×3, then alternating ×1/×3.) Used to disambiguate the
+// canonical tracking when a scanned barcode carries extra padding digits.
+function uspsTrackingValid(t: string): boolean {
+  if (!/^\d{22}$/.test(t)) return false;
+  let sum = 0;
+  for (let i = 0; i < 21; i++) sum += Number(t[i]) * (((20 - i) % 2 === 0) ? 3 : 1);
+  return ((10 - (sum % 10)) % 10) === Number(t[21]);
+}
+
+// Normalize a scanned shipping-label / tracking string to the canonical 22-digit USPS IMpb
+// tracking (starts 92/93/94/95). Returns null when the scan isn't a tracking → order_id path.
+// Handles three real-world barcode shapes:
+//   • bare 22-digit tracking scanned on its own;
+//   • "420" + ZIP(5 or 9) + 22-digit IMpb concatenated routing label (tracking is a clean
+//     22-digit, check-valid substring);
+//   • HAZMAT-style labels whose barcode pads the serial with an EXTRA leading zero, so the
+//     tracking region is 23+ digits and the printed human-readable tracking is NOT a contiguous
+//     substring. We recover it deterministically by collapsing the longest zero-run one digit
+//     at a time until a check-valid 22-digit form remains.
+//     e.g. "4208914992362903942203000007067" → "9236290394220300007067".
+function normalizeTracking(digits: string): string | null {
+  if (/^9[2-5]\d{20}$/.test(digits)) return digits;               // bare canonical tracking
+  // Candidate regions: the whole string, and after stripping "420" + ZIP5 / ZIP+4 routing.
+  const regions = [digits];
+  if (digits.startsWith('420')) { regions.push(digits.slice(8)); regions.push(digits.slice(12)); }
+  for (const region of regions) {
+    // (1) a clean 22-digit window starting 9[2-5] that passes the USPS check digit.
+    for (let i = 0; i + 22 <= region.length; i++) {
+      if (!/^9[2-5]/.test(region.slice(i, i + 2))) continue;
+      const win = region.slice(i, i + 22);
+      if (uspsTrackingValid(win)) return win;
+    }
+    // (2) over-length region (barcode padded the serial with extra zeros): collapse the
+    //     longest zero-run until 22 digits remain, then require a valid check digit. Only
+    //     fires when no clean window validated, so it never rewrites a legitimate tracking.
+    const start = region.search(/9[2-5]/);
+    if (start >= 0 && region.length - start > 22 && region.length - start <= 26) {
+      let s = region.slice(start);
+      while (s.length > 22) {
+        let best = -1, bestLen = 0; const re = /0+/g; let mm: RegExpExecArray | null;
+        while ((mm = re.exec(s))) if (mm[0].length > bestLen) { bestLen = mm[0].length; best = mm.index; }
+        if (best < 0) break;                                       // no zeros to collapse
+        s = s.slice(0, best) + s.slice(best + 1);                  // drop one zero from the longest run
+      }
+      if (s.length === 22 && /^9[2-5]/.test(s) && uspsTrackingValid(s)) return s;
+    }
+  }
+  return null;
+}
+
 // POST: resolve a packing "box" from a scanned slip order_id.
 //
 // Flow (all reads from our own DB):
@@ -33,30 +84,33 @@ export async function POST(req: Request) {
   if (!raw) return NextResponse.json({ error: 'Scan a shipping label or order ID' }, { status: 400 });
 
   // ── 1) Resolve the scanned value → one of our order rows. Three shapes:
-  //   (a) USPS IMpb shipping label: "420" + ZIP(5 or 9) + 22-digit tracking. The tracking
-  //       is the trailing 22 digits — slice(-22) == slice(8) for ZIP5 and is also correct
-  //       for ZIP+4, so it's more robust than a fixed 8-char strip.
+  //   (a) USPS IMpb shipping label: "420" + ZIP(5 or 9) + 22-digit tracking (incl. HAZMAT
+  //       labels that pad the serial with an extra zero — see normalizeTracking).
   //   (b) A bare 22-digit USPS tracking number (the tracking barcode scanned on its own).
   //   (c) A raw TikTok order_id (16–20 digits) — the original / back-compat path.
   const digits = raw.replace(/\s/g, '');
-  let tracking: string | null = null;
-  if (/^420\d{27,}$/.test(digits)) tracking = digits.slice(-22);        // (a) IMpb label
-  else if (/^9\d{21}$/.test(digits)) tracking = digits;                 // (b) bare tracking
+  const tracking = normalizeTracking(digits);
 
   // Seed rows for the scan. A tracking (physical label) maps to MANY orders — do NOT
   // limit(1): that made which box rendered arbitrary/nondeterministic. Pull them all.
-  type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null; store_id: string | null; status: string | null };
-  const SEL = 'order_id, auto_combine_group_id, tracking_number, store_id, status';
-  const resolvedVia: 'tracking' | 'order_id' = tracking ? 'tracking' : 'order_id';
+  type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null; store_id: string | null; status: string | null; sku_name: string | null };
+  const SEL = 'order_id, auto_combine_group_id, tracking_number, store_id, status, sku_name';
+  let resolvedVia: 'tracking' | 'order_id' = tracking ? 'tracking' : 'order_id';
   let seed: SeedRow[] = [];
   if (tracking) {
     const { data } = await supabase.from('synced_order_ids').select(SEL)
       .eq('user_id', user.id).eq('tracking_number', tracking);
     seed = (data ?? []) as SeedRow[];
-  } else {
+  }
+  // Order-id fallback. Runs when the scan wasn't a tracking AND (belt-and-suspenders) when a
+  // parsed tracking matched nothing — the label's tracking was never synced (today ~93% of
+  // synced_order_ids rows have a NULL tracking_number, so tracking lookup misses most orders).
+  // Harmless when `digits` isn't a real order_id: it simply finds no row. The picker's
+  // practical path for such labels is to scan the packing-slip ORDER-ID barcode.
+  if (!seed.length && /^\d{6,}$/.test(digits)) {
     const { data } = await supabase.from('synced_order_ids').select(SEL)
       .eq('user_id', user.id).eq('order_id', digits).maybeSingle();
-    if (data) seed = [data as SeedRow];
+    if (data) { seed = [data as SeedRow]; resolvedVia = 'order_id'; }
   }
   if (!seed.length) {
     // Echo exactly what was scanned (+ the parsed tracking) so the picker can flag it.
@@ -114,6 +168,9 @@ export async function POST(req: Request) {
   //   set, so it also catches cancelled orders that entered via the group fallback (null tracking).
   //   Degrade: if the API is unavailable/partial, fall back to stored status + a loud warning.
   const liveStatus = new Map<string, string>();
+  // Captured from the SAME getOrderById response (no extra call) to enrich unbound orders
+  // with a listing name + seller-SKU for the up-front alert. First line item is representative.
+  const orderDetail = new Map<string, { product_name: string; seller_sku: string }>();
   let statusUnverified = false;
   try {
     const admin = createAdminClient();
@@ -143,7 +200,11 @@ export async function POST(req: Request) {
           await new Promise((r) => setTimeout(r, 500 * attempt));
         }
       }
-      for (const o of got ?? []) liveStatus.set(String(o.id), String(o.status || ''));
+      for (const o of got ?? []) {
+        liveStatus.set(String(o.id), String(o.status || ''));
+        const li = (o.line_items as Record<string, unknown>[] | undefined)?.[0];
+        if (li) orderDetail.set(String(o.id), { product_name: String(li.product_name || ''), seller_sku: String(li.seller_sku || '') });
+      }
     }
     // Any order the API didn't return → we'd be trusting its (possibly stale) stored status,
     // so flag the whole pass as unverified rather than silently trust partial data.
@@ -250,6 +311,32 @@ export async function POST(req: Request) {
     skus: linesByOrder.get(id) ?? [],      // what would have been packed — for the picker's awareness
   }));
 
+  // 6b) Enrich unbound (missing) orders with a listing name + seller-SKU for the up-front
+  //     alert screen. NO new TikTok call — sources are (a) the getOrderById line items already
+  //     fetched above, (b) capture_events for captured-unbound, (c) the synced sku_name.
+  //     seller_sku is often empty (listing-dependent) → fall back to sku_name.
+  const capByOrder = new Map<string, { product_name: string | null; platform_sku_ref: string | null }>();
+  if (missingOrderIds.length) {
+    const { data: caps } = await supabase
+      .from('capture_events')
+      .select('order_id, product_name, platform_sku_ref')
+      .eq('user_id', user.id)
+      .in('order_id', missingOrderIds);
+    for (const c of caps ?? []) {
+      const k = String(c.order_id);
+      if (!capByOrder.has(k)) capByOrder.set(k, { product_name: (c.product_name as string | null) ?? null, platform_sku_ref: (c.platform_sku_ref as string | null) ?? null });
+    }
+  }
+  const missing_orders = missingOrderIds.map((id) => {
+    const d = orderDetail.get(id);
+    const c = capByOrder.get(id);
+    const sr = boxRows.get(id);
+    const listing_name = (d?.product_name && d.product_name.trim()) || (c?.product_name && c.product_name.trim()) || sr?.sku_name || null;
+    const sellerRaw = (d?.seller_sku && d.seller_sku.trim()) || (c?.platform_sku_ref && String(c.platform_sku_ref).trim()) || '';
+    const seller_sku = sellerRaw || (sr?.sku_name ?? null); // fall back to variant/sku_name when TikTok seller_sku is empty
+    return { order_id: id, listing_name, seller_sku };
+  });
+
   // 6) Already verified? (keyed by the physical-box idempotency key)
   const { data: verified } = await supabase
     .from('shipment_verifications')
@@ -268,7 +355,8 @@ export async function POST(req: Request) {
     order_ids: pickOrderIds,           // pickable only — what confirm/verify covers
     order_count: pickOrderIds.length,  // "N SKUs across M orders" counts pickable orders only
     skus,
-    missing_order_ids: missingOrderIds,
+    missing_order_ids: missingOrderIds,          // back-compat (bare ids)
+    missing_orders,                              // enriched: { order_id, listing_name, seller_sku }
     excluded,                          // do-not-pack, flagged (cancelled / on-hold / already-shipped)
     excluded_count: excluded.length,
     status_unverified: statusUnverified, // true → frontend shows the loud stale-status warning
