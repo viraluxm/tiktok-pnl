@@ -198,7 +198,8 @@ export default function ShippingTab() {
         <span className="relative text-xl">✕</span>
       </button>
 
-      <div className="flex-1 flex flex-col items-center justify-center p-6 overflow-y-auto">
+      <div className={`flex-1 min-h-0 flex flex-col items-center p-4 overflow-y-auto ${screen === 'pick' ? '' : 'justify-center'}`}>
+
         {/* READY */}
         {screen === 'ready' && (
           <div className="text-center">
@@ -247,11 +248,11 @@ export default function ShippingTab() {
           </div>
         )}
 
-        {/* PICK — one SKU per screen, photo-first */}
+        {/* PICK — one SKU per screen; hero fills the viewport, controls pinned at the bottom */}
         {screen === 'pick' && box && sku && (
-          <div className="w-full max-w-xl flex flex-col items-center">
-            {/* progress dots (tappable) */}
-            <div className="flex flex-wrap justify-center gap-2 mb-6">
+          <div className="flex-1 min-h-0 w-full max-w-2xl flex flex-col">
+            {/* progress dots (tappable) — compact, top */}
+            <div className="shrink-0 flex flex-wrap justify-center gap-2 pb-3">
               {box.skus.map((s, i) => {
                 const c = (counts[s.inventory_sku_id] ?? 0) >= s.required_qty;
                 return (
@@ -264,50 +265,53 @@ export default function ShippingTab() {
               })}
             </div>
 
-            {/* photo (tap to grab) */}
+            {/* HERO — grows to fill all remaining height. Photo fills it, or (no photo) the
+                big SKU number fills the SAME space, scaling with the viewport. Tap = grab one. */}
             <button onClick={() => grab(sku)} disabled={skuDone}
-              className="relative w-72 h-72 rounded-3xl border-2 border-tt-border bg-tt-card overflow-hidden flex items-center justify-center cursor-pointer disabled:cursor-default">
+              className="relative flex-1 min-h-0 w-full rounded-3xl border-2 border-tt-border bg-tt-card overflow-hidden flex flex-col items-center justify-center cursor-pointer disabled:cursor-default">
               {sku.thumbnail_url ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={sku.thumbnail_url} alt="" className="w-full h-full object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                <img src={sku.thumbnail_url} alt="" className="absolute inset-0 w-full h-full object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
               ) : (
-                <div className="text-center">
-                  <div className="font-mono text-8xl font-bold text-tt-text">#{sku.sku_number ?? '?'}</div>
-                  <div className="mt-2 text-sm text-tt-muted">no photo</div>
+                <div className="flex flex-col items-center justify-center px-4 text-center">
+                  <div className="font-mono font-bold text-tt-text leading-none" style={{ fontSize: 'clamp(4rem, 26vw, 10rem)' }}>#{sku.sku_number ?? '?'}</div>
+                  <div className="mt-4 font-semibold text-tt-text break-words leading-tight" style={{ fontSize: 'clamp(1.1rem, 4.5vw, 2rem)' }}>{sku.title}</div>
                 </div>
               )}
               {justDone && skuDone && (
-                <div className="absolute inset-0 bg-tt-green/85 flex items-center justify-center text-black text-8xl font-bold">✓</div>
+                <div className="absolute inset-0 bg-tt-green/90 flex items-center justify-center text-black font-bold" style={{ fontSize: 'clamp(5rem, 30vw, 12rem)' }}>✓</div>
               )}
             </button>
 
-            <div className="mt-5 text-center">
-              <div className="font-mono text-5xl font-extrabold text-tt-text">#{sku.sku_number ?? '?'}</div>
-              <div className="mt-1 text-xl font-semibold text-tt-text break-words">{sku.title}</div>
-            </div>
-            <div className={`mt-4 text-3xl font-extrabold ${skuDone ? 'text-tt-green' : 'text-tt-text'}`}>{have} / {sku.required_qty} grabbed</div>
-
-            <button onClick={() => grab(sku)} disabled={skuDone}
-              className={`mt-4 w-full py-5 rounded-2xl text-xl font-extrabold transition-opacity ${skuDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}>
-              {skuDone ? '✓ Complete' : 'Grab one'}
-            </button>
-
-            <div className="mt-4 flex items-center justify-between w-full">
-              <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
-                className="px-5 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">‹ Back</button>
-              <span className="text-sm text-tt-muted">SKU {activeIdx + 1} of {box.skus.length} · {pickedUnits}/{totalUnits} units</span>
-              <button onClick={() => setActiveIdx((i) => Math.min(box.skus.length - 1, i + 1))} disabled={activeIdx === box.skus.length - 1}
-                className="px-5 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">Next ›</button>
-            </div>
-
-            {allComplete && (
-              <button onClick={() => enterFinish(box)} className="mt-6 w-full py-4 rounded-2xl bg-tt-cyan text-black text-lg font-bold cursor-pointer hover:opacity-90">
-                Finish box
-              </button>
+            {/* photo caption: number + title (only when the PHOTO is the hero) */}
+            {sku.thumbnail_url && (
+              <div className="shrink-0 text-center pt-2">
+                <span className="font-mono text-4xl font-extrabold text-tt-text align-middle">#{sku.sku_number ?? '?'}</span>
+                <span className="ml-3 text-lg font-semibold text-tt-text break-words align-middle">{sku.title}</span>
+              </div>
             )}
-            <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="mt-4 text-sm text-tt-muted underline cursor-pointer">
-              New label
-            </button>
+
+            {/* controls — compact, pinned bottom */}
+            <div className="shrink-0 pt-3">
+              <div className={`text-center text-2xl font-extrabold ${skuDone ? 'text-tt-green' : 'text-tt-text'}`}>{have} / {sku.required_qty} grabbed</div>
+              <button onClick={() => grab(sku)} disabled={skuDone}
+                className={`mt-2 w-full py-4 rounded-2xl text-xl font-extrabold transition-opacity ${skuDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}>
+                {skuDone ? '✓ Complete' : 'Grab one'}
+              </button>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
+                  className="px-5 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">‹ Back</button>
+                <span className="text-xs text-tt-muted text-center">SKU {activeIdx + 1} of {box.skus.length} · {pickedUnits}/{totalUnits} units</span>
+                <button onClick={() => setActiveIdx((i) => Math.min(box.skus.length - 1, i + 1))} disabled={activeIdx === box.skus.length - 1}
+                  className="px-5 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">Next ›</button>
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="text-sm text-tt-muted underline cursor-pointer">New label</button>
+                {allComplete && (
+                  <button onClick={() => enterFinish(box)} className="px-6 py-3 rounded-xl bg-tt-cyan text-black font-bold cursor-pointer hover:opacity-90">Finish box ›</button>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
