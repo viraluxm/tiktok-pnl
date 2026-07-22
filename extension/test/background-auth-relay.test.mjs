@@ -89,10 +89,12 @@ async function run() {
     const sw = boot(freshSessionSeed('user-A'));
     await sleep(25); // rehydrate restores currentSessionId=sess-user-A, sessionRoomId=room-user-A
     sw.clearBroadcasts();
+    // Single-refresher: relay carries an access token only. A stray refreshToken on the
+    // message (older web build) must be IGNORED — never stored.
     const r = await send(sw.getExternal(), { type: 'LENSED_AUTH', accessToken: jwt('user-A', 2), refreshToken: 'rA2' });
     ok('1) same-user relay replies ok with same userId', r && r.ok === true && r.userId === 'user-A', JSON.stringify(r));
     ok('1) access token rotated in storage', sw.store[K_AT] === jwt('user-A', 2), 'stored=' + (sw.store[K_AT] || '').slice(-6));
-    ok('1) refresh token rotated in storage', sw.store[K_RT] === 'rA2', sw.store[K_RT]);
+    ok('1) relayed refresh token IGNORED (never persisted; single-refresher)', sw.store[K_RT] !== 'rA2', 'stored=' + sw.store[K_RT]);
     ok('1) NO null-session broadcast during same-user refresh', sw.sessionBroadcasts().length === 0, 'saw ' + JSON.stringify(sw.sessionBroadcasts()));
     ok('1) pinned session id retained in storage', sw.store[K_SID] === 'sess-user-A', String(sw.store[K_SID]));
     // Confirm currentSessionId itself survived: a matching TIKTOK_ROOM re-broadcasts it.
