@@ -71,6 +71,13 @@ export default function ShippingTab() {
   const focusInput = useCallback(() => { requestAnimationFrame(() => inputRef.current?.focus()); }, []);
   useEffect(() => { if (focus) focusInput(); }, [focus, screen, box, focusInput]);
 
+  // Leaving the tab (unmount) while still full-screen → drop out of fullscreen. Self-contained
+  // (no external deps) so it runs exactly once on unmount.
+  useEffect(() => () => {
+    const d = document as Document & { webkitExitFullscreen?: () => Promise<void> | void; webkitFullscreenElement?: Element | null };
+    if (d.fullscreenElement || d.webkitFullscreenElement) { try { (d.exitFullscreen ?? d.webkitExitFullscreen)?.call(d); } catch { /* ignore */ } }
+  }, []);
+
   const anyPicked = useMemo(() => Object.values(counts).some((v) => v > 0), [counts]);
   const pickedUnits = useMemo(() => Object.values(counts).reduce((a, b) => a + b, 0), [counts]);
   const totalUnits = useMemo(() => (box ? box.skus.reduce((a, s) => a + s.required_qty, 0) : 0), [box]);
@@ -147,9 +154,24 @@ export default function ShippingTab() {
 
   const backToReady = () => { setBox(null); setCounts({}); setErr(null); setScreen('ready'); focusInput(); };
 
+  // ── true-fullscreen takeover (hides browser chrome: URL bar, etc.) ──
+  // MUST be invoked from the tap handler — browsers block programmatic fullscreen outside a user
+  // gesture. Denial is non-fatal: focus mode still works, just with the browser chrome visible.
+  const enterFullscreen = () => {
+    const el = document.documentElement as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+    const req = el.requestFullscreen ?? el.webkitRequestFullscreen;
+    try { const p = req?.call(el); if (p && typeof (p as Promise<void>).catch === 'function') (p as Promise<void>).catch(() => {}); } catch { /* denied — continue windowed */ }
+  };
+  const exitFullscreen = () => {
+    const d = document as Document & { webkitExitFullscreen?: () => Promise<void> | void; webkitFullscreenElement?: Element | null };
+    if (!(d.fullscreenElement || d.webkitFullscreenElement)) return;
+    const ex = d.exitFullscreen ?? d.webkitExitFullscreen;
+    try { const p = ex?.call(d); if (p && typeof (p as Promise<void>).catch === 'function') (p as Promise<void>).catch(() => {}); } catch { /* ignore */ }
+  };
+
   // ── focus enter / hold-to-exit ──
-  const startScanning = () => { setFocus(true); setBox(null); setCounts({}); setErr(null); setScreen('ready'); focusInput(); };
-  const beginHold = () => { setHolding(true); holdTimer.current = setTimeout(() => { setHolding(false); setFocus(false); backToReady(); }, 900); };
+  const startScanning = () => { enterFullscreen(); setFocus(true); setBox(null); setCounts({}); setErr(null); setScreen('ready'); focusInput(); };
+  const beginHold = () => { setHolding(true); holdTimer.current = setTimeout(() => { setHolding(false); exitFullscreen(); setFocus(false); backToReady(); }, 900); };
   const cancelHold = () => { setHolding(false); if (holdTimer.current) clearTimeout(holdTimer.current); };
 
   // ── idle (tab) view ──
@@ -212,7 +234,7 @@ export default function ShippingTab() {
         <span className="relative text-xl">✕</span>
       </button>
 
-      <div className={`flex-1 min-h-0 w-full flex flex-col items-center p-4 overflow-x-hidden overflow-y-auto ${screen === 'pick' ? '' : 'justify-center'}`}>
+      <div className={`flex-1 min-h-0 w-full flex flex-col items-center overflow-x-hidden ${screen === 'pick' ? 'overflow-y-hidden p-3' : 'p-4 overflow-y-auto justify-center'}`}>
 
         {/* READY */}
         {screen === 'ready' && (
@@ -262,11 +284,13 @@ export default function ShippingTab() {
           </div>
         )}
 
-        {/* PICK — one SKU per screen; hero fills the viewport, controls pinned at the bottom */}
+        {/* PICK — one SKU per screen, sized to the device with dvh + flex + clamp:
+            [progress dots] · [HERO photo/number — flex-1, takes only leftover space, object-contain]
+            · [PINNED controls — number, count, Grab, nav; always visible, never scrolls]. */}
         {screen === 'pick' && box && sku && (
-          <div className="flex-1 min-h-0 w-full max-w-2xl flex flex-col">
+          <div className="flex-1 min-h-0 w-full max-w-2xl flex flex-col gap-[clamp(0.35rem,1.4vh,0.9rem)]">
             {/* progress dots (tappable) — compact, top */}
-            <div className="shrink-0 flex flex-wrap justify-center gap-2 pb-3">
+            <div className="shrink-0 flex flex-wrap justify-center gap-2">
               {box.skus.map((s, i) => {
                 const c = (counts[s.inventory_sku_id] ?? 0) >= s.required_qty;
                 return (
@@ -279,50 +303,54 @@ export default function ShippingTab() {
               })}
             </div>
 
-            {/* HERO — grows to fill all remaining height. Photo fills it, or (no photo) the
-                big SKU number fills the SAME space, scaling with the viewport. Tap = grab one. */}
+            {/* HERO — takes ONLY the leftover height (flex-1 min-h-0). Photo shrinks to fit
+                (object-contain, fully visible, never crops or pushes controls off). No photo →
+                the big SKU number fills the same space, scaling to the box. Tap = grab one. */}
             <button onClick={() => grab(sku)} disabled={skuDone}
-              className="relative flex-1 min-h-0 w-full rounded-3xl border-2 border-tt-border bg-tt-card overflow-hidden flex flex-col items-center justify-center cursor-pointer disabled:cursor-default">
+              className="relative flex-1 min-h-0 w-full rounded-3xl border-2 border-tt-border bg-tt-card overflow-hidden flex items-center justify-center cursor-pointer disabled:cursor-default">
               {sku.thumbnail_url ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={sku.thumbnail_url} alt="" className="absolute inset-0 w-full h-full object-cover" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                <img src={sku.thumbnail_url} alt="" className="max-w-full max-h-full object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
               ) : (
                 <div className="flex flex-col items-center justify-center px-4 text-center">
-                  <div className="font-mono font-bold text-tt-text leading-none" style={{ fontSize: 'clamp(4rem, 26vw, 10rem)' }}>#{sku.sku_number ?? '?'}</div>
-                  <div className="mt-4 font-semibold text-tt-text break-words leading-tight" style={{ fontSize: 'clamp(1.1rem, 4.5vw, 2rem)' }}>{sku.title}</div>
+                  <div className="font-mono font-bold text-tt-text leading-none" style={{ fontSize: 'clamp(3rem, 22vh, 11rem)' }}>#{sku.sku_number ?? '?'}</div>
+                  <div className="mt-3 font-semibold text-tt-text break-words leading-tight" style={{ fontSize: 'clamp(1rem, 4vh, 2rem)' }}>{sku.title}</div>
                 </div>
               )}
               {justDone && skuDone && (
-                <div className="absolute inset-0 bg-tt-green/90 flex items-center justify-center text-black font-bold" style={{ fontSize: 'clamp(5rem, 30vw, 12rem)' }}>✓</div>
+                <div className="absolute inset-0 bg-tt-green/90 flex items-center justify-center text-black font-bold" style={{ fontSize: 'clamp(4rem, 26vh, 12rem)' }}>✓</div>
               )}
             </button>
 
-            {/* photo caption: number + title (only when the PHOTO is the hero) */}
-            {sku.thumbnail_url && (
-              <div className="shrink-0 text-center pt-2">
-                <span className="font-mono text-4xl font-extrabold text-tt-text align-middle">#{sku.sku_number ?? '?'}</span>
-                <span className="ml-3 text-lg font-semibold text-tt-text break-words align-middle">{sku.title}</span>
+            {/* PINNED controls — reserved space, always visible, everything clamp-sized so the
+                whole block scales with the device and never overflows. */}
+            <div className="shrink-0 flex flex-col gap-[clamp(0.3rem,1.2vh,0.7rem)]">
+              {/* SKU number + title (always pinned & visible) */}
+              <div className="text-center leading-tight px-1">
+                <span className="font-mono font-extrabold text-tt-text align-middle" style={{ fontSize: 'clamp(1.4rem, 5.5vw, 2.4rem)' }}>#{sku.sku_number ?? '?'}</span>
+                <span className="ml-2 font-semibold text-tt-text break-words align-middle" style={{ fontSize: 'clamp(0.85rem, 3.4vw, 1.25rem)' }}>{sku.title}</span>
               </div>
-            )}
-
-            {/* controls — compact, pinned bottom */}
-            <div className="shrink-0 pt-3">
-              <div className={`text-center text-2xl font-extrabold ${skuDone ? 'text-tt-green' : 'text-tt-text'}`}>{have} / {sku.required_qty} grabbed</div>
+              {/* count */}
+              <div className={`text-center font-extrabold ${skuDone ? 'text-tt-green' : 'text-tt-text'}`} style={{ fontSize: 'clamp(1.1rem, 4.5vw, 1.9rem)' }}>{have} / {sku.required_qty} grabbed</div>
+              {/* grab */}
               <button onClick={() => grab(sku)} disabled={skuDone}
-                className={`mt-2 w-full py-4 rounded-2xl text-xl font-extrabold transition-opacity ${skuDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}>
+                className={`w-full rounded-2xl font-extrabold transition-opacity ${skuDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}
+                style={{ padding: 'clamp(0.55rem, 1.9vh, 1rem) 0', fontSize: 'clamp(1rem, 4vw, 1.4rem)' }}>
                 {skuDone ? '✓ Complete' : 'Grab one'}
               </button>
-              <div className="mt-3 flex items-center justify-between gap-2">
+              {/* Back / info / Next */}
+              <div className="flex items-center justify-between gap-2">
                 <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
-                  className="shrink-0 px-4 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">‹ Back</button>
+                  className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)' }}>‹ Back</button>
                 <span className="flex-1 min-w-0 truncate text-center text-xs text-tt-muted">SKU {activeIdx + 1} of {box.skus.length} · {pickedUnits}/{totalUnits} units</span>
                 <button onClick={() => setActiveIdx((i) => Math.min(box.skus.length - 1, i + 1))} disabled={activeIdx === box.skus.length - 1}
-                  className="shrink-0 px-4 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">Next ›</button>
+                  className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)' }}>Next ›</button>
               </div>
-              <div className="mt-3 flex items-center justify-between gap-3">
+              {/* New label / Finish */}
+              <div className="flex items-center justify-between gap-3">
                 <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="text-sm text-tt-muted underline cursor-pointer">New label</button>
                 {allComplete && (
-                  <button onClick={() => enterFinish(box)} className="px-6 py-3 rounded-xl bg-tt-cyan text-black font-bold cursor-pointer hover:opacity-90">Finish box ›</button>
+                  <button onClick={() => enterFinish(box)} className="px-6 py-2.5 rounded-xl bg-tt-cyan text-black font-bold cursor-pointer hover:opacity-90">Finish box ›</button>
                 )}
               </div>
             </div>
