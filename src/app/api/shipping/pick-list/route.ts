@@ -45,8 +45,8 @@ export async function POST(req: Request) {
 
   // Seed rows for the scan. A tracking (physical label) maps to MANY orders — do NOT
   // limit(1): that made which box rendered arbitrary/nondeterministic. Pull them all.
-  type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null; store_id: string | null; status: string | null };
-  const SEL = 'order_id, auto_combine_group_id, tracking_number, store_id, status';
+  type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null; store_id: string | null; status: string | null; sku_name: string | null };
+  const SEL = 'order_id, auto_combine_group_id, tracking_number, store_id, status, sku_name';
   const resolvedVia: 'tracking' | 'order_id' = tracking ? 'tracking' : 'order_id';
   let seed: SeedRow[] = [];
   if (tracking) {
@@ -114,6 +114,9 @@ export async function POST(req: Request) {
   //   set, so it also catches cancelled orders that entered via the group fallback (null tracking).
   //   Degrade: if the API is unavailable/partial, fall back to stored status + a loud warning.
   const liveStatus = new Map<string, string>();
+  // Captured from the SAME getOrderById response (no extra call) to enrich unbound orders
+  // with a listing name + seller-SKU for the up-front alert. First line item is representative.
+  const orderDetail = new Map<string, { product_name: string; seller_sku: string }>();
   let statusUnverified = false;
   try {
     const admin = createAdminClient();
@@ -143,7 +146,11 @@ export async function POST(req: Request) {
           await new Promise((r) => setTimeout(r, 500 * attempt));
         }
       }
-      for (const o of got ?? []) liveStatus.set(String(o.id), String(o.status || ''));
+      for (const o of got ?? []) {
+        liveStatus.set(String(o.id), String(o.status || ''));
+        const li = (o.line_items as Record<string, unknown>[] | undefined)?.[0];
+        if (li) orderDetail.set(String(o.id), { product_name: String(li.product_name || ''), seller_sku: String(li.seller_sku || '') });
+      }
     }
     // Any order the API didn't return → we'd be trusting its (possibly stale) stored status,
     // so flag the whole pass as unverified rather than silently trust partial data.
@@ -250,6 +257,32 @@ export async function POST(req: Request) {
     skus: linesByOrder.get(id) ?? [],      // what would have been packed — for the picker's awareness
   }));
 
+  // 6b) Enrich unbound (missing) orders with a listing name + seller-SKU for the up-front
+  //     alert screen. NO new TikTok call — sources are (a) the getOrderById line items already
+  //     fetched above, (b) capture_events for captured-unbound, (c) the synced sku_name.
+  //     seller_sku is often empty (listing-dependent) → fall back to sku_name.
+  const capByOrder = new Map<string, { product_name: string | null; platform_sku_ref: string | null }>();
+  if (missingOrderIds.length) {
+    const { data: caps } = await supabase
+      .from('capture_events')
+      .select('order_id, product_name, platform_sku_ref')
+      .eq('user_id', user.id)
+      .in('order_id', missingOrderIds);
+    for (const c of caps ?? []) {
+      const k = String(c.order_id);
+      if (!capByOrder.has(k)) capByOrder.set(k, { product_name: (c.product_name as string | null) ?? null, platform_sku_ref: (c.platform_sku_ref as string | null) ?? null });
+    }
+  }
+  const missing_orders = missingOrderIds.map((id) => {
+    const d = orderDetail.get(id);
+    const c = capByOrder.get(id);
+    const sr = boxRows.get(id);
+    const listing_name = (d?.product_name && d.product_name.trim()) || (c?.product_name && c.product_name.trim()) || sr?.sku_name || null;
+    const sellerRaw = (d?.seller_sku && d.seller_sku.trim()) || (c?.platform_sku_ref && String(c.platform_sku_ref).trim()) || '';
+    const seller_sku = sellerRaw || (sr?.sku_name ?? null); // fall back to variant/sku_name when TikTok seller_sku is empty
+    return { order_id: id, listing_name, seller_sku };
+  });
+
   // 6) Already verified? (keyed by the physical-box idempotency key)
   const { data: verified } = await supabase
     .from('shipment_verifications')
@@ -268,7 +301,8 @@ export async function POST(req: Request) {
     order_ids: pickOrderIds,           // pickable only — what confirm/verify covers
     order_count: pickOrderIds.length,  // "N SKUs across M orders" counts pickable orders only
     skus,
-    missing_order_ids: missingOrderIds,
+    missing_order_ids: missingOrderIds,          // back-compat (bare ids)
+    missing_orders,                              // enriched: { order_id, listing_name, seller_sku }
     excluded,                          // do-not-pack, flagged (cancelled / on-hold / already-shipped)
     excluded_count: excluded.length,
     status_unverified: statusUnverified, // true → frontend shows the loud stale-status warning
