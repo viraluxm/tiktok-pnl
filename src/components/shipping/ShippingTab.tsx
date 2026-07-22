@@ -178,10 +178,17 @@ export default function ShippingTab() {
   // ── focus-mode overlay (covers the tab nav) ──
   return (
     <div className="fixed inset-0 z-50 bg-tt-bg text-tt-text flex flex-col select-none">
-      {/* hidden scanner sink — reuses the always-focused input + Enter mechanism */}
+      {/* hidden scanner sink — reuses the always-focused input + Enter mechanism.
+          inputMode="none" keeps the input FOCUSED (so the hardware scanner's characters +
+          Enter still land here) while telling the browser NOT to raise the on-screen keyboard.
+          The picker never types by hand. autoComplete/correct/capitalize off avoid any
+          suggestion bar. (If a device still raises the keyboard, the fallback is a
+          document-level keydown capture with no focused field — not needed unless this fails.) */}
       <input
         ref={inputRef} value={value} onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onScan(); } }}
+        inputMode="none"
+        autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}
         className="absolute w-px h-px opacity-0 pointer-events-none" aria-hidden
       />
 
