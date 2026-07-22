@@ -46,3 +46,9 @@ next-env.d.ts
 
 # local Claude Code config (per-machine)
 .claude/
+
+# incident diagnostics + recovery artifacts (local only — contain order/PII data, never commit)
+diag.json
+lost_orders.txt
+*recovery*.csv
+recovery-*.json
