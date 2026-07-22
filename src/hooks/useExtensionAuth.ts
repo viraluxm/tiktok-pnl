@@ -7,14 +7,14 @@ import { createClient } from '@/lib/supabase/client';
  * Relays the Supabase session to the Lensed Chrome extension via
  * chrome.runtime.sendMessage (externally_connectable).
  *
- * ─── Single-refresher COMPAT phase ───
- * Transition state for the single-refresher cutover. This build does BOTH:
- *   • Push (unchanged): relay access + refresh token, so existing v0.4.x extensions
- *     (which self-refresh and read the refresh token) keep working.
- *   • Pull (new): answer the extension's on-demand token request with a fresh access
- *     token from getSession(), so v0.5.0 extensions (which never self-refresh) work.
- * Both extension versions function against this build. The refresh-token relay is
- * removed ONLY in the final phase, after every host is confirmed on v0.5.0.
+ * ─── Single-refresher model (final) ───
+ * The web app is the ONLY refresher. It relays the ACCESS TOKEN ONLY:
+ *   • Push: on sign-in and every TOKEN_REFRESHED, send the fresh access token.
+ *   • Pull: answer the extension's LENSED_REQUEST_TOKEN with a fresh access token
+ *     from getSession(). We never send the refresh token — an extension that held it
+ *     would be a second refresher racing the rotating token (the 2026-07-22 dead-loop).
+ * Apply ONLY after every host is confirmed on v0.5.0 (v0.4.x extensions need the
+ * refresh relay the compat build still provides).
  *
  * Silently no-ops if the extension isn't installed or the ID doesn't match.
  *
@@ -27,12 +27,12 @@ import { createClient } from '@/lib/supabase/client';
 const LENSED_EXTENSION_ID =
   process.env.NEXT_PUBLIC_LENSED_EXTENSION_ID || 'mdfjfepjpnhidnfpeghkpgdjpcjehbpg';
 
-function sendToExtension(accessToken: string, refreshToken: string) {
+function sendToExtension(accessToken: string) {
   try {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
     chrome.runtime.sendMessage(
       LENSED_EXTENSION_ID,
-      { type: 'LENSED_AUTH', accessToken, refreshToken },
+      { type: 'LENSED_AUTH', accessToken },
       // Surface failures instead of swallowing them — a wrong ID / non-matching
       // domain shows "Could not establish connection. Receiving end does not
       // exist." rather than a silent "Not connected".
@@ -60,14 +60,14 @@ export function useExtensionAuth() {
     // Push current session immediately
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) {
-        sendToExtension(session.access_token, session.refresh_token);
+        sendToExtension(session.access_token);
       }
     });
 
     // Push on every auth state change (login, token refresh, logout)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) {
-        sendToExtension(session.access_token, session.refresh_token);
+        sendToExtension(session.access_token);
       }
     });
 
