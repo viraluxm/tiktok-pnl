@@ -7,13 +7,14 @@
   "minimum_chrome_version": "114",
   "permissions": ["storage", "alarms"],
   "host_permissions": [
-    "https://shop.tiktok.com/*"
+    "https://shop.tiktok.com/*",
+    "https://lensed.io/*",
+    "https://*.lensed.io/*"
   ],
   "externally_connectable": {
     "matches": [
       "https://*.lensed.io/*",
-      "https://lensed.io/*",
-      "http://localhost:3000/*"
+      "https://lensed.io/*"
     ]
   },
   "background": {
@@ -34,8 +35,7 @@
     {
       "matches": [
         "https://lensed.io/*",
-        "https://*.lensed.io/*",
-        "http://localhost:3000/*"
+        "https://*.lensed.io/*"
       ],
       "js": ["lensed-bridge.js"],
       "run_at": "document_idle"

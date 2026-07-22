@@ -6,6 +6,13 @@ SRC="$SCRIPT_DIR"
 DIST="$SCRIPT_DIR/dist"
 TERSER="$SCRIPT_DIR/node_modules/.bin/terser"
 
+# Dev vs prod build. DEFAULT IS PRODUCTION (no localhost anywhere). Pass --dev (or set
+# LENSED_DEV=1) to inject http://localhost:3000/* into the dist manifest for LOCAL testing
+# of the web↔extension relay + pull path. The committed source manifest is production-only,
+# so a plain `bash build.sh` can never ship localhost.
+DEV_BUILD=0
+if [ "$1" = "--dev" ] || [ "${LENSED_DEV:-0}" = "1" ]; then DEV_BUILD=1; fi
+
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
@@ -31,6 +38,32 @@ rsync -a \
   "$SRC/" "$DIST/"
 
 echo "Copied source files to dist/"
+
+# ── DEV ONLY: inject http://localhost:3000/* into the dist manifest ──────────────
+# Adds localhost to host_permissions (tabs.query discovery of the local web tab),
+# externally_connectable.matches (LENSED_AUTH relay from the local web app), and the
+# lensed-bridge content-script match (bridge injection on localhost). Patches dist ONLY —
+# the source manifest stays production-clean. Never runs in a default/prod build.
+if [ "$DEV_BUILD" = "1" ]; then
+  echo "  [DEV BUILD] injecting http://localhost:3000/* into dist/manifest.json"
+  python3 - "$DIST/manifest.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p))
+LH = 'http://localhost:3000/*'
+def add(lst):
+    if LH not in lst: lst.append(LH)
+    return lst
+m['host_permissions'] = add(m.get('host_permissions', []))
+m.setdefault('externally_connectable', {}).setdefault('matches', [])
+add(m['externally_connectable']['matches'])
+for cs in m.get('content_scripts', []):
+    if 'lensed-bridge.js' in cs.get('js', []):
+        add(cs['matches'])
+json.dump(m, open(p, 'w'), indent=2)
+open(p, 'a').write('\n')
+PY
+fi
 
 # Stamp the diagnostics build marker with the real short commit SHA (source keeps the
 # literal '__BUILD_SHA__' placeholder; only the built dist carries the resolved SHA).
@@ -70,7 +103,13 @@ echo "Reduction: $(echo "scale=0; 100 - ($DIST_SIZE * 100 / $SRC_SIZE)" | bc)%"
 echo ""
 
 VERSION=$(grep '"version"' "$DIST/manifest.json" | head -1 | sed 's/.*"\([0-9.]*\)".*/\1/')
-ZIP_NAME="lensed-extension-v${VERSION}.zip"
+# Dev builds get a -dev suffix so a localhost-bearing zip can NEVER be mistaken for the
+# distribution artifact. The production zip is lensed-extension-v<version>.zip (no suffix).
+if [ "$DEV_BUILD" = "1" ]; then
+  ZIP_NAME="lensed-extension-v${VERSION}-dev.zip"
+else
+  ZIP_NAME="lensed-extension-v${VERSION}.zip"
+fi
 ZIP_PATH="$SCRIPT_DIR/$ZIP_NAME"
 
 rm -f "$ZIP_PATH"
