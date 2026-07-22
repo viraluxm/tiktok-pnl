@@ -15,6 +15,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 interface BoxSku {
   inventory_sku_id: string;
@@ -175,9 +176,15 @@ export default function ShippingTab() {
   const have = sku ? counts[sku.inventory_sku_id] ?? 0 : 0;
   const skuDone = sku ? have >= sku.required_qty : false;
 
-  // ── focus-mode overlay (covers the tab nav) ──
-  return (
-    <div className="fixed inset-0 z-50 w-screen max-w-full bg-tt-bg text-tt-text flex flex-col select-none overflow-x-hidden">
+  // ── focus-mode overlay ──
+  // Rendered through a PORTAL to <body> so it escapes the tab-content stacking context (a
+  // transformed/positioned ancestor was clipping/under-layering the `fixed` overlay, letting
+  // the tab nav bleed through). Solid, OPAQUE bg-tt-bg fills the whole dynamic viewport at
+  // z-[200] — above the app header/nav (z-50) — so nothing behind is visible or interactable.
+  // Safe under SSR: the overlay only appears after a client click (focus starts false → idle view).
+  if (typeof document === 'undefined') return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[200] w-screen h-[100dvh] max-w-full bg-tt-bg text-tt-text flex flex-col select-none overflow-hidden">
       {/* hidden scanner sink — reuses the always-focused input + Enter mechanism.
           inputMode="none" keeps the input FOCUSED (so the hardware scanner's characters +
           Enter still land here) while telling the browser NOT to raise the on-screen keyboard.
@@ -351,6 +358,7 @@ export default function ShippingTab() {
           </div>
         </div>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
