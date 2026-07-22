@@ -256,8 +256,29 @@ async function syncConnection(
           // Bulk upsert orders (strip product_name — not a DB column). Stamp store_id
           // explicitly from the connection being synced → correct per-store tagging.
           const upsertData = [...rows.values()];
-          const dbRows = upsertData.map(({ product_name: _, ...rest }) => ({ ...rest, store_id: storeId }));
-          const { error: upsertErr } = await admin.from('synced_order_ids').upsert(dbRows, { onConflict: 'user_id,order_id' });
+          const dbRows: Record<string, unknown>[] = upsertData.map(({ product_name: _, ...rest }) => ({ ...rest, store_id: storeId }));
+          // tracking_number is present in the order payload ONLY while an order is AWAITING_COLLECTION;
+          // TikTok drops it once the order ships. A single full-row upsert would then null-overwrite the
+          // tracking we captured earlier — silently wiping it as the order moves to IN_TRANSIT/DELIVERED.
+          // So split the write and never overwrite a stored tracking with null (DB-side COALESCE):
+          //   • rows WITH a tracking value → upsert every column, as before;
+          //   • rows WITHOUT one → upsert with tracking_number OMITTED, so PostgREST leaves the stored
+          //     tracking_number untouched on conflict (== coalesce(excluded.tracking_number, stored)).
+          // Every non-tracking field still upserts exactly as before in both paths. An order_id lands in
+          // exactly one list (rows is keyed by order_id), so the two upserts never conflict with each other.
+          const withTracking = dbRows.filter((r) => r.tracking_number != null);
+          const withoutTracking = dbRows
+            .filter((r) => r.tracking_number == null)
+            .map(({ tracking_number: _tn, ...rest }) => rest);
+          let upsertErr: { message: string } | null = null;
+          if (withTracking.length) {
+            const { error } = await admin.from('synced_order_ids').upsert(withTracking, { onConflict: 'user_id,order_id' });
+            if (error) upsertErr = error;
+          }
+          if (!upsertErr && withoutTracking.length) {
+            const { error } = await admin.from('synced_order_ids').upsert(withoutTracking, { onConflict: 'user_id,order_id' });
+            if (error) upsertErr = error;
+          }
           if (upsertErr) console.error('[Sync] Upsert error:', upsertErr.message);
           else totalNew += upsertData.length;
 
