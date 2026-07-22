@@ -29,10 +29,30 @@ function boot(opts) {
       set: (o, cb) => cb ? setTimeout(() => { Object.assign(store, o); cb(); }, 1) : new Promise((r) => setTimeout(() => { Object.assign(store, o); r(); }, 1)),
       remove: (k, cb) => cb && cb(),
     } },
-    tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => Promise.resolve(), onRemoved: { addListener() {} } },
+    tabs: {
+      // Pull path queries lensed.io tabs with an ARRAY url; broadcast* query tiktok with a
+      // STRING url. Answer the pull with a fresh access token; return no tabs otherwise.
+      query: (qy, cb) => {
+        const isLensed = qy && Array.isArray(qy.url) && qy.url.some((u) => u.includes('lensed.io') || u.includes('localhost'));
+        const t = isLensed ? [{ id: 9 }] : [];
+        return cb ? cb(t) : Promise.resolve(t);
+      },
+      sendMessage: (id, msg, cb) => {
+        if (cb) {
+          if (msg && msg.type === 'LENSED_REQUEST_TOKEN') {
+            pulls.push(msg);
+            cb({ accessToken: 'PULLED.' + b64url({ sub: 'user-abc-1234', exp: Math.floor(Date.now() / 1000) + 3600 }) + '.s' });
+          } else { cb(undefined); }
+          return;
+        }
+        return Promise.resolve();
+      },
+      onRemoved: { addListener() {} },
+    },
     alarms: { create: () => {}, onAlarm: { addListener: (fn) => { alarmHandler = fn; } } },
   };
   const calls = []; // {method,url}
+  const pulls = []; // LENSED_REQUEST_TOKEN messages sent to the lensed.io bridge (pull path)
   const q = { live_sessions_get: opts.liveSessionsGet || [], token: opts.tokenResp };
   window.fetch = (url, o) => {
     const u = String(url); const m = (o && o.method) || 'GET'; calls.push({ method: m, url: u });
@@ -57,7 +77,7 @@ function boot(opts) {
     + 'runTick:function(){return runRecoveryTick();}'
     + '};';
   window.eval(bgText + bridge);
-  return { window, T: window.__T, getOnMessage: () => onMessage, getAlarm: () => alarmHandler, calls };
+  return { window, T: window.__T, getOnMessage: () => onMessage, getAlarm: () => alarmHandler, calls, pulls };
 }
 const send = (fn, msg) => new Promise((res) => { const r = fn(msg, {}, (resp) => res(resp)); if (r !== true) res(undefined); });
 const countPost = (calls, frag) => calls.filter((c) => c.method === 'POST' && c.url.includes(frag)).length;
@@ -77,8 +97,8 @@ async function run() {
     ok('diagEnabled still false (verbose stays gated)', sw.T.diagEnabled() === false);
   }
 
-  // ── (a) alarm refreshes + flushes WITHOUT a content ping ────────────
-  console.log('(a) recovery alarm: refresh + flush with NO content ping:');
+  // ── (a) alarm PULLS a fresh token + flushes WITHOUT a content ping ──
+  console.log('(a) recovery alarm: proactive PULL + flush with NO content ping:');
   { const sw = boot({ expInSec: 120 }); await sleep(40); // near-expiry (120s < 180 buf; >60 so rehydrate keeps it)
     sw.T.setPinned('sess-live', 'room-live');
     sw.T.setQueue([{ sale: { orderId: 'ord-queued', roomId: 'room-live', isPaymentSuccessful: true, sellingPrice: '$5' }, stagedSkus: [], result: 'sold' }]);
@@ -87,7 +107,10 @@ async function run() {
     await sw.getAlarm()({ name: 'lensed_recovery' }); // drive via the real chrome.alarms handler
     await sleep(30);
     const after = sw.calls.slice(before);
-    ok('proactive token refresh fired (no 401 needed)', hasRefresh(after), 'no refresh call');
+    // Single-refresher: proactive recovery PULLS from the web-app bridge and NEVER calls
+    // Supabase's token endpoint itself.
+    ok('proactive PULL fired (LENSED_REQUEST_TOKEN to bridge)', sw.pulls.length >= 1, 'pulls=' + sw.pulls.length);
+    ok('NO self-refresh call to /auth/v1/token', !hasRefresh(after), 'refresh call present');
     ok('queue flushed (capture_events POSTed)', countPost(after, 'capture_events') >= 1);
     ok('sale queue drained', (sw.T.queue() || []).length === 0, 'left=' + (sw.T.queue() || []).length);
     const ring = sw.T.ring() || [];

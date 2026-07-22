@@ -20,9 +20,20 @@ var SUPABASE_URL = 'https://dvucodtdojumvplmgjeu.supabase.co';
 var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR2dWNvZHRkb2p1bXZwbG1namV1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA0MjU5MjAsImV4cCI6MjA4NjAwMTkyMH0.cJskj6ADQpsdA0_T9GWoBTp4cpfvYxJxfEyiclaBKqY'; // your anon/public key
 
 // ─── Storage keys ────────────────────────────────────────────────────
+// Single-refresher model: the extension holds ONLY a short-lived access token.
+// The web app owns the refresh token and is the sole thing that ever rotates it,
+// so we never store or refresh a refresh token here (SK_REFRESH_TOKEN removed).
 var SK_ACCESS_TOKEN = 'lensed_access_token';
-var SK_REFRESH_TOKEN = 'lensed_refresh_token';
 var SK_USER_ID = 'lensed_user_id';
+
+// The lensed.io origins where the web-app token responder + bridge live. Used to
+// find a tab to PULL a fresh access token from on a 401; kept in sync with the
+// lensed-bridge content-script matches in manifest.json.
+var LENSED_TAB_MATCHES = [
+  'https://lensed.io/*',
+  'https://*.lensed.io/*',
+  'http://localhost:3000/*',
+];
 // Live-session identity — persisted so a Live Manager reload or MV3 service-worker
 // eviction RESUMES the same session instead of forking a new one. Auction
 // idempotency is scoped to (session_id, order_id), so re-binding an order under a
@@ -160,8 +171,8 @@ try {
 
 // ─── State ───────────────────────────────────────────────────────────
 var accessToken = null;
-var refreshToken = null;
 var userId = null;
+var authExpired = false; // true when the access token expired and no fresh one could be pulled
 var currentRoomId = null;          // the live's DETECTED tiktok room (from the page)
 var currentSessionId = null;
 // Room that currentSessionId is scoped to (persisted as SK_ROOM_ID). A session is
@@ -501,8 +512,8 @@ async function supabaseGet(table, query) {
   var url = SUPABASE_URL + '/rest/v1/' + table + '?' + query;
   var res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
-    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
-    var refreshed = await tryRefreshToken();
+    diagCrit('http.401', 'warn', '401 from Supabase — pulling fresh access token from web app', null);
+    var refreshed = await recoverAccessToken();
     if (refreshed) {
       res = await sbFetch(url, { headers: supabaseHeaders() }, FETCH_TIMEOUT_MS, true);
     }
@@ -524,8 +535,8 @@ async function supabasePost(table, body) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, false);
   if (res.status === 401) {
-    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
-    var refreshed = await tryRefreshToken();
+    diagCrit('http.401', 'warn', '401 from Supabase — pulling fresh access token from web app', null);
+    var refreshed = await recoverAccessToken();
     if (refreshed) {
       res = await sbFetch(url, {
         method: 'POST',
@@ -553,8 +564,8 @@ async function supabaseUpsert(table, body, onConflict) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, true);
   if (res.status === 401) {
-    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
-    var refreshed = await tryRefreshToken();
+    diagCrit('http.401', 'warn', '401 from Supabase — pulling fresh access token from web app', null);
+    var refreshed = await recoverAccessToken();
     if (refreshed) {
       headers = supabaseHeaders();
       headers['Prefer'] = 'resolution=merge-duplicates,return=representation';
@@ -585,8 +596,8 @@ async function supabasePatch(table, query, body) {
     body: JSON.stringify(body),
   }, FETCH_TIMEOUT_WRITE_MS, true);
   if (res.status === 401) {
-    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
-    var refreshed = await tryRefreshToken();
+    diagCrit('http.401', 'warn', '401 from Supabase — pulling fresh access token from web app', null);
+    var refreshed = await recoverAccessToken();
     if (refreshed) {
       headers = supabaseHeaders();
       headers['Prefer'] = 'return=minimal';
@@ -615,8 +626,8 @@ async function supabaseRpc(fnName, params) {
     body: JSON.stringify(params),
   }, FETCH_TIMEOUT_MS, true);
   if (res.status === 401) {
-    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
-    var refreshed = await tryRefreshToken();
+    diagCrit('http.401', 'warn', '401 from Supabase — pulling fresh access token from web app', null);
+    var refreshed = await recoverAccessToken();
     if (refreshed) {
       res = await sbFetch(url, {
         method: 'POST',
@@ -634,13 +645,12 @@ async function supabaseRpc(fnName, params) {
 
 // ─── Auth: persist / rehydrate / refresh ─────────────────────────────
 
-async function persistAuth(at, rt) {
+async function persistAuth(at) {
   accessToken = at;
-  refreshToken = rt;
+  authExpired = false; // a fresh access token clears any reconnect state
   userId = getUserIdFromToken(at);
   var data = {};
   data[SK_ACCESS_TOKEN] = at;
-  data[SK_REFRESH_TOKEN] = rt;
   if (userId) data[SK_USER_ID] = userId;
   await chrome.storage.local.set(data);
   console.log('[LENSED][BG] auth persisted, user_id:', userId);
@@ -655,26 +665,19 @@ async function rehydrateAuth() {
   // authReadyPromise resolves regardless, and awaiting handlers fall through to
   // their own isAuthenticated() guards instead of throwing/hanging.
   try {
-    var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
+    var data = await chrome.storage.local.get([SK_ACCESS_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
     if (data[SK_ACCESS_TOKEN]) {
       accessToken = data[SK_ACCESS_TOKEN];
-      refreshToken = data[SK_REFRESH_TOKEN] || null;
       userId = data[SK_USER_ID] || getUserIdFromToken(accessToken);
 
-      // If the stored access token is expired, try refreshing immediately
+      // Single-refresher model: we can't renew a token on our own. Keep the stored
+      // access token even if expired — the first real API call 401s and recovers a
+      // fresh one via the pull path (recoverAccessToken → lensed.io bridge), and the
+      // web app also re-relays on its own TOKEN_REFRESHED. This keeps the pinned
+      // session resumable while never calling Supabase's token endpoint here.
       if (isTokenExpired(accessToken)) {
-        console.log('[LENSED][BG] rehydrated token is expired, refreshing...');
-        diagCrit('auth.refresh', 'info', 'rehydrate: refreshing expired token', null);
-        var refreshed = await tryRefreshToken();
-        if (!refreshed) {
-          console.warn('[LENSED][BG] rehydrate refresh failed — clearing auth');
-          diagCrit('auth.lost', 'warn', 'rehydrate refresh failed — auth cleared', { user: diagRedactId(userId) });
-          accessToken = null;
-          refreshToken = null;
-          userId = null;
-        } else {
-          diagCrit('auth.acquired', 'info', 'auth restored (refreshed on rehydrate)', { user: diagRedactId(userId) });
-        }
+        console.log('[LENSED][BG] rehydrated token is expired — will recover via pull on next 401');
+        diagCrit('auth.acquired', 'info', 'auth restored from storage (expired — pull-on-401 armed)', { user: diagRedactId(userId) });
       } else {
         console.log('[LENSED][BG] auth rehydrated, user_id:', userId);
         diagCrit('auth.acquired', 'info', 'auth restored from storage', { user: diagRedactId(userId) });
@@ -713,44 +716,67 @@ async function rehydrateAuth() {
   }
 }
 
-async function tryRefreshToken() {
-  if (!refreshToken) return false;
-  try {
-    // allowRetry=true (one retry): a transient network blip shouldn't drop auth. The
-    // aborted/failed path returns false below, so callers fall through to their own
-    // isAuthenticated() guards and nothing hangs (rehydrate always settles authReady).
-    var res = await sbFetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
-      method: 'POST',
-      headers: {
-        'apikey': SUPABASE_ANON_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    }, FETCH_TIMEOUT_MS, true);
-    if (!res.ok) {
-      console.error('[LENSED][BG] token refresh failed:', res.status);
-      diagCrit('auth.refresh_fail', 'error', 'token refresh rejected', { status: res.status });
-      return false;
+// ─── Pull path: recover a fresh access token from the web app ─────────
+// The extension NEVER calls Supabase's token-refresh endpoint (that made it a second,
+// racing refresher — the root cause of the 2026-07-22 dead-loop). When our access
+// token 401s, we ask an open lensed.io tab (via the lensed-bridge content script) for
+// a current token — the web-app Supabase SDK keeps its session fresh on its own timer.
+// Resolves to the access token, or null if no lensed.io tab can answer.
+function requestTokenFromWebApp() {
+  return new Promise(function (resolve) {
+    try {
+      chrome.tabs.query({ url: LENSED_TAB_MATCHES }, function (tabs) {
+        if (chrome.runtime.lastError || !tabs || tabs.length === 0) {
+          resolve(null);
+          return;
+        }
+        // Try each lensed.io tab until one's bridge answers with a token.
+        var idx = 0;
+        function tryNext() {
+          if (idx >= tabs.length) { resolve(null); return; }
+          var tab = tabs[idx++];
+          chrome.tabs.sendMessage(tab.id, { type: 'LENSED_REQUEST_TOKEN' }, function (resp) {
+            if (chrome.runtime.lastError) { tryNext(); return; } // no bridge in that tab
+            if (resp && resp.accessToken) { resolve(resp.accessToken); return; }
+            tryNext();
+          });
+        }
+        tryNext();
+      });
+    } catch (e) {
+      resolve(null);
     }
-    var json = await res.json();
-    if (json.access_token && json.refresh_token) {
-      await persistAuth(json.access_token, json.refresh_token);
-      console.log('[LENSED][BG] token refreshed successfully');
-      diagCrit('auth.refresh_ok', 'info', 'token refreshed', null);
-      return true;
-    }
-    diagCrit('auth.refresh_fail', 'error', 'token refresh response missing tokens', null);
-    return false;
-  } catch (e) {
-    console.error('[LENSED][BG] token refresh error:', e);
-    diagCrit('auth.refresh_fail', 'error', 'token refresh threw', { code: diagClassifyErr(e) });
-    return false;
+  });
+}
+
+// On a 401, pull a fresh access token from the web app and persist it. Returns true
+// if recovered (the caller then retries its request); false → reconnect state. Drop-in
+// replacement for the old tryRefreshToken() at every 401 site, so the one-retry shape
+// of the REST helpers is unchanged — only the recovery MECHANISM moved to pull.
+async function recoverAccessToken() {
+  var token = await requestTokenFromWebApp();
+  if (token) {
+    await persistAuth(token);
+    console.log('[LENSED][BG] access token recovered from web app');
+    diagCrit('auth.acquired', 'info', 'access token pulled from web app (401 recovery)', { user: diagRedactId(userId) });
+    return true;
   }
+  await handleAuthExpired();
+  return false;
+}
+
+// Reconnect state: no lensed.io tab could hand us a token. Clear auth (we can't refresh
+// on our own) and tell the UI to prompt the user to open lensed.io.
+async function handleAuthExpired() {
+  await clearAuth();
+  authExpired = true; // set AFTER clearAuth so the broadcast reflects reconnect state
+  console.warn('[LENSED][BG] session expired — reconnect via lensed.io');
+  diagCrit('auth.lost', 'warn', 'session expired — reconnect via lensed.io (no tab to pull from)', null);
+  broadcastAuthStatus();
 }
 
 async function clearAuth() {
   accessToken = null;
-  refreshToken = null;
   userId = null;
   currentSessionId = null;
   currentRoomId = null;
@@ -758,7 +784,9 @@ async function clearAuth() {
   cachedSkus = null;
   selectedHostId = null;
   hostAppliedForSession = null;
-  await chrome.storage.local.remove([SK_ACCESS_TOKEN, SK_REFRESH_TOKEN, SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
+  // 'lensed_refresh_token' is a legacy key from the pre-single-refresher build; remove
+  // it by literal so upgrading hosts purge any stored refresh token they still hold.
+  await chrome.storage.local.remove([SK_ACCESS_TOKEN, 'lensed_refresh_token', SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
   console.log('[LENSED][BG] auth cleared');
   diagCrit('auth.lost', 'warn', 'auth cleared', null);
 }
@@ -1466,8 +1494,8 @@ async function uploadShotObject(objectKey, bytes) {
   try { res = await sbFetch(url, { method: 'POST', headers: headers, body: bytes }, FETCH_TIMEOUT_WRITE_MS, false); }
   catch (e) { return { ok: false, retryable: true, err: String(e && e.name || e) }; } // abort/network → retry
   if (res.status === 401) {
-    diagCrit('http.401', 'warn', '401 from Supabase — attempting token refresh', null);
-    var refreshed = await tryRefreshToken();
+    diagCrit('http.401', 'warn', '401 from Supabase — pulling fresh access token from web app', null);
+    var refreshed = await recoverAccessToken();
     if (refreshed) {
       headers.Authorization = 'Bearer ' + accessToken;
       try { res = await sbFetch(url, { method: 'POST', headers: headers, body: bytes }, FETCH_TIMEOUT_WRITE_MS, false); }
@@ -1745,7 +1773,8 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
   if (!message || message.type !== 'LENSED_AUTH') return;
 
   var at = message.accessToken;
-  var rt = message.refreshToken;
+  // Single-refresher: the web app relays the ACCESS TOKEN ONLY. Any refreshToken on the
+  // message (from an older web build) is deliberately ignored — we never store or use it.
   if (!at) {
     sendResponse({ ok: false, error: 'missing accessToken' });
     return;
@@ -1763,7 +1792,7 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
     .then(function () { return chrome.storage.local.get(SK_USER_ID); })
     .then(function (prev) {
       var previousUserId = (prev && prev[SK_USER_ID]) || null;
-      return persistAuth(at, rt || '').then(function () {
+      return persistAuth(at).then(function () {
         // Same Lensed user + resolvable ids → a routine token refresh: preserve live
         // context. Otherwise (no known previous user, unresolvable incoming user, or a
         // genuine user switch) run the existing full user-switch reset.
@@ -1786,11 +1815,11 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
           broadcastSession('user_changed');
           console.log('[LENSED][BG] SESSION RESET', { reason: 'user_changed', source: 'LENSED_AUTH', hadSession: hadSession, hadHost: hadHost, hadStagedSku: null });
         } else {
-          // Routine same-user refresh: tokens already rotated by persistAuth above.
-          // Preserve session / room mapping / host / cached SKUs / dedup state; refresh
-          // the content auth status but do NOT broadcast a null session or reset overlays.
+          // Routine same-user relay: the fresh access token was stored by persistAuth
+          // above. Preserve session / room mapping / host / cached SKUs / dedup state;
+          // refresh the content auth status but do NOT broadcast a null session or reset.
           broadcastAuthStatus();
-          console.log('[LENSED][BG] LENSED_AUTH: same-user token refresh — live state preserved');
+          console.log('[LENSED][BG] LENSED_AUTH: same-user access-token relay — live state preserved');
         }
         sendResponse({ ok: true, userId: userId });
       });
@@ -2095,8 +2124,8 @@ try {
 // MV3 has no self-timer and this ext is woken only by content-script pings. When pings
 // stop, nothing refreshed/flushed/heartbeated until a manual re-sign-in. A ~60s alarm
 // (chrome.alarms survives SW suspension — it re-wakes the worker) gives the SW its own
-// tick to proactively refresh, flush the queue, and heartbeat — no human needed. Reuses
-// the existing tryRefreshToken / flushSaleQueue / heartbeatSession.
+// tick to proactively pull a fresh token, flush the queue, and heartbeat — no human
+// needed. Reuses requestTokenFromWebApp (pull) / flushSaleQueue / heartbeatSession.
 try {
   chrome.alarms.create(RECOVERY_ALARM, { periodInMinutes: 1 }); // MV3 min period; ~60s cadence
 } catch (_) {}
@@ -2114,10 +2143,15 @@ async function runRecoveryTick() {
     // Idle ticks (no live pinned) are gated/verbose only — keeps the always-on ring signal-dense.
     if (!pinned) { diag('recovery.idle', 'info', 'recovery tick — no live pinned', null); return; }
 
-    // (a) Proactive refresh: don't wait for a 401 that never comes because no fetch is firing.
-    if (accessToken && refreshToken && isTokenExpired(accessToken, NEAR_EXPIRY_BUF_SEC)) {
-      diagCrit('recovery.refresh', 'info', 'proactive refresh (token near-expiry)', null);
-      await tryRefreshToken();
+    // (a) Proactive PULL: if the access token is near expiry, pull a fresh one from an
+    //     open lensed.io tab BEFORE a 401 fires (no fetch may be in flight to trigger one).
+    //     The extension never self-refreshes — that was the racing second refresher. If no
+    //     tab can answer we do NOTHING here (do NOT clear auth); the reactive pull-on-401
+    //     path recovers on the next real request.
+    if (accessToken && isTokenExpired(accessToken, NEAR_EXPIRY_BUF_SEC)) {
+      diagCrit('recovery.refresh', 'info', 'proactive pull (token near-expiry)', null);
+      var pulled = await requestTokenFromWebApp();
+      if (pulled) await persistAuth(pulled);
     }
     // (b) Flush any buffered sales the moment auth is usable — no manual re-sign-in needed.
     if (isAuthenticated() && saleQueue.length > 0) {
