@@ -23,6 +23,9 @@
   window.__lensedInjected = true;
 
   const SALE_URL_MARKER = 'auction_result/get';
+  // Live END signal: Seller Center POSTs here when the host ends the live. Unlike room
+  // detection (room_id in the URL query), room_id lives in the POST BODY here.
+  const LIVE_END_URL_MARKER = '/streamer_desktop/live/end';
 
   // ── [account detection] endpoint markers ────────────────────────────
   // Room lifecycle endpoints whose responses are inspected (read-only) for the room
@@ -107,6 +110,33 @@
     console.log('[LENSED][TT] room_id detected:', roomId);
     diag('room.detected', 'info', 'room_id detected', { room: roomId, source: 'auction_url' });
     window.postMessage({ source: 'lensed-tiktok-room', roomId }, window.location.origin);
+  }
+
+  // ── Live END: read room_id from the end-POST body (JSON {"room_id":...}, or a
+  // form-encoded / URLSearchParams / FormData fallback). Observe only. ─────────
+  function extractRoomIdFromBody(body) {
+    try {
+      if (!body) return null;
+      if (typeof body === 'string') {
+        try { const j = JSON.parse(body); if (j && j.room_id != null) return String(j.room_id); } catch (_) {}
+        const m = body.match(/room_id=([^&]+)/); if (m) return decodeURIComponent(m[1]);
+      }
+      if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+        const r = body.get('room_id'); if (r) return String(r);
+      }
+      if (typeof FormData !== 'undefined' && body instanceof FormData) {
+        const r = body.get('room_id'); if (r) return String(r);
+      }
+    } catch (_) {}
+    return null;
+  }
+  // Relay a live-end for a room. NOT deduped here (backgrounds dedups the ~2x fire and
+  // guards the DB write); we forward every observation so a missed one never loses the end.
+  function relayLiveEnd(roomId) {
+    if (!roomId) return;
+    console.log('[LENSED][TT] live end POST observed for room:', roomId);
+    diag('live.end_detected', 'info', 'live end POST observed', { room: roomId });
+    window.postMessage({ source: 'lensed-tiktok-live-end', roomId }, window.location.origin);
   }
 
   // ── [account detection] host/anchor identity ────────────────────────
@@ -373,6 +403,16 @@
 
     if (urlLower.includes('room_id=')) relayRoom(extractRoomIdFromUrl(url));
 
+    // Live END: room_id is in the POST body. Try the init body first; if the caller used a
+    // Request object, clone it and read the body async (never consume the real stream).
+    if (urlLower.includes(LIVE_END_URL_MARKER)) {
+      const rid = extractRoomIdFromBody(args[1] && args[1].body);
+      if (rid) relayLiveEnd(rid);
+      else if (typeof Request !== 'undefined' && resource instanceof Request) {
+        try { resource.clone().text().then((t) => relayLiveEnd(extractRoomIdFromBody(t))).catch(() => {}); } catch (_) {}
+      }
+    }
+
     const isSale = urlLower.includes(SALE_URL_MARKER);
     const idTag = matchIdentity(urlLower); // [account detection] observe only
     if (!isSale && !idTag) return p;
@@ -403,6 +443,9 @@
     const urlLower = String(url).toLowerCase();
 
     if (urlLower.includes('room_id=')) relayRoom(extractRoomIdFromUrl(String(url)));
+
+    // Live END (XHR): room_id is in the send() body.
+    if (urlLower.includes(LIVE_END_URL_MARKER)) relayLiveEnd(extractRoomIdFromBody(body));
 
     if (urlLower.includes(SALE_URL_MARKER)) {
       this.addEventListener('load', () => {

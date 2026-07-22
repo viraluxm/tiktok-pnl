@@ -2600,6 +2600,16 @@
       return;
     }
 
+    if (data.source === 'lensed-tiktok-live-end') {
+      // PRIMARY end signal — the host ended the live (Seller Center end POST). Forward to
+      // background, which ends the matching room's session (idempotent + deduped there).
+      dlog('live.end', 'info', 'live-end relayed to background', { room: data.roomId || null });
+      try {
+        chrome.runtime.sendMessage({ type: 'TIKTOK_LIVE_END', roomId: data.roomId }).catch(function () {});
+      } catch (_) {}
+      return;
+    }
+
     if (data.source === 'lensed-tiktok-account') {
       // Detected CHANNEL/CREATOR identity (room owner/anchor) from the MAIN-world
       // injector. This is the streaming channel (e.g. "onlybids"), NOT the shop —
