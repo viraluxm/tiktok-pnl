@@ -7,6 +7,15 @@ import { createClient } from '@/lib/supabase/client';
  * Relays the Supabase session to the Lensed Chrome extension via
  * chrome.runtime.sendMessage (externally_connectable).
  *
+ * ─── Single-refresher COMPAT phase ───
+ * Transition state for the single-refresher cutover. This build does BOTH:
+ *   • Push (unchanged): relay access + refresh token, so existing v0.4.x extensions
+ *     (which self-refresh and read the refresh token) keep working.
+ *   • Pull (new): answer the extension's on-demand token request with a fresh access
+ *     token from getSession(), so v0.5.0 extensions (which never self-refresh) work.
+ * Both extension versions function against this build. The refresh-token relay is
+ * removed ONLY in the final phase, after every host is confirmed on v0.5.0.
+ *
  * Silently no-ops if the extension isn't installed or the ID doesn't match.
  *
  * ─── IMPORTANT ───
@@ -62,6 +71,30 @@ export function useExtensionAuth() {
       }
     });
 
-    return () => subscription.unsubscribe();
+    // Pull responder: the extension (via its content script on this domain) posts
+    // { type: 'LENSED_REQUEST_TOKEN' } when its access token 401s. Answer with a
+    // fresh access token from the SDK's session (or null so it can show a reconnect
+    // state). We never call /auth/v1/token here — getSession() reads the session the
+    // SDK already keeps fresh. Added in the compat phase so v0.5.0 extensions can pull;
+    // harmless to v0.4.x extensions (they never send it).
+    const onMessage = async (event: MessageEvent) => {
+      // Only accept same-window, same-origin messages (the content script shares
+      // this page's window; reject anything from iframes / other origins).
+      if (event.source !== window) return;
+      if (event.origin !== window.location.origin) return;
+      if (!event.data || event.data.type !== 'LENSED_REQUEST_TOKEN') return;
+
+      const { data: { session } } = await supabase.auth.getSession();
+      window.postMessage(
+        { type: 'LENSED_TOKEN_RESPONSE', accessToken: session?.access_token ?? null },
+        window.location.origin
+      );
+    };
+    window.addEventListener('message', onMessage);
+
+    return () => {
+      subscription.unsubscribe();
+      window.removeEventListener('message', onMessage);
+    };
   }, []);
 }
