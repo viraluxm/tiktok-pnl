@@ -181,6 +181,11 @@ var currentSessionId = null;
 // session stays "pending room confirmation" (currentRoomId is left null) until the
 // page reports a room that matches.
 var sessionRoomId = null;
+// Live-END dedup: the Seller Center end POST fires ~2x per end. room_id -> last-ended ts;
+// a repeat within LIVE_END_DEDUP_MS is dropped (the DB write is also status=live-guarded).
+var recentlyEndedRooms = new Map();
+var LIVE_END_DEDUP_MS = 10000;
+var RECENTLY_ENDED_CAP = 200;
 var loggedOrderStatus = new Map(); // order_id -> last logged status ('sold' | 'not_sold')
 var loggedOrderSession = new Map(); // order_id -> session_id of the row we logged (for flip transitions)
 var cachedSkus = null;
@@ -391,6 +396,56 @@ async function markSessionEndedOnTabClose(sid) {
     console.log('[LENSED][BG] marked session ended on tab close:', sid);
   } catch (e) {
     console.warn('[LENSED][BG] mark-ended-on-close failed (non-fatal):', String((e && e.message) || e));
+  }
+}
+
+function capRecentlyEnded() {
+  while (recentlyEndedRooms.size > RECENTLY_ENDED_CAP) {
+    var k = recentlyEndedRooms.keys().next().value;
+    recentlyEndedRooms.delete(k);
+  }
+}
+
+// PRIMARY end path: the host ended the live (Seller Center end POST → content → here).
+// Ends the matching room's live session in real time. End is BY ROOM (tiktok_live_id), so
+// it works even if the SW was evicted and lost its in-memory session. Idempotent two ways:
+//   1) in-memory dedup absorbs the ~2x POST without a second network write;
+//   2) the PATCH is status=eq.live-guarded, so any late/duplicate flip matches 0 rows.
+// Best-effort: if unauthenticated we skip — the server auto_ender remains the backstop.
+async function handleLiveEnd(room) {
+  if (!room) return;
+  var now = Date.now();
+  var last = recentlyEndedRooms.get(room) || 0;
+  if (now - last < LIVE_END_DEDUP_MS) { diag('live.end_dup', 'info', 'duplicate live-end ignored', { room: room }); return; }
+  recentlyEndedRooms.set(room, now); capRecentlyEnded();
+
+  await ensureAuthReady();
+  if (isAuthenticated()) {
+    try {
+      await supabasePatch(
+        'live_sessions',
+        'tiktok_live_id=eq.' + encodeURIComponent(room) +
+          '&user_id=eq.' + encodeURIComponent(userId) +
+          '&status=eq.live',
+        { status: 'ended', ended_at: new Date().toISOString(), end_source: 'live_ended' }
+      );
+      diagCrit('live.ended', 'info', 'session ended via live-end signal', { room: diagRedactId(room) });
+      console.log('[LENSED][BG] live session ended (live_ended) for room:', room);
+    } catch (e) {
+      console.warn('[LENSED][BG] live-end write failed (non-fatal):', String((e && e.message) || e));
+    }
+  }
+
+  // In-memory cleanup ONLY when this end is for the room we're tracking, so the next live
+  // starts a fresh room-scoped session (mirrors onRemoved). An end for another room never
+  // disturbs the tracked session; the DB write above already handled it by room.
+  if (sessionRoomId === room || currentRoomId === room) {
+    currentSessionId = null;
+    sessionRoomId = null;
+    currentRoomId = null;
+    lastHeartbeatWriteTs = 0;
+    try { persistSession(); } catch (_) {}
+    try { broadcastSession('live_ended'); } catch (_) {}
   }
 }
 
@@ -1894,6 +1949,11 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === 'DIAG_CLEAR') {
     diagRing = []; diagWriteRaw([]);
     try { sendResponse({ ok: true }); } catch (_) {}
+    return;
+  }
+
+  if (message.type === 'TIKTOK_LIVE_END') {
+    if (message.roomId) handleLiveEnd(String(message.roomId));
     return;
   }
 
