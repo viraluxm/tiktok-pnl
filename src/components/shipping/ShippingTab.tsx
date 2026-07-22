@@ -177,7 +177,7 @@ export default function ShippingTab() {
 
   // ── focus-mode overlay (covers the tab nav) ──
   return (
-    <div className="fixed inset-0 z-50 bg-tt-bg text-tt-text flex flex-col select-none">
+    <div className="fixed inset-0 z-50 w-screen max-w-full bg-tt-bg text-tt-text flex flex-col select-none overflow-x-hidden">
       {/* hidden scanner sink — reuses the always-focused input + Enter mechanism.
           inputMode="none" keeps the input FOCUSED (so the hardware scanner's characters +
           Enter still land here) while telling the browser NOT to raise the on-screen keyboard.
@@ -205,34 +205,34 @@ export default function ShippingTab() {
         <span className="relative text-xl">✕</span>
       </button>
 
-      <div className={`flex-1 min-h-0 flex flex-col items-center p-4 overflow-y-auto ${screen === 'pick' ? '' : 'justify-center'}`}>
+      <div className={`flex-1 min-h-0 w-full flex flex-col items-center p-4 overflow-x-hidden overflow-y-auto ${screen === 'pick' ? '' : 'justify-center'}`}>
 
         {/* READY */}
         {screen === 'ready' && (
-          <div className="text-center">
-            <div className="mx-auto w-48 h-48 rounded-3xl border-4 border-tt-cyan/40 flex items-center justify-center animate-pulse">
-              <span className="text-tt-cyan text-7xl">⤢</span>
+          <div className="w-full max-w-sm mx-auto px-5 text-center">
+            <div className="mx-auto w-40 h-40 max-w-[70vw] max-h-[70vw] rounded-3xl border-4 border-tt-cyan/40 flex items-center justify-center animate-pulse">
+              <span className="text-tt-cyan text-6xl">⤢</span>
             </div>
-            <div className="mt-8 text-2xl font-bold">Ready to scan</div>
-            <div className="mt-1 text-tt-muted">Scan a shipping label to load the box</div>
-            {loading && <div className="mt-4 text-tt-cyan font-medium">Loading box…</div>}
-            {err && <div className="mt-4 text-tt-red font-semibold max-w-md">{err}</div>}
-            <div className="mt-10 text-sm text-tt-muted">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked today</div>
+            <div className="mt-8 text-2xl font-bold break-words">Ready to scan</div>
+            <div className="mt-1 text-tt-muted break-words">Scan a shipping label to load the box</div>
+            {loading && <div className="mt-4 text-tt-cyan font-medium break-words">Loading box…</div>}
+            {err && <div className="mt-4 text-tt-red font-semibold break-words">{err}</div>}
+            <div className="mt-10 text-sm text-tt-muted break-words">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked today</div>
           </div>
         )}
 
         {/* ALERT — unbound orders (do NOT pick) */}
         {screen === 'alert' && box && (
-          <div className="w-full max-w-2xl text-center">
+          <div className="w-full max-w-md mx-auto px-4 text-center">
             <div className="text-tt-red text-6xl mb-3">⚠</div>
-            <div className="text-3xl font-extrabold text-tt-red">Heads up — {unbound.length} unrecorded order{unbound.length === 1 ? '' : 's'}</div>
-            <div className="mt-2 text-tt-muted">This box has order{unbound.length === 1 ? '' : 's'} with no recorded items. Do NOT pick from the screen — set the label aside and flag it.</div>
+            <div className="text-2xl font-extrabold text-tt-red break-words">Heads up — {unbound.length} unrecorded order{unbound.length === 1 ? '' : 's'}</div>
+            <div className="mt-2 text-tt-muted break-words">This box has order{unbound.length === 1 ? '' : 's'} with no recorded items. Do NOT pick from the screen — set the label aside and flag it.</div>
             <div className="mt-6 flex flex-col gap-3 text-left">
               {unbound.map((o) => (
                 <div key={o.order_id} className="rounded-xl border-2 border-tt-red/50 bg-tt-red/10 p-4">
-                  <div className="text-lg font-bold text-tt-text">{o.listing_name || 'Unknown listing'}</div>
-                  <div className="text-sm text-tt-muted mt-1">
-                    Seller-SKU <span className="font-mono text-tt-text">{o.seller_sku || '—'}</span> · order <span className="font-mono">{o.order_id}</span>
+                  <div className="text-lg font-bold text-tt-text break-words">{o.listing_name || 'Unknown listing'}</div>
+                  <div className="text-sm text-tt-muted mt-1 break-words">
+                    Seller-SKU <span className="font-mono text-tt-text break-all">{o.seller_sku || '—'}</span> · order <span className="font-mono break-all">{o.order_id}</span>
                   </div>
                 </div>
               ))}
@@ -245,10 +245,10 @@ export default function ShippingTab() {
 
         {/* EMPTY — nothing to pack (all excluded) */}
         {screen === 'empty' && box && (
-          <div className="text-center max-w-lg">
+          <div className="w-full max-w-sm mx-auto px-5 text-center">
             <div className="text-tt-red text-6xl mb-3">🚫</div>
-            <div className="text-2xl font-extrabold">Nothing to pack</div>
-            <div className="mt-2 text-tt-muted">Every order in this box is do-not-pack (cancelled / on-hold / already shipped). Set the label aside.</div>
+            <div className="text-2xl font-extrabold break-words">Nothing to pack</div>
+            <div className="mt-2 text-tt-muted break-words">Every order in this box is do-not-pack (cancelled / on-hold / already shipped). Set the label aside.</div>
             <button onClick={backToReady} className="mt-8 w-full py-5 rounded-2xl bg-tt-red text-white text-xl font-extrabold cursor-pointer hover:opacity-90">
               Set aside &amp; scan next
             </button>
@@ -305,12 +305,12 @@ export default function ShippingTab() {
                 className={`mt-2 w-full py-4 rounded-2xl text-xl font-extrabold transition-opacity ${skuDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}>
                 {skuDone ? '✓ Complete' : 'Grab one'}
               </button>
-              <div className="mt-3 flex items-center justify-between gap-3">
+              <div className="mt-3 flex items-center justify-between gap-2">
                 <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
-                  className="px-5 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">‹ Back</button>
-                <span className="text-xs text-tt-muted text-center">SKU {activeIdx + 1} of {box.skus.length} · {pickedUnits}/{totalUnits} units</span>
+                  className="shrink-0 px-4 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">‹ Back</button>
+                <span className="flex-1 min-w-0 truncate text-center text-xs text-tt-muted">SKU {activeIdx + 1} of {box.skus.length} · {pickedUnits}/{totalUnits} units</span>
                 <button onClick={() => setActiveIdx((i) => Math.min(box.skus.length - 1, i + 1))} disabled={activeIdx === box.skus.length - 1}
-                  className="px-5 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">Next ›</button>
+                  className="shrink-0 px-4 py-3 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer">Next ›</button>
               </div>
               <div className="mt-3 flex items-center justify-between gap-3">
                 <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="text-sm text-tt-muted underline cursor-pointer">New label</button>
@@ -324,10 +324,10 @@ export default function ShippingTab() {
 
         {/* FINISH */}
         {screen === 'finish' && (
-          <div className="text-center max-w-lg">
+          <div className="w-full max-w-sm mx-auto px-5 text-center">
             <div className="text-tt-green text-7xl mb-3">✓</div>
-            <div className="text-3xl font-extrabold">Box picked</div>
-            <div className="mt-2 text-lg text-tt-muted">Put all items on the rack with the shipping label.</div>
+            <div className="text-3xl font-extrabold break-words">Box picked</div>
+            <div className="mt-2 text-lg text-tt-muted break-words">Put all items on the rack with the shipping label.</div>
             <button onClick={backToReady} className="mt-8 w-full py-5 rounded-2xl bg-tt-green text-black text-xl font-extrabold cursor-pointer hover:opacity-90">
               Scan next label
             </button>
