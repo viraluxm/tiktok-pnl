@@ -21,6 +21,9 @@ export interface LiveSession {
   // Captured streaming-channel handle (e.g. "onlybidss"); null on old sessions or
   // before the extension's channel capture has landed. Display-only.
   channel_handle: string | null;
+  // host_id resolved to the employee name by the sessions API; null when no host
+  // selected or not readable. Display-only.
+  host_name: string | null;
 }
 
 const KEY = 'live-sessions';

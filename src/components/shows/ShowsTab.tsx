@@ -255,22 +255,21 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
       className="border-b border-tt-border last:border-0 cursor-pointer hover:bg-tt-card-hover transition-colors"
     >
       <td className="px-4 py-3">
+        {/* Channel handle IS the identity now (large). Falls back to "TikTok Live" when the
+            channel hasn't been attributed yet, so the row is never blank. */}
         <div className="font-medium text-tt-text">
-          {session.title || 'Untitled show'}
-          {/* Part D flag: a session with no store attribution stands out in every view. */}
-          {!session.store_id && (
-            <span className="ml-2 align-middle text-[10px] font-semibold px-2 py-0.5 rounded-md bg-tt-red/15 text-tt-red">Unmapped store</span>
-          )}
+          {session.channel_handle || 'TikTok Live'}
         </div>
+        {/* host · store · date. Host omitted when none selected; store shows red "Unmapped
+            store" when null (the Part-D flag, now inline); date always present. */}
         <div className="text-xs text-tt-muted mt-0.5">
-          {/* Captured channel handle · store · date. Null handle → just store · date
-              (unchanged); null store (unmapped) → handle · date; neither → date. No
-              stray separators, never "null". */}
-          {session.channel_handle ? <span className="text-tt-text/70">{session.channel_handle}</span> : null}
-          {session.channel_handle && session.store_name ? ' · ' : ''}
-          {session.store_name ? <span className="text-tt-text/70">{session.store_name}</span> : null}
-          {(session.channel_handle || session.store_name) ? ' · ' : ''}
-          {fmtDate(session.started_at)}
+          {[
+            session.host_name ? <span key="h" className="text-tt-text/70">{session.host_name}</span> : null,
+            session.store_name
+              ? <span key="s" className="text-tt-text/70">{session.store_name}</span>
+              : <span key="s" className="font-semibold text-tt-red">Unmapped store</span>,
+            <span key="d">{fmtDate(session.started_at)}</span>,
+          ].filter(Boolean).flatMap((node, i) => (i === 0 ? [node] : [<span key={`sep${i}`}> · </span>, node]))}
         </div>
       </td>
       <td className="px-4 py-3">
@@ -542,15 +541,19 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           >
             ← All shows
           </button>
-          <div className="text-xl font-bold">{session.title || 'Untitled show'}</div>
+          {/* Channel handle is the identity (large); "TikTok Live" fallback when unattributed. */}
+          <div className="text-xl font-bold">{session.channel_handle || 'TikTok Live'}</div>
           <div className="text-sm text-tt-muted mt-1 flex items-center gap-3">
-            {/* channel handle · store (either may be absent) */}
-            {(session.channel_handle || session.store_name) && (
-              <span className="text-tt-text/70">
-                {[session.channel_handle, session.store_name].filter(Boolean).join(' · ')}
-              </span>
-            )}
-            <span>{fmtDate(session.started_at)}</span>
+            {/* host · store · date. Host omitted when none; store → red "Unmapped store" when null. */}
+            <span className="text-tt-text/70">
+              {[
+                session.host_name ? <span key="h">{session.host_name}</span> : null,
+                session.store_name
+                  ? <span key="s">{session.store_name}</span>
+                  : <span key="s" className="font-semibold text-tt-red">Unmapped store</span>,
+                <span key="d">{fmtDate(session.started_at)}</span>,
+              ].filter(Boolean).flatMap((node, i) => (i === 0 ? [node] : [<span key={`sep${i}`}> · </span>, node]))}
+            </span>
             <StatusBadge status={session.status} />
             {durationLabel && (
               <span title={`Active selling time (source: ${duration?.source === 'ended_at' ? 'session end' : 'last sale'})`}>
