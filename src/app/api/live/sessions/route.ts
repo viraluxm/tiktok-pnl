@@ -4,29 +4,40 @@ import { createClient } from '@/lib/supabase/server';
 export const dynamic = 'force-dynamic';
 
 const SELECT_COLS =
-  'id, title, status, started_at, ended_at, tiktok_live_id, source, created_at, updated_at, store_id, channel_handle';
+  'id, title, status, started_at, ended_at, tiktok_live_id, source, created_at, updated_at, store_id, channel_handle, host_id';
 
-// Resolve store_id -> store name via a manual join, matching the existing pattern
-// in src/app/api/stores/route.ts (this codebase joins by id list rather than using
-// PostgREST FK embedding). Adds a flat `store_name` (null when a session has no
-// store or the store isn't readable) so the client never has to embed/resolve.
-async function attachStoreNames(
+// Resolve store_id -> store name AND host_id -> employee name via manual joins, matching
+// the existing pattern in src/app/api/stores/route.ts (this codebase joins by id list
+// rather than using PostgREST FK embedding). Adds flat `store_name` / `host_name` (null
+// when absent or not readable) so the client never has to embed/resolve.
+async function attachDisplayNames(
   supabase: Awaited<ReturnType<typeof createClient>>,
   rows: Array<Record<string, unknown>>,
 ): Promise<Array<Record<string, unknown>>> {
   const storeIds = [
     ...new Set(rows.map((r) => r.store_id).filter((v): v is string => typeof v === 'string')),
   ];
-  const nameById = new Map<string, string>();
+  const storeById = new Map<string, string>();
   if (storeIds.length > 0) {
     const { data: stores } = await supabase.from('stores').select('id, name').in('id', storeIds);
     for (const st of (stores ?? []) as Array<{ id: string; name: string }>) {
-      nameById.set(st.id, st.name);
+      storeById.set(st.id, st.name);
+    }
+  }
+  const hostIds = [
+    ...new Set(rows.map((r) => r.host_id).filter((v): v is string => typeof v === 'string')),
+  ];
+  const hostById = new Map<string, string>();
+  if (hostIds.length > 0) {
+    const { data: emps } = await supabase.from('employees').select('id, name').in('id', hostIds);
+    for (const e of (emps ?? []) as Array<{ id: string; name: string }>) {
+      hostById.set(e.id, e.name);
     }
   }
   return rows.map((r) => ({
     ...r,
-    store_name: typeof r.store_id === 'string' ? nameById.get(r.store_id) ?? null : null,
+    store_name: typeof r.store_id === 'string' ? storeById.get(r.store_id) ?? null : null,
+    host_name: typeof r.host_id === 'string' ? hostById.get(r.host_id) ?? null : null,
   }));
 }
 
@@ -47,7 +58,7 @@ export async function GET() {
     console.error('[live/sessions] list error:', error);
     return NextResponse.json({ error: 'Failed to load sessions' }, { status: 500 });
   }
-  const sessions = await attachStoreNames(supabase, data ?? []);
+  const sessions = await attachDisplayNames(supabase, data ?? []);
   return NextResponse.json({ sessions });
 }
 
@@ -106,6 +117,6 @@ export async function POST(req: Request) {
     console.error('[live/sessions] create error:', error);
     return NextResponse.json({ error: 'Failed to start session' }, { status: 500 });
   }
-  const [session] = await attachStoreNames(supabase, [data]);
+  const [session] = await attachDisplayNames(supabase, [data]);
   return NextResponse.json({ session }, { status: 201 });
 }
