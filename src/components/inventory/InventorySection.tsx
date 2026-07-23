@@ -51,15 +51,19 @@ const LABEL_SPECS: Record<
   LabelSize,
   { w: string; h: string; pad: string; gap: string; barcodeH: string; svgBarHeight: number; skuSize: string; titleSize: string | null }
 > = {
-  // Small product label: barcode + SKU#.
+  // Small product label: SKU# (rendered "#207", matching the pick screen) is the
+  // dominant element, small scannable barcode above it. Dropping the "SKU " word
+  // frees width, so the number goes to 30pt. barcodeH 0.4in → X-dim 12.5 mil
+  // (safely scannable). No title.
   '2x1': {
     w: '2in', h: '1in', pad: '0.05in 0.08in', gap: '2px',
-    barcodeH: '0.6in', svgBarHeight: 64, skuSize: '11pt', titleSize: null,
+    barcodeH: '0.4in', svgBarHeight: 64, skuSize: '30pt', titleSize: null,
   },
-  // Large pallet-rack label: barcode + SKU# + title, scaled up.
+  // Large pallet-rack label: SKU# dominates, small barcode above, title below.
+  // barcodeH 1.0in → X-dim 14.3 mil (safely scannable).
   '6x4': {
     w: '6in', h: '4in', pad: '0.35in 0.45in', gap: '0.18in',
-    barcodeH: '2.4in', svgBarHeight: 140, skuSize: '40pt', titleSize: '22pt',
+    barcodeH: '1.0in', svgBarHeight: 140, skuSize: '64pt', titleSize: '22pt',
   },
 };
 
@@ -80,7 +84,7 @@ function printSkuLabels(list: InventorySku[], size: LabelSize = '2x1') {
         spec.titleSize && s.title ? `<div class="title">${escapeHtml(s.title)}</div>` : '';
       return (
         `<div class="label"><div class="bc">${skuBarcodeSvg(s, spec.svgBarHeight)}</div>` +
-        `<div class="sku">SKU ${escapeHtml(String(s.sku_number))}</div>${title}</div>`
+        `<div class="sku">#${escapeHtml(String(s.sku_number))}</div>${title}</div>`
       );
     })
     .join('');
