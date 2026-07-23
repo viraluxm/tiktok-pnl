@@ -7,28 +7,21 @@ import type { Employee, EmployeeStatus } from '@/types';
 import AuctionPerformanceCard from './AuctionPerformanceCard';
 import { AspHitBadge, BelowBreakEvenBadge } from './HostPerformanceBadges';
 import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
-import WeeklyShiftView from './weekly/WeeklyShiftView';
-import RecurringShiftsView from './RecurringShiftsView';
-import TimeRecordsView from './TimeRecordsView';
+import ShiftsView from './ShiftsView';
 import PayView from './PayView';
 import { Field, StatusBadge, titleCase, ROLE_PRESETS, STATUSES } from './shared';
 
 interface EmployeesTabProps {
-  // The dashboard's global FiltersBar range — used by Time Records only. Nulls = all time.
+  // The selected period, driven by the dashboard's global FiltersBar. Nulls = all time.
+  // Consumed by the Shifts List view (production behavior).
   dateFrom: string | null;
   dateTo: string | null;
 }
 
-type SubView = 'weekly' | 'recurring' | 'records' | 'pay' | 'roster' | 'auctions';
-
-const SUB_NAV: { value: SubView; label: string }[] = [
-  { value: 'weekly', label: 'Weekly Shifts' },
-  { value: 'recurring', label: 'Recurring Shifts' },
-  { value: 'records', label: 'Time Records' },
-  { value: 'pay', label: 'Pay' },
-  { value: 'roster', label: 'Roster' },
-  { value: 'auctions', label: 'Auctions' },
-];
+// Production Team navigation: Roster · Shifts · Pay · Auctions. Each view owns its own
+// data hooks, so opening Team (default Roster) doesn't fetch shift history — only the
+// mounted view fetches. The weekly grid lives inside Shifts → Calendar (see ShiftsView).
+type SubView = 'roster' | 'shifts' | 'pay' | 'auctions';
 
 const EMPTY_FORM: EmployeeInput = {
   name: '',
@@ -40,11 +33,12 @@ const EMPTY_FORM: EmployeeInput = {
 };
 
 export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
-  const [subView, setSubView] = useState<SubView>('weekly');
+  const [subView, setSubView] = useState<SubView>('roster');
   const { employees, isLoading, addEmployee, updateEmployee, deleteEmployee } = useEmployees();
+  // Per-host auction badges (Roster). Read-only; empty until 056 attribution accrues.
   const { data: hostPerf } = useHostPerformance();
 
-  // Employee add/edit modal (Roster).
+  // Employee add/edit modal
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Employee | null>(null);
   const [form, setForm] = useState<EmployeeInput>(EMPTY_FORM);
@@ -120,34 +114,29 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   return (
     <div>
       {/* Sub navigation */}
-      <div className="flex items-center justify-between mb-6 gap-4 flex-wrap">
-        <div className="flex gap-2 flex-wrap">
-          {SUB_NAV.map((v) => (
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex gap-2">
+          {(['roster', 'shifts', 'pay', 'auctions'] as SubView[]).map((v) => (
             <button
-              key={v.value}
-              onClick={() => setSubView(v.value)}
+              key={v}
+              onClick={() => setSubView(v)}
               className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                subView === v.value ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text hover:bg-white/5'
+                subView === v ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text hover:bg-white/5'
               }`}
             >
-              {v.label}
+              {v === 'roster' ? 'Roster' : v === 'shifts' ? 'Shifts' : v === 'pay' ? 'Pay' : 'Auctions'}
             </button>
           ))}
         </div>
-        {/* Only Time Records is scoped to the dashboard FiltersBar; other views manage their
-            own range (Weekly = week nav, Pay = pay period). */}
-        {subView === 'records' && (
+        {/* The FiltersBar drives the Shifts List view; the Pay view is scoped to its OWN
+            biweekly pay period, and the Calendar to its own week — so hide this label there. */}
+        {subView !== 'pay' && subView !== 'auctions' && (
           <span className="text-xs text-tt-muted">
             Period: <span className="text-tt-text font-medium">{periodLabel}</span>
           </span>
         )}
       </div>
 
-      {subView === 'weekly' && <WeeklyShiftView employees={employees} />}
-      {subView === 'recurring' && <RecurringShiftsView employees={employees} />}
-      {subView === 'records' && <TimeRecordsView employees={employees} dateFrom={dateFrom} dateTo={dateTo} />}
-      {subView === 'pay' && <PayView employees={employees} />}
-      {subView === 'auctions' && <AuctionPerformanceCard />}
       {subView === 'roster' && (
         <RosterView
           employees={employees}
@@ -158,6 +147,12 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
           onDelete={handleDelete}
         />
       )}
+
+      {subView === 'shifts' && <ShiftsView employees={employees} dateFrom={dateFrom} dateTo={dateTo} />}
+
+      {subView === 'pay' && <PayView employees={employees} />}
+
+      {subView === 'auctions' && <AuctionPerformanceCard />}
 
       {/* Add / edit employee modal */}
       {modalOpen && (

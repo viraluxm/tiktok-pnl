@@ -4,12 +4,22 @@ import { useEffect, useMemo, useState } from 'react';
 import { shiftHours, generateRecurringShifts } from '@/lib/employees';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
-import type { Employee, Shift } from '@/types';
-import ShiftCalendar, { type CalendarShift } from './ShiftCalendar';
-import { Field, inputCls } from './shared';
+import type { Employee, Shift, ShiftRule } from '@/types';
+import WeeklyShiftView from './weekly/WeeklyShiftView';
+import { Field, WEEKDAYS, daysLabel, inputCls } from './shared';
+
+// The production Shifts view: an Add Shift card (One-off / Recurring), a Recurring Rules
+// table, and a "Shifts This Period" list — all under a List / Calendar toggle. This is
+// restored ~verbatim from origin/main; the ONLY change is that the Calendar branch now
+// renders the new interactive weekly employee grid (WeeklyShiftView) instead of the old
+// read-only ShiftCalendar. Both List and Calendar drive the SAME hooks/mutations.
+//
+// Self-contained (owns its own data hooks) so it fetches only when the Shifts tab is
+// mounted — opening Team on the default Roster tab no longer loads shift history. The List
+// still loads the dashboard FiltersBar range; the Calendar loads only its selected week.
 
 type DisplayRow =
-  | { kind: 'oneoff'; id: string; employee_id: string; date: string; start_time: string; end_time: string | null; frozen: boolean }
+  | { kind: 'oneoff'; id: string; employee_id: string; date: string; start_time: string; end_time: string | null }
   | {
       kind: 'recurring';
       id: string;
@@ -22,11 +32,7 @@ type DisplayRow =
       skipped: boolean;
     };
 
-// "Time Records" — the detailed shift list/history, split out of the old mixed Shifts view.
-// One-off entry, the List/Calendar toggle, open-shift closing, and per-occurrence
-// edit/skip/revert are all preserved exactly. Scoped to the dashboard FiltersBar range, so
-// it only loads history when the user opens this tab (not on Team-tab open).
-export default function TimeRecordsView({
+export default function ShiftsView({
   employees,
   dateFrom,
   dateTo,
@@ -40,10 +46,15 @@ export default function TimeRecordsView({
     rules,
     exceptions,
     isLoading: rulesLoading,
+    addRule,
+    toggleRuleActive,
+    deleteRule,
     upsertException,
     deleteException,
   } = useShiftRules();
 
+  // (rule|date) pairs already frozen into real `shifts` rows (source_rule_id set) — the
+  // generator excludes these so a materialized day is counted once. See migration 055.
   const materialized = useMemo(
     () => new Set(shifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
     [shifts],
@@ -52,26 +63,21 @@ export default function TimeRecordsView({
     () => generateRecurringShifts(rules, exceptions, dateFrom, dateTo, materialized),
     [rules, exceptions, dateFrom, dateTo, materialized],
   );
-
   const isLoading = shiftsLoading || rulesLoading;
 
-  // Default to the read-only Calendar view (List remains a fully-working toggle).
+  const [mode, setMode] = useState<'oneoff' | 'recurring'>('oneoff');
+  // Default to the Calendar view (the new interactive weekly grid). List remains a toggle.
   const [view, setView] = useState<'list' | 'calendar'>('calendar');
 
-  // One-off entry form.
+  // One-off form
   const [employeeId, setEmployeeId] = useState('');
   const [date, setDate] = useState('');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [currentlyInShift, setCurrentlyInShift] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const [endingShift, setEndingShift] = useState<
     { id: string; name: string; date: string; start_time: string; end_time: string } | null
-  >(null);
-  const [editing, setEditing] = useState<
-    { ruleId: string; date: string; name: string; start: string; end: string } | null
   >(null);
 
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -80,13 +86,27 @@ export default function TimeRecordsView({
     return () => clearInterval(t);
   }, []);
 
+  // Recurring form
+  const [rEmployeeId, setREmployeeId] = useState('');
+  const [rDays, setRDays] = useState<Set<number>>(new Set());
+  const [rStart, setRStart] = useState('');
+  const [rEnd, setREnd] = useState('');
+  const [rStartDate, setRStartDate] = useState('');
+
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [editing, setEditing] = useState<
+    { ruleId: string; date: string; name: string; start: string; end: string } | null
+  >(null);
+
   const nameById = useMemo(() => {
     const m = new Map<string, string>();
     for (const e of employees) m.set(e.id, e.name);
     return m;
   }, [employees]);
 
-  // Only non-former employees are offered for new entries.
+  // Only non-former employees can be picked for new shifts / rules.
   const selectable = useMemo(() => employees.filter((e) => e.status !== 'former'), [employees]);
 
   const openByEmployee = useMemo(() => {
@@ -107,8 +127,6 @@ export default function TimeRecordsView({
           date: s.date,
           start_time: s.start_time,
           end_time: s.end_time,
-          // Materialized recurring payroll rows are NOT deletable one-offs (spec/audit).
-          frozen: s.source_rule_id != null,
         }),
       ),
       ...generated.map(
@@ -128,33 +146,18 @@ export default function TimeRecordsView({
     return combined.sort((a, b) => b.date.localeCompare(a.date) || a.start_time.localeCompare(b.start_time));
   }, [shifts, openShifts, generated]);
 
-  const calendarShifts = useMemo<CalendarShift[]>(
-    () =>
-      rows
-        .filter((r) => !(r.kind === 'recurring' && r.skipped))
-        .map((r) => ({
-          id: r.id,
-          kind: r.kind,
-          employee_id: r.employee_id,
-          date: r.date,
-          start_time: r.start_time,
-          end_time: r.end_time,
-        })),
-    [rows],
-  );
+  function toggleDay(v: number) {
+    setRDays((prev) => {
+      const next = new Set(prev);
+      if (next.has(v)) next.delete(v);
+      else next.add(v);
+      return next;
+    });
+  }
 
   function minsOf(t: string): number {
     const [h, m] = t.split(':').map(Number);
     return (h || 0) * 60 + (m || 0);
-  }
-
-  function elapsedLabel(dateStr: string, start: string): string {
-    const startMs = new Date(`${dateStr}T${start}`).getTime();
-    if (!Number.isFinite(startMs)) return '—';
-    const mins = Math.max(0, Math.floor((nowTick - startMs) / 60000));
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
   }
 
   async function handleAddOneOff() {
@@ -166,6 +169,7 @@ export default function TimeRecordsView({
       );
       return;
     }
+    // Reject a zero-length shift (end == start); end < start is a valid overnight shift.
     if (!currentlyInShift && minsOf(startTime) === minsOf(endTime)) {
       setError('Start and end time cannot be the same.');
       return;
@@ -194,6 +198,15 @@ export default function TimeRecordsView({
     }
   }
 
+  function elapsedLabel(dateStr: string, start: string): string {
+    const startMs = new Date(`${dateStr}T${start}`).getTime();
+    if (!Number.isFinite(startMs)) return '—';
+    const mins = Math.max(0, Math.floor((nowTick - startMs) / 60000));
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
   async function saveEndShift() {
     if (!endingShift) return;
     if (!endingShift.end_time) {
@@ -215,6 +228,32 @@ export default function TimeRecordsView({
     }
   }
 
+  async function handleAddRule() {
+    if (!rEmployeeId || rDays.size === 0 || !rStart || !rEnd || !rStartDate) {
+      setError('Employee, at least one weekday, start/end time and a start date are required');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await addRule.mutateAsync({
+        employee_id: rEmployeeId,
+        days_of_week: [...rDays].sort((a, b) => a - b),
+        start_time: rStart,
+        end_time: rEnd,
+        start_date: rStartDate,
+      });
+      setRDays(new Set());
+      setRStart('');
+      setREnd('');
+      setRStartDate('');
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function handleSkip(row: Extract<DisplayRow, { kind: 'recurring' }>) {
     if (!confirm(`Skip this recurring shift on ${row.date}? The rule keeps generating other days.`)) return;
     try {
@@ -232,8 +271,16 @@ export default function TimeRecordsView({
     }
   }
 
+  async function handleDeleteRule(rule: ShiftRule) {
+    if (!confirm('Delete this recurring rule? Future shifts stop generating. Past pay already calculated is unaffected, and one-off shifts are untouched.')) return;
+    try {
+      await deleteRule.mutateAsync(rule.id);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
   async function handleDeleteOneOff(id: string) {
-    if (!confirm('Delete this shift? This cannot be undone.')) return;
     try {
       await deleteShift.mutateAsync(id);
     } catch (err) {
@@ -263,6 +310,7 @@ export default function TimeRecordsView({
 
   return (
     <div className="space-y-6">
+      {/* List | Calendar view toggle */}
       <div className="flex items-center justify-end">
         <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
           {(['list', 'calendar'] as const).map((v) => (
@@ -280,15 +328,31 @@ export default function TimeRecordsView({
       </div>
 
       {view === 'calendar' ? (
-        <ShiftCalendar rows={calendarShifts} nameById={nameById} employees={employees} />
+        <WeeklyShiftView employees={employees} />
       ) : (
         <>
-          {/* One-off entry */}
+          {/* Add shift */}
           <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl p-6">
-            <h2 className="text-base font-semibold text-tt-text mb-4">Add a shift</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-base font-semibold text-tt-text">Add Shift</h2>
+              <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
+                {(['oneoff', 'recurring'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => { setMode(m); setError(null); }}
+                    className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                      mode === m ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'
+                    }`}
+                  >
+                    {m === 'oneoff' ? 'One-off' : 'Recurring'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {selectable.length === 0 ? (
-              <p className="text-sm text-tt-muted">Add an active employee first before logging shifts.</p>
-            ) : (
+              <p className="text-sm text-tt-muted">Add an employee first before logging shifts.</p>
+            ) : mode === 'oneoff' ? (
               <>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                   <Field label="Employee">
@@ -333,13 +397,118 @@ export default function TimeRecordsView({
                   </button>
                 </div>
               </>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <Field label="Employee">
+                    <select value={rEmployeeId} onChange={(e) => setREmployeeId(e.target.value)} className={`${inputCls} appearance-none`}>
+                      <option value="" className="bg-tt-card text-tt-muted">Select…</option>
+                      {selectable.map((e) => (
+                        <option key={e.id} value={e.id} className="bg-tt-card text-tt-text">{e.name}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Start Date">
+                    <input type="date" value={rStartDate} onChange={(e) => setRStartDate(e.target.value)} className={inputCls} />
+                  </Field>
+                  <Field label="Start">
+                    <input type="time" value={rStart} onChange={(e) => setRStart(e.target.value)} className={inputCls} />
+                  </Field>
+                  <Field label="End">
+                    <input type="time" value={rEnd} onChange={(e) => setREnd(e.target.value)} className={inputCls} />
+                  </Field>
+                </div>
+                <div className="mt-4">
+                  <label className="text-[11px] text-tt-muted uppercase tracking-wide block mb-2">Repeats on</label>
+                  <div className="flex flex-wrap gap-2">
+                    {WEEKDAYS.map((d) => {
+                      const on = rDays.has(d.value);
+                      return (
+                        <button
+                          key={d.value}
+                          type="button"
+                          onClick={() => toggleDay(d.value)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                            on ? 'bg-tt-cyan text-black' : 'bg-white/5 text-tt-muted hover:text-tt-text'
+                          }`}
+                        >
+                          {d.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {error && <p className="text-xs text-tt-red mt-3">{error}</p>}
+                <div className="mt-4">
+                  <button
+                    onClick={handleAddRule}
+                    disabled={submitting}
+                    className="px-4 py-2 rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] text-black text-[13px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {submitting ? 'Adding…' : '+ Add Recurring Shift'}
+                  </button>
+                </div>
+              </>
             )}
           </div>
 
-          {/* Shift list */}
+          {/* Recurring rules */}
+          {rules.length > 0 && (
+            <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
+              <div className="px-6 py-5 border-b border-tt-border">
+                <h2 className="text-base font-semibold text-tt-text">Recurring Rules</h2>
+                <p className="text-xs text-tt-muted mt-1">Deleting a rule stops future generation. Past pay already calculated is unaffected; one-off shifts are untouched.</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr className="border-b border-tt-border">
+                      <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Employee</th>
+                      <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Days</th>
+                      <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Time</th>
+                      <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">From</th>
+                      <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Status</th>
+                      <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rules.map((r) => (
+                      <tr key={r.id} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
+                        <td className="px-5 py-3 text-[13px] text-tt-text">{nameById.get(r.employee_id) || 'Unknown'}</td>
+                        <td className="px-5 py-3 text-xs text-tt-muted">{daysLabel(r.days_of_week)}</td>
+                        <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{r.start_time.slice(0, 5)}–{r.end_time.slice(0, 5)}</td>
+                        <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{r.start_date}</td>
+                        <td className="px-5 py-3">
+                          <span className={`text-[10px] font-semibold px-2 py-1 rounded-md ${r.active ? 'bg-tt-green/15 text-tt-green' : 'bg-tt-muted/15 text-tt-muted'}`}>
+                            {r.active ? 'Active' : 'Paused'}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3 text-center whitespace-nowrap">
+                          <button
+                            onClick={() => toggleRuleActive.mutateAsync({ id: r.id, active: !r.active }).catch((e) => alert((e as Error).message))}
+                            className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
+                          >
+                            {r.active ? 'Pause' : 'Resume'}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteRule(r)}
+                            className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                          >
+                            Delete Rule
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Shift list (one-off + generated recurring) */}
           <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
             <div className="px-6 py-5 border-b border-tt-border">
-              <h2 className="text-base font-semibold text-tt-text">Time records</h2>
+              <h2 className="text-base font-semibold text-tt-text">Shifts This Period</h2>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full border-collapse">
@@ -358,7 +527,6 @@ export default function TimeRecordsView({
                   {rows.map((row) => {
                     const skipped = row.kind === 'recurring' && row.skipped;
                     const isOpen = row.kind === 'oneoff' && row.end_time == null;
-                    const frozen = row.kind === 'oneoff' && row.frozen;
                     return (
                       <tr key={row.id} className={`border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors ${skipped ? 'opacity-60' : ''}`}>
                         <td className="px-5 py-3 text-xs text-tt-muted">{row.date}</td>
@@ -370,8 +538,6 @@ export default function TimeRecordsView({
                               {row.modified && <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Modified</span>}
                               {row.skipped && <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-red/15 text-tt-red">Skipped</span>}
                             </span>
-                          ) : frozen ? (
-                            <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Recurring (logged)</span>
                           ) : isOpen ? (
                             <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">
                               <span className="w-1.5 h-1.5 rounded-full bg-tt-green animate-pulse" />In progress
@@ -387,34 +553,30 @@ export default function TimeRecordsView({
                         </td>
                         <td className="px-5 py-3 text-center whitespace-nowrap">
                           {row.kind === 'oneoff' ? (
-                            frozen ? (
-                              <span className="text-[11px] text-tt-muted">Logged history</span>
-                            ) : (
-                              <>
-                                {isOpen && (
-                                  <button
-                                    onClick={() =>
-                                      setEndingShift({
-                                        id: row.id,
-                                        name: nameById.get(row.employee_id) || 'Unknown',
-                                        date: row.date,
-                                        start_time: row.start_time,
-                                        end_time: new Date().toTimeString().slice(0, 5),
-                                      })
-                                    }
-                                    className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
-                                  >
-                                    Shift Ended
-                                  </button>
-                                )}
+                            <>
+                              {isOpen && (
                                 <button
-                                  onClick={() => handleDeleteOneOff(row.id)}
-                                  className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                                  onClick={() =>
+                                    setEndingShift({
+                                      id: row.id,
+                                      name: nameById.get(row.employee_id) || 'Unknown',
+                                      date: row.date,
+                                      start_time: row.start_time,
+                                      end_time: new Date().toTimeString().slice(0, 5),
+                                    })
+                                  }
+                                  className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
                                 >
-                                  Delete
+                                  Shift Ended
                                 </button>
-                              </>
-                            )
+                              )}
+                              <button
+                                onClick={() => handleDeleteOneOff(row.id)}
+                                className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                              >
+                                Delete
+                              </button>
+                            </>
                           ) : row.skipped ? (
                             <button
                               onClick={() => handleClear(row)}
@@ -472,7 +634,7 @@ export default function TimeRecordsView({
         </>
       )}
 
-      {/* Edit recurring occurrence */}
+      {/* Edit recurring instance (writes a 'modified' exception for that date) */}
       {editing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEditing(null)} />
@@ -504,7 +666,7 @@ export default function TimeRecordsView({
         </div>
       )}
 
-      {/* End an open shift */}
+      {/* End an open shift — end defaults to NOW but is editable before saving. */}
       {endingShift && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEndingShift(null)} />

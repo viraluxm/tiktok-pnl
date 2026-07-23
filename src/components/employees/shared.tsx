@@ -54,9 +54,3 @@ export function daysLabel(days: number[]): string {
   const picked = WEEKDAYS.filter((d) => set.has(d.value)).map((d) => d.label);
   return picked.length ? picked.join(', ') : '—';
 }
-
-// Plain-language description of a recurring rule, e.g.
-// "Every Mon, Wed, Fri · 09:00–17:00 · from 2026-06-01".
-export function ruleDescription(days: number[], start: string, end: string, startDate: string): string {
-  return `Every ${daysLabel(days)} · ${start.slice(0, 5)}–${end.slice(0, 5)} · from ${startDate}`;
-}
