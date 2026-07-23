@@ -1,0 +1,535 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import { shiftHours, generateRecurringShifts } from '@/lib/employees';
+import { useShifts } from '@/hooks/useShifts';
+import { useShiftRules } from '@/hooks/useShiftRules';
+import type { Employee, Shift } from '@/types';
+import ShiftCalendar, { type CalendarShift } from './ShiftCalendar';
+import { Field, inputCls } from './shared';
+
+type DisplayRow =
+  | { kind: 'oneoff'; id: string; employee_id: string; date: string; start_time: string; end_time: string | null; frozen: boolean }
+  | {
+      kind: 'recurring';
+      id: string;
+      rule_id: string;
+      employee_id: string;
+      date: string;
+      start_time: string;
+      end_time: string;
+      modified: boolean;
+      skipped: boolean;
+    };
+
+// "Time Records" — the detailed shift list/history, split out of the old mixed Shifts view.
+// One-off entry, the List/Calendar toggle, open-shift closing, and per-occurrence
+// edit/skip/revert are all preserved exactly. Scoped to the dashboard FiltersBar range, so
+// it only loads history when the user opens this tab (not on Team-tab open).
+export default function TimeRecordsView({
+  employees,
+  dateFrom,
+  dateTo,
+}: {
+  employees: Employee[];
+  dateFrom: string | null;
+  dateTo: string | null;
+}) {
+  const { shifts, openShifts, isLoading: shiftsLoading, addShift, endShift, deleteShift } = useShifts(dateFrom, dateTo);
+  const {
+    rules,
+    exceptions,
+    isLoading: rulesLoading,
+    upsertException,
+    deleteException,
+  } = useShiftRules();
+
+  const materialized = useMemo(
+    () => new Set(shifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
+    [shifts],
+  );
+  const generated = useMemo(
+    () => generateRecurringShifts(rules, exceptions, dateFrom, dateTo, materialized),
+    [rules, exceptions, dateFrom, dateTo, materialized],
+  );
+
+  const isLoading = shiftsLoading || rulesLoading;
+
+  // Default to the read-only Calendar view (List remains a fully-working toggle).
+  const [view, setView] = useState<'list' | 'calendar'>('calendar');
+
+  // One-off entry form.
+  const [employeeId, setEmployeeId] = useState('');
+  const [date, setDate] = useState('');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [currentlyInShift, setCurrentlyInShift] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [endingShift, setEndingShift] = useState<
+    { id: string; name: string; date: string; start_time: string; end_time: string } | null
+  >(null);
+  const [editing, setEditing] = useState<
+    { ruleId: string; date: string; name: string; start: string; end: string } | null
+  >(null);
+
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const nameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of employees) m.set(e.id, e.name);
+    return m;
+  }, [employees]);
+
+  // Only non-former employees are offered for new entries.
+  const selectable = useMemo(() => employees.filter((e) => e.status !== 'former'), [employees]);
+
+  const openByEmployee = useMemo(() => {
+    const m = new Set<string>();
+    for (const s of openShifts) m.add(s.employee_id);
+    return m;
+  }, [openShifts]);
+
+  const rows = useMemo<DisplayRow[]>(() => {
+    const oneoffById = new Map<string, Shift>();
+    for (const s of [...shifts, ...openShifts]) oneoffById.set(s.id, s);
+    const combined: DisplayRow[] = [
+      ...[...oneoffById.values()].map(
+        (s): DisplayRow => ({
+          kind: 'oneoff',
+          id: s.id,
+          employee_id: s.employee_id,
+          date: s.date,
+          start_time: s.start_time,
+          end_time: s.end_time,
+          // Materialized recurring payroll rows are NOT deletable one-offs (spec/audit).
+          frozen: s.source_rule_id != null,
+        }),
+      ),
+      ...generated.map(
+        (g): DisplayRow => ({
+          kind: 'recurring',
+          id: g.id,
+          rule_id: g.rule_id,
+          employee_id: g.employee_id,
+          date: g.date,
+          start_time: g.start_time,
+          end_time: g.end_time,
+          modified: g.modified,
+          skipped: g.skipped,
+        }),
+      ),
+    ];
+    return combined.sort((a, b) => b.date.localeCompare(a.date) || a.start_time.localeCompare(b.start_time));
+  }, [shifts, openShifts, generated]);
+
+  const calendarShifts = useMemo<CalendarShift[]>(
+    () =>
+      rows
+        .filter((r) => !(r.kind === 'recurring' && r.skipped))
+        .map((r) => ({
+          id: r.id,
+          kind: r.kind,
+          employee_id: r.employee_id,
+          date: r.date,
+          start_time: r.start_time,
+          end_time: r.end_time,
+        })),
+    [rows],
+  );
+
+  function minsOf(t: string): number {
+    const [h, m] = t.split(':').map(Number);
+    return (h || 0) * 60 + (m || 0);
+  }
+
+  function elapsedLabel(dateStr: string, start: string): string {
+    const startMs = new Date(`${dateStr}T${start}`).getTime();
+    if (!Number.isFinite(startMs)) return '—';
+    const mins = Math.max(0, Math.floor((nowTick - startMs) / 60000));
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  async function handleAddOneOff() {
+    if (!employeeId || !date || !startTime || (!currentlyInShift && !endTime)) {
+      setError(
+        currentlyInShift
+          ? 'Employee, date and start time are required'
+          : 'Employee, date, start and end time are all required',
+      );
+      return;
+    }
+    if (!currentlyInShift && minsOf(startTime) === minsOf(endTime)) {
+      setError('Start and end time cannot be the same.');
+      return;
+    }
+    if (currentlyInShift && openByEmployee.has(employeeId)) {
+      setError(`${nameById.get(employeeId) || 'This person'} already has an open shift — end it first.`);
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await addShift.mutateAsync({
+        employee_id: employeeId,
+        date,
+        start_time: startTime,
+        end_time: currentlyInShift ? null : endTime,
+      });
+      setDate('');
+      setStartTime('');
+      setEndTime('');
+      setCurrentlyInShift(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function saveEndShift() {
+    if (!endingShift) return;
+    if (!endingShift.end_time) {
+      alert('End time is required');
+      return;
+    }
+    if (minsOf(endingShift.end_time) === minsOf(endingShift.start_time)) {
+      alert('End time must be different from the start time.');
+      return;
+    }
+    try {
+      await endShift.mutateAsync({
+        id: endingShift.id,
+        end_time: endingShift.end_time.length === 5 ? `${endingShift.end_time}:00` : endingShift.end_time,
+      });
+      setEndingShift(null);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  async function handleSkip(row: Extract<DisplayRow, { kind: 'recurring' }>) {
+    if (!confirm(`Skip this recurring shift on ${row.date}? The rule keeps generating other days.`)) return;
+    try {
+      await upsertException.mutateAsync({ rule_id: row.rule_id, date: row.date, type: 'skip' });
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  async function handleClear(row: Extract<DisplayRow, { kind: 'recurring' }>) {
+    try {
+      await deleteException.mutateAsync({ rule_id: row.rule_id, date: row.date });
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  async function handleDeleteOneOff(id: string) {
+    if (!confirm('Delete this shift? This cannot be undone.')) return;
+    try {
+      await deleteShift.mutateAsync(id);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  async function saveEditing() {
+    if (!editing) return;
+    if (!editing.start || !editing.end) {
+      alert('Start and end time are required');
+      return;
+    }
+    try {
+      await upsertException.mutateAsync({
+        rule_id: editing.ruleId,
+        date: editing.date,
+        type: 'modified',
+        modified_start: editing.start,
+        modified_end: editing.end,
+      });
+      setEditing(null);
+    } catch (err) {
+      alert((err as Error).message);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-end">
+        <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
+          {(['list', 'calendar'] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                view === v ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'
+              }`}
+            >
+              {v === 'list' ? 'List' : 'Calendar'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {view === 'calendar' ? (
+        <ShiftCalendar rows={calendarShifts} nameById={nameById} employees={employees} />
+      ) : (
+        <>
+          {/* One-off entry */}
+          <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl p-6">
+            <h2 className="text-base font-semibold text-tt-text mb-4">Add a shift</h2>
+            {selectable.length === 0 ? (
+              <p className="text-sm text-tt-muted">Add an active employee first before logging shifts.</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <Field label="Employee">
+                    <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} className={`${inputCls} appearance-none`}>
+                      <option value="" className="bg-tt-card text-tt-muted">Select…</option>
+                      {selectable.map((e) => (
+                        <option key={e.id} value={e.id} className="bg-tt-card text-tt-text">{e.name}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="Date">
+                    <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputCls} />
+                  </Field>
+                  <Field label="Start">
+                    <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className={inputCls} />
+                  </Field>
+                  <Field label="End">
+                    {currentlyInShift ? (
+                      <div className={`${inputCls} flex items-center text-tt-muted`}>In progress</div>
+                    ) : (
+                      <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className={inputCls} />
+                    )}
+                  </Field>
+                </div>
+                <label className="mt-3 flex items-center gap-2 cursor-pointer select-none w-fit">
+                  <input
+                    type="checkbox"
+                    checked={currentlyInShift}
+                    onChange={(e) => { setCurrentlyInShift(e.target.checked); setError(null); }}
+                    className="accent-tt-cyan w-4 h-4"
+                  />
+                  <span className="text-[13px] text-tt-text">Currently in shift <span className="text-tt-muted">(no end time yet)</span></span>
+                </label>
+                {error && <p className="text-xs text-tt-red mt-3">{error}</p>}
+                <div className="mt-4">
+                  <button
+                    onClick={handleAddOneOff}
+                    disabled={submitting}
+                    className="px-4 py-2 rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] text-black text-[13px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    {submitting ? 'Adding…' : currentlyInShift ? '+ Start Shift' : '+ Add Shift'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Shift list */}
+          <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
+            <div className="px-6 py-5 border-b border-tt-border">
+              <h2 className="text-base font-semibold text-tt-text">Time records</h2>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="border-b border-tt-border">
+                    <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Date</th>
+                    <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Employee</th>
+                    <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Type</th>
+                    <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Start</th>
+                    <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">End</th>
+                    <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hours</th>
+                    <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => {
+                    const skipped = row.kind === 'recurring' && row.skipped;
+                    const isOpen = row.kind === 'oneoff' && row.end_time == null;
+                    const frozen = row.kind === 'oneoff' && row.frozen;
+                    return (
+                      <tr key={row.id} className={`border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors ${skipped ? 'opacity-60' : ''}`}>
+                        <td className="px-5 py-3 text-xs text-tt-muted">{row.date}</td>
+                        <td className="px-5 py-3 text-[13px] text-tt-text">{nameById.get(row.employee_id) || 'Unknown'}</td>
+                        <td className="px-5 py-3">
+                          {row.kind === 'recurring' ? (
+                            <span className="inline-flex items-center gap-1">
+                              <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Recurring</span>
+                              {row.modified && <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Modified</span>}
+                              {row.skipped && <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-red/15 text-tt-red">Skipped</span>}
+                            </span>
+                          ) : frozen ? (
+                            <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Recurring (logged)</span>
+                          ) : isOpen ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">
+                              <span className="w-1.5 h-1.5 rounded-full bg-tt-green animate-pulse" />In progress
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">One-off</span>
+                          )}
+                        </td>
+                        <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{row.start_time.slice(0, 5)}</td>
+                        <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{isOpen ? '—' : (row.end_time ?? '').slice(0, 5)}</td>
+                        <td className={`px-5 py-3 text-[13px] text-right tabular-nums ${skipped ? 'text-tt-muted line-through' : isOpen ? 'text-tt-green' : 'text-tt-text'}`}>
+                          {isOpen ? elapsedLabel(row.date, row.start_time) : shiftHours(row.start_time, row.end_time).toFixed(2)}
+                        </td>
+                        <td className="px-5 py-3 text-center whitespace-nowrap">
+                          {row.kind === 'oneoff' ? (
+                            frozen ? (
+                              <span className="text-[11px] text-tt-muted">Logged history</span>
+                            ) : (
+                              <>
+                                {isOpen && (
+                                  <button
+                                    onClick={() =>
+                                      setEndingShift({
+                                        id: row.id,
+                                        name: nameById.get(row.employee_id) || 'Unknown',
+                                        date: row.date,
+                                        start_time: row.start_time,
+                                        end_time: new Date().toTimeString().slice(0, 5),
+                                      })
+                                    }
+                                    className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                                  >
+                                    Shift Ended
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleDeleteOneOff(row.id)}
+                                  className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                                >
+                                  Delete
+                                </button>
+                              </>
+                            )
+                          ) : row.skipped ? (
+                            <button
+                              onClick={() => handleClear(row)}
+                              className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                            >
+                              Restore
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() =>
+                                  setEditing({
+                                    ruleId: row.rule_id,
+                                    date: row.date,
+                                    name: nameById.get(row.employee_id) || 'Unknown',
+                                    start: row.start_time.slice(0, 5),
+                                    end: row.end_time.slice(0, 5),
+                                  })
+                                }
+                                className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+                              >
+                                Edit
+                              </button>
+                              {row.modified && (
+                                <button
+                                  onClick={() => handleClear(row)}
+                                  className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
+                                >
+                                  Revert
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleSkip(row)}
+                                className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                              >
+                                Skip
+                              </button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {rows.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="px-5 py-12 text-center text-tt-muted text-sm">
+                        {isLoading ? 'Loading…' : 'No shifts for this period'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Edit recurring occurrence */}
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEditing(null)} />
+          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+            <div className="flex items-start justify-between mb-1">
+              <h3 className="text-base font-semibold text-tt-text">Edit This Occurrence</h3>
+              <button onClick={() => setEditing(null)} className="text-tt-muted hover:text-tt-text transition-colors p-1">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <p className="text-xs text-tt-muted mb-4">
+              {editing.name} · {editing.date}. Changes apply to this date only; the rule keeps generating other days.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Start">
+                <input type="time" value={editing.start} onChange={(e) => setEditing({ ...editing, start: e.target.value })} className={inputCls} />
+              </Field>
+              <Field label="End">
+                <input type="time" value={editing.end} onChange={(e) => setEditing({ ...editing, end: e.target.value })} className={inputCls} />
+              </Field>
+            </div>
+            <div className="flex gap-3 pt-5">
+              <button onClick={() => setEditing(null)} className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors">Cancel</button>
+              <button onClick={saveEditing} className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors">Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* End an open shift */}
+      {endingShift && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEndingShift(null)} />
+          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+            <div className="flex items-start justify-between mb-1">
+              <h3 className="text-base font-semibold text-tt-text">End Shift</h3>
+              <button onClick={() => setEndingShift(null)} className="text-tt-muted hover:text-tt-text transition-colors p-1">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <p className="text-xs text-tt-muted mb-4">
+              {endingShift.name} · {endingShift.date}, started {endingShift.start_time.slice(0, 5)}. Adjust the end time if it wasn&apos;t just now.
+            </p>
+            <Field label="End time">
+              <input type="time" value={endingShift.end_time} onChange={(e) => setEndingShift({ ...endingShift, end_time: e.target.value })} className={inputCls} />
+            </Field>
+            <div className="flex gap-3 pt-5">
+              <button onClick={() => setEndingShift(null)} className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors">Cancel</button>
+              <button onClick={saveEndShift} className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors">End Shift</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
