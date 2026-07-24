@@ -195,4 +195,31 @@ console.log('\nvalidateShiftTimes');
   check('missing end is rejected', missing.ok === false);
 }
 
+// ── 12-hour AM/PM display formatting ─────────────────────────────────────────
+console.log('\n12-hour time formatting');
+{
+  check('00:00 → 12 AM', W.formatTime12('00:00') === '12 AM', W.formatTime12('00:00'));
+  check('05:00 → 5 AM', W.formatTime12('05:00') === '5 AM', W.formatTime12('05:00'));
+  check('12:00 → 12 PM', W.formatTime12('12:00') === '12 PM', W.formatTime12('12:00'));
+  check('17:00 → 5 PM', W.formatTime12('17:00') === '5 PM', W.formatTime12('17:00'));
+  check('17:30 → 5:30 PM', W.formatTime12('17:30') === '5:30 PM', W.formatTime12('17:30'));
+  check('00:40 → 12:40 AM', W.formatTime12('00:40') === '12:40 AM', W.formatTime12('00:40'));
+  check('handles HH:MM:SS (06:00:00 → 6 AM)', W.formatTime12('06:00:00') === '6 AM', W.formatTime12('06:00:00'));
+  check('minutes kept, no leading zero on hour (09:05 → 9:05 AM)', W.formatTime12('09:05') === '9:05 AM', W.formatTime12('09:05'));
+
+  // Ranges (examples from the spec).
+  check('range 17:00–01:00 → 5 PM–1 AM', W.formatTimeRange12('17:00', '01:00') === '5 PM–1 AM', W.formatTimeRange12('17:00', '01:00'));
+  check('range 06:00–14:00 → 6 AM–2 PM', W.formatTimeRange12('06:00', '14:00') === '6 AM–2 PM', W.formatTimeRange12('06:00', '14:00'));
+  check('range 17:00–00:40 → 5 PM–12:40 AM', W.formatTimeRange12('17:00', '00:40') === '5 PM–12:40 AM', W.formatTimeRange12('17:00', '00:40'));
+  check('open range (null end) → "5 PM–open"', W.formatTimeRange12('17:00', null) === '5 PM–open', W.formatTimeRange12('17:00', null));
+
+  // Overnight display + correct duration are independent concerns; both hold.
+  check('overnight 17:00→01:00 displays as 5 PM–1 AM AND is still 8h',
+    W.formatTimeRange12('17:00', '01:00') === '5 PM–1 AM' && W.durationHours('17:00', '01:00') === 8);
+  check('overnight is flagged', W.isOvernight('17:00', '01:00') === true);
+  // "· Ends <weekday>": 2026-06-29 is a Monday, so a shift that night ends Tuesday.
+  check("nextDayWeekday('2026-06-29') = Tuesday", W.nextDayWeekday('2026-06-29') === 'Tuesday', W.nextDayWeekday('2026-06-29'));
+  check('nextDayWeekday("") is empty (no crash on missing date)', W.nextDayWeekday('') === '');
+}
+
 console.log(`\nALL PASSED (${passed} assertions)`);

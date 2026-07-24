@@ -6,6 +6,8 @@ import {
   validateShiftTimes,
   duplicatePrefill,
   addDaysISO,
+  formatTime12,
+  nextDayWeekday,
   type WeekShiftCard,
 } from '@/lib/weeklySchedule';
 
@@ -257,9 +259,9 @@ export default function ShiftEditorModal({
     return (
       <Shell title="Shift" onClose={onClose}>
         <p className="text-xs text-tt-muted mb-4">
-          {nameById(card.employee_id)} · {card.date} · {card.start_time.slice(0, 5)}
-          {card.isOpen ? ' – open' : `–${(card.end_time ?? '').slice(0, 5)}`}
-          {card.isOvernight && ' (overnight, +1d)'}
+          {nameById(card.employee_id)} · {card.date} · {formatTime12(card.start_time)}
+          {card.isOpen ? ' – open' : `–${formatTime12(card.end_time as string)}`}
+          {card.isOvernight && ` · Ends ${nextDayWeekday(card.date)}`}
         </p>
 
         {frozen && (
@@ -363,8 +365,12 @@ export default function ShiftEditorModal({
               <p className="text-tt-muted">Open shift — no end time yet. Won&apos;t count toward hours until ended.</p>
             ) : validation.ok ? (
               <>
-                <p className="text-tt-text">Duration: <span className="font-semibold tabular-nums">{validation.hours.toFixed(2)} h</span></p>
-                {validation.overnight && <p className="text-tt-yellow">🌙 Ends the next day (overnight).</p>}
+                <p className="text-tt-text">
+                  {formatTime12(form.start)}–{formatTime12(form.end)} · <span className="font-semibold tabular-nums">{validation.hours.toFixed(2)} h</span>
+                </p>
+                {validation.overnight && (
+                  <p className="text-tt-yellow">🌙 Ends the next day{form.date ? ` (${nextDayWeekday(form.date)})` : ''} — overnight.</p>
+                )}
                 {validation.longWarning && <p className="text-tt-yellow">⚠ Unusually long shift ({validation.hours.toFixed(1)}h) — double-check the times.</p>}
               </>
             ) : (

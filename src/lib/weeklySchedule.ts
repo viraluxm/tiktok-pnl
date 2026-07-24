@@ -136,6 +136,34 @@ export function isOvernight(startTime: string, endTime: string | null): boolean 
 // Unusually long shifts get a non-blocking warning at/above this many hours.
 export const LONG_SHIFT_HOURS = 16;
 
+// ── 12-hour display formatting (user-facing only; storage stays 24h 'HH:MM:SS') ──
+
+// Format an 'HH:MM' / 'HH:MM:SS' time as 12-hour AM/PM, no leading zero, minutes shown
+// only when non-zero:
+//   00:00 → "12 AM", 05:00 → "5 AM", 12:00 → "12 PM", 17:00 → "5 PM",
+//   17:30 → "5:30 PM", 00:40 → "12:40 AM".
+export function formatTime12(t: string): string {
+  const parts = t.split(':');
+  const h = Number(parts[0]) || 0;
+  const m = Number(parts[1]) || 0;
+  const period = h < 12 ? 'AM' : 'PM';
+  const hh = h % 12 === 0 ? 12 : h % 12;
+  return m === 0 ? `${hh} ${period}` : `${hh}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+// A start–end range in 12-hour format: "5 PM–1 AM". A null end (open shift) → "5 PM–open".
+export function formatTimeRange12(startTime: string, endTime: string | null): string {
+  const s = formatTime12(startTime);
+  return endTime == null ? `${s}–open` : `${s}–${formatTime12(endTime)}`;
+}
+
+// Weekday name (e.g. "Tuesday") of the day AFTER dateISO — for overnight "· Ends <day>"
+// labels. Uses UTC so the calendar day never drifts by timezone.
+export function nextDayWeekday(dateISO: string): string {
+  if (!dateISO) return '';
+  return parseYMD(addDaysISO(dateISO, 1)).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
+}
+
 // ── Shift-card model ──────────────────────────────────────────────────────────
 
 // Minimal shapes of the rows we consume, so the pure logic doesn't couple to exact

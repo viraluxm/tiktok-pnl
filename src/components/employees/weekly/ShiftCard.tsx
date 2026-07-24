@@ -1,6 +1,6 @@
 'use client';
 
-import type { RoleGroupKey, WeekShiftCard } from '@/lib/weeklySchedule';
+import { formatTime12, type RoleGroupKey, type WeekShiftCard } from '@/lib/weeklySchedule';
 
 // Role tint for a card. Color is never the ONLY signal — every card also carries a text
 // type label (One-off / Recurring / Open …) and times.
@@ -14,10 +14,6 @@ function tintClasses(roleKey: RoleGroupKey, isOpen: boolean): string {
     default:
       return 'border-l-tt-muted bg-white/5 hover:bg-white/10';
   }
-}
-
-function hm(t: string): string {
-  return t.slice(0, 5);
 }
 
 function Pill({ tone, children }: { tone: 'cyan' | 'yellow' | 'muted' | 'red'; children: React.ReactNode }) {
@@ -56,8 +52,8 @@ export default function ShiftCard({
       className={`w-full text-left border-l-[3px] rounded-md px-2 py-1.5 transition-colors cursor-pointer ${tintClasses(roleKey, card.isOpen)}`}
     >
       <div className="flex items-center justify-between gap-1">
-        <span className="text-[11px] font-semibold text-tt-text tabular-nums">
-          {hm(card.start_time)}<span className="text-tt-muted">–</span>{card.isOpen ? <span className="text-tt-yellow">now</span> : hm(card.end_time as string)}
+        <span className="text-[11px] font-semibold text-tt-text">
+          {formatTime12(card.start_time)}<span className="text-tt-muted">–</span>{card.isOpen ? <span className="text-tt-yellow">now</span> : formatTime12(card.end_time as string)}
         </span>
         <span className="text-[10px] tabular-nums text-tt-muted">
           {card.isOpen ? '—' : `${card.hours.toFixed(2)}h`}
