@@ -13,21 +13,24 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL('/login', siteUrl));
   }
 
-  // Which store is being connected? Required — connections are now per-store
-  // (unique(user_id, store_id), migration 042). The callback stamps this store_id.
+  // store_id is now OPTIONAL — the OAuth flow serves two cases:
+  //   • RE-AUTH an existing store: store_id present → validate membership, and
+  //     the callback stamps the connection onto that store (legacy path).
+  //   • CONNECT A NEW SHOP (onboarding first-shop OR add-Nth-shop): store_id
+  //     absent → the callback creates/dedups the store from the TikTok shop id
+  //     and links a store_membership. Same code path for both new cases.
   const storeId = new URL(request.url).searchParams.get('store_id');
-  if (!storeId) {
-    return NextResponse.redirect(new URL('/dashboard?tiktok=error&reason=missing_store', siteUrl));
-  }
-  // The store must belong to the caller.
-  const { data: membership } = await supabase
-    .from('store_members')
-    .select('store_id')
-    .eq('user_id', user.id)
-    .eq('store_id', storeId)
-    .maybeSingle();
-  if (!membership) {
-    return NextResponse.redirect(new URL('/dashboard?tiktok=error&reason=invalid_store', siteUrl));
+  if (storeId) {
+    // Re-auth: the store must belong to the caller.
+    const { data: membership } = await supabase
+      .from('store_members')
+      .select('store_id')
+      .eq('user_id', user.id)
+      .eq('store_id', storeId)
+      .maybeSingle();
+    if (!membership) {
+      return NextResponse.redirect(new URL('/dashboard?tiktok=error&reason=invalid_store', siteUrl));
+    }
   }
 
   // Generate CSRF state token
@@ -52,14 +55,17 @@ export async function GET(request: Request) {
     path: '/',
   });
 
-  // And the target store, so the callback stamps store_id on the connection.
-  cookieStore.set('tiktok_oauth_store', storeId, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    maxAge: 600,
-    path: '/',
-  });
+  // Target store cookie — ONLY on the re-auth path. Its absence signals the
+  // callback to create/dedup a store from the TikTok shop id instead.
+  if (storeId) {
+    cookieStore.set('tiktok_oauth_store', storeId, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      maxAge: 600,
+      path: '/',
+    });
+  }
 
   const authUrl = getAuthUrl(state);
   return NextResponse.redirect(authUrl);
