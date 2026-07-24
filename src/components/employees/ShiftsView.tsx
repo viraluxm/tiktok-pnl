@@ -5,7 +5,7 @@ import { shiftHours, generateRecurringShifts } from '@/lib/employees';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee, Shift, ShiftRule } from '@/types';
-import WeeklyShiftView from './weekly/WeeklyShiftView';
+import CalendarView from './weekly/CalendarView';
 import { Field, WEEKDAYS, daysLabel, inputCls } from './shared';
 
 // The production Shifts view: an Add Shift card (One-off / Recurring), a Recurring Rules
@@ -328,7 +328,7 @@ export default function ShiftsView({
       </div>
 
       {view === 'calendar' ? (
-        <WeeklyShiftView employees={employees} />
+        <CalendarView employees={employees} />
       ) : (
         <>
           {/* Add shift */}

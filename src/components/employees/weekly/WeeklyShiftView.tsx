@@ -17,6 +17,7 @@ import {
 import RoleFilter from './RoleFilter';
 import WeeklyShiftGrid from './WeeklyShiftGrid';
 import ShiftEditorModal, { type EditorIntent } from './ShiftEditorModal';
+import { makeEditorHandlers } from './editorHandlers';
 
 function longDate(iso: string): string {
   return parseYMD(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -64,25 +65,7 @@ export default function WeeklyShiftView({ employees }: { employees: Employee[] }
   const defaultAddDate = today >= week.start && today <= week.end ? today : week.start;
 
   const handlers = useMemo(
-    () => ({
-      employees,
-      nameById,
-      onCreate: async (input: { employee_id: string; date: string; start_time: string; end_time: string | null }) => {
-        await addShift.mutateAsync(input);
-      },
-      onUpdate: async (id: string, patch: { start_time?: string; end_time?: string | null }) => {
-        await updateShift.mutateAsync({ id, ...patch });
-      },
-      onDeleteOneOff: async (id: string) => {
-        await deleteShift.mutateAsync(id);
-      },
-      onModifyOccurrence: async (ruleId: string, date: string, start: string, end: string) => {
-        await upsertException.mutateAsync({ rule_id: ruleId, date, type: 'modified', modified_start: start, modified_end: end });
-      },
-      onSkipOccurrence: async (ruleId: string, date: string) => {
-        await upsertException.mutateAsync({ rule_id: ruleId, date, type: 'skip' });
-      },
-    }),
+    () => makeEditorHandlers({ employees, nameById, addShift, updateShift, deleteShift, upsertException }),
     [employees, nameById, addShift, updateShift, deleteShift, upsertException],
   );
 

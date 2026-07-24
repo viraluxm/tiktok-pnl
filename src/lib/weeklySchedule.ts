@@ -356,6 +356,124 @@ export function buildWeekModel(params: {
   return out;
 }
 
+// ── Month grid (Monday-based, full visible range incl. adjacent-month days) ──────
+
+// First day of the month containing `iso`, as 'YYYY-MM-01'.
+export function startOfMonthISO(iso: string): string {
+  return `${iso.slice(0, 7)}-01`;
+}
+
+// First-of-month `n` months from the month containing `iso` (n may be negative).
+export function addMonthsISO(iso: string, n: number): string {
+  const [y, m] = iso.slice(0, 7).split('-').map(Number);
+  return toYMD(new Date(Date.UTC(y, m - 1 + n, 1)));
+}
+
+// "July 2026" for the month containing `anchorISO`.
+export function monthTitle(anchorISO: string): string {
+  return parseYMD(startOfMonthISO(anchorISO)).toLocaleDateString('en-US', {
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+// Is `iso` in the same calendar month as `anchorISO`? (false for adjacent-month grid days.)
+export function isInMonth(iso: string, anchorISO: string): boolean {
+  return iso.slice(0, 7) === anchorISO.slice(0, 7);
+}
+
+export interface MonthGrid {
+  monthStart: string; // 1st of the month
+  monthEnd: string; // last day of the month
+  gridStart: string; // Monday on/before the 1st
+  gridEnd: string; // Sunday on/after the last day
+  days: string[]; // every visible day, Mon→Sun, whole weeks
+  weeks: string[][]; // `days` chunked into 7s
+}
+
+// The full visible month grid: whole Monday→Sunday weeks covering the month, INCLUDING
+// trailing days from the previous/next month. Data fetching + recurring generation should
+// use [gridStart, gridEnd], not just the month's 1st/last, so adjacent-month cells fill in.
+export function monthGridDays(anchorISO: string): MonthGrid {
+  const monthStart = startOfMonthISO(anchorISO);
+  const [y, m] = monthStart.split('-').map(Number);
+  const monthEnd = toYMD(new Date(Date.UTC(y, m, 0))); // day 0 of next month = last day
+  const gridStart = mondayOfISO(monthStart);
+  const gridEnd = addDaysISO(mondayOfISO(monthEnd), 6); // Sunday of the last week
+  const days: string[] = [];
+  for (let d = gridStart; d <= gridEnd; d = addDaysISO(d, 1)) days.push(d);
+  const weeks: string[][] = [];
+  for (let i = 0; i < days.length; i += 7) weeks.push(days.slice(i, i + 7));
+  return { monthStart, monthEnd, gridStart, gridEnd, days, weeks };
+}
+
+// How many entries to show in a month-cell before collapsing the rest into "+N more".
+export const MONTH_CELL_MAX_ENTRIES = 3;
+
+// Split a total count into a visible count + an overflow count for the "+N more" affordance.
+export function overflowSplit(total: number, maxVisible: number = MONTH_CELL_MAX_ENTRIES): { visible: number; more: number } {
+  return { visible: Math.min(total, maxVisible), more: Math.max(0, total - maxVisible) };
+}
+
+// A single shift on a given day, paired with its employee — the month view's unit.
+export interface DayEntry {
+  employee: Employee;
+  card: WeekShiftCard;
+}
+
+// Group a day's entries by role (Live Hosts → Fulfillment → Other), each ordered by start
+// time then name. Only non-empty groups are returned.
+export function groupDayEntriesByRole(entries: DayEntry[]): { key: RoleGroupKey; label: string; entries: DayEntry[] }[] {
+  const out: { key: RoleGroupKey; label: string; entries: DayEntry[] }[] = [];
+  for (const key of ROLE_GROUP_ORDER) {
+    const members = entries
+      .filter((e) => roleGroupOf(e.employee.role) === key)
+      .sort((a, b) => a.card.startMin - b.card.startMin || a.employee.name.localeCompare(b.employee.name));
+    if (members.length) out.push({ key, label: ROLE_GROUP_LABEL[key], entries: members });
+  }
+  return out;
+}
+
+// Build the month model: for each grid day, the schedulable (non-former) entries matching
+// the role filter, grouped/ordered by role → start. Reuses the same card-building +
+// materialized-exclusion logic as the weekly grid (indexWeekCards), so a materialized
+// recurring day stays a protected recurring card here too.
+export function buildMonthModel(params: {
+  employees: Employee[];
+  shifts: ShiftRow[];
+  generated: GeneratedRow[];
+  gridDays: string[];
+  roleFilter: RoleFilterValue;
+}): Map<string, DayEntry[]> {
+  const { employees, shifts, generated, gridDays, roleFilter } = params;
+  const daySet = new Set(gridDays);
+  const empById = new Map(employees.map((e) => [e.id, e]));
+  const index = indexWeekCards(shifts, generated, daySet); // `${employee_id}|${date}` → cards
+
+  const byDate = new Map<string, DayEntry[]>();
+  for (const cards of index.values()) {
+    for (const card of cards) {
+      const employee = empById.get(card.employee_id);
+      if (!employee || isFormer(employee)) continue;
+      if (!matchesRoleFilter(employee.role, roleFilter)) continue;
+      const arr = byDate.get(card.date);
+      if (arr) arr.push({ employee, card });
+      else byDate.set(card.date, [{ employee, card }]);
+    }
+  }
+  // Order each day's entries by role group, then start time, then name.
+  for (const arr of byDate.values()) {
+    arr.sort(
+      (a, b) =>
+        ROLE_GROUP_ORDER.indexOf(roleGroupOf(a.employee.role)) - ROLE_GROUP_ORDER.indexOf(roleGroupOf(b.employee.role)) ||
+        a.card.startMin - b.card.startMin ||
+        a.employee.name.localeCompare(b.employee.name),
+    );
+  }
+  return byDate;
+}
+
 // ── Editor helpers ────────────────────────────────────────────────────────────
 
 export interface ShiftPrefill {
