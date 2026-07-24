@@ -31,6 +31,13 @@ export interface AuctionItem {
   units: number;
   total_cost_cents: number | null;
   skus: AuctionSkuLine[];
+  // Captured-but-unbound sale (real capture, no bound SKU yet). Surfaced inline in
+  // the sold-items list with a "Missing SKU — Bind" action. When true: auction_number
+  // and units are placeholders (render "—"), total_cost_cents is null (cost UNKNOWN,
+  // never $0), skus is empty.
+  unbound?: boolean;
+  order_id?: string;                 // TikTok order id — the key for the retroactive bind
+  seller_sku_hint?: string | null;   // capture_events.platform_sku_ref, to hint the SKU match
 }
 
 const KEY = 'auction-board';

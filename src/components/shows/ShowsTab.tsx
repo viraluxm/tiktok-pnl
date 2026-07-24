@@ -47,28 +47,38 @@ interface ShowSummary {
   itemsSold: number;
   unitsSold: number;
   saleCents: number;
-  costCents: number;
-  profitCents: number;
+  costCents: number;      // costed (bound) rows only — unbound never contributes
+  profitCents: number;    // over COSTED rows only (revenue − cost); unbound excluded
+  costUnknownCount: number; // sold rows with no known cost (unbound/uncosted) — excluded from profit
 }
 
-// P&L summary over SOLD items only, using the REAL won price (not the ASP goal):
-// sale value = Σ won price, cost from inventory_skus, gross profit = sale − cost.
-// itemsSold = sold auction-item ROWS; unitsSold = Σ units (qty across SKU lines)
-// so a bundled win counts each unit (added alongside the existing row count).
+// P&L summary over SOLD items — bound AND captured-but-unbound (both are real sales).
+// REVENUE (sale value) includes unbound sales (real money). COST is summed over
+// COSTED rows only; an unbound sale has NO SKU → NO cost, so it is NEVER treated as
+// $0 (that would overstate profit) — it's counted in costUnknownCount and excluded
+// from cost AND profit. PROFIT accumulates (payout|won − cost) over costed rows only.
+// unitsSold: bound rows use their qty; an unbound sale's qty is unknown → counted as
+// 1 (a minimum), surfaced with a caption so it's never mistaken for a confirmed count.
 function summarize(items: AuctionItem[]): ShowSummary {
   let itemsSold = 0;
   let unitsSold = 0;
   let sale = 0;
   let cost = 0;
+  let profit = 0;
+  let costUnknown = 0;
   for (const it of items) {
-    if (it.status === 'sold') {
-      itemsSold += 1;
-      unitsSold += it.units ?? 0;
-      sale += wonCents(it) ?? 0;
-      cost += it.total_cost_cents ?? 0;
+    if (it.status !== 'sold') continue;
+    itemsSold += 1;                                   // includes unbound (real sales)
+    unitsSold += it.unbound ? 1 : (it.units ?? 0);    // unbound qty unknown → count as 1 (minimum)
+    sale += it.won_price_cents ?? 0;                  // REVENUE includes unbound
+    if (it.unbound || it.total_cost_cents == null) {
+      costUnknown += 1;                               // no known cost → out of cost & profit (never $0)
+    } else {
+      cost += it.total_cost_cents;
+      profit += (it.net_payout_cents ?? it.won_price_cents ?? 0) - it.total_cost_cents;
     }
   }
-  return { itemsSold, unitsSold, saleCents: sale, costCents: cost, profitCents: sale - cost };
+  return { itemsSold, unitsSold, saleCents: sale, costCents: cost, profitCents: profit, costUnknownCount: costUnknown };
 }
 
 // ASP per UNIT = realized sale value ÷ units sold (not per-auction). 0 when no units.
@@ -358,6 +368,27 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // In-app (themed) out-of-stock confirm — replaces window.confirm. Holds the
   // pending bind until the user confirms (→ allow_negative) or cancels (→ abort).
   const [bindConfirm, setBindConfirm] = useState<{ u: UnboundOrder; orderLines: { sku_id: string; qty: number }[]; short: { n: number; cur: number; qty: number; largest: number }[] } | null>(null);
+  // Inline "Missing SKU — Bind" from the sold-items list: which unbound captured
+  // sale is being bound. Reuses the SAME lines/quickAdd/bindOne machinery as the
+  // reconcile box — the modal is just a second entry point.
+  const [bindModal, setBindModal] = useState<{ order_id: string; hint: string | null; won: number | null; buyer: string | null } | null>(null);
+
+  // Open the inline bind modal for an unbound sold-items row. Seeds one SKU line,
+  // pre-picked when the capture's seller-sku hint matches an inventory sku_number.
+  function openBindModal(it: AuctionItem) {
+    const oid = it.order_id;
+    if (!oid) return;
+    if (!lines[oid]) {
+      const m = invSkus.find((s) => String(s.sku_number) === (it.seller_sku_hint ?? ''));
+      setLinesFor(oid, [{ sku_id: m?.id ?? '', qty: 1 }]);
+    }
+    setBindModal({ order_id: oid, hint: it.seller_sku_hint ?? null, won: it.won_price_cents ?? null, buyer: it.buyer_handle ?? null });
+  }
+  // Adapt an unbound sold-items row into the UnboundOrder shape bindOne expects.
+  function bindModalOrder(): UnboundOrder | null {
+    if (!bindModal) return null;
+    return { order_id: bindModal.order_id, buyer: bindModal.buyer ?? '', won_price_cents: bindModal.won, seller_sku: bindModal.hint ?? '', quantity: 1, status: 'sold' };
+  }
 
   function setLinesFor(orderId: string, next: { sku_id: string; qty: number }[]) {
     setLines((l) => ({ ...l, [orderId]: next }));
@@ -495,6 +526,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
       const json = (await res.json().catch(() => ({}))) as { error?: string };
       if (res.ok) {
         setRecon((r) => (r ? { ...r, unbound: r.unbound.filter((x) => x.order_id !== u.order_id) } : r));
+        setBindModal((m) => (m?.order_id === u.order_id ? null : m)); // close inline modal if this was its order
         qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
         qc.invalidateQueries({ queryKey: ['inventory-skus'] });
         setBindNotice({ type: 'success', msg: `Bound order ${u.order_id} to inventory${allowNegative ? ' — stock went negative (recount flagged).' : '.'}` });
@@ -759,6 +791,16 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         </div>
       )}
 
+      {/* Totals-completeness note: revenue/units include unbound sales, but their
+          cost is unknown and excluded from profit — never assumed $0. */}
+      {sum.costUnknownCount > 0 && (
+        <div className="mb-4 rounded-lg border border-amber-400/30 bg-amber-400/5 px-4 py-2.5 text-xs text-amber-200/90">
+          Revenue &amp; units include <span className="font-semibold">{sum.costUnknownCount}</span> captured sale{sum.costUnknownCount === 1 ? '' : 's'} with no SKU —
+          cost is <span className="font-semibold">unknown</span> (excluded from profit &amp; margin, never counted as $0).
+          Use “Missing SKU — Bind” in the list below to attach a SKU and complete the cost.
+        </div>
+      )}
+
       {/* Items table */}
       {isLoading ? (
         <div className="flex items-center justify-center py-16 text-tt-muted">
@@ -802,14 +844,27 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                   else if (won != null) profit = won - cost;
                 }
                 return (
-                  <tr key={it.id} className="border-b border-tt-border last:border-0">
-                    <td className="px-4 py-3 text-tt-muted tabular-nums">{it.auction_number}</td>
+                  <tr key={it.id} className={`border-b border-tt-border last:border-0 ${it.unbound ? 'bg-amber-400/5' : ''}`}>
+                    <td className="px-4 py-3 text-tt-muted tabular-nums">{it.unbound ? '—' : it.auction_number}</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-0.5">
                         {it.tiktok_title ? (
                           <span className="min-w-0 truncate text-tt-text">{it.tiktok_title}</span>
                         ) : null}
-                        {it.skus.length === 0 ? (
+                        {it.unbound ? (
+                          // Captured sale with no internal SKU yet — inline Bind action.
+                          <span className="flex items-center gap-2">
+                            <button
+                              onClick={() => openBindModal(it)}
+                              className="rounded-lg border border-amber-400/50 bg-amber-400/10 px-2 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-400/20 transition-colors cursor-pointer"
+                            >
+                              Missing SKU — Bind
+                            </button>
+                            {it.seller_sku_hint ? (
+                              <span className="text-[11px] text-tt-muted">hint: <span className="font-mono text-tt-text">{it.seller_sku_hint}</span></span>
+                            ) : null}
+                          </span>
+                        ) : it.skus.length === 0 ? (
                           !it.tiktok_title ? <span className="text-tt-muted">—</span> : null
                         ) : (
                           it.skus.map((sk) => (
@@ -822,7 +877,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">{it.units}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{it.unbound ? '—' : it.units}</td>
                     <td className="px-4 py-3 text-center">
                       {sold ? (
                         <span className="text-xs font-medium text-tt-green">Sold</span>
@@ -836,7 +891,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums text-tt-muted">{money(it.expected_price_cents)}</td>
                     <td className="px-4 py-3 text-right tabular-nums">{money(sold ? won : null)}</td>
-                    <td className="px-4 py-3 text-right tabular-nums">{money(cost)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{it.unbound ? <span className="text-amber-300/80">Unknown</span> : money(cost)}</td>
                     <td className={`px-4 py-3 text-right tabular-nums ${profit == null ? 'text-tt-muted' : profitClass(profit)}`}>
                       {profit == null ? '—' : money(profit)}
                     </td>
@@ -891,6 +946,60 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 className="px-4 py-2 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 transition-opacity"
               >
                 Bind anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Inline retroactive-bind modal (opened from a "Missing SKU — Bind" row in the
+          sold-items list). Reuses the SAME lines/quickAdd/bindOne flow as the reconcile
+          box — this is just a second entry point, not new bind logic. */}
+      {bindModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setBindModal(null)} role="dialog" aria-modal="true">
+          <div className="w-full max-w-lg rounded-2xl border border-tt-border bg-tt-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm font-semibold text-tt-text mb-1">Bind sale to an internal SKU</div>
+            <div className="text-xs text-tt-muted mb-4">
+              <span className="font-mono">{bindModal.order_id}</span>{bindModal.buyer ? <> · @{bindModal.buyer}</> : null}
+              {bindModal.won != null ? <> · {money(bindModal.won)}</> : null}
+              {bindModal.hint ? <> · seller_sku hint: <span className="font-mono text-tt-text">{bindModal.hint}</span></> : null}
+            </div>
+            <div className="space-y-1.5">
+              {(lines[bindModal.order_id] ?? []).map((ln, idx) => (
+                <div key={idx}>
+                  <div className="flex items-center gap-2">
+                    <select value={ln.sku_id} onChange={(e) => updateLine(bindModal.order_id, idx, { sku_id: e.target.value })} className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none">
+                      <option value="">Pick SKU…</option>
+                      {allSkus.map((s) => (<option key={s.id} value={s.id}>#{s.sku_number} {s.title}</option>))}
+                    </select>
+                    <input type="number" min={1} value={ln.qty} onChange={(e) => updateLine(bindModal.order_id, idx, { qty: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })} className="w-16 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none tabular-nums" aria-label="Quantity" />
+                    <button onClick={() => { setQuickAdd({ orderId: bindModal.order_id, idx }); setQaName(''); setQaCost(''); setQaError(null); }} className="text-xs text-tt-cyan cursor-pointer hover:underline px-1" title="Create a new inventory SKU">+ New SKU</button>
+                    {(lines[bindModal.order_id]?.length ?? 0) > 1 && (
+                      <button onClick={() => removeLine(bindModal.order_id, idx)} className="text-tt-muted hover:text-tt-red text-xs px-1" aria-label="Remove line">✕</button>
+                    )}
+                  </div>
+                  {quickAdd?.orderId === bindModal.order_id && quickAdd?.idx === idx && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-tt-border bg-tt-input-bg/40 p-2">
+                      <input autoFocus placeholder="New SKU name" value={qaName} onChange={(e) => setQaName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submitQuickAdd(); if (e.key === 'Escape') setQuickAdd(null); }} className="flex-1 min-w-[10rem] rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none" />
+                      <input placeholder="Cost $" inputMode="decimal" value={qaCost} onChange={(e) => setQaCost(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submitQuickAdd(); if (e.key === 'Escape') setQuickAdd(null); }} className="w-24 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none tabular-nums" />
+                      <button onClick={submitQuickAdd} disabled={qaSaving || !qaName.trim()} className="px-2.5 py-1 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40">{qaSaving ? 'Creating…' : 'Create & select'}</button>
+                      <button onClick={() => setQuickAdd(null)} className="text-tt-muted hover:text-tt-text text-xs px-1">Cancel</button>
+                      {qaError && <span className="text-tt-red text-xs w-full">{qaError}</span>}
+                      <span className="text-[10px] text-tt-muted w-full">Creates at 0 stock — binding a sale will take it negative (you&apos;ll confirm).</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+              <button onClick={() => addLine(bindModal.order_id)} className="text-xs text-tt-cyan cursor-pointer hover:underline">+ add SKU</button>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button onClick={() => setBindModal(null)} className="px-4 py-2 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors">Cancel</button>
+              <button
+                onClick={() => { const o = bindModalOrder(); if (o) void bindOne(o); }}
+                disabled={!(lines[bindModal.order_id] ?? []).some((x) => x.sku_id) || bindingId === bindModal.order_id}
+                className="px-4 py-2 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40 transition-opacity"
+              >
+                {bindingId === bindModal.order_id ? 'Binding…' : 'Bind'}
               </button>
             </div>
           </div>

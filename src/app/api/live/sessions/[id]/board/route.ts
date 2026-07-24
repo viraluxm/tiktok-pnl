@@ -10,10 +10,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  // Ownership: the session must belong to the caller.
+  // Ownership: the session must belong to the caller. tiktok_live_id (room) +
+  // window are needed to union THIS-LIVE captured-but-unbound sales below.
   const { data: session } = await supabase
     .from('live_sessions')
-    .select('id, status')
+    .select('id, status, tiktok_live_id, started_at, ended_at, created_at, store_id')
     .eq('id', id)
     .eq('user_id', user.id)
     .maybeSingle();
@@ -158,5 +159,60 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     };
   });
 
-  return NextResponse.json({ items: assembled });
+  // ── Union: captured-but-unbound sales for THIS live, so the sold-items list
+  //    shows EVERY captured sale (not just bound ones). Scope captures to this
+  //    session by room_id (= live_sessions.tiktok_live_id) + the session's time
+  //    window — THIS-LIVE-ONLY, not store-wide. A NULL-room session can't be
+  //    room-scoped, so we skip the union there (never pull another live's sales).
+  const boundOrderIdSet = new Set(orderIds); // client_idempotency_keys of bound items
+  const unboundRows: Array<Record<string, unknown>> = [];
+  const room = (session.tiktok_live_id as string | null) ?? null;
+  const startIso = ((session.started_at as string | null) ?? (session.created_at as string | null)) ?? null;
+  if (room && startIso) {
+    const endIso = (session.ended_at as string | null) ?? new Date().toISOString(); // open live → now
+    let capQ = supabase
+      .from('capture_events')
+      .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at')
+      .eq('user_id', user.id)
+      .eq('room_id', room)
+      .gte('ordered_at', startIso)
+      .lte('ordered_at', endIso);
+    if (session.store_id) capQ = capQ.eq('store_id', session.store_id);
+    const { data: caps, error: capUnionErr } = await capQ;
+    if (capUnionErr) {
+      console.error('[live/board] unbound-capture union error:', capUnionErr);
+    } else {
+      const seen = new Set<string>();
+      for (const c of caps ?? []) {
+        const oid = String(c.order_id ?? '');
+        if (!oid || boundOrderIdSet.has(oid) || seen.has(oid)) continue; // bound already a row; dedup
+        if (c.is_payment_successful === false) continue;                 // failed payment → not a sale
+        seen.add(oid);
+        unboundRows.push({
+          id: `unbound:${oid}`,
+          auction_number: 0,               // never auctioned as a numbered item (UI renders "—")
+          status: 'sold',
+          is_bundle: false,
+          expected_price_cents: null,
+          sold_price_cents: null,
+          won_price_cents: (c.selling_price_cents as number | null) ?? null,
+          tiktok_title: (c.product_name as string | null) ?? null,
+          payment_failed: false,
+          order_status: null,
+          net_payout_cents: null,
+          payout_settled: false,
+          buyer_handle: (c.buyer_username as string | null) ?? null,
+          logged_at: (c.ordered_at as string | null) ?? (c.created_at as string | null) ?? '',
+          units: 0,                        // unknown until bound (UI renders "—"; totals count as 1)
+          total_cost_cents: null,          // UNKNOWN cost — never 0 (kept out of profit)
+          skus: [],
+          unbound: true,
+          order_id: oid,
+          seller_sku_hint: (c.platform_sku_ref as string | null) ?? null,
+        });
+      }
+    }
+  }
+
+  return NextResponse.json({ items: [...assembled, ...unboundRows] });
 }
