@@ -4,8 +4,11 @@ import { useState, useRef, useEffect } from 'react';
 import { useTikTok } from '@/hooks/useTikTok';
 import { useStores, useSetActiveStore, type StoreEntry } from '@/hooks/useStores';
 
-// Full-page OAuth connect for a specific owned store (Phase C requires store_id).
+// Re-auth an existing owned store (passes store_id).
 const connectHref = (storeId: string) => `/api/tiktok/auth?store_id=${encodeURIComponent(storeId)}`;
+// Connect a NEW shop (no store_id) — the callback creates/dedups the store.
+// Serves both first-shop onboarding and add-another-shop.
+const connectNewHref = '/api/tiktok/auth';
 
 export default function TikTokConnect() {
   const { syncProgress, sync, disconnect, isDisconnecting } = useTikTok();
@@ -38,16 +41,23 @@ export default function TikTokConnect() {
   const stores: StoreEntry[] = storesData?.stores ?? [];
   const activeStore = storesData?.activeStore ?? 'all';
 
-  // No stores owned yet — brand-new-store creation is deferred (Phase E note).
+  // Storeless (new account, or an existing user with no shop yet): the ONLY
+  // action is to connect a TikTok Shop, which creates their first store.
   if (stores.length === 0) {
     return (
       <div className="mb-4 p-5 rounded-xl border border-tt-border bg-tt-card">
         <div className="flex items-center gap-3">
           <TikTokIcon />
-          <div>
-            <h3 className="text-sm font-semibold text-tt-text">No stores yet</h3>
-            <p className="text-xs text-tt-muted">Create a store to connect a TikTok Shop.</p>
+          <div className="flex-1">
+            <h3 className="text-sm font-semibold text-tt-text">Connect your first TikTok Shop</h3>
+            <p className="text-xs text-tt-muted">Connecting a shop creates your store and imports its data.</p>
           </div>
+          <a
+            href={connectNewHref}
+            className="shrink-0 bg-gradient-to-r from-tt-cyan to-[#4db8c0] text-black font-semibold px-4 py-2 rounded-lg text-sm hover:opacity-90 transition-opacity"
+          >
+            Connect TikTok Shop
+          </a>
         </div>
       </div>
     );
@@ -178,6 +188,19 @@ export default function TikTokConnect() {
                   );
                 })}
               </div>
+
+              <div className="border-t border-tt-border" />
+              {/* Add another shop — same OAuth path as first-shop onboarding;
+                  the callback creates/dedups a new store (by TikTok shop id). */}
+              <a
+                href={connectNewHref}
+                className="flex items-center gap-3 px-4 py-3 text-left hover:bg-[rgba(255,255,255,0.03)] transition-colors"
+              >
+                <div className="w-9 h-9 rounded-lg bg-[rgba(105,201,208,0.1)] border border-[rgba(105,201,208,0.2)] flex items-center justify-center">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#69C9D0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                </div>
+                <span className="text-sm font-semibold text-tt-cyan flex-1">Connect another shop</span>
+              </a>
             </div>
           )}
         </div>
