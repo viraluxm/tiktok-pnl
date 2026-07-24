@@ -85,6 +85,17 @@ export default function PnlTab({ dateFrom, dateTo }: { dateFrom: string | null; 
 
   return (
     <div>
+      {/* Scope header — this tab is live-auction captures, a different dataset/scope
+          from the Dashboard's all-orders Shop P&L. Labeled so the two numbers don't
+          read as a discrepancy. */}
+      <div className="mb-5">
+        <h2 className="text-sm font-semibold text-tt-text">Live-show P&amp;L · auction captures</h2>
+        <p className="text-[11px] text-tt-muted mt-1 leading-snug max-w-2xl">
+          Reflects live-auction captures only (revenue × 94% − COGS). Excludes shipping,
+          ads/affiliate, and refunds. For all-in net across every order, see the Dashboard.
+        </p>
+      </div>
+
       {/* Lens toggle */}
       <div className="flex gap-1 mb-6">
         {lensOptions.map((opt) => (
@@ -449,7 +460,7 @@ function ByPeriodLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: s
     <div className="space-y-5">
       <div className="grid grid-cols-3 gap-4">
         <StatCard label="Revenue" value={money(totals.revenue)} />
-        <StatCard label="Net profit" value={money(totals.net)} valueClass={netClass(totals.net)} />
+        <StatCard label="Net profit *" value={money(totals.net)} valueClass={netClass(totals.net)} />
         <StatCard label="Units sold" value={totals.units.toLocaleString()} />
       </div>
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5">
