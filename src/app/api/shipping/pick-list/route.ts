@@ -22,45 +22,69 @@ function uspsTrackingValid(t: string): boolean {
   return ((10 - (sum % 10)) % 10) === Number(t[21]);
 }
 
-// Normalize a scanned shipping-label / tracking string to the canonical 22-digit USPS IMpb
-// tracking (starts 92/93/94/95). Returns null when the scan isn't a tracking → order_id path.
-// Handles three real-world barcode shapes:
-//   • bare 22-digit tracking scanned on its own;
-//   • "420" + ZIP(5 or 9) + 22-digit IMpb concatenated routing label (tracking is a clean
-//     22-digit, check-valid substring);
-//   • HAZMAT-style labels whose barcode pads the serial with an EXTRA leading zero, so the
-//     tracking region is 23+ digits and the printed human-readable tracking is NOT a contiguous
-//     substring. We recover it deterministically by collapsing the longest zero-run one digit
-//     at a time until a check-valid 22-digit form remains.
-//     e.g. "4208914992362903942203000007067" → "9236290394220300007067".
-function normalizeTracking(digits: string): string | null {
-  if (/^9[2-5]\d{20}$/.test(digits)) return digits;               // bare canonical tracking
+// USPS IMpb mod-10 check digit for a 21-digit stem (same weighting uspsTrackingValid
+// verifies against: rightmost of the 21 ×3, then alternating ×1/×3).
+function uspsCheckDigit(first21: string): string {
+  let sum = 0;
+  for (let i = 0; i < 21; i++) sum += Number(first21[i]) * (((20 - i) % 2 === 0) ? 3 : 1);
+  return String((10 - (sum % 10)) % 10);
+}
+
+// The canonical 22-digit tracking form(s) of a scanned 22-digit region:
+//   • already CHECK-VALID → it IS canonical; return ONLY itself (never also emit
+//     collapsed variants, so a clean scan can never be turned ambiguous — no regression).
+//   • NOT check-valid → the barcode padded the serial with an extra zero inside a
+//     zero-RUN (the exactly-22 form the labels fail on today). Remove ONE zero from each
+//     maximal run (≥2) → a 21-digit stem → RECOMPUTE the IMpb check digit → a check-valid
+//     22-digit canonical. Runs only (a lone zero isn't treated as padding). Every result
+//     is check-valid by construction; a WRONG (mis-routed) match is prevented downstream
+//     by requiring the candidate to EXIST in the DB and resolve to a SINGLE tracking.
+function canonicalizeFrom22(w: string): string[] {
+  if (!/^9[2-5]\d{20}$/.test(w)) return [];
+  if (uspsTrackingValid(w)) return [w];
+  const out = new Set<string>();
+  for (const m of w.matchAll(/0{2,}/g)) {
+    const idx = m.index ?? -1;
+    if (idx < 0) continue;
+    const stem = w.slice(0, idx) + w.slice(idx + 1); // drop one zero from the run → 21 digits
+    if (stem.length !== 21 || !/^9[2-5]/.test(stem)) continue;
+    out.add(stem + uspsCheckDigit(stem));
+  }
+  return [...out];
+}
+
+// All CHECK-VALID canonical tracking candidates for a scanned string (a SET — we never
+// guess a single one). The resolver looks up `tracking_number IN candidates` and only
+// proceeds when they map to a SINGLE stored tracking, so a padded barcode reconciles to
+// the canonical form the DB stores while ambiguity fails safe (empty → order_id / null).
+// Handles: bare 22-digit; "420"+ZIP(5/9)+22-digit routing labels; the EXACTLY-22 padded
+// form (today's failing labels); and the >22 over-length padded form (HAZMAT).
+function normalizeTrackingCandidates(digits: string): string[] {
+  const out = new Set<string>();
   // Candidate regions: the whole string, and after stripping "420" + ZIP5 / ZIP+4 routing.
-  const regions = [digits];
-  if (digits.startsWith('420')) { regions.push(digits.slice(8)); regions.push(digits.slice(12)); }
+  const regions = new Set<string>([digits]);
+  if (digits.startsWith('420')) { regions.add(digits.slice(8)); regions.add(digits.slice(12)); }
   for (const region of regions) {
-    // (1) a clean 22-digit window starting 9[2-5] that passes the USPS check digit.
-    for (let i = 0; i + 22 <= region.length; i++) {
-      if (!/^9[2-5]/.test(region.slice(i, i + 2))) continue;
-      const win = region.slice(i, i + 22);
-      if (uspsTrackingValid(win)) return win;
-    }
-    // (2) over-length region (barcode padded the serial with extra zeros): collapse the
-    //     longest zero-run until 22 digits remain, then require a valid check digit. Only
-    //     fires when no clean window validated, so it never rewrites a legitimate tracking.
     const start = region.search(/9[2-5]/);
-    if (start >= 0 && region.length - start > 22 && region.length - start <= 26) {
-      let s = region.slice(start);
+    if (start < 0) continue;
+    const tail = region.slice(start);
+    if (tail.length === 22) {
+      // Exactly 22 → valid returns itself; padded (invalid) returns the collapsed canonical.
+      for (const c of canonicalizeFrom22(tail)) out.add(c);
+    } else if (tail.length > 22 && tail.length <= 26) {
+      // Over-length: collapse the longest zero-run until a check-VALID 22 remains (never
+      // recomputes a check here — an over-length label already contains its real check).
+      let s = tail;
       while (s.length > 22) {
         let best = -1, bestLen = 0; const re = /0+/g; let mm: RegExpExecArray | null;
         while ((mm = re.exec(s))) if (mm[0].length > bestLen) { bestLen = mm[0].length; best = mm.index; }
-        if (best < 0) break;                                       // no zeros to collapse
-        s = s.slice(0, best) + s.slice(best + 1);                  // drop one zero from the longest run
+        if (best < 0) break;
+        s = s.slice(0, best) + s.slice(best + 1);
       }
-      if (s.length === 22 && /^9[2-5]/.test(s) && uspsTrackingValid(s)) return s;
+      if (s.length === 22 && /^9[2-5]/.test(s) && uspsTrackingValid(s)) out.add(s);
     }
   }
-  return null;
+  return [...out];
 }
 
 // POST: resolve a packing "box" from a scanned slip order_id.
@@ -89,18 +113,27 @@ export async function POST(req: Request) {
   //   (b) A bare 22-digit USPS tracking number (the tracking barcode scanned on its own).
   //   (c) A raw TikTok order_id (16–20 digits) — the original / back-compat path.
   const digits = raw.replace(/\s/g, '');
-  const tracking = normalizeTracking(digits);
+  // Canonical, check-valid tracking candidates (reconciles padded barcodes to the
+  // form the DB stores). A SET — resolution below requires a SINGLE stored match.
+  const trackingCandidates = normalizeTrackingCandidates(digits);
+  const tracking = trackingCandidates[0] ?? null; // representative, for display / resolved_via
 
   // Seed rows for the scan. A tracking (physical label) maps to MANY orders — do NOT
   // limit(1): that made which box rendered arbitrary/nondeterministic. Pull them all.
   type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null; store_id: string | null; status: string | null; sku_name: string | null };
   const SEL = 'order_id, auto_combine_group_id, tracking_number, store_id, status, sku_name';
-  let resolvedVia: 'tracking' | 'order_id' = tracking ? 'tracking' : 'order_id';
+  let resolvedVia: 'tracking' | 'order_id' = trackingCandidates.length ? 'tracking' : 'order_id';
   let seed: SeedRow[] = [];
-  if (tracking) {
+  if (trackingCandidates.length) {
     const { data } = await supabase.from('synced_order_ids').select(SEL)
-      .eq('user_id', user.id).eq('tracking_number', tracking);
-    seed = (data ?? []) as SeedRow[];
+      .eq('user_id', user.id).in('tracking_number', trackingCandidates);
+    const rows = (data ?? []) as SeedRow[];
+    // CONSERVATIVE: a padded scan can yield several canonical candidates. Only proceed
+    // if they resolve to a SINGLE stored tracking. If candidates matched MORE THAN ONE
+    // distinct tracking_number, the collapse is ambiguous — refuse to guess (a wrong
+    // match could mis-route a package); leave seed empty → order_id fallback / no-match.
+    const distinctTrk = new Set(rows.map((r) => r.tracking_number).filter((t): t is string => !!t));
+    if (distinctTrk.size <= 1) seed = rows;
   }
   // Order-id fallback. Runs when the scan wasn't a tracking AND (belt-and-suspenders) when a
   // parsed tracking matched nothing — the label's tracking was never synced (today ~93% of
