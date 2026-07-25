@@ -83,6 +83,10 @@ export default function ShippingTab() {
   const [value, setValue] = useState('');
   const { data: storesData } = useStores();
   const activeStore = storesData?.activeStore ?? 'all';
+  // Tracking coverage for the active store (label-barcode scanning depends on stored tracking).
+  const [coverage, setCoverage] = useState<null | { total_ac: number; with_tracking: number; missing_tracking: number }>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
   // Pick-ticket batch: age window + the route's included/excluded counts (always surfaced so we
   // never show a bare "included" number). Fetched on the idle view; reused verbatim on print.
   const [ticketDays, setTicketDays] = useState<'1' | '3' | '7' | 'all'>('3');
@@ -268,6 +272,43 @@ export default function ShippingTab() {
     printOrderTickets(groups);
   }
 
+  // ── tracking coverage (staleness) — visible without clicking; refreshed after a sync ──
+  const loadCoverage = useCallback(async () => {
+    if (!activeStore || activeStore === 'all') { setCoverage(null); return; }
+    try {
+      const res = await fetch(`/api/shipping/sync-tracking?store_id=${encodeURIComponent(activeStore)}`);
+      setCoverage(res.ok ? await res.json() : null);
+    } catch { setCoverage(null); }
+  }, [activeStore]);
+  useEffect(() => { if (!focus) loadCoverage(); }, [focus, loadCoverage]);
+
+  // Recover tracking for the active store: loop the bounded route until done, showing progress.
+  async function syncTracking() {
+    if (!activeStore || activeStore === 'all') { setSyncMsg('Pick a specific store first.'); return; }
+    setSyncing(true); setSyncMsg('Syncing tracking…'); setErr(null);
+    try {
+      let after: string | null = null; let updated = 0; let noLabel = 0; let guard = 0;
+      for (;;) {
+        const res: Response = await fetch('/api/shipping/sync-tracking', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ store_id: activeStore, dry_run: false, after }),
+        });
+        if (!res.ok) { setSyncMsg('Sync failed — try again.'); break; }
+        const j: { updated?: number; no_label?: number; remaining?: number; done?: boolean; next_after?: string | null } = await res.json();
+        updated += j.updated ?? 0; noLabel = j.no_label ?? noLabel;
+        setSyncMsg(`Recovered ${updated} so far${j.remaining ? ` · ${j.remaining} to check…` : ''}`);
+        if (j.done || !j.next_after || ++guard > 50) { break; }
+        after = j.next_after;
+      }
+      await loadCoverage();
+      setSyncMsg(`Recovered tracking on ${updated} order${updated === 1 ? '' : 's'}.${noLabel ? ` ${noLabel} have no label purchased yet.` : ''}`);
+    } catch {
+      setSyncMsg('Sync failed — try again.');
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   // ── idle (tab) view ──
   if (!focus) {
     return (
@@ -280,6 +321,14 @@ export default function ShippingTab() {
             className="px-8 py-5 rounded-2xl bg-tt-green text-black text-lg font-extrabold cursor-pointer hover:opacity-90 transition-opacity"
           >
             ▶ Start scanning
+          </button>
+          <button
+            onClick={syncTracking}
+            disabled={syncing || activeStore === 'all'}
+            title="Recover tracking numbers from TikTok so label scanning works — run after buying labels"
+            className="px-6 py-5 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
+          >
+            {syncing ? 'Syncing…' : '🔄 Sync tracking'}
           </button>
           <button
             onClick={printTickets}
@@ -302,6 +351,22 @@ export default function ShippingTab() {
             </select>
           </label>
         </div>
+        {/* Tracking coverage — staleness visible without clicking; label scanning needs stored tracking. */}
+        {activeStore !== 'all' && (
+          <div className="mt-3 text-sm">
+            {syncMsg ? (
+              <span className={syncing ? 'text-tt-cyan' : 'text-tt-text'}>{syncMsg}</span>
+            ) : coverage ? (
+              coverage.missing_tracking > 0 ? (
+                <span className="text-tt-red font-semibold">{coverage.missing_tracking.toLocaleString()} order{coverage.missing_tracking === 1 ? '' : 's'} missing tracking — sync before printing</span>
+              ) : (
+                <span className="text-tt-muted">{coverage.total_ac.toLocaleString()} of {coverage.total_ac.toLocaleString()} orders have tracking</span>
+              )
+            ) : (
+              <span className="text-tt-muted">Checking tracking coverage…</span>
+            )}
+          </div>
+        )}
         {/* ALWAYS surface what's included AND what's hidden — never a bare included count. */}
         <div className="mt-3 text-sm text-tt-muted">
           {ticketLoading || !ticketInfo ? (
