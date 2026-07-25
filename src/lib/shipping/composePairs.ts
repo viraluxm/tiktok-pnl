@@ -40,18 +40,22 @@ export function labelFit(srcW: number, srcH: number) {
 // The A6 label fit factor — 298x420 → 4x6. scale ≈ 0.9664 (label ends up 288 x 405.9, centered).
 export const A6_FIT = labelFit(298, 420);
 
-export type SlipLineKind = 'bound' | 'catalog' | 'unresolved';
-export interface SlipLine { kind: SlipLineKind; text: string; }
+// The slip carries NO per-item lines — the handheld is the item authority. It shows the box's
+// scan key + tracking + an AUTHORITATIVE item COUNT (Σqty from the FULL resolved box) + box-level
+// warnings. When the box has no reliable physical key (package_id reconciliation failed / no
+// tracking), the count cannot be trusted → print UNVERIFIABLE instead of a confident number.
 export interface SlipModel {
   orderId: string;            // Code128 value (any box-mate resolves the box on scan)
   tracking: string | null;    // human-readable, for eyeball slip↔label match (no scan needed)
   boxIndex: number;           // 1-based
   boxTotal: number;
-  orderCount: number;
+  orderCount: number;         // orders in the FULL resolved box
   packageLabel: string | null; // "Package 1 of 2" for multi-package boxes; null when single
-  setAside: boolean;          // ≥1 unbound-auction order → SET ASIDE banner on every page
-  totalItems: number;
-  lines: SlipLine[];
+  itemCount: number | null;   // authoritative Σqty across the full box; null when unverifiable
+  unverifiable: boolean;      // no reliable key / reconciliation disagreement → confirm on device
+  setAside: boolean;          // ≥1 unbound-auction order in the box
+  unresolvedCount: number;    // # unbound-auction orders
+  catalogCount: number;       // # catalog orders (informational)
 }
 export interface ErrorSheetModel {
   orderId: string;
@@ -119,56 +123,41 @@ function wrap(font: PDFFont, text: string, size: number, maxW: number): string[]
   return out.length ? out : [''];
 }
 
-const ITEM_SIZE = 10;
-const ITEM_LH = 13;
+// Draw the slip as a SINGLE 4x6 page: scan key + tracking + authoritative COUNT (or UNVERIFIABLE)
+// + box-level warnings. No per-item lines — the handheld is the item authority, so there is
+// nothing to under-list. Returns 1 (kept for the caller's page-count bookkeeping).
+export function addSlipPage(doc: PDFDocument, f: Fonts, s: SlipModel): number {
+  const page = doc.addPage([PAGE.w, PAGE.h]);
+  drawBarcode(page, s.orderId, PAGE.w / 2, 432 - MARGIN - 50, 250, 50);
+  center(page, `#${s.orderId}`, f.monoBold, 14, 360);
+  center(page, s.tracking ? `TRACKING ${s.tracking}` : 'TRACKING —', f.mono, 8.5, 346);
+  const meta = `Box ${s.boxIndex} of ${s.boxTotal}${s.packageLabel ? ` · ${s.packageLabel}` : ''} · ${s.orderCount} order${s.orderCount === 1 ? '' : 's'}`;
+  center(page, meta, f.reg, 9, 333);
 
-// Header height depends on whether the SET ASIDE banner is present.
-function slipHeaderBottom(setAside: boolean): number {
-  // barcode(48) + oid + tracking + meta (+ banner). Returns the y below which items start.
-  return setAside ? 300 : 316;
-}
-function drawSlipHeader(page: PDFPage, f: Fonts, s: SlipModel, pageX: number, pageY: number) {
-  drawBarcode(page, s.orderId, PAGE.w / 2, 432 - MARGIN - 48, 250, 48);
-  center(page, `#${s.orderId}`, f.monoBold, 13, 362);
-  center(page, s.tracking ? `TRACKING ${s.tracking}` : 'TRACKING —', f.mono, 8.5, 350);
-  const meta = `Box ${s.boxIndex} of ${s.boxTotal}${s.packageLabel ? ` · ${s.packageLabel}` : ''} · ${s.orderCount} order${s.orderCount === 1 ? '' : 's'} · ${s.totalItems} items`;
-  center(page, meta, f.reg, 8.5, 339);
-  center(page, `page ${pageX} of ${pageY}`, f.reg, 7.5, 329);
-  if (s.setAside) {
-    page.drawRectangle({ x: MARGIN, y: 310, width: PAGE.w - 2 * MARGIN, height: 15, color: RED });
-    const t = asc('⚠ SET ASIDE — unresolved auction order(s)');
-    const w = f.bold.widthOfTextAtSize(t, 9.5);
-    page.drawText(t, { x: (PAGE.w - w) / 2, y: 314, size: 9.5, font: f.bold, color: rgb(1, 1, 1) });
-  }
-}
-
-// Draw a slip as one-or-more 4x6 pages (pagination for overflow). All pages of one slip are added
-// consecutively — the caller must not interleave another box between them.
-export function addSlipPages(doc: PDFDocument, f: Fonts, s: SlipModel): number {
-  const top = slipHeaderBottom(s.setAside);
-  const maxW = PAGE.w - 2 * MARGIN - 8;
-  // Pre-wrap every line into sub-lines, then greedily fill pages by remaining height.
-  const sub: { kind: SlipLineKind; text: string; first: boolean }[] = [];
-  for (const ln of s.lines) {
-    const parts = wrap(f.reg, ln.text, ITEM_SIZE, maxW);
-    parts.forEach((p, i) => sub.push({ kind: ln.kind, text: p, first: i === 0 }));
-  }
-  const perPage = Math.max(1, Math.floor((top - MARGIN) / ITEM_LH));
-  const pages: typeof sub[] = [];
-  for (let i = 0; i < sub.length; i += perPage) pages.push(sub.slice(i, i + perPage));
-  if (!pages.length) pages.push([]); // empty box still prints a slip (barcode + header)
-
-  pages.forEach((chunk, pi) => {
-    const page = doc.addPage([PAGE.w, PAGE.h]);
-    drawSlipHeader(page, f, s, pi + 1, pages.length);
-    let y = top - ITEM_LH;
-    for (const line of chunk) {
-      const color = line.kind === 'unresolved' ? RED : BLACK;
-      page.drawText(asc(line.text), { x: MARGIN + 4, y, size: ITEM_SIZE, font: f.reg, color });
-      y -= ITEM_LH;
+  // The count block (or UNVERIFIABLE) — the middle of the slip, the thing the picker reconciles.
+  if (s.unverifiable || s.itemCount == null) {
+    page.drawRectangle({ x: MARGIN, y: 250, width: PAGE.w - 2 * MARGIN, height: 46, color: RED });
+    for (const [i, ln] of ['! BOX COMPOSITION', 'UNVERIFIABLE', 'confirm on device'].entries()) {
+      const size = i === 2 ? 11 : 15;
+      const w = f.bold.widthOfTextAtSize(ln, size);
+      page.drawText(ln, { x: (PAGE.w - w) / 2, y: 278 - i * 15, size, font: f.bold, color: rgb(1, 1, 1) });
     }
-  });
-  return pages.length;
+  } else {
+    center(page, String(s.itemCount), f.bold, 64, 250, BLACK);
+    center(page, `item${s.itemCount === 1 ? '' : 's'} — verify count on device`, f.reg, 10, 232);
+  }
+
+  // Box-level warnings (from the FULL resolved box, never the scanned order alone).
+  let y = 205;
+  if (s.setAside) {
+    page.drawRectangle({ x: MARGIN, y: y - 3, width: PAGE.w - 2 * MARGIN, height: 16, color: RED });
+    const t = asc(`⚠ SET ASIDE — ${s.unresolvedCount} unresolved auction order${s.unresolvedCount === 1 ? '' : 's'}`);
+    const w = f.bold.widthOfTextAtSize(t, 9.5);
+    page.drawText(t, { x: (PAGE.w - w) / 2, y: y + 1, size: 9.5, font: f.bold, color: rgb(1, 1, 1) });
+    y -= 22;
+  }
+  if (s.catalogCount > 0) { center(page, `includes ${s.catalogCount} catalog item${s.catalogCount === 1 ? '' : 's'}`, f.reg, 9, y); }
+  return 1;
 }
 
 // Embed a fetched label PDF's first page, scaled+centered to 4x6. Returns the fit used.
