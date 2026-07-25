@@ -15,11 +15,21 @@ import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
 
+// Pay sub-tab role filter (ported from PR #69). 'all' = everyone (default); others match
+// employees.role. Purely display — narrows which payroll rows show; no new calc/query.
+type PayRole = 'all' | 'fulfillment' | 'host';
+const PAY_ROLE_OPTIONS: { value: PayRole; label: string }[] = [
+  { value: 'all', label: 'View all' },
+  { value: 'fulfillment', label: 'Fulfillment' },
+  { value: 'host', label: 'Host' },
+];
+
 // Pay owed for the current biweekly pay period — unchanged behaviour, extracted from the
 // original EmployeesTab. Scoped to its OWN pay period (not the dashboard FiltersBar), with
 // prev/next navigation. Reuses computePay's exact hours×rate math (open + skipped excluded).
 export default function PayView({ employees }: { employees: Employee[] }) {
   const [periodOffset, setPeriodOffset] = useState(0);
+  const [payRole, setPayRole] = useState<PayRole>('all');
   const payday = useMemo(() => paydayAtOffset(periodOffset), [periodOffset]);
   const period = useMemo(() => payPeriodFor(payday), [payday]);
 
@@ -38,9 +48,15 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     () => computePay(employees, [...periodShifts, ...periodGenerated.filter((g) => !g.skipped)]),
     [employees, periodShifts, periodGenerated],
   );
+  // Role filter applied on the already-computed pay rows (no recompute — just narrows which
+  // rows show). The period selector still drives the numbers.
+  const filteredPay = useMemo(
+    () => (payRole === 'all' ? pay : pay.filter((p) => p.employee.role?.toLowerCase() === payRole)),
+    [pay, payRole],
+  );
   const totals = useMemo(
-    () => pay.reduce((acc, p) => ({ hours: acc.hours + p.hours, pay: acc.pay + p.pay }), { hours: 0, pay: 0 }),
-    [pay],
+    () => filteredPay.reduce((acc, p) => ({ hours: acc.hours + p.hours, pay: acc.pay + p.pay }), { hours: 0, pay: 0 }),
+    [filteredPay],
   );
 
   return (
@@ -81,6 +97,24 @@ export default function PayView({ employees }: { employees: Employee[] }) {
             ← Back to current period
           </button>
         )}
+        {/* Role filter: narrows the payroll rows + totals below by employee role.
+            Respects the pay period selected above. */}
+        <div className="mt-4 flex items-center gap-2">
+          <span className="text-[11px] text-tt-muted uppercase tracking-wide">View</span>
+          <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
+            {PAY_ROLE_OPTIONS.map(({ value, label }) => (
+              <button
+                key={value}
+                onClick={() => setPayRole(value)}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                  payRole === value ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full border-collapse">
@@ -94,7 +128,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
             </tr>
           </thead>
           <tbody>
-            {pay.map(({ employee, hours, pay: owed }) => (
+            {filteredPay.map(({ employee, hours, pay: owed }) => (
               <tr key={employee.id} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
                 <td className="px-5 py-3 text-[13px] text-tt-text">{employee.name}</td>
                 <td className="px-5 py-3 text-xs text-tt-muted">{titleCase(employee.role)}</td>
@@ -103,16 +137,22 @@ export default function PayView({ employees }: { employees: Employee[] }) {
                 <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(owed)}</td>
               </tr>
             ))}
-            {pay.length === 0 && (
+            {filteredPay.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-5 py-12 text-center text-tt-muted text-sm">No employees yet</td>
+                <td colSpan={5} className="px-5 py-12 text-center text-tt-muted text-sm">
+                  {pay.length === 0
+                    ? 'No employees yet'
+                    : payRole === 'all'
+                      ? 'No pay in this period'
+                      : `No ${titleCase(payRole)} staff in this period`}
+                </td>
               </tr>
             )}
           </tbody>
-          {pay.length > 0 && (
+          {filteredPay.length > 0 && (
             <tfoot>
               <tr className="border-t border-tt-border">
-                <td className="px-5 py-3 text-[13px] font-semibold text-tt-text" colSpan={3}>Total for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}</td>
+                <td className="px-5 py-3 text-[13px] font-semibold text-tt-text" colSpan={3}>Total{payRole !== 'all' ? ` · ${titleCase(payRole)}` : ''} for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}</td>
                 <td className="px-5 py-3 text-[13px] font-semibold text-tt-text text-right tabular-nums">{fmtHours(totals.hours)}</td>
                 <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(totals.pay)}</td>
               </tr>
