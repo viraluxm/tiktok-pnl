@@ -67,6 +67,7 @@ export async function POST(req: Request) {
   let body: {
     mode?: string; store_id?: string; include_in_transit_unpaid?: boolean;
     call_budget?: number; time_budget_ms?: number; sample?: number;
+    after?: Record<string, string>;
   };
   try { body = await req.json(); } catch { body = {}; }
 
@@ -76,6 +77,8 @@ export async function POST(req: Request) {
   const callBudget = Math.max(1, Math.trunc(Number(body.call_budget) || DEFAULT_CALL_BUDGET));
   const timeBudgetMs = Math.max(5_000, Math.trunc(Number(body.time_budget_ms) || DEFAULT_TIME_BUDGET_MS));
   const sampleN = Math.min(50, Math.max(1, Math.trunc(Number(body.sample) || 20)));
+  // Per-store keyset resume cursors from the prior invocation ({ store_id: cursor }); empty = start.
+  const afterIn: Record<string, string> = (body.after && typeof body.after === 'object') ? body.after : {};
 
   const admin = createAdminClient();
   const started = Date.now();
@@ -120,95 +123,145 @@ export async function POST(req: Request) {
   const transitions: Record<string, number> = {};
   const sample: { store: string; order_id: string; from: string; to: string }[] = [];
   const cancelled: { store: string; store_id: string; order_id: string; user_id: string }[] = [];
-  const perStore: Record<string, { store_id: string; examined: number; calls: number; changed: number; updated: number; not_returned: number; open_before: number; open_after: number }> = {};
+  const perStore: Record<string, { store_id: string; examined: number; calls: number; changed: number; updated: number; not_returned: number; remaining: number; next_after: string | null }> = {};
   const totals = { examined: 0, calls: 0, changed: 0, updated: 0, not_returned: 0 };
+  const nextAfter: Record<string, string> = {};
   let callsUsed = 0;
   let budgetExhausted = false;
 
-  const openCount = async (userId: string, storeId: string): Promise<number> => {
-    const { count } = await admin.from('synced_order_ids')
-      .select('order_id', { count: 'exact', head: true })
+  // Keyset cursor over the OLDEST-open-first order (order_created_at asc, order_id asc). Two
+  // phases so NULL order_created_at (undateable rows) are still swept, never skipped: phase 'T'
+  // walks dated rows, then phase 'N' walks the null tail by order_id. Encoded as a compact string
+  // per store so the caller resumes exactly where the last invocation stopped — validated to
+  // visit every open row once (no skip, no dupe) and terminate. order_created_at has no '|'.
+  type Cursor = { phase: 'T' | 'N'; ts: string | null; id: string | null };
+  const decodeCursor = (s: string | undefined): Cursor => {
+    if (!s) return { phase: 'T', ts: null, id: null };
+    const p = s.split('|');
+    if (p[0] === 'N') return { phase: 'N', ts: null, id: p[1] ?? '' };
+    if (p[0] === 'T') return { phase: 'T', ts: p[1] ?? null, id: p[2] ?? null };
+    return { phase: 'T', ts: null, id: null };
+  };
+  const encodeCursor = (cur: Cursor): string =>
+    cur.phase === 'N' ? `N|${cur.id ?? ''}` : `T|${cur.ts ?? ''}|${cur.id ?? ''}`;
+
+  // Count of open rows still AHEAD of the cursor (unexamined this sweep) — the resumability
+  // `remaining`, which decrements to 0 as the sweep completes.
+  const remainingAhead = async (userId: string, storeId: string, cur: Cursor): Promise<number> => {
+    const base = () => admin.from('synced_order_ids').select('order_id', { count: 'exact', head: true })
       .eq('user_id', userId).eq('store_id', storeId).in('status', statuses);
-    return count ?? 0;
+    if (cur.phase === 'N') {
+      const { count } = await base().is('order_created_at', null).gt('order_id', cur.id ?? '');
+      return count ?? 0;
+    }
+    let qt = base().not('order_created_at', 'is', null);
+    if (cur.ts !== null) qt = qt.or(`order_created_at.gt.${cur.ts},and(order_created_at.eq.${cur.ts},order_id.gt.${cur.id})`);
+    const { count: ct } = await qt;
+    const { count: cn } = await base().is('order_created_at', null);
+    return (ct ?? 0) + (cn ?? 0);
   };
 
   for (const c of conns) {
     const storeId = String(c.store_id);
     const ownerUserId = String(c.user_id);
     const storeName = storeNames.get(storeId) || storeId;
-    const ps = { store_id: storeId, examined: 0, calls: 0, changed: 0, updated: 0, not_returned: 0, open_before: 0, open_after: 0 };
+    const ps = { store_id: storeId, examined: 0, calls: 0, changed: 0, updated: 0, not_returned: 0, remaining: 0, next_after: null as string | null };
     perStore[storeName] = ps;
-    ps.open_before = await openCount(ownerUserId, storeId);
 
-    // Load the OLDEST open ids first, only as many as the remaining call budget can process.
-    const remainingCalls = callBudget - callsUsed;
-    if (remainingCalls <= 0) { budgetExhausted = true; ps.open_after = ps.open_before; continue; }
-    const maxIds = remainingCalls * CHUNK;
-    const rows: { order_id: string; status: string }[] = [];
-    for (let off = 0; rows.length < maxIds; off += 1000) {
-      const { data: page, error: pErr } = await admin.from('synced_order_ids')
-        .select('order_id, status')
-        .eq('user_id', ownerUserId).eq('store_id', storeId).in('status', statuses)
-        .order('order_created_at', { ascending: true, nullsFirst: false })
-        .order('order_id', { ascending: true })
-        .range(off, off + 999);
-      if (pErr) return NextResponse.json({ error: `synced read failed: ${pErr.message}` }, { status: 500 });
-      if (!page?.length) break;
-      rows.push(...page.map((r) => ({ order_id: String(r.order_id), status: String(r.status) })));
-      if (page.length < 1000) break;
-    }
-    const work = rows.slice(0, maxIds);
-    if (!work.length) { ps.open_after = ps.open_before; continue; }
-    const storedById = new Map(work.map((r) => [r.order_id, r.status]));
-    const ids = [...storedById.keys()];
+    const cur = decodeCursor(afterIn[storeId]);
+    let storeDone = false;
+    let token = ''; let cipher = ''; let tokenLoaded = false;
 
-    const fresh = await getFreshToken(admin, c as unknown as ConnRow, { skewMinutes: 30 });
-    const token = fresh.accessToken as string;
-    const cipher = (fresh.shopCipher ?? c.shop_cipher) as string;
-
-    for (let i = 0; i < ids.length; i += CHUNK) {
+    outer: while (true) {
       if (callsUsed >= callBudget || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break; }
-      const chunk = ids.slice(i, i + CHUNK);
 
-      let got: Record<string, unknown>[] = [];
-      for (let attempt = 0; ; attempt++) {
-        try { got = await getOrderById(token, cipher, chunk); break; }
-        catch (e) {
-          const msg = String(e);
-          if (/429|rate|too many/i.test(msg) && attempt < MAX_429_RETRIES) { await sleep(1000 * (attempt + 1)); continue; }
-          return NextResponse.json({ error: 'getOrderById failed', detail: msg, store_id: storeId }, { status: 502 });
-        }
+      // Fetch the next keyset page for the current phase.
+      let pageRows: { order_id: string; status: string; order_created_at: string | null }[] = [];
+      if (cur.phase === 'T') {
+        let q = admin.from('synced_order_ids').select('order_id, status, order_created_at')
+          .eq('user_id', ownerUserId).eq('store_id', storeId).in('status', statuses)
+          .not('order_created_at', 'is', null)
+          .order('order_created_at', { ascending: true }).order('order_id', { ascending: true }).limit(1000);
+        if (cur.ts !== null) q = q.or(`order_created_at.gt.${cur.ts},and(order_created_at.eq.${cur.ts},order_id.gt.${cur.id})`);
+        const { data, error } = await q;
+        if (error) return NextResponse.json({ error: `synced read failed: ${error.message}` }, { status: 500 });
+        pageRows = (data ?? []) as typeof pageRows;
+        if (!pageRows.length) { cur.phase = 'N'; cur.id = ''; cur.ts = null; continue; } // dated tail done → nulls
+      } else {
+        const { data, error } = await admin.from('synced_order_ids').select('order_id, status, order_created_at')
+          .eq('user_id', ownerUserId).eq('store_id', storeId).in('status', statuses)
+          .is('order_created_at', null).gt('order_id', cur.id ?? '')
+          .order('order_id', { ascending: true }).limit(1000);
+        if (error) return NextResponse.json({ error: `synced read failed: ${error.message}` }, { status: 500 });
+        pageRows = (data ?? []) as typeof pageRows;
+        if (!pageRows.length) { storeDone = true; break; }
       }
-      callsUsed++; ps.calls++;
 
-      const returned = new Set<string>();
-      for (const o of got) {
-        const id = String(o.id); returned.add(id);
-        const from = storedById.get(id); if (from === undefined) continue;
-        const to = String(o.status || '').toUpperCase();
-        if (!to) continue; // never infer status from an empty payload
-        transitions[`${from} -> ${to}`] = (transitions[`${from} -> ${to}`] || 0) + 1;
-        if (to !== from) {
-          ps.changed++;
-          if (sample.length < sampleN) sample.push({ store: storeName, order_id: id, from, to });
-          if (to === 'CANCELLED') cancelled.push({ store: storeName, store_id: storeId, order_id: id, user_id: ownerUserId });
-          if (write) {
-            // status ONLY. .neq guards a no-op / concurrent-sync race. Never touches
-            // tracking_number, auto_combine_group_id, gmv, sku_*, units.
-            const { error: uErr, count } = await admin.from('synced_order_ids')
-              .update({ status: to }, { count: 'exact' })
-              .eq('store_id', storeId).eq('order_id', id).neq('status', to);
-            if (uErr) console.error('[refresh-status] update error', id, uErr.message);
-            else ps.updated += count ?? 0;
+      if (!tokenLoaded) {
+        const fresh = await getFreshToken(admin, c as unknown as ConnRow, { skewMinutes: 30 });
+        token = fresh.accessToken as string; cipher = (fresh.shopCipher ?? c.shop_cipher) as string; tokenLoaded = true;
+      }
+
+      for (let i = 0; i < pageRows.length; i += CHUNK) {
+        if (callsUsed >= callBudget || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break outer; }
+        const chunkRows = pageRows.slice(i, i + CHUNK);
+        const storedById = new Map(chunkRows.map((r) => [String(r.order_id), String(r.status)]));
+        const chunk = [...storedById.keys()];
+
+        let got: Record<string, unknown>[] = [];
+        for (let attempt = 0; ; attempt++) {
+          try { got = await getOrderById(token, cipher, chunk); break; }
+          catch (e) {
+            const msg = String(e);
+            if (/429|rate|too many/i.test(msg) && attempt < MAX_429_RETRIES) { await sleep(1000 * (attempt + 1)); continue; }
+            return NextResponse.json({ error: 'getOrderById failed', detail: msg, store_id: storeId }, { status: 502 });
           }
         }
+        callsUsed++; ps.calls++;
+
+        const returned = new Set<string>();
+        for (const o of got) {
+          const id = String(o.id); returned.add(id);
+          const from = storedById.get(id); if (from === undefined) continue;
+          const to = String(o.status || '').toUpperCase();
+          if (!to) continue; // never infer status from an empty payload
+          transitions[`${from} -> ${to}`] = (transitions[`${from} -> ${to}`] || 0) + 1;
+          if (to !== from) {
+            ps.changed++;
+            if (sample.length < sampleN) sample.push({ store: storeName, order_id: id, from, to });
+            if (to === 'CANCELLED') cancelled.push({ store: storeName, store_id: storeId, order_id: id, user_id: ownerUserId });
+            if (write) {
+              // status ONLY. .neq guards a no-op / concurrent-sync race. Never touches
+              // tracking_number, auto_combine_group_id, gmv, sku_*, units.
+              const { error: uErr, count } = await admin.from('synced_order_ids')
+                .update({ status: to }, { count: 'exact' })
+                .eq('store_id', storeId).eq('order_id', id).neq('status', to);
+              if (uErr) console.error('[refresh-status] update error', id, uErr.message);
+              else ps.updated += count ?? 0;
+            }
+          }
+        }
+        ps.examined += chunk.length;
+        ps.not_returned += chunk.filter((id) => !returned.has(id)).length;
+        // Advance the cursor to the LAST row of this chunk — resumption is strictly after it, so a
+        // mid-page budget cut never re-processes or skips a row.
+        const last = chunkRows[chunkRows.length - 1];
+        if (cur.phase === 'T') { cur.ts = String(last.order_created_at); cur.id = String(last.order_id); }
+        else { cur.id = String(last.order_id); }
+        await sleep(80); // gentle pacing
       }
-      ps.examined += chunk.length;
-      ps.not_returned += chunk.filter((id) => !returned.has(id)).length;
-      await sleep(80); // gentle pacing
+
+      if (pageRows.length < 1000) {
+        // Current phase exhausted (short page). Move dated → null, or finish the store.
+        if (cur.phase === 'T') { cur.phase = 'N'; cur.id = ''; cur.ts = null; continue; }
+        storeDone = true; break;
+      }
+      // Full page: cursor advanced; loop to fetch the next page.
     }
 
-    ps.open_after = await openCount(ownerUserId, storeId);
+    ps.next_after = storeDone ? null : encodeCursor(cur);
+    ps.remaining = storeDone ? 0 : await remainingAhead(ownerUserId, storeId, cur);
+    if (ps.next_after) nextAfter[storeId] = ps.next_after;
     totals.examined += ps.examined; totals.calls += ps.calls; totals.changed += ps.changed;
     totals.updated += ps.updated; totals.not_returned += ps.not_returned;
   }
@@ -235,11 +288,12 @@ export async function POST(req: Request) {
   const cancelledOut = cancelled.map((c) => ({ store: c.store, order_id: c.order_id, bound: boundOrderIds.has(c.order_id) }));
   const cancelledSummary = { total: cancelledOut.length, bound: cancelledOut.filter((c) => c.bound).length };
 
-  const remainingTotal = Object.values(perStore).reduce((n, s) => n + s.open_after, 0);
+  const remainingTotal = Object.values(perStore).reduce((n, s) => n + s.remaining, 0);
+  const done = remainingTotal === 0;
   return NextResponse.json({
     mode: write ? 'write' : 'dry_run',
     dry_run: !write,
-    target_statuses: statuses,
+    target_statuses: statuses, // PARTIALLY_SHIPPING is in this list & the .in() query — zero rows, not absent
     store_filter: storeFilter || 'ALL',
     write_gate: writeGate,
     stores: perStore,
@@ -252,11 +306,12 @@ export async function POST(req: Request) {
       call_budget: callBudget, time_budget_ms: timeBudgetMs,
       calls_used: callsUsed, ms_used: Date.now() - started, exhausted: budgetExhausted,
     },
+    // Resume the sweep by echoing `after` back on the next call; empty when every store is done.
+    next_after: nextAfter,
     remaining_total: remainingTotal,
-    // Nothing left to correct this sweep when a within-budget pass changed nothing.
-    done: !budgetExhausted && totals.updated === 0,
+    done,
     note: write
-      ? 'WRITE pass. Re-invoke until `done` (updated=0). Cancelled orders surfaced for separate reconciliation.'
+      ? (done ? 'WRITE pass complete — remaining_total=0.' : 'WRITE pass — re-invoke with the returned `next_after` as `after` until remaining_total=0.')
       : 'DRY RUN — no rows written. Review transitions; re-invoke with mode:"write" (gated) to apply.',
   });
 }
