@@ -278,6 +278,29 @@ export async function getOrderById(
   return (data?.orders || data?.order_list || []) as Record<string, unknown>[];
 }
 
+// Fetch a package's SHIPPING_LABEL (A6) shipping document. Unlike shopGet this does NOT throw on a
+// non-zero code — the caller needs to distinguish transient (11034037 "still being generated"),
+// terminal (21042102 "after pickup"), and success (0 → doc_url). READ-ONLY; no label purchase.
+export async function getShippingDocument(
+  accessToken: string,
+  shopCipher: string,
+  packageId: string,
+): Promise<{ code: number; message: string; docUrl: string | null }> {
+  const path = `/fulfillment/202309/packages/${packageId}/shipping_documents`;
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const params: Record<string, string> = {
+    app_key: TIKTOK_SHOP_APP_KEY, timestamp,
+    shop_cipher: shopCipher, document_type: 'SHIPPING_LABEL', document_size: 'A6',
+  };
+  params.sign = generateShopSignature(path, params);
+  const res = await fetch(`${TIKTOK_SHOP_BASE}${path}?${new URLSearchParams(params)}`, {
+    headers: { 'Content-Type': 'application/json', 'x-tts-access-token': accessToken },
+  });
+  let json: { code?: number; message?: string; data?: { doc_url?: string } };
+  try { json = JSON.parse(await res.text()); } catch { json = {}; }
+  return { code: Number(json.code ?? -1), message: String(json.message ?? ''), docUrl: json.data?.doc_url ?? null };
+}
+
 // ==================== FINANCE ENDPOINTS ====================
 
 export interface ParsedStatement {
