@@ -188,6 +188,9 @@ export async function shopPost(path: string, accessToken: string, body: Record<s
 // ==================== SHOP ENDPOINTS ====================
 
 export interface ShopInfo {
+  // Stable TikTok shop id — the DEDUP key for stores (shop_cipher rotates on
+  // re-auth and must NOT be used for identity).
+  shop_id: string;
   shop_cipher: string;
   shop_name: string;
   region: string;
@@ -198,6 +201,7 @@ export async function getAuthorizedShops(accessToken: string): Promise<ShopInfo[
   const data = await shopGet('/authorization/202309/shops', accessToken);
   if (!data?.shops) return [];
   return data.shops.map((s: Record<string, unknown>) => ({
+    shop_id: String(s.id || ''),
     shop_cipher: String(s.cipher || ''),
     shop_name: String(s.name || ''),
     region: String(s.region || ''),

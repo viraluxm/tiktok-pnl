@@ -37,13 +37,10 @@ export async function GET(request: Request) {
     return NextResponse.redirect(`${origin}/login`);
   }
 
-  // Connections are per-store (unique(user_id, store_id), store_id NOT NULL).
-  // The auth route set this cookie after validating membership; re-check here
-  // (defense-in-depth) before stamping it on the connection.
-  if (!storeId) {
-    console.error('No store ID found in cookie');
-    return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=missing_store`);
-  }
+  // storeId is OPTIONAL now:
+  //   • present  → RE-AUTH an existing store (validated below, defense-in-depth).
+  //   • absent   → CONNECT A NEW SHOP: create/dedup a store from the TikTok shop
+  //                id and link a store_membership (onboarding + add-Nth-shop).
 
   try {
     // Exchange code for access token via TikTok Shop API (retry once on failure)
@@ -56,33 +53,111 @@ export async function GET(request: Request) {
       tokenData = await exchangeCodeForToken(code);
     }
 
-    // Get authorized shops — shop_cipher is required for all Shop API calls
+    // Get authorized shops — shop_cipher is required for all Shop API calls,
+    // shop_id is the STABLE dedup key.
+    let shopId: string | null = null;
     let shopCipher: string | null = null;
     let shopName: string | null = null;
+    let logoUrl: string | null = null;
     const shops = await getAuthorizedShops(tokenData.access_token);
     console.log('[TikTok callback] getAuthorizedShops returned:', JSON.stringify(shops));
     if (shops.length > 0) {
+      shopId = shops[0].shop_id || null;
       shopCipher = shops[0].shop_cipher;
       shopName = shops[0].shop_name;
-      console.log('[TikTok callback] Using shop:', shopName, 'cipher:', shopCipher);
+      logoUrl = shops[0].logo_url;
+      console.log('[TikTok callback] Using shop:', shopName, 'id:', shopId, 'cipher:', shopCipher);
     } else {
       console.error('[TikTok callback] No authorized shops found — sync will not work');
     }
 
-    // Store connection in database using admin client (bypasses RLS)
+    // All store/membership/connection writes use the admin client (bypasses RLS).
     const adminClient = createAdminClient();
 
-    // Re-validate the target store belongs to this user (admin client bypasses RLS,
-    // so check explicitly) before stamping the connection.
-    const { data: membership } = await adminClient
-      .from('store_members')
-      .select('store_id')
-      .eq('user_id', userId)
-      .eq('store_id', storeId)
-      .maybeSingle();
-    if (!membership) {
-      console.error('TikTok callback: store not owned by user', { userId, storeId });
-      return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=invalid_store`);
+    // Resolve the store this connection attaches to.
+    let targetStoreId: string;
+
+    if (storeId) {
+      // RE-AUTH: re-validate the target store belongs to this user.
+      const { data: membership } = await adminClient
+        .from('store_members')
+        .select('store_id')
+        .eq('user_id', userId)
+        .eq('store_id', storeId)
+        .maybeSingle();
+      if (!membership) {
+        console.error('TikTok callback: store not owned by user', { userId, storeId });
+        return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=invalid_store`);
+      }
+      targetStoreId = storeId;
+    } else {
+      // CONNECT NEW SHOP → create/dedup the store, then link membership.
+      // 1. Ensure the user has an org (idempotent SECURITY DEFINER RPC).
+      const { data: orgId, error: orgErr } = await adminClient.rpc('ensure_user_org', {
+        p_user: userId,
+        p_name: null,
+      });
+      if (orgErr || !orgId) {
+        console.error('TikTok callback: ensure_user_org failed', orgErr);
+        return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=org_error`);
+      }
+
+      // 2. Dedup: reuse an existing store for this (org, TikTok shop id).
+      //    Falls back to (org, name) when TikTok returned no shop id, so we still
+      //    avoid an obvious duplicate.
+      let existing: { id: string } | null = null;
+      if (shopId) {
+        const { data } = await adminClient
+          .from('stores')
+          .select('id')
+          .eq('org_id', orgId)
+          .eq('tiktok_shop_id', shopId)
+          .maybeSingle();
+        existing = data ?? null;
+      } else if (shopName) {
+        const { data } = await adminClient
+          .from('stores')
+          .select('id')
+          .eq('org_id', orgId)
+          .eq('name', shopName)
+          .is('tiktok_shop_id', null)
+          .maybeSingle();
+        existing = data ?? null;
+      }
+
+      if (existing) {
+        targetStoreId = existing.id;
+        // Refresh name/logo/shop_id in case they changed since last connect.
+        await adminClient
+          .from('stores')
+          .update({ name: shopName || undefined, logo_url: logoUrl, tiktok_shop_id: shopId })
+          .eq('id', targetStoreId);
+      } else {
+        const { data: created, error: storeErr } = await adminClient
+          .from('stores')
+          .insert({
+            org_id: orgId,
+            name: shopName || 'TikTok Shop',
+            tiktok_shop_id: shopId,
+            logo_url: logoUrl,
+          })
+          .select('id')
+          .single();
+        if (storeErr || !created) {
+          console.error('TikTok callback: store create failed', storeErr);
+          return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=store_error`);
+        }
+        targetStoreId = created.id;
+      }
+
+      // 3. Link the user to the store as owner (idempotent).
+      const { error: memErr } = await adminClient
+        .from('store_members')
+        .upsert({ store_id: targetStoreId, user_id: userId, role: 'owner' }, { onConflict: 'store_id,user_id' });
+      if (memErr) {
+        console.error('TikTok callback: store_member link failed', memErr);
+        return NextResponse.redirect(`${origin}/dashboard?tiktok=error&reason=member_error`);
+      }
     }
 
     // access_token_expire_in / refresh_token_expire_in are ABSOLUTE Unix epoch seconds —
@@ -96,7 +171,7 @@ export async function GET(request: Request) {
       .from('tiktok_connections')
       .upsert({
         user_id: userId,
-        store_id: storeId,
+        store_id: targetStoreId,
         access_token: encrypt(tokenData.access_token),
         refresh_token: encrypt(tokenData.refresh_token),
         token_expires_at,
