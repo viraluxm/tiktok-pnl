@@ -66,9 +66,21 @@ export default function ShippingTab() {
   const [abandon, setAbandon] = useState<null | { scan: string | null }>(null);
   const [holding, setHolding] = useState(false);
   const [value, setValue] = useState('');
-  const [printing, setPrinting] = useState(false);
   const { data: storesData } = useStores();
   const activeStore = storesData?.activeStore ?? 'all';
+  // Pick-ticket batch: age window + the route's included/excluded counts (always surfaced so we
+  // never show a bare "included" number). Fetched on the idle view; reused verbatim on print.
+  const [ticketDays, setTicketDays] = useState<'1' | '3' | '7' | 'all'>('3');
+  const [ticketLoading, setTicketLoading] = useState(false);
+  const [ticketInfo, setTicketInfo] = useState<null | {
+    groups: PickTicketGroup[];
+    days: string | number;
+    included_boxes: number;
+    included_orders: number;
+    excluded_boxes: number;
+    excluded_orders: number;
+    no_timestamp_orders: number;
+  }>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const confirmedRef = useRef(false); // fire /confirm + count once per box
@@ -179,23 +191,62 @@ export default function ShippingTab() {
   const beginHold = () => { setHolding(true); holdTimer.current = setTimeout(() => { setHolding(false); exitFullscreen(); setFocus(false); backToReady(); }, 900); };
   const cancelHold = () => { setHolding(false); if (holdTimer.current) clearTimeout(holdTimer.current); };
 
-  // Print OUR OWN order-id pick tickets for the pack-ready batch (one per box). Read-only:
-  // fetches the batch and opens a print window — no scan/box state touched.
-  async function printTickets() {
-    setPrinting(true); setErr(null);
+  const storeName = activeStore === 'all'
+    ? 'All stores'
+    : (storesData?.stores?.find((s) => s.id === activeStore)?.name ?? 'this store');
+  const scopeLabel = ticketInfo
+    ? (ticketInfo.days === 'all' ? 'all dates' : `last ${ticketInfo.days} days`)
+    : (ticketDays === 'all' ? 'all dates' : `last ${ticketDays} days`);
+
+  // Load the pack-ready batch + its included/excluded counts (READ-ONLY, our DB only). Runs on the
+  // idle view so the counts (and the "older boxes hidden" caveat) are visible BEFORE printing.
+  const loadTickets = useCallback(async () => {
+    setTicketLoading(true); setErr(null);
     try {
-      const qs = activeStore && activeStore !== 'all' ? `?store_id=${encodeURIComponent(activeStore)}` : '';
-      const res = await fetch(`/api/shipping/pick-tickets${qs}`);
-      if (!res.ok) { setErr('Failed to load pick tickets'); return; }
+      const params = new URLSearchParams();
+      if (activeStore && activeStore !== 'all') params.set('store_id', activeStore);
+      params.set('days', ticketDays);
+      const res = await fetch(`/api/shipping/pick-tickets?${params.toString()}`);
+      if (!res.ok) { setTicketInfo(null); setErr('Failed to load pick tickets'); return; }
       const json = await res.json();
-      const groups = (json.groups ?? []) as PickTicketGroup[];
-      if (!groups.length) { setErr('No pack-ready (AWAITING_COLLECTION) orders to print'); return; }
-      printOrderTickets(groups);
+      setTicketInfo({
+        groups: (json.groups ?? []) as PickTicketGroup[],
+        days: json.days ?? ticketDays,
+        included_boxes: json.included_boxes ?? 0,
+        included_orders: json.included_orders ?? 0,
+        excluded_boxes: json.excluded_boxes ?? 0,
+        excluded_orders: json.excluded_orders ?? 0,
+        no_timestamp_orders: json.no_timestamp_orders ?? 0,
+      });
     } catch {
-      setErr('Failed to load pick tickets');
+      setTicketInfo(null); setErr('Failed to load pick tickets');
     } finally {
-      setPrinting(false);
+      setTicketLoading(false);
     }
+  }, [activeStore, ticketDays]);
+
+  useEffect(() => { if (!focus) loadTickets(); }, [focus, loadTickets]);
+
+  // Confirm with the REAL route numbers before opening the print window (never a bare included
+  // count; call out excluded boxes + a large-batch warning). Reuses the already-fetched groups so
+  // what the operator confirms is exactly what prints.
+  function printTickets() {
+    if (!ticketInfo) return;
+    const { groups, included_boxes, included_orders, excluded_boxes, no_timestamp_orders } = ticketInfo;
+    if (!groups.length) { setErr('No pack-ready orders in this window to print'); return; }
+    let msg = `Print ${included_boxes} ticket${included_boxes === 1 ? '' : 's'} `
+      + `(${included_orders} order${included_orders === 1 ? '' : 's'}) for ${storeName} — ${scopeLabel}?`;
+    if (excluded_boxes > 0) {
+      msg += `\n\n${excluded_boxes.toLocaleString()} older box${excluded_boxes === 1 ? '' : 'es'} excluded (status likely stale).`;
+    }
+    if (no_timestamp_orders > 0 && ticketInfo.days !== 'all') {
+      msg += `\n${no_timestamp_orders} order${no_timestamp_orders === 1 ? '' : 's'} with no date not included.`;
+    }
+    if (included_boxes > 200) {
+      msg += `\n\n⚠ Large batch: ${included_boxes.toLocaleString()} tickets will print.`;
+    }
+    if (!window.confirm(msg)) return;
+    printOrderTickets(groups);
   }
 
   // ── idle (tab) view ──
@@ -213,11 +264,44 @@ export default function ShippingTab() {
           </button>
           <button
             onClick={printTickets}
-            disabled={printing}
+            disabled={ticketLoading || !ticketInfo || ticketInfo.included_boxes === 0}
             className="px-6 py-5 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
           >
-            {printing ? 'Loading…' : '🖨 Print pick tickets'}
+            {ticketLoading ? 'Loading…' : '🖨 Print pick tickets'}
           </button>
+          <label className="flex items-center gap-2 text-sm text-tt-muted">
+            <span>Age</span>
+            <select
+              value={ticketDays}
+              onChange={(e) => setTicketDays(e.target.value as '1' | '3' | '7' | 'all')}
+              className="px-3 py-2 rounded-xl bg-tt-card border border-tt-border text-tt-text cursor-pointer"
+            >
+              <option value="1">Last 1 day</option>
+              <option value="3">Last 3 days</option>
+              <option value="7">Last 7 days</option>
+              <option value="all">All dates</option>
+            </select>
+          </label>
+        </div>
+        {/* ALWAYS surface what's included AND what's hidden — never a bare included count. */}
+        <div className="mt-3 text-sm text-tt-muted">
+          {ticketLoading || !ticketInfo ? (
+            'Counting pack-ready boxes…'
+          ) : (
+            <>
+              <span className="text-tt-text font-semibold">
+                {ticketInfo.included_boxes.toLocaleString()} box{ticketInfo.included_boxes === 1 ? '' : 'es'}
+              </span>
+              {' '}({scopeLabel})
+              {' · '}
+              {ticketInfo.excluded_boxes > 0
+                ? `${ticketInfo.excluded_boxes.toLocaleString()} older box${ticketInfo.excluded_boxes === 1 ? '' : 'es'} hidden — status likely stale`
+                : 'no older boxes hidden'}
+              {ticketInfo.no_timestamp_orders > 0 && (
+                <> {' · '}{ticketInfo.no_timestamp_orders.toLocaleString()} order{ticketInfo.no_timestamp_orders === 1 ? '' : 's'} with no date{ticketInfo.days === 'all' ? '' : ' — not included'}</>
+              )}
+            </>
+          )}
         </div>
         {err && <div className="mt-4 text-sm text-tt-red">{err}</div>}
         {pickedToday > 0 && <div className="mt-6 text-sm text-tt-muted">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked this session</div>}
