@@ -35,13 +35,13 @@ export async function GET(req: Request) {
 
   // 1) Pack-ready orders (paged to avoid the 1000-row cap; store-scoped when provided). Fetch the
   //    FULL set (no date filter in SQL) so excluded/no-timestamp counts are truthful.
-  interface Row { order_id: string; auto_combine_group_id: string | null; order_created_at: string | null }
+  interface Row { order_id: string; auto_combine_group_id: string | null; order_created_at: string | null; tiktok_product_id: string | null; sku_name: string | null; units: number | null }
   const rows: Row[] = [];
   const PAGE = 1000;
   for (let from = 0; ; from += PAGE) {
     let q = supabase
       .from('synced_order_ids')
-      .select('order_id, auto_combine_group_id, order_created_at')
+      .select('order_id, auto_combine_group_id, order_created_at, tiktok_product_id, sku_name, units')
       .eq('user_id', uid)
       .eq('status', 'AWAITING_COLLECTION')
       .order('order_id', { ascending: true })
@@ -147,18 +147,74 @@ export async function GET(req: Request) {
     orderItems.set(oid, m);
   }
 
-  // 5) One group per INCLUDED box.
+  // 5) Classify every non-bound order: unbound-AUCTION vs CATALOG (Phase-0 discriminator).
+  //    Structural, no title matching. capture_events presence = "captured during a live auction".
+  //    A catalog order was never in the auction pipeline → no capture_events row. GUARD against
+  //    capture-less auction items (a real failure mode: when the host extension ran unauthenticated
+  //    it captured sales and discarded them, leaving auction orders with NO capture_events). So a
+  //    no-capture order is CATALOG only when its listing is NOT also used by auction sales (its
+  //    tiktok_product_id never appears in capture_events) AND it has a real products.name; anything
+  //    else fails SAFE to unbound (UNRESOLVED) — we would rather false-flag a catalog item than tell
+  //    a packer to pick an unresolvable box. (5 listings are shared auction+catalog in prod → those
+  //    catalog orders correctly fail safe.)
+  const nonBoundIds = includedOrderIds.filter((oid) => !orderHasSku.has(oid));
+  const capRows = nonBoundIds.length
+    ? await chunkedIn<{ order_id: string }>('capture_events', 'order_id', 'order_id', nonBoundIds)
+    : [];
+  const captureSet = new Set(capRows.map((c) => String(c.order_id)));
+  const rowByOrder = new Map(includedBoxes.flat().map((r) => [r.order_id, r]));
+  // Catalog candidates = non-bound AND never captured. Check their listings against the auction set.
+  const candidateOrders = nonBoundIds.filter((oid) => !captureSet.has(oid));
+  const candidatePids = [...new Set(candidateOrders.map((oid) => rowByOrder.get(oid)?.tiktok_product_id).filter((p): p is string => !!p))];
+  const auctionPidRows = candidatePids.length
+    ? await chunkedIn<{ tiktok_product_id: string }>('capture_events', 'tiktok_product_id', 'tiktok_product_id', candidatePids)
+    : [];
+  const auctionPids = new Set(auctionPidRows.map((r) => String(r.tiktok_product_id))); // listings ALSO sold via auction
+  const prodRows = candidatePids.length
+    ? await chunkedIn<{ tiktok_product_id: string; name: string | null }>('products', 'tiktok_product_id, name', 'tiktok_product_id', candidatePids)
+    : [];
+  const productName = new Map(prodRows.map((p) => [String(p.tiktok_product_id), (p.name ?? '').trim()]));
+
+  type OType = 'bound' | 'unbound' | 'catalog';
+  const orderType = new Map<string, OType>();
+  const catalogByOrder = new Map<string, { listing_name: string; seller_sku: string; qty: number }>();
+  for (const oid of includedOrderIds) {
+    if (orderHasSku.has(oid)) { orderType.set(oid, 'bound'); continue; }
+    if (captureSet.has(oid)) { orderType.set(oid, 'unbound'); continue; } // captured but unbound → genuine unresolved
+    const r = rowByOrder.get(oid);
+    const pid = r?.tiktok_product_id ?? '';
+    const name = pid ? productName.get(pid) : '';
+    if (pid && !auctionPids.has(pid) && name) {
+      orderType.set(oid, 'catalog');
+      catalogByOrder.set(oid, { listing_name: name, seller_sku: (r?.sku_name ?? '').trim(), qty: Number(r?.units) || 1 });
+    } else {
+      orderType.set(oid, 'unbound'); // capture-less auction / shared-listing / no name → fail safe
+    }
+  }
+
+  // 6) One group per INCLUDED box, rendering each order line by its own type.
   const groups = includedBoxes
     .map((boxRows) => {
       const groupOrderIds = boxRows.map((r) => r.order_id);
       const agg = new Map<string, { sku_number: number | null; title: string; qty: number }>();
+      const catAgg = new Map<string, { listing_name: string; seller_sku: string; qty: number }>();
       let unresolved = 0;
       for (const oid of groupOrderIds) {
-        if (!orderHasSku.has(oid)) { unresolved += 1; continue; }
-        for (const [k, v] of orderItems.get(oid) ?? []) {
-          const cur = agg.get(k) ?? { sku_number: v.sku_number, title: v.title, qty: 0 };
-          cur.qty += v.qty;
-          agg.set(k, cur);
+        const t = orderType.get(oid);
+        if (t === 'bound') {
+          for (const [k, v] of orderItems.get(oid) ?? []) {
+            const cur = agg.get(k) ?? { sku_number: v.sku_number, title: v.title, qty: 0 };
+            cur.qty += v.qty;
+            agg.set(k, cur);
+          }
+        } else if (t === 'catalog') {
+          const c = catalogByOrder.get(oid)!;
+          const key = `${c.listing_name}||${c.seller_sku}`;
+          const cur = catAgg.get(key) ?? { listing_name: c.listing_name, seller_sku: c.seller_sku, qty: 0 };
+          cur.qty += c.qty;
+          catAgg.set(key, cur);
+        } else {
+          unresolved += 1; // unbound auction — box carries the set-aside warning
         }
       }
       return {
@@ -166,6 +222,7 @@ export async function GET(req: Request) {
         barcode_order_id: groupOrderIds.slice().sort()[0],
         order_ids: groupOrderIds,
         order_count: groupOrderIds.length,
+        catalog_items: [...catAgg.values()].sort((a, b) => a.listing_name.localeCompare(b.listing_name)),
         items: [...agg.values()].sort((a, b) => (Number(a.sku_number) || 0) - (Number(b.sku_number) || 0)),
         unresolved_count: unresolved,
       };

@@ -25,12 +25,18 @@ export interface PickTicketItem {
   title: string;
   qty: number;
 }
+export interface PickTicketCatalogItem {
+  listing_name: string; // real catalog listing name (products.name) — a normal pick, NOT unresolved
+  seller_sku: string; // the variant / seller SKU (synced_order_ids.sku_name, e.g. "1 Black")
+  qty: number;
+}
 export interface PickTicketGroup {
   barcode_order_id: string; // the order_id encoded in the barcode (any box-mate resolves the box)
   order_ids: string[];
   order_count: number;
-  items: PickTicketItem[]; // aggregated bound SKUs across every order in the box
-  unresolved_count: number; // orders in the box with no bound SKU
+  items: PickTicketItem[]; // aggregated bound-AUCTION SKUs across the box (internal snapshot)
+  catalog_items: PickTicketCatalogItem[]; // aggregated CATALOG lines — pickable, real listing + variant
+  unresolved_count: number; // UNBOUND-AUCTION orders in the box (genuinely unresolved → set aside)
 }
 
 const escapeHtml = (s: string) =>
@@ -54,26 +60,43 @@ interface BoxModel {
   oid: string;
   orderCount: number;
   totalItems: number;
+  setAside: boolean; // box has ≥1 unbound-auction order → repeat a SET-ASIDE banner on every page
   lines: { html: string; cls: string }[];
 }
 
 function buildBox(g: PickTicketGroup): BoxModel {
-  const lines: { html: string; cls: string }[] = g.items.map((it) => ({
-    cls: 'item',
-    html:
-      `<span class="num">#${it.sku_number ?? '?'}</span> ` +
-      `${escapeHtml(it.title || 'Untitled')}${it.qty > 1 ? ` <b>×${it.qty}</b>` : ''}`,
-  }));
-  // One UNRESOLVED line per unbound order in the box (spec: picker must see it on paper).
+  // Three distinct line renderings — a mixed box shows each order line by its own type.
+  const lines: { html: string; cls: string }[] = [];
+  // (1) bound auction: internal snapshot (#number + title).
+  for (const it of g.items) {
+    lines.push({
+      cls: 'item',
+      html: `<span class="num">#${it.sku_number ?? '?'}</span> ` +
+        `${escapeHtml(it.title || 'Untitled')}${it.qty > 1 ? ` <b>×${it.qty}</b>` : ''}`,
+    });
+  }
+  // (2) catalog: real listing + seller SKU — a NORMAL pick, tagged so the picker knows it isn't
+  //     an internal-SKU auction item. Never labelled UNRESOLVED.
+  for (const c of g.catalog_items ?? []) {
+    lines.push({
+      cls: 'item catalog',
+      html: `<span class="tag">CATALOG</span> ${escapeHtml(c.listing_name || 'Untitled')}` +
+        `${c.seller_sku ? ` · <b>${escapeHtml(c.seller_sku)}</b>` : ''}${c.qty > 1 ? ` ×${c.qty}` : ''}`,
+    });
+  }
+  // (3) unbound auction: unchanged — one UNRESOLVED line per unbound order.
   for (let i = 0; i < g.unresolved_count; i++) {
     lines.push({ cls: 'item unresolved', html: '⚠ UNRESOLVED — no SKU bound' });
   }
-  const totalItems = g.items.reduce((n, it) => n + (Number(it.qty) || 1), 0) + g.unresolved_count;
+  const totalItems = g.items.reduce((n, it) => n + (Number(it.qty) || 1), 0)
+    + (g.catalog_items ?? []).reduce((n, c) => n + (Number(c.qty) || 1), 0)
+    + g.unresolved_count;
   return {
     barcodeSvg: orderBarcodeSvg(g.barcode_order_id),
     oid: escapeHtml(g.barcode_order_id),
     orderCount: g.order_count,
     totalItems,
+    setAside: g.unresolved_count > 0,
     lines,
   };
 }
@@ -98,6 +121,13 @@ const TICKET_CSS =
   `.items{flex:1 1 0;min-height:0;overflow:hidden;margin-top:8px;font-size:11pt;line-height:1.3}` +
   `.item{padding:1px 0}.num{font-family:monospace;font-weight:700}` +
   `.unresolved{color:#b00000;font-weight:700}` +
+  // Catalog line: a normal pick, visually distinct from internal-SKU auction lines via the tag.
+  `.catalog{color:#000}` +
+  `.tag{display:inline-block;font-size:8pt;font-weight:800;letter-spacing:.04em;` +
+  `border:1px solid #000;border-radius:3px;padding:0 3px;margin-right:4px;vertical-align:1px}` +
+  // Box-level SET-ASIDE banner — repeats on every page of a box with any unbound-auction order.
+  `.setaside{margin-top:3px;padding:2px 4px;text-align:center;font-size:10pt;font-weight:800;` +
+  `color:#fff;background:#b00000;border-radius:3px}` +
   `.incomplete{color:#b00000;font-weight:800}` +
   `.fallback-warn{color:#b00000;font-weight:800;font-size:11pt;padding:6px}`;
 
@@ -114,7 +144,8 @@ const PAGINATOR = `(function(){
         '<div class="oid">#'+box.oid+'</div>'+
         (box.orderCount>1?'<div class="cnt">'+box.orderCount+' orders in this box</div>':'')+
         '<div class="pg">Box '+(bi+1)+' \\u2014 page 1 of 1</div>'+
-        '<div class="tot">'+box.totalItems+' items total</div>';
+        '<div class="tot">'+box.totalItems+' items total</div>'+
+        (box.setAside?'<div class="setaside">\\u26a0 SET ASIDE \\u2014 unresolved auction order(s)</div>':'');
       return h;
     }
     function newPage(){
@@ -167,6 +198,7 @@ const PAGINATOR = `(function(){
           (b.orderCount>1?'<div class="cnt">'+b.orderCount+' orders in this box</div>':'')+
           '<div class="pg">Box '+(k+1)+'</div>'+
           '<div class="tot">'+b.totalItems+' items total</div>'+
+          (b.setAside?'<div class="setaside">\\u26a0 SET ASIDE \\u2014 unresolved auction order(s)</div>':'')+
           '<div class="items">'+li+'</div></div>';
       }
       document.getElementById('root').innerHTML=html;

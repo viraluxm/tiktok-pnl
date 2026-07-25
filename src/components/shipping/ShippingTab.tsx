@@ -237,7 +237,7 @@ export default function ShippingTab() {
     let msg = `Print ${included_boxes} ticket${included_boxes === 1 ? '' : 's'} `
       + `(${included_orders} order${included_orders === 1 ? '' : 's'}) for ${storeName} — ${scopeLabel}?`;
     if (excluded_boxes > 0) {
-      msg += `\n\n${excluded_boxes.toLocaleString()} older box${excluded_boxes === 1 ? '' : 'es'} excluded (status likely stale).`;
+      msg += `\n\n${excluded_boxes.toLocaleString()} older box${excluded_boxes === 1 ? '' : 'es'} excluded.`;
     }
     if (no_timestamp_orders > 0 && ticketInfo.days !== 'all') {
       msg += `\n${no_timestamp_orders} order${no_timestamp_orders === 1 ? '' : 's'} with no date not included.`;
@@ -295,7 +295,7 @@ export default function ShippingTab() {
               {' '}({scopeLabel})
               {' · '}
               {ticketInfo.excluded_boxes > 0
-                ? `${ticketInfo.excluded_boxes.toLocaleString()} older box${ticketInfo.excluded_boxes === 1 ? '' : 'es'} hidden — status likely stale`
+                ? `${ticketInfo.excluded_boxes.toLocaleString()} older box${ticketInfo.excluded_boxes === 1 ? '' : 'es'} hidden`
                 : 'no older boxes hidden'}
               {ticketInfo.no_timestamp_orders > 0 && (
                 <> {' · '}{ticketInfo.no_timestamp_orders.toLocaleString()} order{ticketInfo.no_timestamp_orders === 1 ? '' : 's'} with no date{ticketInfo.days === 'all' ? '' : ' — not included'}</>
