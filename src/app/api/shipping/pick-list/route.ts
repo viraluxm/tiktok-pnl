@@ -93,8 +93,8 @@ export async function POST(req: Request) {
 
   // Seed rows for the scan. A tracking (physical label) maps to MANY orders — do NOT
   // limit(1): that made which box rendered arbitrary/nondeterministic. Pull them all.
-  type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null; store_id: string | null; status: string | null; sku_name: string | null };
-  const SEL = 'order_id, auto_combine_group_id, tracking_number, store_id, status, sku_name';
+  type SeedRow = { order_id: string; auto_combine_group_id: string | null; tracking_number: string | null; store_id: string | null; status: string | null; sku_name: string | null; tiktok_product_id: string | null; units: number | null };
+  const SEL = 'order_id, auto_combine_group_id, tracking_number, store_id, status, sku_name, tiktok_product_id, units';
   let resolvedVia: 'tracking' | 'order_id' = tracking ? 'tracking' : 'order_id';
   let seed: SeedRow[] = [];
   if (tracking) {
@@ -327,15 +327,55 @@ export async function POST(req: Request) {
       if (!capByOrder.has(k)) capByOrder.set(k, { product_name: (c.product_name as string | null) ?? null, platform_sku_ref: (c.platform_sku_ref as string | null) ?? null });
     }
   }
-  const missing_orders = missingOrderIds.map((id) => {
+  // ── 6c) THREE-WAY ORDER TYPE (Phase-0 discriminator, structural — no title matching):
+  //   bound auction   → has a bound SKU (in `skus`); pick from the internal snapshot.
+  //   unbound auction → captured during a live (capture_events) but never bound → SET ASIDE.
+  //   catalog         → never captured; a normal pre-listed sale → PICKABLE (real listing +
+  //     seller SKU). GUARD against capture-less auction items (the extension ran unauthenticated
+  //     and discarded captures, leaving auction orders with no capture_events): a no-capture order
+  //     is catalog ONLY when its listing is NOT also used by auction sales (tiktok_product_id absent
+  //     from capture_events) AND it has a products.name; otherwise it fails SAFE to unbound. This is
+  //     the SAME guard as the pick ticket — capByOrder (fetched above) is the capture signal.
+  const candidatePids = [...new Set(missingOrderIds.filter((id) => !capByOrder.has(id)).map((id) => boxRows.get(id)?.tiktok_product_id).filter((p): p is string => !!p))];
+  const auctionPidSet = new Set<string>();
+  const productNameByPid = new Map<string, string>();
+  if (candidatePids.length) {
+    const { data: ap } = await supabase.from('capture_events').select('tiktok_product_id').eq('user_id', user.id).in('tiktok_product_id', candidatePids);
+    for (const r of ap ?? []) auctionPidSet.add(String(r.tiktok_product_id));
+    const { data: pn } = await supabase.from('products').select('tiktok_product_id, name').eq('user_id', user.id).in('tiktok_product_id', candidatePids);
+    for (const p of pn ?? []) productNameByPid.set(String(p.tiktok_product_id), ((p.name as string | null) ?? '').trim());
+  }
+  const isCatalog = (id: string): boolean => {
+    if (capByOrder.has(id)) return false;                  // captured → auction (unbound)
+    const pid = boxRows.get(id)?.tiktok_product_id ?? '';
+    const name = pid ? productNameByPid.get(pid) : '';
+    return !!pid && !auctionPidSet.has(pid) && !!name;     // no-capture, non-auction listing, real name
+  };
+  const catalogIds = missingOrderIds.filter(isCatalog);
+  const unboundIds = missingOrderIds.filter((id) => !isCatalog(id));
+
+  // Shared display enrichment. For catalog the live product_name IS the real listing name.
+  const displayOf = (id: string) => {
     const d = orderDetail.get(id);
     const c = capByOrder.get(id);
     const sr = boxRows.get(id);
-    const listing_name = (d?.product_name && d.product_name.trim()) || (c?.product_name && c.product_name.trim()) || sr?.sku_name || null;
+    const pid = sr?.tiktok_product_id ?? '';
+    const listing_name = (d?.product_name && d.product_name.trim()) || (pid ? productNameByPid.get(pid) || '' : '') || (c?.product_name && c.product_name.trim()) || sr?.sku_name || null;
     const sellerRaw = (d?.seller_sku && d.seller_sku.trim()) || (c?.platform_sku_ref && String(c.platform_sku_ref).trim()) || '';
-    const seller_sku = sellerRaw || (sr?.sku_name ?? null); // fall back to variant/sku_name when TikTok seller_sku is empty
-    return { order_id: id, listing_name, seller_sku };
+    const seller_sku = sellerRaw || (sr?.sku_name ?? null); // fall back to variant/sku_name when seller_sku empty
+    return { listing_name, seller_sku };
+  };
+
+  // Unbound-auction ONLY → the set-aside alert list (catalog no longer false-flagged here).
+  const missing_orders = unboundIds.map((id) => ({ order_id: id, ...displayOf(id) }));
+  // Catalog → pickable lines (real listing + seller SKU + qty).
+  const catalog_orders = catalogIds.map((id) => {
+    const { listing_name, seller_sku } = displayOf(id);
+    return { order_id: id, listing_name, seller_sku, qty: Number(boxRows.get(id)?.units) || 1 };
   });
+  // Per-order type tag for the pickable orders.
+  const order_types: Record<string, 'bound' | 'unbound_auction' | 'catalog'> = {};
+  for (const id of pickOrderIds) order_types[id] = orderIdsWithItems.has(id) ? 'bound' : (isCatalog(id) ? 'catalog' : 'unbound_auction');
 
   // 6) Already verified? (keyed by the physical-box idempotency key)
   const { data: verified } = await supabase
@@ -355,8 +395,10 @@ export async function POST(req: Request) {
     order_ids: pickOrderIds,           // pickable only — what confirm/verify covers
     order_count: pickOrderIds.length,  // "N SKUs across M orders" counts pickable orders only
     skus,
-    missing_order_ids: missingOrderIds,          // back-compat (bare ids)
-    missing_orders,                              // enriched: { order_id, listing_name, seller_sku }
+    catalog_orders,                              // pickable catalog lines: { order_id, listing_name, seller_sku, qty }
+    order_types,                                 // { order_id: 'bound' | 'unbound_auction' | 'catalog' }
+    missing_order_ids: unboundIds,               // back-compat (bare ids) — UNBOUND-AUCTION only now
+    missing_orders,                              // enriched UNBOUND-AUCTION: { order_id, listing_name, seller_sku }
     excluded,                          // do-not-pack, flagged (cancelled / on-hold / already-shipped)
     excluded_count: excluded.length,
     status_unverified: statusUnverified, // true → frontend shows the loud stale-status warning

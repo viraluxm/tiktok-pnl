@@ -28,6 +28,7 @@ interface BoxSku {
   required_qty: number;
 }
 interface MissingOrder { order_id: string; listing_name: string | null; seller_sku: string | null; }
+interface CatalogOrder { order_id: string; listing_name: string | null; seller_sku: string | null; qty: number; }
 interface Box {
   scanned_value?: string;
   resolved_via?: 'tracking' | 'order_id';
@@ -38,8 +39,10 @@ interface Box {
   order_ids: string[];
   order_count: number;
   skus: BoxSku[];
-  missing_order_ids: string[];
-  missing_orders?: MissingOrder[];
+  catalog_orders?: CatalogOrder[];                                   // pickable catalog lines (third state)
+  order_types?: Record<string, 'bound' | 'unbound_auction' | 'catalog'>;
+  missing_order_ids: string[];                                       // UNBOUND-AUCTION only
+  missing_orders?: MissingOrder[];                                   // UNBOUND-AUCTION only → set-aside alert
   excluded?: { order_id: string; reason: string; skus: string[] }[];
   excluded_count?: number;
   status_unverified?: boolean;
@@ -48,8 +51,20 @@ interface Box {
 
 type Screen = 'ready' | 'alert' | 'pick' | 'finish' | 'empty';
 
-const firstUnpicked = (b: Box, c: Record<string, number>) => {
-  const i = b.skus.findIndex((s) => (c[s.inventory_sku_id] ?? 0) < s.required_qty);
+// A pickable line is EITHER a bound-auction internal SKU or a CATALOG order. Both flow through
+// the same one-per-screen pick UI; catalog lines are visibly tagged so a picker can tell them
+// apart from internal-SKU auction items and never mistakes one for the other.
+type PickLine =
+  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number }
+  | { kind: 'catalog'; key: string; order_id: string; listing_name: string; seller_sku: string; required_qty: number };
+
+const buildPickLines = (b: Box): PickLine[] => [
+  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty })),
+  ...(b.catalog_orders ?? []).map((c): PickLine => ({ kind: 'catalog', key: `cat:${c.order_id}`, order_id: c.order_id, listing_name: c.listing_name || 'Catalog item', seller_sku: c.seller_sku || '', required_qty: c.qty || 1 })),
+];
+
+const firstUnpickedIdx = (lines: PickLine[], c: Record<string, number>) => {
+  const i = lines.findIndex((l) => (c[l.key] ?? 0) < l.required_qty);
   return i === -1 ? 0 : i;
 };
 
@@ -95,12 +110,13 @@ export default function ShippingTab() {
     if (d.fullscreenElement || d.webkitFullscreenElement) { try { (d.exitFullscreen ?? d.webkitExitFullscreen)?.call(d); } catch { /* ignore */ } }
   }, []);
 
+  const pickLines = useMemo(() => (box ? buildPickLines(box) : []), [box]);
   const anyPicked = useMemo(() => Object.values(counts).some((v) => v > 0), [counts]);
   const pickedUnits = useMemo(() => Object.values(counts).reduce((a, b) => a + b, 0), [counts]);
-  const totalUnits = useMemo(() => (box ? box.skus.reduce((a, s) => a + s.required_qty, 0) : 0), [box]);
+  const totalUnits = useMemo(() => pickLines.reduce((a, l) => a + l.required_qty, 0), [pickLines]);
   const allComplete = useMemo(
-    () => !!box && box.skus.length > 0 && box.skus.every((s) => (counts[s.inventory_sku_id] ?? 0) >= s.required_qty),
-    [box, counts],
+    () => pickLines.length > 0 && pickLines.every((l) => (counts[l.key] ?? 0) >= l.required_qty),
+    [pickLines, counts],
   );
 
   // ── scan → box resolution (EXISTING route, unchanged) ──
@@ -119,10 +135,13 @@ export default function ShippingTab() {
       }
       const b = json as Box;
       setBox(b); setCounts({}); setActiveIdx(0); confirmedRef.current = false; setErr(null);
+      // Only UNBOUND-AUCTION orders trigger the set-aside alert (mixed box → the warning WINS).
+      // Catalog orders are pickable and never suppress a real unresolved warning.
       const unbound = (b.missing_orders?.length ?? 0) > 0 || b.missing_order_ids.length > 0;
-      if (unbound) setScreen('alert');            // ANY unbound → alert, never pick
-      else if (b.skus.length === 0) setScreen('empty'); // all do-not-pack / nothing to pick
-      else { setScreen('pick'); setActiveIdx(firstUnpicked(b, {})); }
+      const lines = buildPickLines(b);
+      if (unbound) setScreen('alert');            // any unbound-auction → set aside, never pick
+      else if (lines.length === 0) setScreen('empty'); // all do-not-pack / nothing to pick
+      else { setScreen('pick'); setActiveIdx(firstUnpickedIdx(lines, {})); }
     } catch {
       setErr('Network error loading the box'); setScreen('ready');
     } finally {
@@ -138,20 +157,20 @@ export default function ShippingTab() {
   }
 
   // ── pick actions ──
-  function grab(sku: BoxSku) {
+  function grab(line: PickLine) {
     if (!box) return;
-    const have = counts[sku.inventory_sku_id] ?? 0;
-    if (have >= sku.required_qty) return;
+    const have = counts[line.key] ?? 0;
+    if (have >= line.required_qty) return;
     const next = have + 1;
-    const nc = { ...counts, [sku.inventory_sku_id]: next };
+    const nc = { ...counts, [line.key]: next };
     setCounts(nc);
-    if (next >= sku.required_qty) {
+    if (next >= line.required_qty) {
       setJustDone(true);
       window.setTimeout(() => {
         setJustDone(false);
-        const complete = box.skus.every((s) => (nc[s.inventory_sku_id] ?? 0) >= s.required_qty);
+        const complete = pickLines.every((l) => (nc[l.key] ?? 0) >= l.required_qty);
         if (complete) enterFinish(box);
-        else setActiveIdx(firstUnpicked(box, nc));
+        else setActiveIdx(firstUnpickedIdx(pickLines, nc));
       }, 550);
     }
   }
@@ -312,9 +331,9 @@ export default function ShippingTab() {
   const unbound: MissingOrder[] = box
     ? (box.missing_orders?.length ? box.missing_orders : box.missing_order_ids.map((id) => ({ order_id: id, listing_name: null, seller_sku: null })))
     : [];
-  const sku = box && screen === 'pick' ? box.skus[activeIdx] : null;
-  const have = sku ? counts[sku.inventory_sku_id] ?? 0 : 0;
-  const skuDone = sku ? have >= sku.required_qty : false;
+  const line = box && screen === 'pick' ? pickLines[activeIdx] ?? null : null;
+  const have = line ? counts[line.key] ?? 0 : 0;
+  const lineDone = line ? have >= line.required_qty : false;
 
   // ── focus-mode overlay ──
   // Rendered through a PORTAL to <body> so it escapes the tab-content stacking context (a
@@ -405,37 +424,45 @@ export default function ShippingTab() {
         {/* PICK — one SKU per screen, sized to the device with dvh + flex + clamp:
             [progress dots] · [HERO photo/number — flex-1, takes only leftover space, object-contain]
             · [PINNED controls — number, count, Grab, nav; always visible, never scrolls]. */}
-        {screen === 'pick' && box && sku && (
+        {screen === 'pick' && box && line && (
           <div className="flex-1 min-h-0 w-full max-w-2xl flex flex-col gap-[clamp(0.35rem,1.4vh,0.9rem)]">
-            {/* progress dots (tappable) — compact, top */}
+            {/* progress dots (tappable) — compact, top. Catalog lines get a square dot so a picker
+                can see at a glance that the box mixes internal-SKU and catalog items. */}
             <div className="shrink-0 flex flex-wrap justify-center gap-2">
-              {box.skus.map((s, i) => {
-                const c = (counts[s.inventory_sku_id] ?? 0) >= s.required_qty;
+              {pickLines.map((l, i) => {
+                const c = (counts[l.key] ?? 0) >= l.required_qty;
                 return (
                   <button
-                    key={s.inventory_sku_id} onClick={() => setActiveIdx(i)}
-                    className={`w-3.5 h-3.5 rounded-full transition-colors ${i === activeIdx ? 'ring-2 ring-offset-2 ring-offset-tt-bg ring-tt-cyan' : ''} ${c ? 'bg-tt-green' : 'bg-tt-border'}`}
-                    aria-label={`SKU ${i + 1}`}
+                    key={l.key} onClick={() => setActiveIdx(i)}
+                    className={`w-3.5 h-3.5 transition-colors ${l.kind === 'catalog' ? 'rounded-[3px]' : 'rounded-full'} ${i === activeIdx ? 'ring-2 ring-offset-2 ring-offset-tt-bg ring-tt-cyan' : ''} ${c ? 'bg-tt-green' : 'bg-tt-border'}`}
+                    aria-label={`Item ${i + 1}`}
                   />
                 );
               })}
             </div>
 
-            {/* HERO — takes ONLY the leftover height (flex-1 min-h-0). Photo shrinks to fit
-                (object-contain, fully visible, never crops or pushes controls off). No photo →
-                the big SKU number fills the same space, scaling to the box. Tap = grab one. */}
-            <button onClick={() => grab(sku)} disabled={skuDone}
+            {/* HERO — takes ONLY the leftover height. SKU line: photo or big #number. Catalog line:
+                a CATALOG-tagged card with the real listing name + seller SKU (no internal #). */}
+            <button onClick={() => grab(line)} disabled={lineDone}
               className="relative flex-1 min-h-0 w-full rounded-3xl border-2 border-tt-border bg-tt-card overflow-hidden flex items-center justify-center cursor-pointer disabled:cursor-default">
-              {sku.thumbnail_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={sku.thumbnail_url} alt="" className="max-w-full max-h-full object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+              {line.kind === 'sku' ? (
+                line.thumbnail_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={line.thumbnail_url} alt="" className="max-w-full max-h-full object-contain" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                ) : (
+                  <div className="flex flex-col items-center justify-center px-4 text-center">
+                    <div className="font-mono font-bold text-tt-text leading-none" style={{ fontSize: 'clamp(3rem, 22vh, 11rem)' }}>#{line.sku_number ?? '?'}</div>
+                    <div className="mt-3 font-semibold text-tt-text break-words leading-tight" style={{ fontSize: 'clamp(1rem, 4vh, 2rem)' }}>{line.title}</div>
+                  </div>
+                )
               ) : (
-                <div className="flex flex-col items-center justify-center px-4 text-center">
-                  <div className="font-mono font-bold text-tt-text leading-none" style={{ fontSize: 'clamp(3rem, 22vh, 11rem)' }}>#{sku.sku_number ?? '?'}</div>
-                  <div className="mt-3 font-semibold text-tt-text break-words leading-tight" style={{ fontSize: 'clamp(1rem, 4vh, 2rem)' }}>{sku.title}</div>
+                <div className="flex flex-col items-center justify-center px-5 text-center">
+                  <span className="inline-block rounded-md border-2 border-tt-cyan text-tt-cyan font-extrabold tracking-wide" style={{ fontSize: 'clamp(0.8rem,2.6vh,1.15rem)', padding: '0.15em 0.5em' }}>CATALOG ITEM</span>
+                  <div className="mt-4 font-bold text-tt-text break-words leading-tight" style={{ fontSize: 'clamp(1.1rem, 4.2vh, 2.1rem)' }}>{line.listing_name}</div>
+                  <div className="mt-3 text-tt-muted break-words" style={{ fontSize: 'clamp(0.9rem, 3vh, 1.4rem)' }}>Seller SKU <span className="font-mono text-tt-text break-all">{line.seller_sku || '—'}</span></div>
                 </div>
               )}
-              {justDone && skuDone && (
+              {justDone && lineDone && (
                 <div className="absolute inset-0 bg-tt-green/90 flex items-center justify-center text-black font-bold" style={{ fontSize: 'clamp(4rem, 26vh, 12rem)' }}>✓</div>
               )}
             </button>
@@ -443,25 +470,34 @@ export default function ShippingTab() {
             {/* PINNED controls — reserved space, always visible, everything clamp-sized so the
                 whole block scales with the device and never overflows. */}
             <div className="shrink-0 flex flex-col gap-[clamp(0.3rem,1.2vh,0.7rem)]">
-              {/* SKU number + title (always pinned & visible) */}
+              {/* line label (always pinned & visible) — internal #SKU, or the catalog listing. */}
               <div className="text-center leading-tight px-1">
-                <span className="font-mono font-extrabold text-tt-text align-middle" style={{ fontSize: 'clamp(1.4rem, 5.5vw, 2.4rem)' }}>#{sku.sku_number ?? '?'}</span>
-                <span className="ml-2 font-semibold text-tt-text break-words align-middle" style={{ fontSize: 'clamp(0.85rem, 3.4vw, 1.25rem)' }}>{sku.title}</span>
+                {line.kind === 'sku' ? (
+                  <>
+                    <span className="font-mono font-extrabold text-tt-text align-middle" style={{ fontSize: 'clamp(1.4rem, 5.5vw, 2.4rem)' }}>#{line.sku_number ?? '?'}</span>
+                    <span className="ml-2 font-semibold text-tt-text break-words align-middle" style={{ fontSize: 'clamp(0.85rem, 3.4vw, 1.25rem)' }}>{line.title}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="inline-block rounded border border-tt-cyan text-tt-cyan font-bold align-middle mr-2" style={{ fontSize: 'clamp(0.6rem,2.4vw,0.85rem)', padding: '0 0.35em' }}>CATALOG</span>
+                    <span className="font-semibold text-tt-text break-words align-middle" style={{ fontSize: 'clamp(0.85rem, 3.4vw, 1.25rem)' }}>{line.listing_name} · <span className="font-mono">{line.seller_sku || '—'}</span></span>
+                  </>
+                )}
               </div>
               {/* count */}
-              <div className={`text-center font-extrabold ${skuDone ? 'text-tt-green' : 'text-tt-text'}`} style={{ fontSize: 'clamp(1.1rem, 4.5vw, 1.9rem)' }}>{have} / {sku.required_qty} grabbed</div>
+              <div className={`text-center font-extrabold ${lineDone ? 'text-tt-green' : 'text-tt-text'}`} style={{ fontSize: 'clamp(1.1rem, 4.5vw, 1.9rem)' }}>{have} / {line.required_qty} grabbed</div>
               {/* grab */}
-              <button onClick={() => grab(sku)} disabled={skuDone}
-                className={`w-full rounded-2xl font-extrabold transition-opacity ${skuDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}
+              <button onClick={() => grab(line)} disabled={lineDone}
+                className={`w-full rounded-2xl font-extrabold transition-opacity ${lineDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}
                 style={{ padding: 'clamp(0.55rem, 1.9vh, 1rem) 0', fontSize: 'clamp(1rem, 4vw, 1.4rem)' }}>
-                {skuDone ? '✓ Complete' : 'Grab one'}
+                {lineDone ? '✓ Complete' : 'Grab one'}
               </button>
               {/* Back / info / Next */}
               <div className="flex items-center justify-between gap-2">
                 <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
                   className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)' }}>‹ Back</button>
-                <span className="flex-1 min-w-0 truncate text-center text-xs text-tt-muted">SKU {activeIdx + 1} of {box.skus.length} · {pickedUnits}/{totalUnits} units</span>
-                <button onClick={() => setActiveIdx((i) => Math.min(box.skus.length - 1, i + 1))} disabled={activeIdx === box.skus.length - 1}
+                <span className="flex-1 min-w-0 truncate text-center text-xs text-tt-muted">Item {activeIdx + 1} of {pickLines.length} · {pickedUnits}/{totalUnits} units</span>
+                <button onClick={() => setActiveIdx((i) => Math.min(pickLines.length - 1, i + 1))} disabled={activeIdx === pickLines.length - 1}
                   className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)' }}>Next ›</button>
               </div>
               {/* New label / Finish */}
