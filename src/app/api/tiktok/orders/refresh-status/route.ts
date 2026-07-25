@@ -17,36 +17,41 @@ export const maxDuration = 300;
 // lookup, so TikTok's broken search cursor is structurally absent — and corrects status ONLY.
 //
 // MODE (required to write): mode:'write' performs the UPDATE; anything else (default) is a DRY
-// RUN that reports the transition table and writes nothing. Mirrors backfill-tracking's write
-// discipline: targeted UPDATE of a SINGLE column (status), guarded by store_id+order_id. It
-// NEVER uses parseOrder/upsert and NEVER touches tracking_number or auto_combine_group_id (the
-// bind/pick path depends on both), nor gmv/sku_*/units.
+// RUN that reports the transition table and writes nothing. Write discipline mirrors
+// backfill-tracking: targeted UPDATE of a SINGLE column (status), guarded by store_id+order_id.
+// It NEVER uses parseOrder/upsert and NEVER touches tracking_number or auto_combine_group_id
+// (the bind/pick path depends on both), nor gmv/sku_*/units.
 //
-// STATELESS + RESUMABLE: target = rows WHERE status IN (open set), keyset-paged by order_id
-// (a stable lexicographic total order). Each invocation is bounded by a call/time budget and
-// returns { examined, updated, remaining, next_after } so a caller re-invokes until remaining
-// is 0. The set self-shrinks as orders go terminal, so partial passes are safe. No migration.
+// ORDER: OLDEST-OPEN-FIRST (order_created_at asc, nulls last). The stale tail is corrected in the
+// first invocation. STATELESS + RESUMABLE: each invocation reloads the oldest open ids, processes
+// up to a call/time budget, and (in write mode) corrected rows leave the open set — so the next
+// invocation naturally advances. Re-invoke until `updated` is 0 (`done`). No cursor, no migration.
 //
 // WRITE GATE: writes are refused while a live is active (recent capture_events / live_auction_items
-// write within ACTIVITY_WINDOW_MIN) — NOT gated on live_sessions.status (orphaned 'live' rows
-// make it unreliable). The gate is reported on every call and enforced only in write mode.
+// write within ACTIVITY_WINDOW_MIN) — NOT gated on live_sessions.status (orphaned 'live' rows make
+// it unreliable). Reported on every call; enforced (409) only in write mode.
+//
+// CANCELLATIONS: any order this pass moves to CANCELLED is OUTPUT (with a `bound` flag = has a
+// reachable live_auction_item_skus row) so downstream inventory reconciliation can be scoped
+// separately. This pass does NOT adjust inventory, unbind, or touch live_auction_items.
 
 const CORE_OPEN = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'ON_HOLD', 'PARTIALLY_SHIPPING'];
 const OPT_IN = ['IN_TRANSIT', 'UNPAID']; // only when include_in_transit_unpaid:true
 // Terminal — never targeted: DELIVERED, COMPLETED, CANCELLED. (order_status is a fulfillment
 // lifecycle with no RETURNED/REFUNDED state; post-COMPLETED returns live in return_refund objects
-// and never flip order_status — so COMPLETED is safe to skip forever.)
+// and never flip order_status — verified by a 500-order terminal control sample: 0 changed.)
 
 const ACTIVITY_WINDOW_MIN = 15;   // no auction write within this window ⇒ safe to write
-const CHUNK = 50;                  // getOrderById max ids/call
-// Per-invocation defaults DERIVED from the measured per-call latency (Q3, real 78-call sample):
-// a 50-id call runs mean ~890ms / p90 ~1.1s / max ~1.68s. With ~80ms pacing that's ~1.0s/call, so
+const CHUNK = 50;                 // getOrderById max ids/call
+// Per-invocation defaults DERIVED from measured per-call latency (Q3, real 78-call sample): a
+// 50-id call runs mean ~890ms / p90 ~1.1s / max ~1.68s. With ~80ms pacing that's ~1.0s/call, so
 // under a 240s time budget ~200 calls fit with margin below maxDuration=300s. A cold full sweep is
-// ~240 calls (~12k open / 50) ⇒ ~2 invocations; re-invoke with `after` until remaining_total=0.
-// Both bounds apply; whichever trips first ends the invocation (time budget is the hard stop).
-const DEFAULT_TIME_BUDGET_MS = 240_000;  // 4 min, leaves margin under the 300s ceiling
-const DEFAULT_CALL_BUDGET = 200;         // ~200 calls × ~1.0s ≈ 200s < time budget
+// ~240 calls (~12k open / 50) ⇒ ~2 invocations; re-invoke until `done`. Both bounds apply; the
+// time budget is the hard stop.
+const DEFAULT_TIME_BUDGET_MS = 240_000;
+const DEFAULT_CALL_BUDGET = 200;
 const MAX_429_RETRIES = 3;
+const CH_IN = 300; // .in() list chunk for the cancellation bound-lookup
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -59,7 +64,6 @@ export async function POST(req: Request) {
   let body: {
     mode?: string; store_id?: string; include_in_transit_unpaid?: boolean;
     call_budget?: number; time_budget_ms?: number; sample?: number;
-    after?: Record<string, string>;
   };
   try { body = await req.json(); } catch { body = {}; }
 
@@ -69,7 +73,6 @@ export async function POST(req: Request) {
   const callBudget = Math.max(1, Math.trunc(Number(body.call_budget) || DEFAULT_CALL_BUDGET));
   const timeBudgetMs = Math.max(5_000, Math.trunc(Number(body.time_budget_ms) || DEFAULT_TIME_BUDGET_MS));
   const sampleN = Math.min(50, Math.max(1, Math.trunc(Number(body.sample) || 20)));
-  const afterIn: Record<string, string> = (body.after && typeof body.after === 'object') ? body.after : {};
 
   const admin = createAdminClient();
   const started = Date.now();
@@ -113,105 +116,123 @@ export async function POST(req: Request) {
 
   const transitions: Record<string, number> = {};
   const sample: { store: string; order_id: string; from: string; to: string }[] = [];
-  const perStore: Record<string, { store_id: string; examined: number; calls: number; changed: number; updated: number; not_returned: number; remaining: number; next_after: string | null }> = {};
-  const totals = { examined: 0, calls: 0, changed: 0, updated: 0, not_returned: 0, remaining: 0 };
-  const nextAfter: Record<string, string> = {};
+  const cancelled: { store: string; store_id: string; order_id: string; user_id: string }[] = [];
+  const perStore: Record<string, { store_id: string; examined: number; calls: number; changed: number; updated: number; not_returned: number; open_before: number; open_after: number }> = {};
+  const totals = { examined: 0, calls: 0, changed: 0, updated: 0, not_returned: 0 };
   let callsUsed = 0;
   let budgetExhausted = false;
+
+  const openCount = async (userId: string, storeId: string): Promise<number> => {
+    const { count } = await admin.from('synced_order_ids')
+      .select('order_id', { count: 'exact', head: true })
+      .eq('user_id', userId).eq('store_id', storeId).in('status', statuses);
+    return count ?? 0;
+  };
 
   for (const c of conns) {
     const storeId = String(c.store_id);
     const ownerUserId = String(c.user_id);
     const storeName = storeNames.get(storeId) || storeId;
-    const ps = { store_id: storeId, examined: 0, calls: 0, changed: 0, updated: 0, not_returned: 0, remaining: 0, next_after: null as string | null };
+    const ps = { store_id: storeId, examined: 0, calls: 0, changed: 0, updated: 0, not_returned: 0, open_before: 0, open_after: 0 };
     perStore[storeName] = ps;
+    ps.open_before = await openCount(ownerUserId, storeId);
 
-    let cursor = afterIn[storeId] ?? '';
-    let token = ''; let cipher = String(c.shop_cipher);
-    let tokenLoaded = false;
-
-    // Keyset-page the target set (order_id lexicographic) so resumption is stable under writes.
-    outer: while (true) {
-      if (callsUsed >= callBudget || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break; }
-
+    // Load the OLDEST open ids first, only as many as the remaining call budget can process.
+    const remainingCalls = callBudget - callsUsed;
+    if (remainingCalls <= 0) { budgetExhausted = true; ps.open_after = ps.open_before; continue; }
+    const maxIds = remainingCalls * CHUNK;
+    const rows: { order_id: string; status: string }[] = [];
+    for (let off = 0; rows.length < maxIds; off += 1000) {
       const { data: page, error: pErr } = await admin.from('synced_order_ids')
         .select('order_id, status')
-        .eq('user_id', ownerUserId).eq('store_id', storeId)
-        .in('status', statuses)
-        .gt('order_id', cursor)
+        .eq('user_id', ownerUserId).eq('store_id', storeId).in('status', statuses)
+        .order('order_created_at', { ascending: true, nullsFirst: false })
         .order('order_id', { ascending: true })
-        .limit(1000);
+        .range(off, off + 999);
       if (pErr) return NextResponse.json({ error: `synced read failed: ${pErr.message}` }, { status: 500 });
-      if (!page?.length) { ps.next_after = cursor || null; break; }
+      if (!page?.length) break;
+      rows.push(...page.map((r) => ({ order_id: String(r.order_id), status: String(r.status) })));
+      if (page.length < 1000) break;
+    }
+    const work = rows.slice(0, maxIds);
+    if (!work.length) { ps.open_after = ps.open_before; continue; }
+    const storedById = new Map(work.map((r) => [r.order_id, r.status]));
+    const ids = [...storedById.keys()];
 
-      const storedById = new Map(page.map((r) => [String(r.order_id), String(r.status)]));
-      const ids = [...storedById.keys()];
+    const fresh = await getFreshToken(admin, c as unknown as ConnRow, { skewMinutes: 30 });
+    const token = fresh.accessToken as string;
+    const cipher = (fresh.shopCipher ?? c.shop_cipher) as string;
 
-      if (!tokenLoaded) {
-        const fresh = await getFreshToken(admin, c as unknown as ConnRow, { skewMinutes: 30 });
-        token = fresh.accessToken as string; cipher = fresh.shopCipher as string; tokenLoaded = true;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      if (callsUsed >= callBudget || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break; }
+      const chunk = ids.slice(i, i + CHUNK);
+
+      let got: Record<string, unknown>[] = [];
+      for (let attempt = 0; ; attempt++) {
+        try { got = await getOrderById(token, cipher, chunk); break; }
+        catch (e) {
+          const msg = String(e);
+          if (/429|rate|too many/i.test(msg) && attempt < MAX_429_RETRIES) { await sleep(1000 * (attempt + 1)); continue; }
+          return NextResponse.json({ error: 'getOrderById failed', detail: msg, store_id: storeId }, { status: 502 });
+        }
       }
+      callsUsed++; ps.calls++;
 
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        if (callsUsed >= callBudget || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; ps.next_after = cursor || null; break outer; }
-        const chunk = ids.slice(i, i + CHUNK);
-
-        // getOrderById with 429 backoff.
-        let got: Record<string, unknown>[] = [];
-        for (let attempt = 0; ; attempt++) {
-          try { got = await getOrderById(token, cipher, chunk); break; }
-          catch (e) {
-            const msg = String(e);
-            if (/429|rate|too many/i.test(msg) && attempt < MAX_429_RETRIES) { await sleep(1000 * (attempt + 1)); continue; }
-            return NextResponse.json({ error: 'getOrderById failed', detail: msg, store_id: storeId }, { status: 502 });
+      const returned = new Set<string>();
+      for (const o of got) {
+        const id = String(o.id); returned.add(id);
+        const from = storedById.get(id); if (from === undefined) continue;
+        const to = String(o.status || '').toUpperCase();
+        if (!to) continue; // never infer status from an empty payload
+        transitions[`${from} -> ${to}`] = (transitions[`${from} -> ${to}`] || 0) + 1;
+        if (to !== from) {
+          ps.changed++;
+          if (sample.length < sampleN) sample.push({ store: storeName, order_id: id, from, to });
+          if (to === 'CANCELLED') cancelled.push({ store: storeName, store_id: storeId, order_id: id, user_id: ownerUserId });
+          if (write) {
+            // status ONLY. .neq guards a no-op / concurrent-sync race. Never touches
+            // tracking_number, auto_combine_group_id, gmv, sku_*, units.
+            const { error: uErr, count } = await admin.from('synced_order_ids')
+              .update({ status: to }, { count: 'exact' })
+              .eq('store_id', storeId).eq('order_id', id).neq('status', to);
+            if (uErr) console.error('[refresh-status] update error', id, uErr.message);
+            else ps.updated += count ?? 0;
           }
         }
-        callsUsed++; ps.calls++;
-
-        const returned = new Set<string>();
-        for (const o of got) {
-          const id = String(o.id); returned.add(id);
-          const from = storedById.get(id); if (from === undefined) continue;
-          const to = String(o.status || '').toUpperCase();
-          if (!to) continue; // never infer from an empty status
-          const key = `${from} -> ${to}`;
-          transitions[key] = (transitions[key] || 0) + 1;
-          if (to !== from) {
-            ps.changed++;
-            if (sample.length < sampleN) sample.push({ store: storeName, order_id: id, from, to });
-            if (write) {
-              // status ONLY. .neq guards against a no-op / concurrent-sync race. Never touches
-              // tracking_number, auto_combine_group_id, gmv, sku_*, units.
-              const { error: uErr, count } = await admin.from('synced_order_ids')
-                .update({ status: to }, { count: 'exact' })
-                .eq('store_id', storeId).eq('order_id', id).neq('status', to);
-              if (uErr) console.error('[refresh-status] update error', id, uErr.message);
-              else ps.updated += count ?? 0;
-            }
-          }
-        }
-        ps.examined += chunk.length;
-        ps.not_returned += chunk.filter((id) => !returned.has(id)).length;
-        await sleep(80); // gentle pacing
       }
-
-      cursor = ids[ids.length - 1];
-      ps.next_after = cursor;
-      if (page.length < 1000) break; // store's target set exhausted this sweep
+      ps.examined += chunk.length;
+      ps.not_returned += chunk.filter((id) => !returned.has(id)).length;
+      await sleep(80); // gentle pacing
     }
 
-    // Remaining target rows still ahead of this store's cursor.
-    const { count: rem } = await admin.from('synced_order_ids')
-      .select('order_id', { count: 'exact', head: true })
-      .eq('user_id', ownerUserId).eq('store_id', storeId).in('status', statuses)
-      .gt('order_id', ps.next_after ?? '');
-    ps.remaining = rem ?? 0;
-    if (ps.next_after) nextAfter[storeId] = ps.next_after;
-
+    ps.open_after = await openCount(ownerUserId, storeId);
     totals.examined += ps.examined; totals.calls += ps.calls; totals.changed += ps.changed;
-    totals.updated += ps.updated; totals.not_returned += ps.not_returned; totals.remaining += ps.remaining;
+    totals.updated += ps.updated; totals.not_returned += ps.not_returned;
   }
 
+  // ── Resolve bound-ness of cancelled orders (report only — NO inventory/bind changes) ──
+  // bound = order_id has a live_auction_items row (client_idempotency_key) that owns >=1
+  // live_auction_item_skus row. Chunked .in() to stay under the query-string limit.
+  const cancelledIds = cancelled.map((c) => c.order_id);
+  const boundOrderIds = new Set<string>();
+  if (cancelledIds.length) {
+    const itemToOrder = new Map<string, string>();
+    for (let i = 0; i < cancelledIds.length; i += CH_IN) {
+      const { data } = await admin.from('live_auction_items')
+        .select('id, client_idempotency_key').in('client_idempotency_key', cancelledIds.slice(i, i + CH_IN));
+      for (const r of data ?? []) itemToOrder.set(String(r.id), String(r.client_idempotency_key));
+    }
+    const itemIds = [...itemToOrder.keys()];
+    for (let i = 0; i < itemIds.length; i += CH_IN) {
+      const { data } = await admin.from('live_auction_item_skus')
+        .select('auction_item_id').in('auction_item_id', itemIds.slice(i, i + CH_IN));
+      for (const r of data ?? []) { const oid = itemToOrder.get(String(r.auction_item_id)); if (oid) boundOrderIds.add(oid); }
+    }
+  }
+  const cancelledOut = cancelled.map((c) => ({ store: c.store, order_id: c.order_id, bound: boundOrderIds.has(c.order_id) }));
+  const cancelledSummary = { total: cancelledOut.length, bound: cancelledOut.filter((c) => c.bound).length };
+
+  const remainingTotal = Object.values(perStore).reduce((n, s) => n + s.open_after, 0);
   return NextResponse.json({
     mode: write ? 'write' : 'dry_run',
     dry_run: !write,
@@ -222,15 +243,17 @@ export async function POST(req: Request) {
     totals,
     transitions,
     sample,
+    cancelled: cancelledOut,
+    cancelled_summary: cancelledSummary,
     budget: {
       call_budget: callBudget, time_budget_ms: timeBudgetMs,
       calls_used: callsUsed, ms_used: Date.now() - started, exhausted: budgetExhausted,
     },
-    // Pass this back as `after` to resume; empty ⇒ every store's target set is fully swept.
-    next_after: nextAfter,
-    remaining_total: totals.remaining,
+    remaining_total: remainingTotal,
+    // Nothing left to correct this sweep when a within-budget pass changed nothing.
+    done: !budgetExhausted && totals.updated === 0,
     note: write
-      ? 'WRITE pass. Re-invoke with the returned `after` until remaining_total is 0.'
+      ? 'WRITE pass. Re-invoke until `done` (updated=0). Cancelled orders surfaced for separate reconciliation.'
       : 'DRY RUN — no rows written. Review transitions; re-invoke with mode:"write" (gated) to apply.',
   });
 }
