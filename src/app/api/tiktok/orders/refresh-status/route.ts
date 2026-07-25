@@ -36,10 +36,13 @@ export const maxDuration = 300;
 // separately. This pass does NOT adjust inventory, unbind, or touch live_auction_items.
 
 const CORE_OPEN = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'ON_HOLD', 'PARTIALLY_SHIPPING'];
-const OPT_IN = ['IN_TRANSIT', 'UNPAID']; // only when include_in_transit_unpaid:true
-// Terminal — never targeted: DELIVERED, COMPLETED, CANCELLED. (order_status is a fulfillment
-// lifecycle with no RETURNED/REFUNDED state; post-COMPLETED returns live in return_refund objects
-// and never flip order_status — verified by a 500-order terminal control sample: 0 changed.)
+// Opt-in (include_in_transit_unpaid:true) — non-terminal states that still advance. DELIVERED is
+// here (NOT terminal): a control sample showed DELIVERED → COMPLETED, so leaving it skip-forever
+// would refreeze the ~2.4k orders this sweep moves into DELIVERED, recreating the bug one hop down.
+const OPT_IN = ['IN_TRANSIT', 'UNPAID', 'DELIVERED'];
+// Skip forever — genuinely terminal: COMPLETED, CANCELLED. (order_status is a fulfillment lifecycle
+// with no RETURNED/REFUNDED state; post-COMPLETED returns live in return_refund objects and never
+// flip order_status — COMPLETED verified terminal by a 500-order control sample: 0/429 changed.)
 
 const ACTIVITY_WINDOW_MIN = 15;   // no auction write within this window ⇒ safe to write
 const CHUNK = 50;                 // getOrderById max ids/call
