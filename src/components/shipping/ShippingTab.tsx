@@ -16,6 +16,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useStores } from '@/hooks/useStores';
+import { printOrderTickets, type PickTicketGroup } from '@/lib/shipping/pickTickets';
 
 interface BoxSku {
   inventory_sku_id: string;
@@ -64,6 +66,9 @@ export default function ShippingTab() {
   const [abandon, setAbandon] = useState<null | { scan: string | null }>(null);
   const [holding, setHolding] = useState(false);
   const [value, setValue] = useState('');
+  const [printing, setPrinting] = useState(false);
+  const { data: storesData } = useStores();
+  const activeStore = storesData?.activeStore ?? 'all';
   const inputRef = useRef<HTMLInputElement | null>(null);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const confirmedRef = useRef(false); // fire /confirm + count once per box
@@ -174,18 +179,47 @@ export default function ShippingTab() {
   const beginHold = () => { setHolding(true); holdTimer.current = setTimeout(() => { setHolding(false); exitFullscreen(); setFocus(false); backToReady(); }, 900); };
   const cancelHold = () => { setHolding(false); if (holdTimer.current) clearTimeout(holdTimer.current); };
 
+  // Print OUR OWN order-id pick tickets for the pack-ready batch (one per box). Read-only:
+  // fetches the batch and opens a print window — no scan/box state touched.
+  async function printTickets() {
+    setPrinting(true); setErr(null);
+    try {
+      const qs = activeStore && activeStore !== 'all' ? `?store_id=${encodeURIComponent(activeStore)}` : '';
+      const res = await fetch(`/api/shipping/pick-tickets${qs}`);
+      if (!res.ok) { setErr('Failed to load pick tickets'); return; }
+      const json = await res.json();
+      const groups = (json.groups ?? []) as PickTicketGroup[];
+      if (!groups.length) { setErr('No pack-ready (AWAITING_COLLECTION) orders to print'); return; }
+      printOrderTickets(groups);
+    } catch {
+      setErr('Failed to load pick tickets');
+    } finally {
+      setPrinting(false);
+    }
+  }
+
   // ── idle (tab) view ──
   if (!focus) {
     return (
       <div>
         <div className="text-xl font-bold">Packing station</div>
-        <div className="text-sm text-tt-muted mt-1 mb-8">Full-screen, scanner-driven picking. Scan a shipping label, pick each item, put the box on the rack.</div>
-        <button
-          onClick={startScanning}
-          className="px-8 py-5 rounded-2xl bg-tt-green text-black text-lg font-extrabold cursor-pointer hover:opacity-90 transition-opacity"
-        >
-          ▶ Start scanning
-        </button>
+        <div className="text-sm text-tt-muted mt-1 mb-8">Print your order-id pick tickets, then scan them to pick each box. Full-screen, scanner-driven.</div>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={startScanning}
+            className="px-8 py-5 rounded-2xl bg-tt-green text-black text-lg font-extrabold cursor-pointer hover:opacity-90 transition-opacity"
+          >
+            ▶ Start scanning
+          </button>
+          <button
+            onClick={printTickets}
+            disabled={printing}
+            className="px-6 py-5 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
+          >
+            {printing ? 'Loading…' : '🖨 Print pick tickets'}
+          </button>
+        </div>
+        {err && <div className="mt-4 text-sm text-tt-red">{err}</div>}
         {pickedToday > 0 && <div className="mt-6 text-sm text-tt-muted">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked this session</div>}
       </div>
     );
