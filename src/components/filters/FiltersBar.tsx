@@ -29,15 +29,15 @@ export default function FiltersBar({
   ];
 
   return (
-    <div className="flex items-center gap-4 mb-8 flex-wrap">
-      <div className="flex items-center gap-2">
+    <div className="flex items-center gap-3 md:gap-4 mb-4 md:mb-8 flex-wrap">
+      <div className="flex items-center gap-2 min-w-0">
         <label className="text-[13px] text-tt-muted font-medium">Period:</label>
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1.5">
           {quickFilters.map((f) => (
             <button
               key={String(f.value)}
               onClick={() => onQuickFilter(f.value)}
-              className={`px-3 py-1.5 rounded-full border text-xs cursor-pointer transition-all ${
+              className={`px-3 py-2 md:py-1.5 rounded-full border text-xs cursor-pointer transition-all ${
                 activeQuickFilter === f.value
                   ? 'bg-tt-cyan text-black border-tt-cyan font-semibold'
                   : 'border-tt-border text-tt-muted hover:bg-tt-cyan hover:text-black hover:border-tt-cyan'

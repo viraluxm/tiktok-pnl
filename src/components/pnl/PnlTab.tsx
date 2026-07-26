@@ -14,6 +14,7 @@ import {
 } from 'chart.js';
 import { Line, Bar } from 'react-chartjs-2';
 import { getLineChartOptions, getBarChartOptions } from '@/lib/chart-options';
+import MobileDataCard from '@/components/ui/MobileDataCard';
 import {
   usePnlBySku,
   usePnlByShow,
@@ -97,7 +98,7 @@ export default function PnlTab({ dateFrom, dateTo }: { dateFrom: string | null; 
       </div>
 
       {/* Lens toggle */}
-      <div className="flex gap-1 mb-6">
+      <div className="flex flex-wrap gap-1 mb-6">
         {lensOptions.map((opt) => (
           <button
             key={opt.value}
@@ -225,7 +226,9 @@ function BySkuLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: stri
   if (data.length === 0) return <Empty>No SKUs yet.</Empty>;
 
   return (
-    <div className="rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
+    <>
+    {/* Desktop table — unchanged at md+ */}
+    <div className="hidden md:block rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
@@ -289,6 +292,55 @@ function BySkuLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: stri
         Performance columns (units / revenue / COGS / net / margin) reflect the selected period. Days of cover uses a fixed trailing 30-day velocity (or since first sale for newer SKUs) that is independent of the selected period, so the reorder signal stays stable. Reorder flags when cover ≤ lead time + {SAFETY_BUFFER_DAYS}-day buffer.
       </div>
     </div>
+
+    {/* Mobile cards — same rows / sort / handlers as the desktop table */}
+    <div className="md:hidden flex flex-col gap-3">
+      {rows.map((r) => {
+        const reorderSignal = !r.hasLead ? (
+          <span className="text-xs text-tt-muted italic">Set lead time</span>
+        ) : r.reorderFlag ? (
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-tt-red/15 text-tt-red text-xs font-semibold whitespace-nowrap">
+            <span className="w-1.5 h-1.5 rounded-full bg-tt-red" />Reorder now
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-tt-green/15 text-tt-green text-xs font-semibold whitespace-nowrap">
+            <span className="w-1.5 h-1.5 rounded-full bg-tt-green" />OK
+          </span>
+        );
+        return (
+          <MobileDataCard
+            key={r.sku_id}
+            className={r.is_active ? '' : 'opacity-50'}
+            title={r.title || <span className="text-tt-muted">Untitled</span>}
+            subtitle={<span className="font-mono">{r.sku_number}</span>}
+            badge={reorderSignal}
+            stats={[
+              { label: 'Units sold', value: r.units_sold.toLocaleString() },
+              { label: 'Revenue', value: money(r.revenue_cents) },
+              { label: 'COGS', value: <span className="text-tt-muted">{money(r.cogs_cents)}</span> },
+              { label: 'Net profit', value: <span className={netClass(r.net_profit_cents)}>{money(r.net_profit_cents)}</span> },
+              { label: 'Margin %', value: <span className={r.lowMargin ? 'text-tt-red' : ''}>{pct(r.margin)}</span> },
+              { label: 'Qty on hand', value: r.qty_on_hand.toLocaleString() },
+              {
+                label: 'Days of cover',
+                value: (
+                  <>
+                    {r.daysOfCover == null ? <span className="text-tt-muted">—</span> : `${r.daysOfCover.toFixed(1)} d`}
+                    <span className="block text-[10px] text-tt-muted font-normal">velocity: last {r.reorder_window_days}d</span>
+                  </>
+                ),
+              },
+              { label: 'Lead time', value: r.lead_time_days == null ? <span className="text-tt-muted">—</span> : `${r.lead_time_days} d` },
+              ...(r.lowMargin ? [{ label: 'Flag', value: <span className="text-tt-red font-medium">Low margin</span> }] : []),
+            ]}
+          />
+        );
+      })}
+      <p className="px-1 text-[11px] text-tt-muted leading-snug">
+        Performance columns (units / revenue / COGS / net / margin) reflect the selected period. Days of cover uses a fixed trailing 30-day velocity (or since first sale for newer SKUs) that is independent of the selected period, so the reorder signal stays stable. Reorder flags when cover ≤ lead time + {SAFETY_BUFFER_DAYS}-day buffer.
+      </p>
+    </div>
+    </>
   );
 }
 
@@ -301,7 +353,9 @@ function ByShowLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: str
   if (data.length === 0) return <Empty>No shows with sales in this period.</Empty>;
 
   return (
-    <div className="rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
+    <>
+    {/* Desktop table — unchanged at md+ */}
+    <div className="hidden md:block rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
@@ -352,6 +406,61 @@ function ByShowLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: str
         </tbody>
       </table>
     </div>
+
+    {/* Mobile cards — same data / expand handler as the desktop table */}
+    <div className="md:hidden flex flex-col gap-3">
+      {data.map((s) => {
+        const isOpen = expanded === s.session_id;
+        return (
+          <div key={s.session_id} className="rounded-2xl border border-tt-border bg-tt-card overflow-hidden">
+            <button
+              onClick={() => setExpanded(isOpen ? null : s.session_id)}
+              className="w-full text-left p-4 flex flex-col gap-3 min-h-[44px] active:opacity-90"
+            >
+              <div className="flex items-start gap-2">
+                <span className={`text-tt-muted transition-transform ${isOpen ? 'rotate-90' : ''}`}>▸</span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-semibold text-tt-text break-words leading-tight">{s.title || 'Live session'}</div>
+                  <div className="text-[11px] text-tt-muted mt-0.5">{fmtShowWhen(s.started_at)}</div>
+                </div>
+                <div className={`shrink-0 text-right tabular-nums font-semibold ${netClass(s.net_profit_cents)}`}>
+                  <div>{money(s.net_profit_cents)}</div>
+                  <div className="text-[10px] font-normal text-tt-muted uppercase tracking-wide">Net profit</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 pl-6">
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wide text-tt-muted">Duration</div>
+                  <div className="text-sm font-medium text-tt-text tabular-nums">{fmtDuration(s.started_at, s.ended_at)}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wide text-tt-muted">Auctions</div>
+                  <div className="text-sm font-medium text-tt-text tabular-nums">{s.auctions.toLocaleString()}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wide text-tt-muted">Units</div>
+                  <div className="text-sm font-medium text-tt-text tabular-nums">{s.units.toLocaleString()}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wide text-tt-muted">GMV</div>
+                  <div className="text-sm font-medium text-tt-text tabular-nums">{money(s.gmv_cents)}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wide text-tt-muted">Margin %</div>
+                  <div className="text-sm font-medium text-tt-text tabular-nums">{pct(marginOf(s.net_profit_cents, s.gmv_cents))}</div>
+                </div>
+              </div>
+            </button>
+            {isOpen && (
+              <div className="px-4 py-4 bg-tt-bg/40 border-t border-tt-border">
+                <HourlyBreakdown sessionId={s.session_id} />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+    </>
   );
 }
 
@@ -381,7 +490,8 @@ function HourlyBreakdown({ sessionId }: { sessionId: string }) {
       <div className="h-[180px] mb-4">
         <Bar data={chart} options={getBarChartOptions()} />
       </div>
-      <table className="w-full text-sm">
+      <div className="overflow-x-auto">
+      <table className="w-full text-sm min-w-[420px]">
         <thead>
           <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
             <th className="px-3 py-2 font-medium text-left">Hour</th>
@@ -405,6 +515,7 @@ function HourlyBreakdown({ sessionId }: { sessionId: string }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -458,7 +569,7 @@ function ByPeriodLens({ dateFrom, dateTo }: { dateFrom: string | null; dateTo: s
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard label="Revenue" value={money(totals.revenue)} />
         <StatCard label="Net profit *" value={money(totals.net)} valueClass={netClass(totals.net)} />
         <StatCard label="Units sold" value={totals.units.toLocaleString()} />

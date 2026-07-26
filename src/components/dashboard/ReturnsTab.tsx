@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { fmt, fmtInt } from '@/lib/calculations';
 import type { ReturnsResponse, ReturnItem } from '@/hooks/useReturns';
 import { useQueryClient } from '@tanstack/react-query';
+import MobileDataCard from '@/components/ui/MobileDataCard';
 
 interface ReturnsTabProps {
   data: ReturnsResponse | undefined;
@@ -116,7 +117,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
   return (
     <div>
       {/* Summary cards */}
-      <div className="grid grid-cols-3 gap-5 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 mb-8">
         <div className="bg-tt-card border border-tt-border rounded-[14px] p-6 backdrop-blur-xl">
           <span className="text-xs text-tt-muted uppercase tracking-wide">Total Returns</span>
           <div className="text-[30px] font-bold text-tt-red mt-2">{fmtInt(summary.totalReturns)}</div>
@@ -144,7 +145,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
               <span className="ml-2 text-sm font-normal text-tt-yellow">({awaitingAction.length})</span>
             </h2>
           </div>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto hidden md:block">
             <table className="w-full border-collapse">
               <thead>
                 <tr className="border-b border-tt-border">
@@ -204,6 +205,54 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile card list */}
+          <div className="md:hidden flex flex-col gap-3 p-4">
+            {awaitingAction.map((item, i) => (
+              <MobileDataCard
+                key={`awaiting-card-${item.return_id}-${i}`}
+                thumbnail={
+                  item.product_image ? (
+                    <img src={item.product_image} alt="" className="w-11 h-11 rounded-lg object-cover" />
+                  ) : (
+                    <div className="w-11 h-11 rounded-lg bg-tt-border" />
+                  )
+                }
+                title={item.product_name}
+                subtitle={<span className="font-mono">{item.order_id.slice(-12)}</span>}
+                badge={<StatusBadge status={item.status} />}
+                stats={[
+                  {
+                    label: 'Type / Reason',
+                    wide: true,
+                    value: (
+                      <span className="flex flex-col gap-0.5 font-normal">
+                        {item.return_type && (
+                          <span className="text-tt-text font-medium">{formatReturnType(item.return_type)}</span>
+                        )}
+                        {item.reason && <span className="text-tt-muted">{item.reason}</span>}
+                        {item.buyer_remarks && (
+                          <span className="text-tt-muted/70 italic text-xs">&ldquo;{item.buyer_remarks}&rdquo;</span>
+                        )}
+                      </span>
+                    ),
+                  },
+                  { label: 'Date', value: item.order_date },
+                  { label: 'Refund', value: fmt(item.gmv) },
+                ]}
+                actions={
+                  item.return_id ? (
+                    <button
+                      onClick={() => openModal(item)}
+                      className="px-3 py-2 rounded-lg text-sm font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+                    >
+                      Respond
+                    </button>
+                  ) : undefined
+                }
+              />
+            ))}
+          </div>
         </div>
       )}
 
@@ -234,7 +283,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
             </button>
           </div>
         </div>
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto hidden md:block">
           <table className="w-full border-collapse">
             <thead>
               <tr className="border-b border-tt-border">
@@ -310,16 +359,77 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
             </tbody>
           </table>
         </div>
+
+        {/* Mobile card list */}
+        <div className="md:hidden flex flex-col gap-3 p-4">
+          {filteredItems.map((item, i) => (
+            <MobileDataCard
+              key={`history-card-${item.order_id}-${i}`}
+              thumbnail={
+                item.product_image ? (
+                  <img src={item.product_image} alt="" className="w-11 h-11 rounded-lg object-cover" />
+                ) : (
+                  <div className="w-11 h-11 rounded-lg bg-tt-border" />
+                )
+              }
+              title={item.product_name}
+              subtitle={<span className="font-mono">{item.order_id.slice(-12)}</span>}
+              badge={
+                <div className="flex flex-col items-end gap-1">
+                  <StatusBadge status={item.status} />
+                  {isPendingStatus(item.status) && isAwaitingSellerAction(item) && (
+                    <span className="text-[9px] font-semibold text-tt-red uppercase tracking-wide">Action needed</span>
+                  )}
+                </div>
+              }
+              stats={[
+                {
+                  label: 'Type / Reason',
+                  wide: true,
+                  value: (
+                    <span className="flex flex-col gap-0.5 font-normal">
+                      {item.return_type && (
+                        <span className="text-tt-text font-medium">{formatReturnType(item.return_type)}</span>
+                      )}
+                      {item.reason && <span className="text-tt-muted">{item.reason}</span>}
+                      {item.buyer_remarks && (
+                        <span className="text-tt-muted/70 italic text-xs">&ldquo;{item.buyer_remarks}&rdquo;</span>
+                      )}
+                    </span>
+                  ),
+                },
+                { label: 'Date', value: item.order_date },
+                { label: 'Units', value: item.units },
+                { label: 'Refund', value: fmt(item.gmv) },
+              ]}
+              actions={
+                isPendingStatus(item.status) && item.return_id ? (
+                  <button
+                    onClick={() => openModal(item)}
+                    className="px-3 py-2 rounded-lg text-sm font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+                  >
+                    Respond
+                  </button>
+                ) : undefined
+              }
+            />
+          ))}
+          {filteredItems.length === 0 && (
+            <div className="px-5 py-12 text-center text-tt-muted text-sm">
+              {filter === 'pending' ? 'No pending returns or cancellations' : 'No returns or cancellations found for this period'}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Respond Modal */}
       {modalItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
           {/* Backdrop */}
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={closeModal} />
 
           {/* Modal content */}
-          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl">
+          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-md sm:mx-4 max-h-[90dvh] overflow-y-auto shadow-2xl">
             {submitSuccess ? (
               <div className="text-center py-8">
                 <div className="w-12 h-12 rounded-full bg-tt-green/15 flex items-center justify-center mx-auto mb-4">
@@ -402,7 +512,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
                         <p className="text-xs text-tt-red">{submitError}</p>
                       </div>
                     )}
-                    <div className="flex gap-3">
+                    <div className="flex gap-3 pb-[env(safe-area-inset-bottom)]">
                       <button
                         onClick={() => setModalAction(null)}
                         className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors"
@@ -458,7 +568,7 @@ export default function ReturnsTab({ data, isLoading }: ReturnsTabProps) {
                         <p className="text-xs text-tt-red">{submitError}</p>
                       </div>
                     )}
-                    <div className="flex gap-3">
+                    <div className="flex gap-3 pb-[env(safe-area-inset-bottom)]">
                       <button
                         onClick={() => setModalAction(null)}
                         className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors"

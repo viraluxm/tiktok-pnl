@@ -14,7 +14,12 @@ import {
   isInMonth,
   localTodayISO,
   WEEKDAY_LABELS,
+  groupDayEntriesByRole,
+  formatTimeRange12,
+  isProbation,
+  parseYMD,
   type RoleFilterValue,
+  type RoleGroupKey,
   type WeekShiftCard,
 } from '@/lib/weeklySchedule';
 import RoleFilter from './RoleFilter';
@@ -22,6 +27,17 @@ import MonthlyDayCell from './MonthlyDayCell';
 import DayShiftDetailsModal from './DayShiftDetailsModal';
 import ShiftEditorModal, { type EditorIntent } from './ShiftEditorModal';
 import { makeEditorHandlers } from './editorHandlers';
+
+// Presentational role treatments for the mobile agenda (color always paired with a text label).
+function roleText(key: RoleGroupKey): string {
+  return key === 'host' ? 'text-tt-cyan' : key === 'fulfillment' ? 'text-tt-magenta-soft' : 'text-tt-muted';
+}
+function roleDot(key: RoleGroupKey): string {
+  return key === 'host' ? 'bg-tt-cyan' : key === 'fulfillment' ? 'bg-tt-magenta-soft' : 'bg-tt-muted';
+}
+function agendaDayLabel(iso: string): string {
+  return parseYMD(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
 
 // Interactive, role-organized month calendar. The selected month drives the shift query
 // AND recurring generation for the FULL visible grid range (incl. adjacent-month days),
@@ -99,8 +115,8 @@ export default function MonthlyShiftCalendar({ employees }: { employees: Employe
         <RoleFilter value={roleFilter} onChange={setRoleFilter} />
       </div>
 
-      {/* Month grid */}
-      <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
+      {/* Month grid — desktop/tablet only (the 720px 7-col grid is unusable on a phone) */}
+      <div className="hidden md:block bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
         <div className="overflow-x-auto">
           <div className="min-w-[720px]">
             {/* Weekday header (Mon→Sun) */}
@@ -130,6 +146,77 @@ export default function MonthlyShiftCalendar({ employees }: { employees: Employe
             ))}
           </div>
         </div>
+      </div>
+
+      {/* Mobile agenda — same byDate data, days that have shifts only. Replaces the wide grid on phones. */}
+      <div className="md:hidden space-y-3">
+        {(() => {
+          const daysWithShifts = grid.days.filter((d) => (byDate.get(d)?.length ?? 0) > 0);
+          if (daysWithShifts.length === 0) {
+            return (
+              <div className="bg-tt-card border border-tt-border rounded-2xl p-6 text-center text-sm text-tt-muted">
+                No shifts scheduled this month. Tap a day in the grid on a larger screen, or add one below.
+              </div>
+            );
+          }
+          return daysWithShifts.map((day) => {
+            const groups = groupDayEntriesByRole(byDate.get(day) ?? []);
+            return (
+              <div key={day} className="bg-tt-card border border-tt-border rounded-2xl overflow-hidden">
+                <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-tt-border">
+                  <button
+                    type="button"
+                    onClick={() => setDetailsDate(day)}
+                    className="flex items-center gap-2 min-h-[44px] text-left"
+                    aria-label={`View ${day}`}
+                  >
+                    <span className={`text-sm font-semibold ${day === today ? 'text-tt-cyan' : 'text-tt-text'}`}>{agendaDayLabel(day)}</span>
+                    {day === today && <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-tt-cyan text-black">Today</span>}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openAddDay(day)}
+                    className="min-h-[44px] px-3 rounded-lg text-xs font-semibold text-tt-cyan hover:bg-tt-cyan/10 transition-colors"
+                  >
+                    + Add
+                  </button>
+                </div>
+                <div className="p-3 space-y-3">
+                  {groups.map((g) => (
+                    <div key={g.key}>
+                      <div className={`text-[10px] font-bold uppercase tracking-wide mb-1.5 flex items-center gap-1.5 ${roleText(g.key)}`}>
+                        <span className={`inline-block w-2 h-2 rounded-full ${roleDot(g.key)}`} aria-hidden />
+                        {g.label}
+                      </div>
+                      <div className="space-y-1.5">
+                        {g.entries.map(({ employee, card }) => (
+                          <button
+                            key={card.id}
+                            type="button"
+                            onClick={() => openCard(card)}
+                            className="w-full min-h-[44px] flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-left"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              <span className="text-[13px] text-tt-text break-words">{employee.name}</span>
+                              {isProbation(employee) && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-tt-yellow/15 text-tt-yellow shrink-0">Probation</span>
+                              )}
+                            </span>
+                            <span className="text-[12px] tabular-nums text-tt-muted shrink-0">
+                              {formatTimeRange12(card.start_time, card.end_time)}
+                              {card.isOvernight && <span title="Overnight — ends next day"> 🌙</span>}
+                              {card.isOpen && <span className="text-tt-yellow"> ·open</span>}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          });
+        })()}
       </div>
 
       {/* Legend — labels + colors (never color alone). */}

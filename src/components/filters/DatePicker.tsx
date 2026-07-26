@@ -177,7 +177,7 @@ export default function DatePicker({ dateFrom, dateTo, onDateFromChange, onDateT
 
       {/* Dropdown calendar */}
       {open && (
-        <div className="absolute top-full left-0 mt-2 z-50 bg-[#1a1a1a] border border-tt-border rounded-xl shadow-2xl shadow-black/50 p-4 w-[300px] animate-fade-in">
+        <div className="absolute top-full left-0 mt-2 z-50 bg-[#1a1a1a] border border-tt-border rounded-xl shadow-2xl shadow-black/50 p-4 w-[min(300px,calc(100vw-1.5rem))] max-h-[70dvh] overflow-y-auto animate-fade-in">
           {/* Selecting indicator */}
           <div className="flex gap-2 mb-3">
             <button

@@ -10,6 +10,7 @@ import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
 import ShiftsView from './ShiftsView';
 import PayView from './PayView';
 import { Field, StatusBadge, titleCase, ROLE_PRESETS, STATUSES } from './shared';
+import MobileDataCard from '@/components/ui/MobileDataCard';
 
 interface EmployeesTabProps {
   // The selected period, driven by the dashboard's global FiltersBar. Nulls = all time.
@@ -114,13 +115,13 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   return (
     <div>
       {/* Sub navigation */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <div className="flex flex-wrap gap-2">
           {(['roster', 'shifts', 'pay', 'auctions'] as SubView[]).map((v) => (
             <button
               key={v}
               onClick={() => setSubView(v)}
-              className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+              className={`inline-flex items-center justify-center min-h-[44px] md:min-h-0 px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                 subView === v ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text hover:bg-white/5'
               }`}
             >
@@ -156,9 +157,9 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
 
       {/* Add / edit employee modal */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={closeModal} />
-          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl">
+          <div className="relative bg-tt-card border border-tt-border rounded-t-2xl sm:rounded-2xl p-6 w-full max-w-md sm:mx-4 max-h-[90dvh] overflow-y-auto shadow-2xl">
             <div className="flex items-start justify-between mb-5">
               <h3 className="text-base font-semibold text-tt-text">{editing ? 'Edit Employee' : 'Add Employee'}</h3>
               <button onClick={closeModal} className="text-tt-muted hover:text-tt-text transition-colors p-1">
@@ -240,7 +241,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                 </div>
               )}
 
-              <div className="flex gap-3 pt-1">
+              <div className="flex gap-3 pt-1 pb-[env(safe-area-inset-bottom)]">
                 <button
                   onClick={closeModal}
                   disabled={saving}
@@ -290,7 +291,7 @@ function RosterView({
           + Add Employee
         </button>
       </div>
-      <div className="overflow-x-auto">
+      <div className="hidden md:block overflow-x-auto">
         <table className="w-full border-collapse">
           <thead>
             <tr className="border-b border-tt-border">
@@ -345,6 +346,53 @@ function RosterView({
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Mobile card list — same rows + handlers as the desktop table above */}
+      <div className="md:hidden p-4 flex flex-col gap-3">
+        {employees.map((e) => {
+          const isHost = e.role?.toLowerCase() === 'host';
+          return (
+            <MobileDataCard
+              key={e.id}
+              title={e.name}
+              subtitle={titleCase(e.role)}
+              badge={<StatusBadge status={e.status} />}
+              stats={[
+                { label: 'Hourly Rate', value: fmt(e.hourly_rate) },
+                { label: 'Hire Date', value: e.hire_date || '—' },
+                { label: 'Probation Ends', value: e.probation_end_date || '—' },
+                ...(isHost
+                  ? [
+                      { label: 'ASP Hit (7d)', value: <AspHitBadge agg={hostPerf[e.id]} /> },
+                      { label: 'Below Break-even (14d)', value: <BelowBreakEvenBadge agg={hostPerf[e.id]} /> },
+                    ]
+                  : []),
+              ]}
+              actions={
+                <>
+                  <button
+                    onClick={() => onEdit(e)}
+                    className="flex items-center justify-center rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => onDelete(e)}
+                    className="flex items-center justify-center rounded-lg text-xs font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                  >
+                    Remove
+                  </button>
+                </>
+              }
+            />
+          );
+        })}
+        {employees.length === 0 && (
+          <div className="px-1 py-12 text-center text-tt-muted text-sm">
+            {isLoading ? 'Loading…' : 'No employees yet — add your first team member'}
+          </div>
+        )}
       </div>
     </div>
   );

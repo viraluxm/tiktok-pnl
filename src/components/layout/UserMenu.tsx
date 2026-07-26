@@ -135,7 +135,7 @@ function MenuItem({ icon, label, onClick, danger = false }: {
   return (
     <button
       onClick={onClick}
-      className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+      className={`w-full flex items-center gap-3 px-4 py-2.5 min-h-[44px] text-sm transition-colors ${
         danger
           ? 'text-tt-red hover:bg-[rgba(255,23,68,0.08)]'
           : 'text-tt-text hover:bg-white/[0.04]'

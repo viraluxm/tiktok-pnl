@@ -7,6 +7,7 @@ import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee, Shift, ShiftRule } from '@/types';
 import CalendarView from './weekly/CalendarView';
 import { Field, WEEKDAYS, daysLabel, inputCls } from './shared';
+import MobileDataCard from '@/components/ui/MobileDataCard';
 
 // The production Shifts view: an Add Shift card (One-off / Recurring), a Recurring Rules
 // table, and a "Shifts This Period" list — all under a List / Calendar toggle. This is
@@ -459,7 +460,8 @@ export default function ShiftsView({
                 <h2 className="text-base font-semibold text-tt-text">Recurring Rules</h2>
                 <p className="text-xs text-tt-muted mt-1">Deleting a rule stops future generation. Past pay already calculated is unaffected; one-off shifts are untouched.</p>
               </div>
-              <div className="overflow-x-auto">
+              {/* Desktop / tablet table */}
+              <div className="hidden md:block overflow-x-auto">
                 <table className="w-full border-collapse">
                   <thead>
                     <tr className="border-b border-tt-border">
@@ -502,6 +504,42 @@ export default function ShiftsView({
                   </tbody>
                 </table>
               </div>
+
+              {/* Mobile cards — same rules data + handlers as the table above */}
+              <div className="md:hidden p-4 space-y-3">
+                {rules.map((r) => (
+                  <MobileDataCard
+                    key={r.id}
+                    title={nameById.get(r.employee_id) || 'Unknown'}
+                    subtitle={daysLabel(r.days_of_week)}
+                    badge={
+                      <span className={`text-[10px] font-semibold px-2 py-1 rounded-md ${r.active ? 'bg-tt-green/15 text-tt-green' : 'bg-tt-muted/15 text-tt-muted'}`}>
+                        {r.active ? 'Active' : 'Paused'}
+                      </span>
+                    }
+                    stats={[
+                      { label: 'Time', value: <span className="tabular-nums">{r.start_time.slice(0, 5)}–{r.end_time.slice(0, 5)}</span> },
+                      { label: 'From', value: <span className="tabular-nums">{r.start_date}</span> },
+                    ]}
+                    actions={
+                      <>
+                        <button
+                          onClick={() => toggleRuleActive.mutateAsync({ id: r.id, active: !r.active }).catch((e) => alert((e as Error).message))}
+                          className="rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
+                        >
+                          {r.active ? 'Pause' : 'Resume'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteRule(r)}
+                          className="rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                        >
+                          Delete Rule
+                        </button>
+                      </>
+                    }
+                  />
+                ))}
+              </div>
             </div>
           )}
 
@@ -510,7 +548,8 @@ export default function ShiftsView({
             <div className="px-6 py-5 border-b border-tt-border">
               <h2 className="text-base font-semibold text-tt-text">Shifts This Period</h2>
             </div>
-            <div className="overflow-x-auto">
+            {/* Desktop / tablet table */}
+            <div className="hidden md:block overflow-x-auto">
               <table className="w-full border-collapse">
                 <thead>
                   <tr className="border-b border-tt-border">
@@ -630,15 +669,129 @@ export default function ShiftsView({
                 </tbody>
               </table>
             </div>
+
+            {/* Mobile cards — same rows data + handlers as the table above */}
+            <div className="md:hidden p-4 space-y-3">
+              {rows.map((row) => {
+                const skipped = row.kind === 'recurring' && row.skipped;
+                const isOpen = row.kind === 'oneoff' && row.end_time == null;
+                return (
+                  <MobileDataCard
+                    key={row.id}
+                    className={skipped ? 'opacity-60' : ''}
+                    title={nameById.get(row.employee_id) || 'Unknown'}
+                    subtitle={row.date}
+                    badge={
+                      row.kind === 'recurring' ? (
+                        <span className="inline-flex flex-wrap items-center justify-end gap-1">
+                          <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Recurring</span>
+                          {row.modified && <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Modified</span>}
+                          {row.skipped && <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-red/15 text-tt-red">Skipped</span>}
+                        </span>
+                      ) : isOpen ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">
+                          <span className="w-1.5 h-1.5 rounded-full bg-tt-green animate-pulse" />In progress
+                        </span>
+                      ) : (
+                        <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">One-off</span>
+                      )
+                    }
+                    stats={[
+                      { label: 'Start', value: <span className="tabular-nums">{row.start_time.slice(0, 5)}</span> },
+                      { label: 'End', value: <span className="tabular-nums">{isOpen ? '—' : (row.end_time ?? '').slice(0, 5)}</span> },
+                      {
+                        label: 'Hours',
+                        value: (
+                          <span className={`tabular-nums ${skipped ? 'text-tt-muted line-through' : isOpen ? 'text-tt-green' : ''}`}>
+                            {isOpen ? elapsedLabel(row.date, row.start_time) : shiftHours(row.start_time, row.end_time).toFixed(2)}
+                          </span>
+                        ),
+                      },
+                    ]}
+                    actions={
+                      row.kind === 'oneoff' ? (
+                        <>
+                          {isOpen && (
+                            <button
+                              onClick={() =>
+                                setEndingShift({
+                                  id: row.id,
+                                  name: nameById.get(row.employee_id) || 'Unknown',
+                                  date: row.date,
+                                  start_time: row.start_time,
+                                  end_time: new Date().toTimeString().slice(0, 5),
+                                })
+                              }
+                              className="rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                            >
+                              Shift Ended
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleDeleteOneOff(row.id)}
+                            className="rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                          >
+                            Delete
+                          </button>
+                        </>
+                      ) : row.skipped ? (
+                        <button
+                          onClick={() => handleClear(row)}
+                          className="rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                        >
+                          Restore
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() =>
+                              setEditing({
+                                ruleId: row.rule_id,
+                                date: row.date,
+                                name: nameById.get(row.employee_id) || 'Unknown',
+                                start: row.start_time.slice(0, 5),
+                                end: row.end_time.slice(0, 5),
+                              })
+                            }
+                            className="rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+                          >
+                            Edit
+                          </button>
+                          {row.modified && (
+                            <button
+                              onClick={() => handleClear(row)}
+                              className="rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
+                            >
+                              Revert
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleSkip(row)}
+                            className="rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
+                          >
+                            Skip
+                          </button>
+                        </>
+                      )
+                    }
+                  />
+                );
+              })}
+              {rows.length === 0 && (
+                <div className="px-5 py-12 text-center text-tt-muted text-sm">
+                  {isLoading ? 'Loading…' : 'No shifts for this period'}
+                </div>
+              )}
+            </div>
           </div>
         </>
       )}
 
       {/* Edit recurring instance (writes a 'modified' exception for that date) */}
       {editing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEditing(null)} />
-          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+          <div className="relative bg-tt-card border border-tt-border rounded-t-2xl sm:rounded-2xl p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] w-full sm:max-w-sm sm:mx-4 shadow-2xl max-h-[90dvh] overflow-y-auto">
             <div className="flex items-start justify-between mb-1">
               <h3 className="text-base font-semibold text-tt-text">Edit This Occurrence</h3>
               <button onClick={() => setEditing(null)} className="text-tt-muted hover:text-tt-text transition-colors p-1">
@@ -659,8 +812,8 @@ export default function ShiftsView({
               </Field>
             </div>
             <div className="flex gap-3 pt-5">
-              <button onClick={() => setEditing(null)} className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors">Cancel</button>
-              <button onClick={saveEditing} className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors">Save</button>
+              <button onClick={() => setEditing(null)} className="flex-1 min-h-[44px] py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors">Cancel</button>
+              <button onClick={saveEditing} className="flex-1 min-h-[44px] py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors">Save</button>
             </div>
           </div>
         </div>
@@ -668,9 +821,9 @@ export default function ShiftsView({
 
       {/* End an open shift — end defaults to NOW but is editable before saving. */}
       {endingShift && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setEndingShift(null)} />
-          <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+          <div className="relative bg-tt-card border border-tt-border rounded-t-2xl sm:rounded-2xl p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] w-full sm:max-w-sm sm:mx-4 shadow-2xl max-h-[90dvh] overflow-y-auto">
             <div className="flex items-start justify-between mb-1">
               <h3 className="text-base font-semibold text-tt-text">End Shift</h3>
               <button onClick={() => setEndingShift(null)} className="text-tt-muted hover:text-tt-text transition-colors p-1">
@@ -686,8 +839,8 @@ export default function ShiftsView({
               <input type="time" value={endingShift.end_time} onChange={(e) => setEndingShift({ ...endingShift, end_time: e.target.value })} className={inputCls} />
             </Field>
             <div className="flex gap-3 pt-5">
-              <button onClick={() => setEndingShift(null)} className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors">Cancel</button>
-              <button onClick={saveEndShift} className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors">End Shift</button>
+              <button onClick={() => setEndingShift(null)} className="flex-1 min-h-[44px] py-2.5 rounded-xl text-sm font-semibold text-tt-muted hover:text-tt-text bg-white/5 hover:bg-white/10 transition-colors">Cancel</button>
+              <button onClick={saveEndShift} className="flex-1 min-h-[44px] py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors">End Shift</button>
             </div>
           </div>
         </div>
