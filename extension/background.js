@@ -852,7 +852,7 @@ function isAuthenticated() {
 
 // ─── Real Supabase calls ─────────────────────────────────────────────
 
-var SKU_COLS = 'select=id,sku_number,barcode,title,unit_cost_cents,qty_on_hand,live_seller_notes';
+var SKU_COLS = 'select=id,sku_number,barcode,title,unit_cost_cents,qty_on_hand,live_seller_notes,category';
 
 // Normalize a typed/scanned term before lookup. Scanners can append hidden
 // control/zero-width characters and hosts may type a leading '#'; we also

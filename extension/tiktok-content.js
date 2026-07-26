@@ -913,9 +913,27 @@
     return totalCost;
   }
 
-  // ASP goal = break-even cost × 3 (a 3x markup target on staged cost).
+  // ASP goal multiplier is CATEGORY-RELATIVE (inventory_skus.category): squish is a 4x-cost
+  // target, electronics 3x. Unknown/absent category falls back to 3x (the pre-category default,
+  // so uncategorized SKUs behave exactly as before). Change these two numbers to retune targets.
+  var CATEGORY_ASP_MULTIPLIER = { squish: 4, electronics: 3 };
+  var DEFAULT_ASP_MULTIPLIER = 3;
+  function aspMultiplierFor(category) {
+    var m = CATEGORY_ASP_MULTIPLIER[String(category || '').toLowerCase()];
+    return Number.isFinite(m) ? m : DEFAULT_ASP_MULTIPLIER;
+  }
+
+  // ASP goal = Σ (unit_cost × qty × multiplier(category)) over staged SKUs. Cost-WEIGHTED so a
+  // mixed-category staged bundle gets each SKU's own target (squish 4x + electronics 3x), never a
+  // single flat multiplier applied to the blended cost.
   function aspGoalCents() {
-    return stagedCostCents() * 3;
+    var goal = 0;
+    for (var i = 0; i < stagedSkus.length; i++) {
+      var c = Number(stagedSkus[i].unit_cost_cents);
+      if (!Number.isFinite(c)) c = 0;
+      goal += c * (stagedSkus[i].qty || 1) * aspMultiplierFor(stagedSkus[i].category);
+    }
+    return goal;
   }
 
   // Live-auction bids are whole dollars, so the ASP goal and break-even targets
@@ -966,6 +984,7 @@
       existing.qty = currentQty + 1;
       existing.qty_on_hand = cap; // refresh with latest stock
       existing.unit_cost_cents = pendingResolve.unit_cost_cents;
+      existing.category = pendingResolve.category || null; // for the category-relative ASP goal
       existing.live_seller_notes = pendingResolve.live_seller_notes || [];
     } else {
       stagedSkus.push({
@@ -975,6 +994,7 @@
         qty: 1,
         qty_on_hand: cap,
         unit_cost_cents: pendingResolve.unit_cost_cents,
+        category: pendingResolve.category || null, // for the category-relative ASP goal
         live_seller_notes: pendingResolve.live_seller_notes || [],
       });
     }
@@ -1008,7 +1028,7 @@
     // Deep-copy so later qty edits don't mutate the saved set. The previous set was
     // already within stock when it bound, so it stays valid on re-stage.
     stagedSkus = previousSkus.map(function (s) {
-      return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+      return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
     });
     renderStagedPills();
     clearResolveLine();
@@ -1143,7 +1163,7 @@
       // bind payload — so it carries live_seller_notes. Persists across the
       // auto-clear below.
       previousSkus = stagedSkus.map(function (s) {
-        return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+        return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
       });
     }
 
@@ -1809,7 +1829,7 @@
           return;
         }
         stagedSkus = rec.skus.map(function (s) {
-          return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+          return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
         });
         seenOrderIds = Object.create(null);
         if (Array.isArray(rec.orderIds)) { for (var i = 0; i < rec.orderIds.length; i++) seenOrderIds[rec.orderIds[i]] = true; }
@@ -1926,7 +1946,7 @@
         var srec = data[LK_STAGED];
         if (srec && srec.sessionId === counterSessionId && Array.isArray(srec.skus) && srec.skus.length > 0) {
           stagedSkus = srec.skus.map(function (s) {
-            return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+            return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
           });
           renderStagedPills();
           updateStagedLabel();
