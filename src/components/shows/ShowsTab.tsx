@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
 import { useAuctionBoard, type AuctionItem } from '@/hooks/useLiveAuctions';
-import { notSoldBadge } from '@/lib/paymentStatus';
+import { notSoldBadge, paidNeedsFlip } from '@/lib/paymentStatus';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
 import { useStores } from '@/hooks/useStores';
@@ -759,6 +759,18 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         </div>
       )}
 
+      {/* PAID — needs flip: not_sold rows TikTok confirms as paid (real revenue sitting
+          mislabeled). Surfaced as a count so it's visible without scanning the table. */}
+      {(() => {
+        const needsFlip = items.filter((it) => it.status === 'not_sold' && paidNeedsFlip(it.synced_status)).length;
+        return needsFlip > 0 ? (
+          <div className="mb-4 rounded-lg border border-tt-green/40 bg-tt-green/10 px-4 py-2.5 text-sm text-tt-green">
+            <span className="font-semibold">{needsFlip}</span> paid order{needsFlip === 1 ? '' : 's'} still marked
+            not sold (PAID — needs flip) — real revenue not yet counted.
+          </div>
+        ) : null;
+      })()}
+
       {/* Items table */}
       {isLoading ? (
         <div className="flex items-center justify-center py-16 text-tt-muted">
@@ -828,8 +840,9 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                         <span className="text-xs font-medium text-tt-green">Sold</span>
                       ) : (
                         (() => {
-                          // not_sold → show the payment-recovery state from order_status.
-                          const b = notSoldBadge(it.order_status, it.payment_failed);
+                          // not_sold → show the truthful payment state (synced status first,
+                          // frozen order_status snapshot as fallback).
+                          const b = notSoldBadge(it.synced_status, it.order_status, it.payment_failed);
                           return <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>;
                         })()
                       )}
