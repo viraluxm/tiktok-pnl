@@ -46,6 +46,9 @@ export interface ShowCoverage {
   captured_but_unbound_ids: string[];
   coverage_gap_count: number;
   coverage_gap: CoverageGapOrder[];
+  // Captured but attributable to NO show (null/orphan room) — cannot be bound on any board.
+  room_unknown_count: number;
+  room_unknown: CoverageGapOrder[];
   window: { start_date: string | null; end_date: string | null; store_id: string | null };
 }
 
