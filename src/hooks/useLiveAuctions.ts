@@ -31,6 +31,11 @@ export interface AuctionItem {
   units: number;
   total_cost_cents: number | null;
   skus: AuctionSkuLine[];
+  // Captured-but-unbound sale unioned into the board (no live_auction_items row yet). Bindable
+  // via /bind; carries the capture context for identification. Absent/false on normal bound rows.
+  unbound?: boolean;
+  order_id?: string;
+  seller_sku_hint?: string | null;
 }
 
 const KEY = 'auction-board';
