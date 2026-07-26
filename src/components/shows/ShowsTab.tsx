@@ -1193,6 +1193,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
 // reconcile handles — the two are shown as separate figures, never merged.
 function CoveragePanel({ sessionId }: { sessionId: string }) {
   const { data, isLoading, isError } = useShowCoverage(sessionId);
+  const [showCatalog, setShowCatalog] = useState(false);
 
   if (isLoading) {
     return (
@@ -1209,25 +1210,31 @@ function CoveragePanel({ sessionId }: { sessionId: string }) {
     );
   }
 
-  const gap = data.coverage_gap_count;
-  const hasGap = gap > 0;
+  const missed = data.missed_capture_count;
+  const catalog = data.catalog_count;
+  const hasMissed = missed > 0;
 
   return (
     <div
       className={`mb-5 rounded-xl border px-4 py-3 ${
-        hasGap ? 'border-amber-400/40 bg-amber-400/10' : 'border-tt-border bg-tt-card'
+        hasMissed ? 'border-amber-400/40 bg-amber-400/10' : 'border-tt-border bg-tt-card'
       }`}
     >
-      <div className="flex items-center gap-2">
-        <span className={`text-xs font-semibold uppercase tracking-wide ${hasGap ? 'text-amber-300' : 'text-tt-muted'}`}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className={`text-xs font-semibold uppercase tracking-wide ${hasMissed ? 'text-amber-300' : 'text-tt-muted'}`}>
           Order coverage
         </span>
-        <span className={`text-sm ${hasGap ? 'text-amber-200' : 'text-tt-text'}`}>
+        <span className={`text-sm ${hasMissed ? 'text-amber-200' : 'text-tt-text'}`}>
           {data.total_synced} synced order{data.total_synced === 1 ? '' : 's'} ·{' '}
           {data.captured_but_unbound_count} captured but unbound ·{' '}
-          <span className={hasGap ? 'font-semibold text-amber-300' : ''}>
-            {gap} never captured (coverage gap)
+          {/* PRIMARY signal: genuinely-missed AUCTION captures only. */}
+          <span className={hasMissed ? 'font-semibold text-amber-300' : 'text-tt-text'}>
+            {missed} missed auction capture{missed === 1 ? '' : 's'}
           </span>
+          {/* SECONDARY, de-emphasised but visible. */}
+          {catalog > 0 && (
+            <span className="text-tt-muted"> · {catalog} catalog sale{catalog === 1 ? '' : 's'} (pre-listed, not auctions)</span>
+          )}
           {data.room_unknown_count > 0 && (
             <> · <span className="font-semibold text-tt-red">{data.room_unknown_count} room unknown</span></>
           )}
@@ -1247,38 +1254,74 @@ function CoveragePanel({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      {hasGap && (
+      {/* PRIMARY: genuinely-missed auction captures (the real capture-health signal). */}
+      {hasMissed && (
         <div className="mt-3">
           <div className="text-xs text-amber-200/80 mb-2">
-            These TikTok orders synced but were never captured during the live, so they have no
-            SKU and are invisible to Reconcile. Listed for visibility only — no binding here yet.
+            <span className="font-semibold">{missed}</span> auction sale{missed === 1 ? '' : 's'} synced but {missed === 1 ? 'was' : 'were'} never captured during the live — genuinely missing from the auction log (their seller SKU is a real inventory SKU number). Catalog/pre-listed sales are counted separately below.
           </div>
           <div className="overflow-x-auto rounded-lg border border-amber-400/20">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-amber-400/20 text-amber-200/70 text-xs uppercase tracking-wide">
                   <th className="text-left font-medium px-3 py-2">Order ID</th>
-                  <th className="text-left font-medium px-3 py-2">Order date</th>
-                  <th className="text-left font-medium px-3 py-2">Buyer</th>
+                  <th className="text-left font-medium px-3 py-2">Date</th>
+                  <th className="text-left font-medium px-3 py-2">Seller SKU</th>
                   <th className="text-right font-medium px-3 py-2">GMV</th>
                   <th className="text-left font-medium px-3 py-2">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {data.coverage_gap.map((o) => (
+                {data.missed_capture.map((o) => (
                   <tr key={o.order_id} className="border-b border-amber-400/10 last:border-0">
                     <td className="px-3 py-2 font-mono text-xs text-tt-text">{o.order_id}</td>
                     <td className="px-3 py-2 text-tt-text/80">{o.order_date ?? '—'}</td>
-                    <td className="px-3 py-2 text-tt-muted">{o.buyer ?? '—'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-tt-text/80">
-                      {o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}
-                    </td>
+                    <td className="px-3 py-2 font-mono text-tt-cyan">#{o.sku_name}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-tt-text/80">{o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}</td>
                     <td className="px-3 py-2 text-tt-muted">{o.status ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* SECONDARY: catalog sales — de-emphasised, collapsed by default, but the count + list stay available. */}
+      {catalog > 0 && (
+        <div className="mt-3 rounded-lg border border-tt-border bg-tt-card/40 px-3 py-2">
+          <button onClick={() => setShowCatalog((v) => !v)} className="flex w-full items-start justify-between gap-2 text-left cursor-pointer">
+            <span className="text-xs text-tt-muted">
+              <span className="font-semibold text-tt-text/80">{catalog}</span> catalog sale{catalog === 1 ? '' : 's'} in this window — pre-listed items (mouth tape, nasal strips…) sold via normal listings, <span className="text-tt-text/70">not auctions</span> and not pick/packed. Not a capture problem.
+            </span>
+            <span className="text-xs text-tt-cyan shrink-0">{showCatalog ? 'Hide' : 'Show'}</span>
+          </button>
+          {showCatalog && (
+            <div className="mt-2 overflow-x-auto rounded-lg border border-tt-border">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
+                    <th className="text-left font-medium px-3 py-2">Order ID</th>
+                    <th className="text-left font-medium px-3 py-2">Date</th>
+                    <th className="text-left font-medium px-3 py-2">Variant</th>
+                    <th className="text-right font-medium px-3 py-2">GMV</th>
+                    <th className="text-left font-medium px-3 py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.catalog.map((o) => (
+                    <tr key={o.order_id} className="border-b border-tt-border/60 last:border-0">
+                      <td className="px-3 py-2 font-mono text-xs text-tt-text/80">{o.order_id}</td>
+                      <td className="px-3 py-2 text-tt-muted">{o.order_date ?? '—'}</td>
+                      <td className="px-3 py-2 text-tt-muted">{o.sku_name ?? '—'}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-tt-muted">{o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}</td>
+                      <td className="px-3 py-2 text-tt-muted">{o.status ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>

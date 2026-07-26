@@ -98,6 +98,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     order_created_at: string | null;
     created_at: string | null;
     gmv: number | string | null;
+    sku_name: string | null;
     status: string | null;
     auto_combine_group_id: string | null;
   }
@@ -111,7 +112,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   for (let from = 0; ; from += PAGE) {
     let q = supabase
       .from('synced_order_ids')
-      .select('order_id, order_date, order_created_at, created_at, gmv, status, auto_combine_group_id')
+      .select('order_id, order_date, order_created_at, created_at, gmv, sku_name, status, auto_combine_group_id')
       .eq('user_id', user.id)
       .gte('order_date', startDate)
       .lte('order_date', endDate)
@@ -226,22 +227,42 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     return 'orphan'; // successful captures, but only under NULL/orphan rooms → cannot attribute
   };
 
+  // ── Split the "never captured" gap into the two very different things it actually contains:
+  //    MISSED AUCTION CAPTURES (the real capture-health signal) vs CATALOG SALES (pre-listed items
+  //    — mouth tape / nasal strips sold via normal listings, never auctions, never pick/packed).
+  //    Signal: an auction sale's seller_sku is the internal SKU NUMBER (numeric sku_name that
+  //    resolves to a real inventory_skus.sku_number); catalog variants are text ("1 Black",
+  //    "1 Month Supply"). ~98.5% of the raw gap is catalog, so surfacing them as one number badly
+  //    overstates a capture problem. We split, but keep the catalog count visible (never hidden).
+  const skuByNumber = new Set<number>();
+  {
+    const { data: inv } = await supabase.from('inventory_skus').select('sku_number').eq('user_id', userId);
+    for (const s of inv ?? []) if (s.sku_number != null) skuByNumber.add(Number(s.sku_number));
+  }
+  const isMissedAuction = (name: string | null): boolean => {
+    if (!name || !/^[0-9]+$/.test(name.trim())) return false;
+    const n = Number(name.trim());
+    return Number.isFinite(n) && skuByNumber.has(n);
+  };
+
   interface GapRow {
     order_id: string; order_date: string | null; created_at: string | null; buyer: string | null;
-    gmv: number | null; status: string | null; auto_combine_group_id: string | null;
+    gmv: number | null; status: string | null; auto_combine_group_id: string | null; sku_name: string | null;
   }
   const gapRow = (r: typeof scoped[number]): GapRow => ({
     order_id: r.order_id, order_date: r.order_date, created_at: r.created_at, buyer: null,
     gmv: r.gmv == null ? null : Number(r.gmv), status: r.status, auto_combine_group_id: r.auto_combine_group_id,
+    sku_name: r.sku_name ?? null,
   });
 
   const capturedButUnboundIds: string[] = [];
-  const coverageGap: GapRow[] = [];
+  const missedCapture: GapRow[] = []; // never-captured AND auction-shaped → the real capture gap
+  const catalogSales: GapRow[] = [];  // never-captured but a pre-listed catalog item → not an auction
   const roomUnknown: GapRow[] = [];
   for (const r of scoped) {
     if (boundSet.has(r.order_id)) continue; // bound (any session) → not actionable here
     switch (classify(r.order_id)) {
-      case 'never': coverageGap.push(gapRow(r)); break;
+      case 'never': (isMissedAuction(r.sku_name) ? missedCapture : catalogSales).push(gapRow(r)); break;
       case 'thisRoom': capturedButUnboundIds.push(r.order_id); break;
       case 'orphan': roomUnknown.push(gapRow(r)); break;
       // 'otherKnown' (sibling live's sale) and 'failed' (payment failed) are intentionally not surfaced here
@@ -252,8 +273,15 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     total_synced: scoped.length,
     captured_but_unbound_count: capturedButUnboundIds.length,
     captured_but_unbound_ids: capturedButUnboundIds,
-    coverage_gap_count: coverageGap.length,
-    coverage_gap: coverageGap,
+    // PRIMARY capture-health signal: genuinely-missed AUCTION captures only.
+    missed_capture_count: missedCapture.length,
+    missed_capture: missedCapture,
+    // SECONDARY (de-emphasised, never hidden): catalog sales in the window — pre-listed items, not auctions.
+    catalog_count: catalogSales.length,
+    catalog: catalogSales,
+    // Back-compat: the full never-captured set (missed + catalog) kept for any consumer doing math.
+    coverage_gap_count: missedCapture.length + catalogSales.length,
+    coverage_gap: [...missedCapture, ...catalogSales],
     // Captured but attributable to NO show (null/orphan room). Not bindable on any board — shown
     // as its own labeled group so it never silently disappears.
     room_unknown_count: roomUnknown.length,
