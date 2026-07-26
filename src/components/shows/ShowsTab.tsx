@@ -477,6 +477,10 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   const [unbindingId, setUnbindingId] = useState<string | null>(null);
   // Bound THIS session → drives the "N unbound · M remaining" progress (total = remaining + bound).
   const [boundThisSession, setBoundThisSession] = useState(0);
+  // Discoverability: on a 100+ row show, unbound rows are unfindable interleaved. This filters
+  // the table to just the actionable (unbound) rows. Toggled from the progress banner.
+  const [onlyUnbound, setOnlyUnbound] = useState(false);
+  const displayItems = useMemo(() => (onlyUnbound ? items.filter((i) => i.unbound) : items), [onlyUnbound, items]);
   // PRIMARY narrowing set: SKUs sold in this show (from the board) — the picker's default list.
   const primaryIdSet = useMemo(() => new Set(sessionSkus.map((s) => s.id)), [sessionSkus]);
 
@@ -912,18 +916,25 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         </div>
       )}
 
-      {/* Bind progress — captured-but-unbound rows are actionable inline in the table below. */}
+      {/* Bind progress + discoverability filter — captured-but-unbound rows are actionable inline. */}
       {(() => {
         const remaining = items.filter((i) => i.unbound).length;
         const total = remaining + boundThisSession;
-        return total > 0 ? (
-          <div className="mb-3 flex items-center gap-2 text-sm">
+        if (total === 0) return null;
+        return (
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
             <span className="inline-flex items-center rounded-md bg-tt-yellow/15 px-2 py-0.5 text-xs font-semibold text-tt-yellow ring-1 ring-tt-yellow/30">
               {total} unbound · {remaining} remaining
             </span>
+            {remaining > 0 && (
+              <button
+                onClick={() => setOnlyUnbound((v) => !v)}
+                className={`text-xs rounded-md px-2 py-0.5 cursor-pointer transition-colors ${onlyUnbound ? 'bg-tt-cyan text-black font-semibold' : 'border border-tt-border text-tt-cyan hover:bg-tt-card-hover'}`}
+              >{onlyUnbound ? 'Showing only unbound — show all' : `Show only unbound (${remaining})`}</button>
+            )}
             <span className="text-xs text-tt-muted">Click a “Unbound — bind” row to attach its SKU(s).</span>
           </div>
-        ) : null;
+        );
       })()}
 
       {/* Items table */}
@@ -935,6 +946,11 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
       ) : items.length === 0 ? (
         <div className="rounded-2xl border border-tt-border bg-tt-card py-12 text-center text-tt-muted text-sm">
           No auction items captured for this show.
+        </div>
+      ) : displayItems.length === 0 ? (
+        <div className="rounded-2xl border border-tt-border bg-tt-card py-12 text-center text-tt-muted text-sm">
+          No unbound rows remaining.{' '}
+          <button onClick={() => setOnlyUnbound(false)} className="text-tt-cyan cursor-pointer hover:underline">Show all rows</button>
         </div>
       ) : (
         <div className="rounded-2xl border border-tt-border bg-tt-card overflow-hidden">
@@ -955,7 +971,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
               </tr>
             </thead>
             <tbody>
-              {items.map((it) => {
+              {displayItems.map((it) => {
                 const isUnbound = !!it.unbound;
                 const sold = it.status === 'sold';
                 const won = wonCents(it); // real winning bid (sold items only)
