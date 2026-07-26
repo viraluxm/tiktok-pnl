@@ -38,14 +38,26 @@ export interface CoverageGapOrder {
   gmv: number | null;
   status: string | null;
   auto_combine_group_id: string | null;
+  sku_name: string | null;
 }
 
 export interface ShowCoverage {
   total_synced: number;
   captured_but_unbound_count: number;
   captured_but_unbound_ids: string[];
+  // PRIMARY capture-health signal: genuinely-missed AUCTION captures (numeric sku_name that
+  // resolves to a real SKU). This is the headline "never captured" number.
+  missed_capture_count: number;
+  missed_capture: CoverageGapOrder[];
+  // SECONDARY (de-emphasised, never hidden): catalog sales in the window — pre-listed items, not auctions.
+  catalog_count: number;
+  catalog: CoverageGapOrder[];
+  // Back-compat: full never-captured set (missed + catalog).
   coverage_gap_count: number;
   coverage_gap: CoverageGapOrder[];
+  // Captured but attributable to NO show (null/orphan room) — cannot be bound on any board.
+  room_unknown_count: number;
+  room_unknown: CoverageGapOrder[];
   window: { start_date: string | null; end_date: string | null; store_id: string | null };
 }
 

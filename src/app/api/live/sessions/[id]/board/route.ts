@@ -10,10 +10,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  // Ownership: the session must belong to the caller.
+  // Ownership: the session must belong to the caller. tiktok_live_id (room) + window scope the
+  // captured-but-unbound union to THIS live.
   const { data: session } = await supabase
     .from('live_sessions')
-    .select('id, status')
+    .select('id, status, tiktok_live_id, started_at, ended_at, created_at, store_id')
     .eq('id', id)
     .eq('user_id', user.id)
     .maybeSingle();
@@ -149,6 +150,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       : null;
     return {
       id: it.id,
+      // Bound rows expose their order_id (= client_idempotency_key) so the UI can unbind them.
+      order_id: it.client_idempotency_key ?? null,
       auction_number: it.sequence,
       status: it.status,
       is_bundle: it.is_bundle,
@@ -185,5 +188,82 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     };
   });
 
-  return NextResponse.json({ items: assembled });
+  // ── PRIMARY narrowing list: the distinct internal SKUs actually sold in THIS show (+ category),
+  //    so the bind picker offers ~10-50 SKUs, never the full 217 catalogue. The full list stays a
+  //    searchable fallback in the client.
+  const soldSkuIds = [...new Set(skuRows.map((s) => String(s.inventory_sku_id)))];
+  let sessionSkus: Array<{ id: string; sku_number: number | null; title: string | null; category: string | null; barcode: string | null }> = [];
+  if (soldSkuIds.length) {
+    const { data: inv } = await supabase.from('inventory_skus')
+      .select('id, sku_number, title, category, barcode').eq('user_id', user.id).in('id', soldSkuIds);
+    sessionSkus = (inv ?? []).map((s) => ({
+      id: String(s.id), sku_number: (s.sku_number as number | null) ?? null, title: (s.title as string | null) ?? null,
+      category: (s.category as string | null) ?? null, barcode: (s.barcode as string | null) ?? null,
+    })).sort((a, b) => (Number(a.sku_number) || 0) - (Number(b.sku_number) || 0));
+  }
+  const liveCategories = [...new Set(sessionSkus.map((s) => s.category).filter((c): c is string => !!c))];
+
+  // ── Union: captured-but-unbound sales for THIS show. ATTRIBUTION IS BY ROOM:
+  //    capture_events.room_id = the session's tiktok_live_id. Under concurrent same-store lives the
+  //    Order API has no room signal, so the capture's room is the ONLY reliable attribution — an
+  //    order captured in a sibling live's room is that host's sale, NOT this show's, and must NOT be
+  //    bindable here (binding it would mis-attribute revenue + host ASP/below-BE, which read
+  //    live_sessions.host_id). Store scoping, however, is taken from synced_order_ids (which HAS a
+  //    reliable store_id) — NOT from capture_events.store_id, which is frequently NULL (the known
+  //    backfill gap) and was hiding a session's OWN unbound orders. CANCELLED/'0'/failed-payment excluded.
+  const boundOrderIdSet = new Set(orderIds);
+  const unboundRows: Array<Record<string, unknown>> = [];
+  const room = (session.tiktok_live_id as string | null) ?? null;
+  const startIso = ((session.started_at as string | null) ?? (session.created_at as string | null)) ?? null;
+  if (room && startIso) {
+    const endIso = (session.ended_at as string | null) ?? new Date().toISOString();
+    // Captures for THIS ROOM + window. No store filter here (capture store_id is unreliable/NULL).
+    const { data: caps, error: capUnionErr } = await supabase.from('capture_events')
+      .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at')
+      .eq('user_id', user.id).eq('room_id', room).gte('ordered_at', startIso).lte('ordered_at', endIso);
+    if (capUnionErr) {
+      console.error('[live/board] unbound-capture union error:', capUnionErr);
+    } else {
+      const capUnbound = (caps ?? []).filter((c) => {
+        const oid = String(c.order_id ?? '');
+        return oid && oid !== '0' && !boundOrderIdSet.has(oid) && c.is_payment_successful !== false;
+      });
+      // Store scope + CANCELLED come from synced_order_ids (reliable store_id + authoritative status).
+      // When the session is store-scoped, keep an order only if its synced row confirms THIS store
+      // (a room-captured order whose synced row is another store — or has no synced row — isn't
+      // confirmable as this store's sale). CANCELLED always dropped.
+      const uoids = [...new Set(capUnbound.map((c) => String(c.order_id)))];
+      const cancelled = new Set<string>();
+      const storeOk = new Set<string>();
+      for (let i = 0; i < uoids.length; i += 300) {
+        const { data: so } = await supabase.from('synced_order_ids')
+          .select('order_id, status, store_id').eq('user_id', user.id).in('order_id', uoids.slice(i, i + 300));
+        for (const r of so ?? []) {
+          const oid = String(r.order_id);
+          if (String(r.status) === 'CANCELLED') cancelled.add(oid);
+          if (!session.store_id || String(r.store_id) === String(session.store_id)) storeOk.add(oid);
+        }
+      }
+      const seen = new Set<string>();
+      for (const c of capUnbound) {
+        const oid = String(c.order_id);
+        if (seen.has(oid) || cancelled.has(oid)) continue;
+        if (session.store_id && !storeOk.has(oid)) continue; // store-scoped: require synced-store confirmation
+        seen.add(oid);
+        unboundRows.push({
+          id: `unbound:${oid}`, auction_number: 0, status: 'sold', is_bundle: false,
+          expected_price_cents: null, sold_price_cents: null,
+          won_price_cents: (c.selling_price_cents as number | null) ?? null,
+          tiktok_title: (c.product_name as string | null) ?? null,
+          payment_failed: false, order_status: null, net_payout_cents: null, payout_settled: false,
+          buyer_handle: (c.buyer_username as string | null) ?? null,
+          logged_at: (c.ordered_at as string | null) ?? (c.created_at as string | null) ?? '',
+          units: 0, total_cost_cents: null, skus: [],
+          unbound: true, order_id: oid, seller_sku_hint: (c.platform_sku_ref as string | null) ?? null,
+        });
+      }
+    }
+  }
+
+  return NextResponse.json({ items: [...assembled, ...unboundRows], session_skus: sessionSkus, live_categories: liveCategories });
 }
