@@ -176,92 +176,65 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   }
   const liveCategories = [...new Set(sessionSkus.map((s) => s.category).filter((c): c is string => !!c))];
 
-  // ── Union: captured-but-unbound sales for THIS show. ONE definition, shared with the coverage
-  //    banner (/api/shows/[id]/coverage): synced orders in the show's store + window that HAVE a
-  //    capture but no bind. Deliberately ROOM- and capture-store-AGNOSTIC: concurrent same-store
-  //    lives tag captures with a SIBLING room, and capture_events.store_id is frequently NULL, so
-  //    scoping the union by capture room/store hid real unbound sales (banner said 19, table showed
-  //    0). The authoritative store + window come from synced_order_ids (which HAS store_id);
-  //    capture_events is joined only to hydrate display fields. CANCELLED + junk '0' + failed-payment
-  //    are excluded (binding one would decrement stock for a non-sale).
-  const SHOP_TZ = 'America/Los_Angeles';
-  const localDate = (iso: string) => new Date(iso).toLocaleDateString('en-CA', { timeZone: SHOP_TZ });
-  const isCancelled = (s: string | null | undefined) => {
-    const u = (s ?? '').toUpperCase();
-    return u === 'CANCELLED' || u.includes('CANCEL');
-  };
+  // ── Union: captured-but-unbound sales for THIS show. ATTRIBUTION IS BY ROOM:
+  //    capture_events.room_id = the session's tiktok_live_id. Under concurrent same-store lives the
+  //    Order API has no room signal, so the capture's room is the ONLY reliable attribution — an
+  //    order captured in a sibling live's room is that host's sale, NOT this show's, and must NOT be
+  //    bindable here (binding it would mis-attribute revenue + host ASP/below-BE, which read
+  //    live_sessions.host_id). Store scoping, however, is taken from synced_order_ids (which HAS a
+  //    reliable store_id) — NOT from capture_events.store_id, which is frequently NULL (the known
+  //    backfill gap) and was hiding a session's OWN unbound orders. CANCELLED/'0'/failed-payment excluded.
+  const boundOrderIdSet = new Set(orderIds);
   const unboundRows: Array<Record<string, unknown>> = [];
+  const room = (session.tiktok_live_id as string | null) ?? null;
   const startIso = ((session.started_at as string | null) ?? (session.created_at as string | null)) ?? null;
-  if (startIso) {
+  if (room && startIso) {
     const endIso = (session.ended_at as string | null) ?? new Date().toISOString();
-    const startDate = localDate(startIso), endDate = localDate(endIso);
-    const startMs = new Date(startIso).getTime(), endMs = new Date(endIso).getTime();
-
-    // Authoritative order set: synced_order_ids for the store + date window (refined to the exact
-    // timestamp when order_created_at is present; date-window fallback for un-backfilled rows).
-    interface SyncRow { order_id: string; status: string | null; order_created_at: string | null }
-    const synced: SyncRow[] = [];
-    const PAGE = 1000;
-    for (let from = 0; ; from += PAGE) {
-      let q = supabase.from('synced_order_ids')
-        .select('order_id, status, order_created_at')
-        .eq('user_id', user.id).gte('order_date', startDate).lte('order_date', endDate)
-        .order('order_date', { ascending: true }).range(from, from + PAGE - 1);
-      if (session.store_id) q = q.eq('store_id', session.store_id);
-      const { data, error: syncErr } = await q;
-      if (syncErr) { console.error('[live/board] unbound synced-scan error:', syncErr); break; }
-      synced.push(...((data ?? []) as SyncRow[]));
-      if (!data || data.length < PAGE) break;
-    }
-    const candidateSet = [...new Set(
-      synced.filter((o) => {
-        if (!o.order_id || o.order_id === '0' || isCancelled(o.status)) return false;
-        if (o.order_created_at) {
-          const t = new Date(o.order_created_at).getTime();
-          if (Number.isFinite(t)) return t >= startMs && t <= endMs;
+    // Captures for THIS ROOM + window. No store filter here (capture store_id is unreliable/NULL).
+    const { data: caps, error: capUnionErr } = await supabase.from('capture_events')
+      .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at')
+      .eq('user_id', user.id).eq('room_id', room).gte('ordered_at', startIso).lte('ordered_at', endIso);
+    if (capUnionErr) {
+      console.error('[live/board] unbound-capture union error:', capUnionErr);
+    } else {
+      const capUnbound = (caps ?? []).filter((c) => {
+        const oid = String(c.order_id ?? '');
+        return oid && oid !== '0' && !boundOrderIdSet.has(oid) && c.is_payment_successful !== false;
+      });
+      // Store scope + CANCELLED come from synced_order_ids (reliable store_id + authoritative status).
+      // When the session is store-scoped, keep an order only if its synced row confirms THIS store
+      // (a room-captured order whose synced row is another store — or has no synced row — isn't
+      // confirmable as this store's sale). CANCELLED always dropped.
+      const uoids = [...new Set(capUnbound.map((c) => String(c.order_id)))];
+      const cancelled = new Set<string>();
+      const storeOk = new Set<string>();
+      for (let i = 0; i < uoids.length; i += 300) {
+        const { data: so } = await supabase.from('synced_order_ids')
+          .select('order_id, status, store_id').eq('user_id', user.id).in('order_id', uoids.slice(i, i + 300));
+        for (const r of so ?? []) {
+          const oid = String(r.order_id);
+          if (String(r.status) === 'CANCELLED') cancelled.add(oid);
+          if (!session.store_id || String(r.store_id) === String(session.store_id)) storeOk.add(oid);
         }
-        return true; // no timestamp → keep on the date window (coverage parity)
-      }).map((o) => o.order_id),
-    )];
-
-    // captured = has a capture (ANY room/store, payment not failed); bound = has an auction item in
-    // ANY session. Chunk the .in() lists so a long day never blows the query-string limit.
-    const capById = new Map<string, { won: number | null; title: string | null; seller: string | null; buyer: string | null; when: string | null }>();
-    const boundIds = new Set<string>();
-    for (let i = 0; i < candidateSet.length; i += 300) {
-      const chunk = candidateSet.slice(i, i + 300);
-      const { data: caps } = await supabase.from('capture_events')
-        .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, ordered_at, created_at, is_payment_successful')
-        .eq('user_id', user.id).in('order_id', chunk);
-      for (const c of caps ?? []) {
+      }
+      const seen = new Set<string>();
+      for (const c of capUnbound) {
         const oid = String(c.order_id);
-        if (c.is_payment_successful === false) continue; // failed payment ≠ a sale
-        if (!capById.has(oid)) capById.set(oid, {
-          won: (c.selling_price_cents as number | null) ?? null,
-          title: (c.product_name as string | null) ?? null,
-          seller: (c.platform_sku_ref as string | null) ?? null,
-          buyer: (c.buyer_username as string | null) ?? null,
-          when: (c.ordered_at as string | null) ?? (c.created_at as string | null) ?? null,
+        if (seen.has(oid) || cancelled.has(oid)) continue;
+        if (session.store_id && !storeOk.has(oid)) continue; // store-scoped: require synced-store confirmation
+        seen.add(oid);
+        unboundRows.push({
+          id: `unbound:${oid}`, auction_number: 0, status: 'sold', is_bundle: false,
+          expected_price_cents: null, sold_price_cents: null,
+          won_price_cents: (c.selling_price_cents as number | null) ?? null,
+          tiktok_title: (c.product_name as string | null) ?? null,
+          payment_failed: false, order_status: null, net_payout_cents: null, payout_settled: false,
+          buyer_handle: (c.buyer_username as string | null) ?? null,
+          logged_at: (c.ordered_at as string | null) ?? (c.created_at as string | null) ?? '',
+          units: 0, total_cost_cents: null, skus: [],
+          unbound: true, order_id: oid, seller_sku_hint: (c.platform_sku_ref as string | null) ?? null,
         });
       }
-      const { data: bnd } = await supabase.from('live_auction_items')
-        .select('client_idempotency_key').eq('user_id', user.id).in('client_idempotency_key', chunk);
-      for (const b of bnd ?? []) if (b.client_idempotency_key) boundIds.add(String(b.client_idempotency_key));
-    }
-
-    for (const oid of candidateSet) {
-      if (boundIds.has(oid)) continue;  // bound in some session → not unbound
-      const cap = capById.get(oid);
-      if (!cap) continue;               // not captured → that's "never captured" (coverage/CoveragePanel), not here
-      unboundRows.push({
-        id: `unbound:${oid}`, auction_number: 0, status: 'sold', is_bundle: false,
-        expected_price_cents: null, sold_price_cents: null,
-        won_price_cents: cap.won, tiktok_title: cap.title,
-        payment_failed: false, order_status: null, net_payout_cents: null, payout_settled: false,
-        buyer_handle: cap.buyer, logged_at: cap.when ?? '',
-        units: 0, total_cost_cents: null, skus: [],
-        unbound: true, order_id: oid, seller_sku_hint: cap.seller,
-      });
     }
   }
 
