@@ -112,9 +112,9 @@ export default function Charts({ chartData }: ChartsProps) {
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-8">
       {/* Combined Profit & Sales Chart */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl lg:col-span-1">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <h3 className="text-sm font-semibold text-tt-muted">Performance Trend</h3>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap gap-1">
             {viewOptions.map((opt) => (
               <button
                 key={opt.value}
@@ -130,7 +130,7 @@ export default function Charts({ chartData }: ChartsProps) {
             ))}
           </div>
         </div>
-        <div className="relative h-[340px]">
+        <div className="relative h-[260px] sm:h-[300px] md:h-[340px]">
           <Line
             data={{ labels, datasets }}
             options={getOptions()}
@@ -141,7 +141,7 @@ export default function Charts({ chartData }: ChartsProps) {
       {/* Cost Breakdown */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-5 backdrop-blur-xl">
         <h3 className="text-sm font-semibold text-tt-muted mb-4">Cost Breakdown</h3>
-        <div className="relative h-[340px]">
+        <div className="relative h-[260px] sm:h-[300px] md:h-[340px]">
           <Doughnut
             data={{
               labels: chartData.costBreakdown.labels,

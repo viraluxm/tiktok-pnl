@@ -314,11 +314,11 @@ export default function ShippingTab() {
     return (
       <div>
         <div className="text-xl font-bold">Packing station</div>
-        <div className="text-sm text-tt-muted mt-1 mb-8">Print your order-id pick tickets, then scan them to pick each box. Full-screen, scanner-driven.</div>
+        <div className="text-sm text-tt-muted mt-1 mb-6">Print your order-id pick tickets, then scan them to pick each box. Full-screen, scanner-driven.</div>
         <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={startScanning}
-            className="px-8 py-5 rounded-2xl bg-tt-green text-black text-lg font-extrabold cursor-pointer hover:opacity-90 transition-opacity"
+            className="w-full sm:w-auto min-h-[56px] px-8 py-5 rounded-2xl bg-tt-green text-black text-xl font-extrabold cursor-pointer hover:opacity-90 transition-opacity shadow-lg"
           >
             ▶ Start scanning
           </button>
@@ -326,23 +326,23 @@ export default function ShippingTab() {
             onClick={syncTracking}
             disabled={syncing || activeStore === 'all'}
             title="Recover tracking numbers from TikTok so label scanning works — run after buying labels"
-            className="px-6 py-5 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
+            className="flex-1 sm:flex-none min-h-[44px] px-6 py-4 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
           >
             {syncing ? 'Syncing…' : '🔄 Sync tracking'}
           </button>
           <button
             onClick={printTickets}
             disabled={ticketLoading || !ticketInfo || ticketInfo.included_boxes === 0}
-            className="px-6 py-5 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
+            className="flex-1 sm:flex-none min-h-[44px] px-6 py-4 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
           >
             {ticketLoading ? 'Loading…' : '🖨 Print pick tickets'}
           </button>
-          <label className="flex items-center gap-2 text-sm text-tt-muted">
+          <label className="flex items-center gap-2 text-sm text-tt-muted w-full sm:w-auto">
             <span>Age</span>
             <select
               value={ticketDays}
               onChange={(e) => setTicketDays(e.target.value as '1' | '3' | '7' | 'all')}
-              className="px-3 py-2 rounded-xl bg-tt-card border border-tt-border text-tt-text cursor-pointer"
+              className="flex-1 sm:flex-none min-h-[44px] px-3 py-2 rounded-xl bg-tt-card border border-tt-border text-tt-text cursor-pointer"
             >
               <option value="1">Last 1 day</option>
               <option value="3">Last 3 days</option>
@@ -408,7 +408,15 @@ export default function ShippingTab() {
   // Safe under SSR: the overlay only appears after a client click (focus starts false → idle view).
   if (typeof document === 'undefined') return null;
   return createPortal(
-    <div className="fixed inset-0 z-[200] w-screen h-[100dvh] max-w-full bg-tt-bg text-tt-text flex flex-col select-none overflow-hidden">
+    <div
+      className="fixed inset-0 z-[200] w-screen h-[100dvh] max-w-full bg-tt-bg text-tt-text flex flex-col select-none overflow-hidden"
+      style={{
+        paddingTop: 'env(safe-area-inset-top)',
+        paddingBottom: 'env(safe-area-inset-bottom)',
+        paddingLeft: 'env(safe-area-inset-left)',
+        paddingRight: 'env(safe-area-inset-right)',
+      }}
+    >
       {/* hidden scanner sink — reuses the always-focused input + Enter mechanism.
           inputMode="none" keeps the input FOCUSED (so the hardware scanner's characters +
           Enter still land here) while telling the browser NOT to raise the on-screen keyboard.
@@ -423,18 +431,25 @@ export default function ShippingTab() {
         className="absolute w-px h-px opacity-0 pointer-events-none" aria-hidden
       />
 
-      {/* Hold-to-exit ✕ (tap-and-hold ~0.9s, not a single tap) */}
-      <button
-        onPointerDown={beginHold} onPointerUp={cancelHold} onPointerLeave={cancelHold} onPointerCancel={cancelHold}
-        title="Hold to exit"
-        className="absolute top-4 right-4 z-20 w-14 h-14 rounded-full border border-tt-border bg-tt-card flex items-center justify-center text-tt-muted overflow-hidden"
+      {/* Hold-to-exit control (tap-and-hold ~0.9s, not a single tap) — same handler, larger + labelled */}
+      <div
+        className="absolute z-20 flex flex-col items-center gap-1"
+        style={{ top: 'calc(env(safe-area-inset-top) + 1rem)', right: 'calc(env(safe-area-inset-right) + 1rem)' }}
       >
-        <span
-          className="absolute inset-0 rounded-full bg-tt-red/30"
-          style={{ transform: holding ? 'scale(1)' : 'scale(0)', transition: holding ? 'transform 0.9s linear' : 'transform 0s' }}
-        />
-        <span className="relative text-xl">✕</span>
-      </button>
+        <button
+          onPointerDown={beginHold} onPointerUp={cancelHold} onPointerLeave={cancelHold} onPointerCancel={cancelHold}
+          title="Hold to exit"
+          aria-label="Hold to exit"
+          className="relative w-16 h-16 rounded-full border-2 border-tt-border-hover bg-tt-card flex items-center justify-center text-tt-text overflow-hidden active:scale-95 transition-transform"
+        >
+          <span
+            className="absolute inset-0 rounded-full bg-tt-red/30"
+            style={{ transform: holding ? 'scale(1)' : 'scale(0)', transition: holding ? 'transform 0.9s linear' : 'transform 0s' }}
+          />
+          <span className="relative text-2xl leading-none">✕</span>
+        </button>
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-tt-muted pointer-events-none">Hold to exit</span>
+      </div>
 
       <div className={`flex-1 min-h-0 w-full flex flex-col items-center overflow-x-hidden ${screen === 'pick' ? 'overflow-y-hidden p-3' : 'p-4 overflow-y-auto justify-center'}`}>
 
@@ -444,10 +459,19 @@ export default function ShippingTab() {
             <div className="mx-auto w-40 h-40 max-w-[70vw] max-h-[70vw] rounded-3xl border-4 border-tt-cyan/40 flex items-center justify-center animate-pulse">
               <span className="text-tt-cyan text-6xl">⤢</span>
             </div>
-            <div className="mt-8 text-2xl font-bold break-words">Ready to scan</div>
-            <div className="mt-1 text-tt-muted break-words">Scan a shipping label to load the box</div>
-            {loading && <div className="mt-4 text-tt-cyan font-medium break-words">Loading box…</div>}
-            {err && <div className="mt-4 text-tt-red font-semibold break-words">{err}</div>}
+            <div className="mt-8 text-3xl font-bold break-words">Ready to scan</div>
+            <div className="mt-2 text-base text-tt-muted break-words">Scan a shipping label to load the box</div>
+            {loading && (
+              <div className="mt-6 flex items-center justify-center gap-3 text-tt-cyan font-semibold text-lg break-words">
+                <span className="w-5 h-5 border-2 border-tt-cyan border-t-transparent rounded-full animate-spin" />
+                Loading box…
+              </div>
+            )}
+            {err && (
+              <div className="mt-6 rounded-2xl border-2 border-tt-red/50 bg-tt-red/10 px-5 py-4 text-tt-red font-semibold text-base break-words">
+                <span className="mr-2" aria-hidden>⚠</span>{err}
+              </div>
+            )}
             <div className="mt-10 text-sm text-tt-muted break-words">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked today</div>
           </div>
         )}
@@ -468,7 +492,7 @@ export default function ShippingTab() {
                 </div>
               ))}
             </div>
-            <button onClick={backToReady} className="mt-8 w-full py-5 rounded-2xl bg-tt-red text-white text-xl font-extrabold cursor-pointer hover:opacity-90">
+            <button onClick={backToReady} className="mt-8 w-full min-h-[56px] py-5 rounded-2xl bg-tt-red text-white text-xl font-extrabold cursor-pointer hover:opacity-90">
               Set aside &amp; scan next
             </button>
           </div>
@@ -480,7 +504,7 @@ export default function ShippingTab() {
             <div className="text-tt-red text-6xl mb-3">🚫</div>
             <div className="text-2xl font-extrabold break-words">Nothing to pack</div>
             <div className="mt-2 text-tt-muted break-words">Every order in this box is do-not-pack (cancelled / on-hold / already shipped). Set the label aside.</div>
-            <button onClick={backToReady} className="mt-8 w-full py-5 rounded-2xl bg-tt-red text-white text-xl font-extrabold cursor-pointer hover:opacity-90">
+            <button onClick={backToReady} className="mt-8 w-full min-h-[56px] py-5 rounded-2xl bg-tt-red text-white text-xl font-extrabold cursor-pointer hover:opacity-90">
               Set aside &amp; scan next
             </button>
           </div>
@@ -499,9 +523,11 @@ export default function ShippingTab() {
                 return (
                   <button
                     key={l.key} onClick={() => setActiveIdx(i)}
-                    className={`w-3.5 h-3.5 transition-colors ${l.kind === 'catalog' ? 'rounded-[3px]' : 'rounded-full'} ${i === activeIdx ? 'ring-2 ring-offset-2 ring-offset-tt-bg ring-tt-cyan' : ''} ${c ? 'bg-tt-green' : 'bg-tt-border'}`}
+                    className="p-2.5 flex items-center justify-center cursor-pointer"
                     aria-label={`Item ${i + 1}`}
-                  />
+                  >
+                    <span className={`block w-3.5 h-3.5 transition-colors ${l.kind === 'catalog' ? 'rounded-[3px]' : 'rounded-full'} ${i === activeIdx ? 'ring-2 ring-offset-2 ring-offset-tt-bg ring-tt-cyan' : ''} ${c ? 'bg-tt-green' : 'bg-tt-border'}`} />
+                  </button>
                 );
               })}
             </div>
@@ -560,16 +586,16 @@ export default function ShippingTab() {
               {/* Back / info / Next */}
               <div className="flex items-center justify-between gap-2">
                 <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
-                  className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)' }}>‹ Back</button>
+                  className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)', minHeight: '44px', minWidth: '44px' }}>‹ Back</button>
                 <span className="flex-1 min-w-0 truncate text-center text-xs text-tt-muted">Item {activeIdx + 1} of {pickLines.length} · {pickedUnits}/{totalUnits} units</span>
                 <button onClick={() => setActiveIdx((i) => Math.min(pickLines.length - 1, i + 1))} disabled={activeIdx === pickLines.length - 1}
-                  className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)' }}>Next ›</button>
+                  className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)', minHeight: '44px', minWidth: '44px' }}>Next ›</button>
               </div>
               {/* New label / Finish */}
               <div className="flex items-center justify-between gap-3">
-                <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="text-sm text-tt-muted underline cursor-pointer">New label</button>
+                <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="shrink-0 inline-flex items-center min-h-[44px] px-2 text-sm text-tt-muted underline cursor-pointer">New label</button>
                 {allComplete && (
-                  <button onClick={() => enterFinish(box)} className="px-6 py-2.5 rounded-xl bg-tt-cyan text-black font-bold cursor-pointer hover:opacity-90">Finish box ›</button>
+                  <button onClick={() => enterFinish(box)} className="flex-1 min-h-[52px] px-6 py-3 rounded-xl bg-tt-cyan text-black text-lg font-extrabold cursor-pointer hover:opacity-90 shadow-lg">Finish box ›</button>
                 )}
               </div>
             </div>
@@ -582,7 +608,7 @@ export default function ShippingTab() {
             <div className="text-tt-green text-7xl mb-3">✓</div>
             <div className="text-3xl font-extrabold break-words">Box picked</div>
             <div className="mt-2 text-lg text-tt-muted break-words">Put all items on the rack with the shipping label.</div>
-            <button onClick={backToReady} className="mt-8 w-full py-5 rounded-2xl bg-tt-green text-black text-xl font-extrabold cursor-pointer hover:opacity-90">
+            <button onClick={backToReady} className="mt-8 w-full min-h-[56px] py-5 rounded-2xl bg-tt-green text-black text-xl font-extrabold cursor-pointer hover:opacity-90 shadow-lg">
               Scan next label
             </button>
           </div>

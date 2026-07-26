@@ -39,9 +39,9 @@ export default function DayShiftDetailsModal({
 }) {
   const groups = groupDayEntriesByRole(entries);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-tt-card border border-tt-border rounded-2xl p-6 w-full max-w-md mx-4 shadow-2xl max-h-[80vh] overflow-y-auto" role="dialog" aria-modal="true">
+      <div className="relative bg-tt-card border border-tt-border rounded-t-2xl sm:rounded-2xl p-6 w-full sm:max-w-md sm:mx-4 shadow-2xl max-h-[90dvh] overflow-y-auto" role="dialog" aria-modal="true">
         <div className="flex items-start justify-between mb-4">
           <h3 className="text-base font-semibold text-tt-text">{longDate(date)}</h3>
           <button onClick={onClose} aria-label="Close" className="text-tt-muted hover:text-tt-text transition-colors p-1">
@@ -88,10 +88,10 @@ export default function DayShiftDetailsModal({
           </div>
         )}
 
-        <div className="pt-5">
+        <div className="pt-5 pb-[env(safe-area-inset-bottom)]">
           <button
             onClick={() => onAddDay(date)}
-            className="w-full py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors"
+            className="w-full min-h-[44px] py-2.5 rounded-xl text-sm font-semibold bg-tt-cyan text-black hover:bg-tt-cyan/90 transition-colors"
           >
             + Add shift this day
           </button>

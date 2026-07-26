@@ -27,13 +27,40 @@
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
 
+html {
+  /* Site-wide guard against page-level horizontal overflow. `clip` (not `hidden`)
+     does NOT create a scroll container, so `position: sticky` headers keep working. */
+  overflow-x: clip;
+}
+
 body {
   background: #0f0f0f;
   color: #e8e8e8;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   line-height: 1.5;
-  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: clip;
 }
+
+/* Mobile only: inputs/selects/textarea render at >=16px so iOS Safari never
+   zooms the viewport on focus. Desktop (md+) keeps component-defined sizes. */
+@media (max-width: 767px) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Safe-area padding helpers (resolve to real insets under viewport-fit=cover). */
+.pt-safe { padding-top: env(safe-area-inset-top); }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+.pl-safe { padding-left: env(safe-area-inset-left); }
+.pr-safe { padding-right: env(safe-area-inset-right); }
+
+/* Hide scrollbar on horizontally-scrollable strips (e.g. the mobile tab bar). */
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
 
 /* Fade-in animation */
 @keyframes fadeIn {

@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import Providers from '@/providers/Providers';
 import './globals.css';
 
@@ -13,6 +13,15 @@ export const metadata: Metadata = {
     siteName: 'Lensed',
     type: 'website',
   },
+};
+
+// device-width is already Next's default; this adds viewport-fit=cover so
+// env(safe-area-inset-*) resolves on notched phones, plus a matching theme color.
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+  themeColor: '#0f0f0f',
 };
 
 export default function RootLayout({
