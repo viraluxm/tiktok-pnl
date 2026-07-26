@@ -58,7 +58,8 @@ function computeFromSkus(skus: { qty: number; unit_cost_cents: number | null; sk
 export default function HostTrackingShell({ sessionId }: { sessionId: string }) {
   const { data: session, isLoading: sessionLoading, isError } = useLiveSession(sessionId);
   const { data: allSkus = [] } = useInventorySkus();
-  const { data: board = [] } = useAuctionBoard(sessionId);
+  const { data: boardData } = useAuctionBoard(sessionId);
+  const board = boardData?.items ?? [];
   const quickClose = useQuickClose();
   const deleteItem = useDeleteAuctionItem();
   const endSession = useEndSession();

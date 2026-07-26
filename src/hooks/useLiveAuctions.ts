@@ -40,19 +40,67 @@ export interface AuctionItem {
 
 const KEY = 'auction-board';
 
+// A SKU actually sold in THIS show — the PRIMARY narrowing list for the bind picker
+// (never the full catalogue). Carries category (for tertiary grouping) + barcode (scan).
+export interface SessionSku {
+  id: string;
+  sku_number: number | null;
+  title: string | null;
+  category: string | null;
+  barcode: string | null;
+}
+
+// Full board payload: the auction rows PLUS the ranked-picker inputs. Older callers that
+// only need the rows read `.items`.
+export interface BoardResponse {
+  items: AuctionItem[];
+  session_skus: SessionSku[];
+  live_categories: string[];
+}
+
 export function useAuctionBoard(sessionId: string | null) {
   const { user } = useUser();
 
-  return useQuery<AuctionItem[]>({
+  return useQuery<BoardResponse>({
     queryKey: [KEY, sessionId, user?.id],
     enabled: !!user && !!sessionId,
     queryFn: async () => {
       const res = await fetch(`/api/live/sessions/${sessionId}/board`);
       if (!res.ok) throw new Error('Failed to load auction log');
       const json = await res.json();
-      return json.items ?? [];
+      return {
+        items: json.items ?? [],
+        session_skus: json.session_skus ?? [],
+        live_categories: json.live_categories ?? [],
+      };
     },
     staleTime: 5_000,
+  });
+}
+
+// Reverse a retroactive bind (unbind / change-SKU correction). Delegates to the
+// /unbind endpoint → lensed_unbind (restock + delete). Idempotent. On success,
+// refresh the board (row returns to unbound) and inventory (stock restored).
+export function useUnbind(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (orderId: string) => {
+      const res = await fetch(`/api/live/sessions/${sessionId}/unbind`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: orderId }),
+      });
+      if (!res.ok) {
+        let msg = 'Failed to unbind';
+        try { msg = (await res.json()).error || msg; } catch { /* ignore */ }
+        throw new Error(msg);
+      }
+      return res.json() as Promise<{ ok: boolean; unbound: boolean; restocked_lines: number; restocked_units: number }>;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [KEY, sessionId] });
+      qc.invalidateQueries({ queryKey: ['inventory-skus'] });
+    },
   });
 }
 

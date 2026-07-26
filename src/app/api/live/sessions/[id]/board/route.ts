@@ -128,6 +128,8 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       : null;
     return {
       id: it.id,
+      // Bound rows expose their order_id (= client_idempotency_key) so the UI can unbind them.
+      order_id: it.client_idempotency_key ?? null,
       auction_number: it.sequence,
       status: it.status,
       is_bundle: it.is_bundle,
