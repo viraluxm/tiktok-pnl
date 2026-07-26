@@ -944,7 +944,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
               <span className="text-xs font-medium text-tt-green">Sold</span>
             ) : (
               (() => {
-                const b = notSoldBadge(it.order_status, it.payment_failed);
+                const b = notSoldBadge(it.synced_status, it.order_status, it.payment_failed);
                 return <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>;
               })()
             );
