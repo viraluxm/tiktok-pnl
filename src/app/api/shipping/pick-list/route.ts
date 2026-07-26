@@ -6,6 +6,13 @@ import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } f
 
 export const dynamic = 'force-dynamic';
 
+// Append-only scan log — fire-and-forget via the service role. LOG ONLY: a logging failure must
+// NEVER block or fail a scan, so this never awaits and never throws. The RAW scanned string is the
+// point (diagnose scanner formatting issues, e.g. GS1-128 AI prefixes).
+function logScan(fields: { user_id: string; store_id: string | null; raw_scan: string; resolved: boolean; group_key: string | null; set_aside: boolean; error: string | null }) {
+  try { void createAdminClient().from('scan_log').insert(fields).then(undefined, () => {}); } catch { /* never block a scan */ }
+}
+
 // Statuses that must NOT be packed into the box: cancelled/held (never ship) and already-gone
 // (re-picking = over-pick). Everything else — AWAITING_COLLECTION / AWAITING_SHIPMENT — is packable.
 const DO_NOT_PACK = new Set(['CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
@@ -113,6 +120,7 @@ export async function POST(req: Request) {
     if (data) { seed = [data as SeedRow]; resolvedVia = 'order_id'; }
   }
   if (!seed.length) {
+    logScan({ user_id: user.id, store_id: null, raw_scan: raw, resolved: false, group_key: null, set_aside: false, error: 'No matching order' });
     // Echo exactly what was scanned (+ the parsed tracking) so the picker can flag it.
     return NextResponse.json(
       { error: 'No matching order', scanned_value: raw, parsed_tracking: tracking, resolved_via: resolvedVia },
@@ -384,6 +392,9 @@ export async function POST(req: Request) {
     .eq('user_id', user.id)
     .eq('group_key', groupKey)
     .maybeSingle();
+
+  // Resolved scan — log it (set_aside = box has an unbound-auction order → resolver requires set-aside).
+  logScan({ user_id: user.id, store_id: storeId, raw_scan: raw, resolved: true, group_key: groupKey, set_aside: unboundIds.length > 0, error: null });
 
   return NextResponse.json({
     scanned_value: raw,

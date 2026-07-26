@@ -66,6 +66,28 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     }
   }
 
+  // Join the TRUTHFUL, refreshed TikTok order status from synced_order_ids (the order
+  // sweep). capture_events.order_status is a write-once snapshot frozen at capture time,
+  // so the payment badge must prefer this. Fallback to the snapshot only when the order
+  // isn't in synced_order_ids yet. Read-only; keyed by the same order_id.
+  const syncedStatusByOrderId = new Map<string, string | null>();
+  if (orderIds.length) {
+    const { data: synced, error: syncErr } = await supabase
+      .from('synced_order_ids')
+      .select('order_id, status')
+      .eq('user_id', user.id)
+      .in('order_id', orderIds);
+    if (syncErr) {
+      // Non-fatal: the board still works without the synced-status join (badge falls
+      // back to the capture snapshot).
+      console.error('[live/board] synced_order_ids join error:', syncErr);
+    } else {
+      for (const s of synced ?? []) {
+        syncedStatusByOrderId.set(s.order_id as string, (s.status as string | null) ?? null);
+      }
+    }
+  }
+
   // Join true payout (estimate or settled) by order_id, populated by Reconcile.
   const payoutByOrderId = new Map<string, { net_payout_cents: number | null; payout_settled: boolean }>();
   if (orderIds.length) {
@@ -141,6 +163,11 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       // TikTok order status (read-only display signal): 2=pending/recoverable,
       // 3=paid (RECOVERED — needs review if still not_sold), 4=cancelled. null=unknown.
       order_status: capture?.order_status ?? null,
+      // Truthful refreshed TikTok status string (from synced_order_ids); the payment
+      // badge prefers this over the frozen order_status snapshot. null = not yet swept.
+      synced_status: it.client_idempotency_key
+        ? syncedStatusByOrderId.get(it.client_idempotency_key) ?? null
+        : null,
       // True net payout (estimate or settled), joined from order_payouts (Reconcile).
       net_payout_cents: payout?.net_payout_cents ?? null,
       payout_settled: payout?.payout_settled ?? false,
