@@ -913,19 +913,20 @@
     return totalCost;
   }
 
-  // ASP goal multiplier is CATEGORY-RELATIVE (inventory_skus.category): squish is a 4x-cost
-  // target, electronics 3x. Unknown/absent category falls back to 3x (the pre-category default,
-  // so uncategorized SKUs behave exactly as before). Change these two numbers to retune targets.
-  var CATEGORY_ASP_MULTIPLIER = { squish: 4, electronics: 3 };
-  var DEFAULT_ASP_MULTIPLIER = 3;
+  // ASP goal multiplier. UNIFIED at 4x across categories: both squish and electronics realize
+  // ~2x cost at the median, so a common 4x bar makes hosts directly comparable (an electronics
+  // host isn't flattered by a softer 3x goal). Kept as a per-category map (+ default) so a
+  // category can be re-diverged later by changing a single number.
+  var CATEGORY_ASP_MULTIPLIER = { squish: 4, electronics: 4 };
+  var DEFAULT_ASP_MULTIPLIER = 4;
   function aspMultiplierFor(category) {
     var m = CATEGORY_ASP_MULTIPLIER[String(category || '').toLowerCase()];
     return Number.isFinite(m) ? m : DEFAULT_ASP_MULTIPLIER;
   }
 
-  // ASP goal = Σ (unit_cost × qty × multiplier(category)) over staged SKUs. Cost-WEIGHTED so a
-  // mixed-category staged bundle gets each SKU's own target (squish 4x + electronics 3x), never a
-  // single flat multiplier applied to the blended cost.
+  // ASP goal = Σ (unit_cost × qty × multiplier(category)) over staged SKUs. Cost-WEIGHTED per SKU
+  // (structure preserved so categories can re-diverge); with the current unified 4x this equals
+  // 4× the staged break-even.
   function aspGoalCents() {
     var goal = 0;
     for (var i = 0; i < stagedSkus.length; i++) {
