@@ -48,7 +48,7 @@ function StatTile({
 }) {
   const t = TONE[tone];
   return (
-    <div className={`flex-1 min-w-[9rem] bg-white/[0.03] border ${t.ring} rounded-xl px-4 py-4`}>
+    <div className={`flex-1 min-w-[7.5rem] md:min-w-[9rem] bg-white/[0.03] border ${t.ring} rounded-xl px-4 py-4`}>
       <div className="text-[11px] text-tt-muted uppercase tracking-wide">{label}</div>
       <div className={`mt-1.5 text-2xl font-semibold tabular-nums ${t.value}`}>{value}</div>
       {count && <div className="text-[11px] text-tt-muted mt-1 tabular-nums">{count}</div>}

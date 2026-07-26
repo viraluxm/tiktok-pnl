@@ -79,7 +79,7 @@ export default function TikTokConnect() {
         <div ref={dropdownRef} className="relative">
           <button
             onClick={() => setIsOpen(!isOpen)}
-            className={`flex items-center gap-3 px-4 py-2.5 rounded-xl border text-sm font-medium text-tt-text transition-all cursor-pointer ${
+            className={`flex items-center gap-3 px-4 py-2.5 min-h-[44px] rounded-xl border text-sm font-medium text-tt-text transition-all cursor-pointer ${
               isOpen ? 'border-tt-cyan bg-tt-card' : 'border-tt-border bg-tt-card hover:border-tt-border-hover'
             }`}
           >
@@ -97,7 +97,7 @@ export default function TikTokConnect() {
           </button>
 
           {isOpen && (
-            <div className="absolute right-0 top-full mt-2 w-80 bg-[#1a1a1a] border border-tt-border rounded-xl shadow-2xl shadow-black/60 z-50 overflow-hidden animate-fade-in">
+            <div className="absolute right-0 top-full mt-2 w-[min(20rem,calc(100vw-2rem))] bg-[#1a1a1a] border border-tt-border rounded-xl shadow-2xl shadow-black/60 z-50 overflow-hidden animate-fade-in">
               {/* All stores (aggregate) */}
               <button
                 onClick={() => selectStore('all')}

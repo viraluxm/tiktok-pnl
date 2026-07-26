@@ -9,6 +9,7 @@ import { notSoldBadge } from '@/lib/paymentStatus';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
 import { useStores } from '@/hooks/useStores';
+import MobileDataCard from '@/components/ui/MobileDataCard';
 
 interface UnboundOrder {
   order_id: string;
@@ -200,26 +201,36 @@ export default function ShowsTab() {
           </p>
         </div>
       ) : (
-        <div className="rounded-2xl border border-tt-border bg-tt-card overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
-                <th className="text-left font-medium px-4 py-3">Show</th>
-                <th className="text-left font-medium px-4 py-3">Status</th>
-                <th className="text-right font-medium px-4 py-3">Auctions won</th>
-                <th className="text-right font-medium px-4 py-3">Units sold</th>
-                <th className="text-right font-medium px-4 py-3">Sale value</th>
-                <th className="text-right font-medium px-4 py-3">Cost</th>
-                <th className="text-right font-medium px-4 py-3">Gross profit</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleSessions.map((s) => (
-                <ShowRow key={s.id} session={s} onOpen={setSelectedId} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <>
+          {/* Desktop table (md+) — unchanged layout, scrolls horizontally on tablet if needed. */}
+          <div className="hidden md:block rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
+                  <th className="text-left font-medium px-4 py-3">Show</th>
+                  <th className="text-left font-medium px-4 py-3">Status</th>
+                  <th className="text-right font-medium px-4 py-3">Auctions won</th>
+                  <th className="text-right font-medium px-4 py-3">Units sold</th>
+                  <th className="text-right font-medium px-4 py-3">Sale value</th>
+                  <th className="text-right font-medium px-4 py-3">Cost</th>
+                  <th className="text-right font-medium px-4 py-3">Gross profit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleSessions.map((s) => (
+                  <ShowRow key={s.id} session={s} onOpen={setSelectedId} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile card list (<md) — same sessions, same open handler. */}
+          <div className="md:hidden space-y-3">
+            {visibleSessions.map((s) => (
+              <ShowCardMobile key={s.id} session={s} onOpen={setSelectedId} />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
@@ -235,7 +246,7 @@ function PracticeModeCard() {
       </div>
       <Link
         href="/admin/training/practice-mode"
-        className="inline-flex min-h-[40px] shrink-0 items-center justify-center rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] px-5 text-sm font-semibold text-black transition-opacity hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/50"
+        className="inline-flex min-h-[44px] w-full shrink-0 items-center justify-center rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] px-5 text-sm font-semibold text-black transition-opacity hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/50 sm:min-h-[40px] sm:w-auto"
       >
         Open Practice Mode
       </Link>
@@ -283,6 +294,46 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
         {isLoading ? '…' : money(sum.profitCents)}
       </td>
     </tr>
+  );
+}
+
+// Mobile counterpart of ShowRow — same board hook, same summary, same open
+// handler, rendered as a stacked card (shown only <md via the parent wrapper).
+function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id: string) => void }) {
+  const { data: items = [], isLoading } = useAuctionBoard(session.id);
+  const sum = useMemo(() => summarize(items), [items]);
+
+  // host · store · date — identical wording/tone to the desktop row.
+  const subtitle = [
+    session.host_name ? <span key="h" className="text-tt-text/70">{session.host_name}</span> : null,
+    session.store_name
+      ? <span key="s" className="text-tt-text/70">{session.store_name}</span>
+      : <span key="s" className="font-semibold text-tt-red">Unmapped store</span>,
+    <span key="d">{fmtDate(session.started_at)}</span>,
+  ].filter(Boolean).flatMap((node, i) => (i === 0 ? [node] : [<span key={`sep${i}`}> · </span>, node]));
+
+  return (
+    <MobileDataCard
+      onClick={() => onOpen(session.id)}
+      title={session.channel_handle || 'TikTok Live'}
+      subtitle={subtitle}
+      badge={<StatusBadge status={session.status} />}
+      stats={[
+        { label: 'Auctions won', value: isLoading ? '…' : sum.itemsSold },
+        { label: 'Units sold', value: isLoading ? '…' : sum.unitsSold },
+        { label: 'Sale value', value: isLoading ? '…' : money(sum.saleCents) },
+        { label: 'Cost', value: isLoading ? '…' : money(sum.costCents) },
+        {
+          label: 'Gross profit',
+          wide: true,
+          value: (
+            <span className={isLoading ? '' : profitClass(sum.profitCents)}>
+              {isLoading ? '…' : money(sum.profitCents)}
+            </span>
+          ),
+        },
+      ]}
+    />
   );
 }
 
@@ -533,17 +584,17 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   return (
     <div>
       {/* Header */}
-      <div className="flex items-start justify-between gap-4 mb-5">
+      <div className="flex flex-col gap-4 mb-5 md:flex-row md:items-start md:justify-between">
         <div>
           <button
             onClick={onBack}
-            className="text-xs text-tt-cyan cursor-pointer hover:underline mb-2"
+            className="inline-flex min-h-[44px] items-center text-xs text-tt-cyan cursor-pointer hover:underline mb-2 md:min-h-0"
           >
             ← All shows
           </button>
           {/* Channel handle is the identity (large); "TikTok Live" fallback when unattributed. */}
           <div className="text-xl font-bold">{session.channel_handle || 'TikTok Live'}</div>
-          <div className="text-sm text-tt-muted mt-1 flex items-center gap-3">
+          <div className="text-sm text-tt-muted mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             {/* host · store · date. Host omitted when none; store → red "Unmapped store" when null. */}
             <span className="text-tt-text/70">
               {[
@@ -562,7 +613,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
             )}
           </div>
         </div>
-        <div className="shrink-0 flex items-center gap-2">
+        <div className="shrink-0 flex flex-wrap items-center gap-2">
           <button
             onClick={reconcile}
             disabled={reconciling}
@@ -770,7 +821,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           No auction items captured for this show.
         </div>
       ) : (
-        <div className="rounded-2xl border border-tt-border bg-tt-card overflow-hidden">
+        <div className="hidden md:block rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
@@ -864,17 +915,98 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         </div>
       )}
 
+      {/* Mobile item cards (<md) — same items, same derived figures as the table. */}
+      {!isLoading && items.length > 0 && (
+        <div className="md:hidden space-y-3">
+          {items.map((it) => {
+            const sold = it.status === 'sold';
+            const won = wonCents(it);
+            const cost = it.total_cost_cents;
+            let profit: number | null = null;
+            if (sold && cost != null) {
+              if (it.net_payout_cents != null) profit = it.net_payout_cents - cost;
+              else if (won != null) profit = won - cost;
+            }
+            const resultBadge = sold ? (
+              <span className="text-xs font-medium text-tt-green">Sold</span>
+            ) : (
+              (() => {
+                const b = notSoldBadge(it.order_status, it.payment_failed);
+                return <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>;
+              })()
+            );
+            return (
+              <MobileDataCard
+                key={it.id}
+                thumbnail={
+                  <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg border border-tt-border px-2 text-xs font-mono text-tt-muted tabular-nums">
+                    {it.auction_number}
+                  </span>
+                }
+                badge={resultBadge}
+                title={
+                  <div className="flex flex-col gap-0.5">
+                    {it.tiktok_title ? (
+                      <span className="text-tt-text break-words">{it.tiktok_title}</span>
+                    ) : null}
+                    {it.skus.length === 0 ? (
+                      !it.tiktok_title ? <span className="text-tt-muted font-normal">—</span> : null
+                    ) : (
+                      it.skus.map((sk) => (
+                        <span key={sk.inventory_sku_id} className="text-xs font-normal text-tt-muted break-words">
+                          <span className="font-mono text-tt-cyan">#{sk.sku_number}</span>{' '}
+                          <span>{sk.title || 'Untitled'}</span>
+                          {sk.qty > 1 ? <span> ×{sk.qty}</span> : null}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                }
+                stats={[
+                  { label: 'Qty', value: it.units },
+                  { label: 'ASP Goal', value: money(it.expected_price_cents) },
+                  { label: 'Won price', value: money(sold ? won : null) },
+                  { label: 'Cost', value: money(cost) },
+                  {
+                    label: `Profit ${anyPayout ? '(net)' : '(won−cost)'}`,
+                    value: (
+                      <span className={profit == null ? 'text-tt-muted' : profitClass(profit)}>
+                        {profit == null ? '—' : money(profit)}
+                      </span>
+                    ),
+                  },
+                  {
+                    label: 'Actual payout',
+                    value:
+                      it.net_payout_cents == null ? (
+                        <span className="text-tt-muted">—</span>
+                      ) : (
+                        <>
+                          {money(it.net_payout_cents)}
+                          {!it.payout_settled && (
+                            <span className="ml-1 text-[10px] uppercase text-tt-muted">est</span>
+                          )}
+                        </>
+                      ),
+                  },
+                ]}
+              />
+            );
+          })}
+        </div>
+      )}
+
       {/* In-app (themed) out-of-stock bind confirm — replaces window.confirm.
           Same wording + behavior: Cancel aborts, "Bind anyway" sends allow_negative. */}
       {bindConfirm && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4 sm:items-center"
           onClick={() => setBindConfirm(null)}
           role="dialog"
           aria-modal="true"
         >
           <div
-            className="w-full max-w-md rounded-2xl border border-tt-border bg-tt-card p-5 shadow-xl"
+            className="w-full max-w-md max-h-[90dvh] overflow-y-auto rounded-2xl border border-tt-border bg-tt-card p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="text-sm font-semibold text-tt-text mb-2">Not enough stock</div>

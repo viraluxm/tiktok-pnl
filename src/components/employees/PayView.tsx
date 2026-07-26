@@ -14,6 +14,7 @@ import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
+import MobileDataCard from '@/components/ui/MobileDataCard';
 
 // Pay sub-tab role filter (ported from PR #69). 'all' = everyone (default); others match
 // employees.role. Purely display — narrows which payroll rows show; no new calc/query.
@@ -62,7 +63,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   return (
     <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
       <div className="px-6 py-5 border-b border-tt-border">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-base font-semibold text-tt-text">Pay owed — this pay period</h2>
             <p className="text-xs text-tt-muted mt-1 max-w-md">
@@ -116,7 +117,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
           </div>
         </div>
       </div>
-      <div className="overflow-x-auto">
+      <div className="hidden md:block overflow-x-auto">
         <table className="w-full border-collapse">
           <thead>
             <tr className="border-b border-tt-border">
@@ -159,6 +160,52 @@ export default function PayView({ employees }: { employees: Employee[] }) {
             </tfoot>
           )}
         </table>
+      </div>
+
+      {/* Mobile card list — same rows + values as the desktop table above */}
+      <div className="md:hidden p-4 flex flex-col gap-3">
+        {filteredPay.map(({ employee, hours, pay: owed }) => (
+          <MobileDataCard
+            key={employee.id}
+            title={employee.name}
+            subtitle={titleCase(employee.role)}
+            stats={[
+              { label: 'Hourly Rate', value: fmt(employee.hourly_rate) },
+              { label: 'Hours (period)', value: fmtHours(hours) },
+              {
+                label: 'Pay Owed (period)',
+                value: <span className="text-tt-green font-semibold">{fmt(owed)}</span>,
+                wide: true,
+              },
+            ]}
+          />
+        ))}
+        {filteredPay.length === 0 && (
+          <div className="px-1 py-12 text-center text-tt-muted text-sm">
+            {pay.length === 0
+              ? 'No employees yet'
+              : payRole === 'all'
+                ? 'No pay in this period'
+                : `No ${titleCase(payRole)} staff in this period`}
+          </div>
+        )}
+        {filteredPay.length > 0 && (
+          <div className="rounded-2xl border border-tt-border bg-white/[0.03] p-4">
+            <div className="text-[11px] uppercase tracking-wide text-tt-muted">
+              Total{payRole !== 'all' ? ` · ${titleCase(payRole)}` : ''} for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-4">
+              <div>
+                <div className="text-[11px] text-tt-muted">Hours</div>
+                <div className="text-sm font-semibold text-tt-text tabular-nums">{fmtHours(totals.hours)}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[11px] text-tt-muted">Pay owed</div>
+                <div className="text-sm font-semibold text-tt-green tabular-nums">{fmt(totals.pay)}</div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -13,6 +13,7 @@ import {
   type InventorySku,
 } from '@/hooks/useInventorySkus';
 import { code128ToSvg } from '@/lib/barcode/code128';
+import MobileDataCard from '@/components/ui/MobileDataCard';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
 
@@ -471,7 +472,7 @@ export default function InventorySection() {
             {editingId ? `Edit SKU ${form.sku_number}` : 'Add SKU'}
           </div>
 
-          <div className="flex gap-5">
+          <div className="flex flex-col md:flex-row gap-5">
             {/* Image uploader */}
             <div className="shrink-0">
               <span className="block text-xs text-tt-muted mb-1.5">Image</span>
@@ -535,7 +536,7 @@ export default function InventorySection() {
             )}
 
             {/* Fields */}
-            <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-3 content-start">
+            <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 content-start">
               <Field label="SKU #">
                 <input
                   value={form.sku_number}
@@ -554,7 +555,7 @@ export default function InventorySection() {
                   className="input uppercase"
                 />
               </Field>
-              <Field label="Title" className="col-span-2">
+              <Field label="Title" className="col-span-1 sm:col-span-2">
                 <input
                   value={form.title}
                   onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
@@ -623,7 +624,7 @@ export default function InventorySection() {
                   className="input tabular-nums"
                 />
               </Field>
-              <Field label="Supplier / reorder link" className="col-span-2">
+              <Field label="Supplier / reorder link" className="col-span-1 sm:col-span-2">
                 <input
                   value={form.supplier}
                   onChange={(e) => setForm((f) => ({ ...f, supplier: e.target.value }))}
@@ -641,7 +642,7 @@ export default function InventorySection() {
                 />
                 <span className="block text-[11px] text-tt-muted mt-1">Leave blank to auto-calculate</span>
               </Field>
-              <Field label="Live seller talking points" className="col-span-2 md:col-span-4">
+              <Field label="Live seller talking points" className="col-span-1 sm:col-span-2 md:col-span-4">
                 <span className="block text-[11px] text-tt-muted -mt-1 mb-1.5">
                   Shown in the live overlay when this SKU is scanned
                 </span>
@@ -837,7 +838,9 @@ export default function InventorySection() {
           </p>
         </div>
       ) : (
-        <div className="rounded-2xl border border-tt-border bg-tt-card overflow-hidden">
+        <>
+        {/* Desktop table (md+) — kept intact, made horizontally scrollable so it never overflows the viewport on tablet. */}
+        <div className="hidden md:block rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
@@ -952,6 +955,136 @@ export default function InventorySection() {
             </tbody>
           </table>
         </div>
+
+        {/* Mobile card list (<md) — same rows, same handlers, stacked as cards. */}
+        <div className="md:hidden space-y-3">
+          <label className="flex items-center gap-2 text-sm text-tt-muted px-1 min-h-[44px] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allSelected}
+              onChange={toggleSelectAll}
+              aria-label="Select all SKUs"
+              className="accent-tt-cyan w-5 h-5 cursor-pointer"
+            />
+            Select all
+          </label>
+          {visibleSkus.map((s) => {
+            const negativeQty = (s.qty_on_hand ?? 0) < 0 || s.batches.some((b) => b.qty_remaining < 0);
+            return (
+              <MobileDataCard
+                key={s.id}
+                className={s.is_active ? '' : 'opacity-50'}
+                selected={selectedIds.has(s.id)}
+                thumbnail={
+                  <div className="flex flex-col items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(s.id)}
+                      onChange={() => toggleSelected(s.id)}
+                      aria-label={`Select SKU ${s.sku_number}`}
+                      className="accent-tt-cyan w-5 h-5 cursor-pointer"
+                    />
+                    <Thumb url={s.thumbnail_url} />
+                  </div>
+                }
+                title={
+                  <span className="line-clamp-2">
+                    {s.title || <span className="text-tt-muted">Untitled</span>}
+                  </span>
+                }
+                subtitle={
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono">#{s.sku_number}</span>
+                    {s.shortcut_letter && (
+                      <span className="inline-flex items-center justify-center min-w-6 h-6 px-1.5 rounded-md bg-tt-cyan/15 text-tt-cyan text-xs font-bold">
+                        {s.shortcut_letter}
+                      </span>
+                    )}
+                  </span>
+                }
+                badge={
+                  <button
+                    onClick={() => toggleActive.mutate({ id: s.id, is_active: !s.is_active })}
+                    className="min-h-[44px] px-2 text-xs font-medium cursor-pointer hover:underline"
+                    title={s.is_active ? 'Click to deactivate' : 'Click to activate'}
+                  >
+                    <span className={s.is_active ? 'text-tt-green' : 'text-tt-muted'}>
+                      {s.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                  </button>
+                }
+                stats={[
+                  { label: 'Unit cost', value: fmtCents(s.unit_cost_cents) },
+                  {
+                    label: 'Qty',
+                    value: (
+                      <span className={negativeQty ? 'text-tt-red font-semibold' : 'text-tt-text'}>
+                        {s.qty_on_hand ?? 0}
+                        <span className="ml-1.5 text-[10px] font-normal text-tt-muted" title="cost layers — manage in Edit">
+                          {s.batches.length}L
+                        </span>
+                      </span>
+                    ),
+                  },
+                  {
+                    label: 'Category',
+                    wide: true,
+                    value: (
+                      <select
+                        value={s.category ?? ''}
+                        onChange={(e) =>
+                          setCategory.mutate({ id: s.id, category: e.target.value ? (e.target.value as Category) : null })
+                        }
+                        aria-label={`Category for SKU ${s.sku_number}`}
+                        className="mt-1 w-full min-h-[44px] rounded-lg border border-tt-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text cursor-pointer outline-none focus:border-tt-input-focus"
+                      >
+                        <option value="">—</option>
+                        {CATEGORY_OPTIONS.map((c) => (
+                          <option key={c.value} value={c.value}>{c.label}</option>
+                        ))}
+                      </select>
+                    ),
+                  },
+                ]}
+                actions={
+                  confirmDeleteId === s.id ? (
+                    <>
+                      <span className="flex items-center justify-center rounded-lg border border-tt-border text-xs text-tt-muted">Delete?</span>
+                      <button
+                        onClick={() => onDelete(s.id)}
+                        className="rounded-lg border border-tt-red/50 text-sm font-semibold text-tt-red cursor-pointer hover:bg-tt-red/10"
+                      >
+                        Yes
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="rounded-lg border border-tt-border text-sm text-tt-muted cursor-pointer hover:bg-tt-card-hover"
+                      >
+                        No
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => openEdit(s)}
+                        className="rounded-lg border border-tt-border text-sm font-semibold text-tt-cyan cursor-pointer hover:bg-tt-card-hover"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(s.id)}
+                        className="rounded-lg border border-tt-border text-sm text-tt-muted cursor-pointer hover:bg-tt-card-hover"
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )
+                }
+              />
+            );
+          })}
+        </div>
+        </>
       )}
     </div>
   );

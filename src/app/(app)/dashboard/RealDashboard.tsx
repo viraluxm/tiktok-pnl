@@ -252,13 +252,13 @@ export default function RealDashboard() {
     <div className="min-h-screen bg-tt-bg">
       <Header />
 
-      <div className="px-8 py-6">
+      <div className="px-4 py-4 md:px-8 md:py-6">
         <UnmappedSessionsBanner />
         <TikTokConnect />
 
         {/* Ad Account Connection */}
         {isConnected && (
-          <div className="mb-4 flex items-center gap-3">
+          <div className="mb-4 flex items-center gap-3 flex-wrap">
             {bizConnected ? (
               <div className="flex items-center gap-3 px-4 py-2 rounded-lg border border-tt-border bg-tt-card">
                 <span className="text-xs text-tt-muted">Ad Account:</span>
@@ -318,13 +318,13 @@ export default function RealDashboard() {
           activeQuickFilter={activeQuickFilter}
         />
 
-        {/* View Tabs */}
-        <div className="flex gap-2 mb-8">
+        {/* View Tabs — horizontally scrollable on mobile (edge-to-edge), static row on desktop */}
+        <div className="flex gap-2 mb-6 md:mb-8 overflow-x-auto no-scrollbar snap-x -mx-4 px-4 md:mx-0 md:px-0">
           {tabs.map((tab) => (
             <button
               key={tab.value}
               onClick={() => setActiveView(tab.value)}
-              className={`px-6 py-2.5 rounded-lg border text-sm font-medium cursor-pointer transition-all ${
+              className={`shrink-0 snap-start min-h-[44px] px-4 md:px-6 py-2.5 rounded-lg border text-sm font-medium cursor-pointer transition-all ${
                 activeView === tab.value
                   ? 'bg-tt-cyan text-black border-tt-cyan font-semibold'
                   : 'border-tt-border text-tt-muted hover:bg-tt-card-hover'

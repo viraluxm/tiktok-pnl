@@ -98,8 +98,8 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
     <div className="mb-8 animate-fade-in">
       <div className="bg-gradient-to-br from-[rgba(105,201,208,0.15)] to-[rgba(105,201,208,0.05)] border border-[rgba(105,201,208,0.3)] rounded-[14px] p-6 backdrop-blur-xl">
         {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <div>
+        <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
+          <div className="min-w-0">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-tt-cyan animate-pulse" />
               <h3 className="text-sm font-semibold text-tt-cyan uppercase tracking-wide">This month (forecast)</h3>
@@ -108,7 +108,7 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
               1–{daysInMonth} {monthName} {currentYear} · based on last 30 days avg
             </p>
           </div>
-          <div className="text-[11px] text-tt-muted bg-tt-card px-2.5 py-1 rounded-full border border-tt-border">
+          <div className="text-[11px] text-tt-muted bg-tt-card px-2.5 py-1 rounded-full border border-tt-border whitespace-nowrap">
             {daysRemaining} days remaining
           </div>
         </div>
@@ -145,7 +145,7 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
 
         {/* Net profit section */}
         <div className="mt-4 pt-4 border-t border-[rgba(105,201,208,0.2)]">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs text-tt-muted">Net profit</span>
@@ -163,9 +163,9 @@ export default function ForecastCard({ entries, costsMap }: ForecastCardProps) {
               </div>
             </div>
             {/* Progress bar for month */}
-            <div className="flex flex-col items-end gap-1">
+            <div className="flex flex-col items-start sm:items-end gap-1 w-full sm:w-auto">
               <span className="text-[11px] text-tt-muted">{Math.round((dayOfMonth / daysInMonth) * 100)}% through month</span>
-              <div className="w-32 h-1.5 bg-[rgba(255,255,255,0.1)] rounded-full overflow-hidden">
+              <div className="w-full sm:w-32 h-1.5 bg-[rgba(255,255,255,0.1)] rounded-full overflow-hidden">
                 <div
                   className="h-full bg-tt-cyan rounded-full transition-all"
                   style={{ width: `${(dayOfMonth / daysInMonth) * 100}%` }}
