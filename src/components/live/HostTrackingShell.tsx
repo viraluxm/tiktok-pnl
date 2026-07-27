@@ -6,9 +6,9 @@ import { useLiveSession, useEndSession } from '@/hooks/useLiveSessions';
 import { useInventorySkus, type InventorySku } from '@/hooks/useInventorySkus';
 import { useAuctionBoard, useQuickClose, useDeleteAuctionItem, type AuctionResult } from '@/hooks/useLiveAuctions';
 import { notSoldBadge } from '@/lib/paymentStatus';
+import { ASP_GOAL_MULTIPLIER, aspGoalCents } from '@/lib/asp';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
-const EXPECTED_MULTIPLIER = 3;
 
 interface SelLine {
   sku_id: string;
@@ -50,7 +50,7 @@ function computeFromSkus(skus: { qty: number; unit_cost_cents: number | null; sk
     if (l.unit_cost_cents == null) totalCost = null;
     else if (totalCost != null) totalCost += l.unit_cost_cents * l.qty;
   }
-  const expected = totalCost == null ? null : totalCost * EXPECTED_MULTIPLIER;
+  const expected = aspGoalCents(totalCost);
   const itemsStr = skus.map((l) => `${l.sku_number} ${l.title}${l.qty > 1 ? ` ×${l.qty}` : ''}`).join('; ');
   return { units, totalCost, expected, itemsStr };
 }
@@ -265,7 +265,7 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
       it.units,
       it.logged_at,
       it.total_cost_cents == null ? 'Cost missing' : fmtCents(it.total_cost_cents),
-      it.expected_price_cents == null ? 'Cost missing' : fmtCents(it.expected_price_cents),
+      it.total_cost_cents == null ? 'Cost missing' : fmtCents(aspGoalCents(it.total_cost_cents)),
     ]);
     const csv = [header, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -310,7 +310,7 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
       itemsStr: b.skus.map((x) => `${x.sku_number} ${x.title}${x.qty > 1 ? ` ×${x.qty}` : ''}`).join('; ') || '—',
       units: b.units,
       totalCost: b.total_cost_cents,
-      expected: b.expected_price_cents,
+      expected: aspGoalCents(b.total_cost_cents), // recompute from cost (not the vestigial stored expected_price_cents)
       loggedAt: b.logged_at,
       pendingState: undefined as PendingRow['state'] | undefined,
       error: undefined as string | undefined,

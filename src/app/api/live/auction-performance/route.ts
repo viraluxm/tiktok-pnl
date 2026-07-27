@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { ASP_GOAL_MULTIPLIER } from '@/lib/asp';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,7 +16,7 @@ export const dynamic = 'force-dynamic';
 //     lai.id,
 //     lai.store_id,
 //     sum(s.unit_cost_cents_snapshot * s.qty)     as break_even_cents,
-//     sum(s.unit_cost_cents_snapshot * s.qty) * 3 as asp_goal_cents,
+//     sum(s.unit_cost_cents_snapshot * s.qty) * 4 as asp_goal_cents (see @/lib/asp),
 //     ce.selling_price_cents                       as final_price_cents
 //   from live_auction_items lai
 //   join live_auction_item_skus s on s.auction_item_id = lai.id
@@ -143,7 +144,7 @@ export async function GET(req: Request) {
       (sum, s) => sum + (Number(s.unit_cost_cents_snapshot) || 0) * (Number(s.qty) || 1),
       0,
     );
-    perAuction.push({ groupKey: 'team', breakEven, aspGoal: breakEven * 3, finalPrice });
+    perAuction.push({ groupKey: 'team', breakEven, aspGoal: breakEven * ASP_GOAL_MULTIPLIER, finalPrice });
   }
 
   // ── STEP 2: aggregate. Keyed by groupKey so a future GROUP BY host_id is a

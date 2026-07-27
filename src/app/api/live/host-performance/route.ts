@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { ASP_GOAL_MULTIPLIER } from '@/lib/asp';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,7 @@ export const dynamic = 'force-dynamic';
 //   with attributed as (
 //     select ls.host_id, lai.closed_at,
 //            sum(s.unit_cost_cents_snapshot * s.qty)     as break_even_cents,
-//            sum(s.unit_cost_cents_snapshot * s.qty) * 3 as asp_goal_cents,
+//            sum(s.unit_cost_cents_snapshot * s.qty) * 4 as asp_goal_cents (see @/lib/asp),
 //            ce.selling_price_cents                       as final_price
 //     from live_auction_items lai
 //     join live_sessions ls
@@ -118,7 +119,7 @@ export async function GET() {
       (sum, s) => sum + (Number(s.unit_cost_cents_snapshot) || 0) * (Number(s.qty) || 1),
       0,
     );
-    const aspGoal = breakEven * 3;
+    const aspGoal = breakEven * ASP_GOAL_MULTIPLIER;
     const inAsp7 = a.closed_at != null && new Date(a.closed_at).getTime() >= asp7CutoffMs;
 
     const agg = byHost.get(hostId) ?? { asp7_n: 0, asp7_hits: 0, be14_n: 0, be14_below: 0 };
