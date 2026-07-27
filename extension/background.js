@@ -307,6 +307,16 @@ async function handleAccountDetected(account, room) {
     score: account.score || null, strong: incomingStrong, room: r || null, session: sid ? diagRedactId(sid) : null,
   });
 
+  // GUARDRAIL 0 (BACKSTOP) — the incoming handle must be a KNOWN channel (present in
+  // channel_store_map) before it may touch live_sessions.channel_handle. This is the
+  // root-cause fix: it applies to the FIRST write too, so garbage can no longer win the
+  // first-write race and stick. Unknown handles are split for triage only: 'plausible'
+  // (a real-but-unmapped channel like infinit.deals → add it to the map) vs 'garbage'
+  // (UI text like "10s"/"English"/"Close" → the DOM lied). Neither is ever written.
+  await ensureChannelSet();
+  var known = account.handle ? isKnownChannel(account.handle) : false;
+  var unknownClass = (account.handle && !known) ? classifyUnknownHandle(account.handle) : null;
+
   // Read the current channel_handle FIRST (authoritative), then the storage map, so the
   // non-destructive guard can compare against what's already persisted.
   var existingHandle = null;
@@ -328,19 +338,38 @@ async function handleAccountDetected(account, room) {
     prevHandle = prev.handle || null;
     if (existingHandle == null) existingHandle = prevHandle; // fall back to cache when DB unread (e.g. unauthenticated)
 
-    // GUARDRAIL 1 — decide if the incoming handle may be written. Never let a WEAK handle
-    // OVERWRITE a DIFFERENT already-set handle (the jumbosteals→"Close" corruption). First
-    // write is allowed; identical is a no-op; only a STRONG (sec_uid) identity may overwrite.
+    // GUARDRAIL 1 — decide if the incoming handle may be written, on TOP of the known-set
+    // floor (GUARDRAIL 0) above. Order matters: an UNKNOWN handle is rejected before the
+    // first-write branch, so garbage can no longer win the first-write race and stick
+    // (the actual root cause). Then: first write of a KNOWN handle is allowed; identical
+    // is a no-op; only a STRONG (sec_uid) identity may overwrite a different known handle;
+    // a WEAK handle never clobbers a different existing one (the jumbosteals→"Close" case).
     var decision;
     if (!account.handle) decision = 'no_handle';
+    else if (!known) decision = 'unknown_' + unknownClass; // 'unknown_plausible' | 'unknown_garbage' → WRITE NOTHING (backstop)
     else if (!existingHandle) { acceptHandle = account.handle; decision = 'first_write'; }
     else if (existingHandle === account.handle) decision = 'unchanged';
     else if (incomingStrong) { acceptHandle = account.handle; decision = 'overwrite_strong'; }
     else decision = 'rejected_weak_overwrite'; // KEEP existing — do NOT clobber
-    if (account.handle && existingHandle && existingHandle !== account.handle) {
+    // Unknown-handle triage — distinct, always-on messages so the operator can tell
+    // "add this to the map" from "the DOM lied" straight from the diagnostics.
+    if (account.handle && !known) {
+      if (unknownClass === 'plausible') {
+        diagCrit('channel.unmapped', 'warn',
+          'unmapped channel "' + account.handle + '" — handle-shaped but NOT in channel_store_map; add it to the map to attribute this session',
+          { handle: account.handle, classification: 'plausible', action: 'not_written', source: src, room: r || null, session: sid ? diagRedactId(sid) : null });
+      } else {
+        diagCrit('channel.rejected', 'warn',
+          'ignored "' + account.handle + '" — not a known channel and looks like UI text (the DOM lied); nothing written',
+          { handle: account.handle, classification: 'garbage', action: 'not_written', source: src, room: r || null, session: sid ? diagRedactId(sid) : null });
+      }
+    }
+    // Genuine channel→channel change on a KNOWN incoming handle (rare). Unknown incoming
+    // never reaches here as "applied" — only a strong known identity may overwrite.
+    if (known && account.handle && existingHandle && existingHandle !== account.handle) {
       diagCrit('channel.overwrite', decision === 'rejected_weak_overwrite' ? 'warn' : 'info',
         'channel_handle "' + existingHandle + '" → "' + account.handle + '" (' + decision + ')',
-        { old: existingHandle, new: account.handle, source: src, strong: incomingStrong, applied: decision !== 'rejected_weak_overwrite' });
+        { old: existingHandle, new: account.handle, source: src, strong: incomingStrong, applied: decision === 'overwrite_strong' });
     }
     map[mapKey] = {
       sec_uid: account.secUid || prev.sec_uid || null,
@@ -365,7 +394,10 @@ async function handleAccountDetected(account, room) {
   // 2) DB persist to live_sessions.channel_* — PARTIAL patch: include ONLY fields the message
   //    actually carries (GUARDRAIL 1). A DOM-only message never NULLs an existing sec_uid /
   //    nickname / account_id, and the handle is only written when the guard above accepted it.
-  if (sid && isAuthenticated()) {
+  //    BACKSTOP: if the incoming handle is unknown, write NOTHING at all (not even sec_uid) —
+  //    an unmapped channel surfaces via diagnostics and is never persisted. A no-handle
+  //    identity (payload sec_uid only) is unaffected and keeps the prior behavior.
+  if (sid && isAuthenticated() && (known || !account.handle)) {
     var patch = {};
     if (account.secUid) patch.channel_sec_uid = account.secUid;
     if (account.nickname) patch.channel_nickname = account.nickname;
@@ -380,6 +412,15 @@ async function handleAccountDetected(account, room) {
       }
     }
   }
+
+  // Report the backstop verdict back to the content overlay so it can show the truth
+  // (known handle / ⚠ unmapped / suppress garbage) instead of whatever the DOM scraped.
+  return {
+    handle: account.handle || null,
+    known: known,
+    classification: unknownClass, // 'plausible' | 'garbage' | null (known/no-handle)
+    written: !!acceptHandle,
+  };
 }
 
 // Best-effort "mark ended" when the live tab closes. Close handlers are unreliable in
@@ -940,6 +981,58 @@ async function fetchAllSkus() {
     console.error('[LENSED][BG] fetch SKUs error:', e);
     return [];
   }
+}
+
+// ─── Channel → store map (the KNOWN channel allow-list) ──────────────
+// The BACKSTOP that gates channel_handle writes. Only a handle present in
+// channel_store_map may be persisted to live_sessions.channel_handle; anything else
+// is UI text ("10s", "English", "Close") or an unmapped-but-real channel and must
+// NOT corrupt the session. Cached with a short TTL and refreshed lazily — the map is
+// a handful of rows, so this is cheap. Fetched the SAME way SKUs/hosts are.
+var cachedChannelSet = null;      // Set<string> of normalized channel_name, or null until first load
+var cachedChannelSetTs = 0;
+var CHANNEL_MAP_TTL_MS = 5 * 60 * 1000;
+
+function normChannel(h) { return String(h == null ? '' : h).trim().replace(/^@+/, '').toLowerCase(); }
+
+// Load/refresh the known-channel set. Never CLEARS an existing set on a transient
+// failure — a fetch error must not open the gate to garbage, so we keep the last
+// good set. Returns the set (possibly null if never loaded and unauthenticated).
+async function ensureChannelSet(force) {
+  var now = Date.now();
+  if (!force && cachedChannelSet && (now - cachedChannelSetTs) < CHANNEL_MAP_TTL_MS) return cachedChannelSet;
+  if (!isAuthenticated()) return cachedChannelSet;
+  try {
+    var rows = await supabaseGet('channel_store_map', 'select=channel_name');
+    var set = new Set();
+    (rows || []).forEach(function (r) { var n = normChannel(r && r.channel_name); if (n) set.add(n); });
+    cachedChannelSet = set;
+    cachedChannelSetTs = now;
+  } catch (e) {
+    console.warn('[LENSED][BG] channel_store_map fetch failed (non-fatal, keeping last set):', String((e && e.message) || e));
+  }
+  return cachedChannelSet;
+}
+
+// A handle is writable ONLY if it is a known channel. If the set never loaded
+// (null), nothing is known → nothing is written (fail CLOSED, never open).
+function isKnownChannel(handle) {
+  if (!cachedChannelSet) return false;
+  return cachedChannelSet.has(normChannel(handle));
+}
+
+// Heuristic triage for a handle that is NOT in the known set. Used ONLY to label the
+// operator's diagnostics/overlay — "add this to the map" (plausible) vs "the DOM lied"
+// (garbage). It NEVER gates a write: unknown handles are never persisted regardless of
+// this label. Imperfect classification is harmless — it only changes the message.
+var CHANNEL_UI_STOPWORDS = /^(close|cancel|save|live|lives|following|followers|follow|share|shared|more|less|back|next|prev|done|settings?|profile|accounts?|switch|mute|unmute|report|block|gifts?|ranking?s?|top|viewers?|sold|add|remove|edit|delete|english|spanish|language|search|home|shop|cart|checkout|explore|inbox|messages?|comments?|likes?|host|end|start|now|new|hot|sale|deals?|online|offline)$/i;
+function classifyUnknownHandle(handle) {
+  var h = normChannel(handle);
+  if (!h) return 'garbage';
+  if (/^\d+\s*[a-z]?$/i.test(h)) return 'garbage';   // timers / counts: "10s", "5", "3m"
+  if (h.length < 5) return 'garbage';                // too short to be a real channel handle
+  if (CHANNEL_UI_STOPWORDS.test(h)) return 'garbage'; // known overlay/button words
+  return 'plausible';                                // handle-shaped, not obviously UI → candidate for the map
 }
 
 // ─── Live host (Team/Employees roster) ───────────────────────────────
@@ -2010,8 +2103,14 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
     // Detected streaming channel/creator identity forwarded from content. Capture it
     // (console + storage + best-effort DB). Fire-and-forget; never blocks anything.
     if (sender && sender.tab && sender.tab.id != null) liveTabId = sender.tab.id;
-    handleAccountDetected(message.account, message.roomId);
-    return;
+    // Reply with the backstop verdict so the overlay reflects the truth. Async; content
+    // tolerates a missing/late reply (its callback swallows lastError), so this is
+    // backward-safe with any older content script.
+    handleAccountDetected(message.account, message.roomId).then(
+      function (outcome) { try { sendResponse(outcome || {}); } catch (_) {} },
+      function () { try { sendResponse({}); } catch (_) {} }
+    );
+    return true; // keep the channel open for the async sendResponse
   }
 
   if (message.type === 'TIKTOK_SALE') {
