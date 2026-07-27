@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useStores } from '@/hooks/useStores';
+import { useEmployees } from '@/hooks/useEmployees';
 import { printOrderTickets, type PickTicketGroup } from '@/lib/shipping/pickTickets';
 
 interface BoxSku {
@@ -68,6 +69,120 @@ const firstUnpickedIdx = (lines: PickLine[], c: Record<string, number>) => {
   return i === -1 ? 0 : i;
 };
 
+// Small in-modal picker dropdown — replaces the native <select>, whose options menu on
+// mobile opened detached toward the top-left of the screen. This opens in-flow directly
+// below the field (so it stays inside the modal and viewport), scrolls internally when the
+// list is long, highlights the selection, closes on pick / outside-tap / Escape, and is
+// keyboard accessible (Arrow/Home/End/Enter/Escape via aria-activedescendant). Presentational
+// only: same selected id in, same id out — no effect on filtering or the picker flow.
+function PickerCombobox({
+  options,
+  value,
+  onChange,
+  placeholder,
+}: {
+  options: { id: string; name: string }[];
+  value: string;
+  onChange: (id: string) => void;
+  placeholder: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selected = options.find((o) => o.id === value) ?? null;
+
+  // Close when tapping/clicking anywhere outside the field + list.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [open]);
+
+  // Keep the highlighted row visible while arrow-navigating a long, internally-scrolling list.
+  useEffect(() => {
+    if (!open) return;
+    document.getElementById(`picker-opt-${options[highlight]?.id ?? ''}`)?.scrollIntoView({ block: 'nearest' });
+  }, [open, highlight, options]);
+
+  const choose = (id: string) => { onChange(id); setOpen(false); };
+
+  // Open with the current selection (or first row) highlighted — set in the handler, not an
+  // effect, so there's no cascading render.
+  const openList = () => {
+    const i = options.findIndex((o) => o.id === value);
+    setHighlight(i >= 0 ? i : 0);
+    setOpen(true);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!open) {
+      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openList(); }
+      return;
+    }
+    switch (e.key) {
+      case 'ArrowDown': e.preventDefault(); setHighlight((h) => Math.min(options.length - 1, h + 1)); break;
+      case 'ArrowUp': e.preventDefault(); setHighlight((h) => Math.max(0, h - 1)); break;
+      case 'Home': e.preventDefault(); setHighlight(0); break;
+      case 'End': e.preventDefault(); setHighlight(options.length - 1); break;
+      case 'Enter':
+      case ' ': { e.preventDefault(); const o = options[highlight]; if (o) choose(o.id); break; }
+      case 'Escape': e.preventDefault(); setOpen(false); break;
+      case 'Tab': setOpen(false); break;
+      default: break;
+    }
+  };
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        id="picker-select"
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls="picker-listbox"
+        aria-activedescendant={open && options[highlight] ? `picker-opt-${options[highlight].id}` : undefined}
+        onClick={() => (open ? setOpen(false) : openList())}
+        onKeyDown={onKeyDown}
+        disabled={options.length === 0}
+        className="w-full min-h-[52px] flex items-center justify-between gap-2 bg-tt-card border border-tt-border rounded-xl px-4 py-3 text-base text-left cursor-pointer disabled:opacity-60"
+      >
+        <span className={selected ? 'text-tt-text' : 'text-tt-muted'}>{selected ? selected.name : placeholder}</span>
+        <span className={`shrink-0 text-tt-muted transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden>▾</span>
+      </button>
+      {open && options.length > 0 && (
+        <ul
+          id="picker-listbox"
+          role="listbox"
+          className="mt-1 max-h-60 overflow-y-auto rounded-xl border border-tt-border bg-tt-card py-1"
+        >
+          {options.map((o, i) => {
+            const isSel = o.id === value;
+            const isHi = i === highlight;
+            return (
+              <li
+                key={o.id}
+                id={`picker-opt-${o.id}`}
+                role="option"
+                aria-selected={isSel}
+                onClick={() => choose(o.id)}
+                onPointerEnter={() => setHighlight(i)}
+                className={`px-4 py-3 min-h-[44px] flex items-center justify-between gap-2 cursor-pointer ${isHi ? 'bg-tt-card-hover' : ''}`}
+              >
+                <span className="break-words text-tt-text">{o.name}</span>
+                {isSel && <span className="shrink-0 text-tt-green" aria-hidden>✓</span>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function ShippingTab() {
   const [focus, setFocus] = useState(false);
   const [screen, setScreen] = useState<Screen>('ready');
@@ -81,8 +196,19 @@ export default function ShippingTab() {
   const [abandon, setAbandon] = useState<null | { scan: string | null }>(null);
   const [holding, setHolding] = useState(false);
   const [value, setValue] = useState('');
+  // Picker gate: who is packing this session. Selected in a small modal that the existing
+  // "Start scanning" button opens; UI-only (no persistence), read by focus mode to show it.
+  const [pickerId, setPickerId] = useState('');
+  const [pickerModalOpen, setPickerModalOpen] = useState(false);
   const { data: storesData } = useStores();
   const activeStore = storesData?.activeStore ?? 'all';
+  // Eligible pickers: role 'fulfillment' AND status active/probation (no hosts, no former).
+  const { employees } = useEmployees();
+  const pickers = useMemo(
+    () => employees.filter((e) => e.role?.trim().toLowerCase() === 'fulfillment' && (e.status === 'active' || e.status === 'probation')),
+    [employees],
+  );
+  const pickerName = useMemo(() => employees.find((e) => e.id === pickerId)?.name ?? '', [employees, pickerId]);
   // Tracking coverage for the active store (label-barcode scanning depends on stored tracking).
   const [coverage, setCoverage] = useState<null | { total_ac: number; with_tracking: number; missing_tracking: number }>(null);
   const [syncing, setSyncing] = useState(false);
@@ -214,6 +340,10 @@ export default function ShippingTab() {
   const beginHold = () => { setHolding(true); holdTimer.current = setTimeout(() => { setHolding(false); exitFullscreen(); setFocus(false); backToReady(); }, 900); };
   const cancelHold = () => { setHolding(false); if (holdTimer.current) clearTimeout(holdTimer.current); };
 
+  // Confirm the picker, then enter the EXISTING scanner (startScanning, unchanged). When the
+  // modal is opened mid-session via "Change picker" (already in focus), just close it.
+  const confirmPicker = () => { if (!pickerId) return; setPickerModalOpen(false); if (!focus) startScanning(); };
+
   const storeName = activeStore === 'all'
     ? 'All stores'
     : (storesData?.stores?.find((s) => s.id === activeStore)?.name ?? 'this store');
@@ -309,6 +439,33 @@ export default function ShippingTab() {
     }
   }
 
+  // ── picker-selection modal (small, opened by "Start scanning"; also by "Change picker") ──
+  const pickerModal = pickerModalOpen ? (
+    <div className="fixed inset-0 z-[210] bg-black/60 flex items-center justify-center p-6">
+      <div className="bg-tt-card border border-tt-border rounded-2xl p-6 max-w-sm w-full">
+        <div className="text-lg font-bold text-tt-text">Who&apos;s picking?</div>
+        <label htmlFor="picker-select" className="block text-xs uppercase tracking-wide text-tt-muted mt-4 mb-2">Picker</label>
+        <PickerCombobox
+          options={pickers}
+          value={pickerId}
+          onChange={setPickerId}
+          placeholder="Select your name"
+        />
+        {pickers.length === 0 && (
+          <div className="mt-3 text-sm text-tt-muted">No active fulfillment employees found. Add one with role “Fulfillment” in the Team tab.</div>
+        )}
+        <div className="mt-5 flex gap-3">
+          <button onClick={() => setPickerModalOpen(false)} className="flex-1 min-h-[44px] py-3 rounded-xl border border-tt-border text-tt-text cursor-pointer">Cancel</button>
+          <button
+            onClick={confirmPicker}
+            disabled={!pickerId}
+            className={`flex-1 min-h-[44px] py-3 rounded-xl font-bold transition-opacity ${pickerId ? 'bg-tt-green text-black cursor-pointer hover:opacity-90' : 'bg-tt-card-hover text-tt-muted cursor-not-allowed'}`}
+          >Continue to scanning</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   // ── idle (tab) view ──
   if (!focus) {
     return (
@@ -317,7 +474,7 @@ export default function ShippingTab() {
         <div className="text-sm text-tt-muted mt-1 mb-6">Print your order-id pick tickets, then scan them to pick each box. Full-screen, scanner-driven.</div>
         <div className="flex flex-wrap items-center gap-3">
           <button
-            onClick={startScanning}
+            onClick={() => setPickerModalOpen(true)}
             className="w-full sm:w-auto min-h-[56px] px-8 py-5 rounded-2xl bg-tt-green text-black text-xl font-extrabold cursor-pointer hover:opacity-90 transition-opacity shadow-lg"
           >
             ▶ Start scanning
@@ -389,6 +546,7 @@ export default function ShippingTab() {
         </div>
         {err && <div className="mt-4 text-sm text-tt-red">{err}</div>}
         {pickedToday > 0 && <div className="mt-6 text-sm text-tt-muted">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked this session</div>}
+        {pickerModal}
       </div>
     );
   }
@@ -461,6 +619,12 @@ export default function ShippingTab() {
             </div>
             <div className="mt-8 text-3xl font-bold break-words">Ready to scan</div>
             <div className="mt-2 text-base text-tt-muted break-words">Scan a shipping label to load the box</div>
+            {pickerName && (
+              <div className="mt-3 text-sm text-tt-muted break-words">
+                Picking as <span className="font-semibold text-tt-text">{pickerName}</span>
+                <button onClick={() => setPickerModalOpen(true)} className="ml-2 underline cursor-pointer">Change picker</button>
+              </div>
+            )}
             {loading && (
               <div className="mt-6 flex items-center justify-center gap-3 text-tt-cyan font-semibold text-lg break-words">
                 <span className="w-5 h-5 border-2 border-tt-cyan border-t-transparent rounded-full animate-spin" />
@@ -631,6 +795,8 @@ export default function ShippingTab() {
           </div>
         </div>
       )}
+
+      {pickerModal}
     </div>,
     document.body,
   );
