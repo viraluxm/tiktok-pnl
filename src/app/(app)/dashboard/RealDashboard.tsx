@@ -19,7 +19,6 @@ import { useTikTokBusiness } from '@/hooks/useTikTokBusiness';
 import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
-import ReturnsTab from '@/components/dashboard/ReturnsTab';
 import ShowsTab from '@/components/shows/ShowsTab';
 import ShippingTab from '@/components/shipping/ShippingTab';
 import EmployeesTab from '@/components/employees/EmployeesTab';
@@ -30,7 +29,7 @@ const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: fal
 // P&L renders chart.js — load client-only, same as Charts.
 const PnlTab = dynamic(() => import('@/components/pnl/PnlTab'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'pnl' | 'inventory' | 'shows' | 'shipping' | 'returns' | 'employees';
+type ViewTab = 'dashboard' | 'pnl' | 'inventory' | 'shows' | 'shipping' | 'employees';
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -82,7 +81,7 @@ export default function RealDashboard() {
   const { data: videoMetrics } = useShopVideos(filters.dateFrom, filters.dateTo);
   const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
   const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
-  const { data: returnsData, isLoading: returnsLoading } = useReturns(filters.dateFrom, filters.dateTo);
+  const { data: returnsData } = useReturns(filters.dateFrom, filters.dateTo);
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -244,7 +243,6 @@ export default function RealDashboard() {
     { label: 'Inventory', value: 'inventory' },
     { label: 'Shows', value: 'shows' },
     { label: 'Shipping', value: 'shipping' },
-    { label: 'Returns', value: 'returns' },
     { label: 'Team', value: 'employees' },
   ];
 
@@ -356,11 +354,6 @@ export default function RealDashboard() {
         {/* Shipping View */}
         {activeView === 'shipping' && (
           <ShippingTab />
-        )}
-
-        {/* Returns View */}
-        {activeView === 'returns' && (
-          <ReturnsTab data={returnsData} isLoading={returnsLoading} />
         )}
 
         {/* Team / Employees View */}
