@@ -109,6 +109,32 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     }
   }
 
+  // ── PRICE FALLBACK for bound rows WITHOUT a capture (never-captured orders bound via the
+  //    coverage panel): use synced_order_ids (gmv − shipping) as the shipping-excluded product
+  //    revenue basis (matches capture selling_price ~98%). This is READ-SIDE only — no synthetic
+  //    capture_events row is written, so the "never captured" capture-health meter stays truthful.
+  //    Marked as won_price_source='order_data' so the row is visibly traceable as order-data, not
+  //    capture, revenue. Capture price stays authoritative whenever a capture exists.
+  const syncedPriceByOrderId = new Map<string, number>();
+  const noCaptureBound = orderIds.filter((oid) => !captureByOrderId.has(oid));
+  if (noCaptureBound.length) {
+    for (let i = 0; i < noCaptureBound.length; i += 300) {
+      const chunk = noCaptureBound.slice(i, i + 300);
+      const { data: sp, error: spErr } = await supabase
+        .from('synced_order_ids')
+        .select('order_id, gmv, shipping')
+        .eq('user_id', user.id)
+        .in('order_id', chunk);
+      if (spErr) { console.error('[live/board] synced-price fallback error:', spErr); break; }
+      for (const r of sp ?? []) {
+        const gmv = r.gmv == null ? null : Number(r.gmv);
+        if (gmv == null || !Number.isFinite(gmv)) continue;
+        const ship = r.shipping == null ? 0 : Number(r.shipping) || 0;
+        syncedPriceByOrderId.set(String(r.order_id), Math.round((gmv - ship) * 100));
+      }
+    }
+  }
+
   const itemIds = (items ?? []).map((i) => i.id);
   let skuRows: Record<string, unknown>[] = [];
   if (itemIds.length) {
@@ -148,6 +174,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     const payout = it.client_idempotency_key
       ? payoutByOrderId.get(it.client_idempotency_key) ?? null
       : null;
+    // Won price: capture is authoritative; else fall back to synced order data (gmv − shipping)
+    // for a bound row with no capture (a bound never-captured order). Track the source.
+    const captureWon = capture?.won_price_cents ?? null;
+    const syncedWon = it.client_idempotency_key ? syncedPriceByOrderId.get(it.client_idempotency_key) ?? null : null;
+    const wonPrice = captureWon ?? syncedWon;
+    const wonSource: 'capture' | 'order_data' | null =
+      captureWon != null ? 'capture' : (syncedWon != null ? 'order_data' : null);
     return {
       id: it.id,
       // Bound rows expose their order_id (= client_idempotency_key) so the UI can unbind them.
@@ -157,8 +190,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       is_bundle: it.is_bundle,
       expected_price_cents: it.expected_price_cents,
       sold_price_cents: it.sold_price_cents,
-      // Real winning bid from the captured sale (item price, excl. shipping).
-      won_price_cents: capture?.won_price_cents ?? null,
+      // Real winning bid: capture price when captured, else order-data (gmv−shipping) fallback.
+      won_price_cents: wonPrice,
+      // Where won_price came from: 'capture' (authoritative) | 'order_data' (never-captured bind) | null.
+      won_price_source: wonSource,
       // TikTok auction item title from the capture (e.g. "Random Electronics").
       tiktok_title: capture?.tiktok_title ?? null,
       // True when the captured sale had a failed payment (logged as not_sold).
@@ -254,6 +289,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
           id: `unbound:${oid}`, auction_number: 0, status: 'sold', is_bundle: false,
           expected_price_cents: null, sold_price_cents: null,
           won_price_cents: (c.selling_price_cents as number | null) ?? null,
+          won_price_source: ((c.selling_price_cents as number | null) ?? null) != null ? 'capture' : null,
           tiktok_title: (c.product_name as string | null) ?? null,
           payment_failed: false, order_status: null, net_payout_cents: null, payout_settled: false,
           buyer_handle: (c.buyer_username as string | null) ?? null,

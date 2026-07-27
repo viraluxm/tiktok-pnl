@@ -20,7 +20,8 @@ export interface AuctionItem {
   is_bundle: boolean;
   expected_price_cents: number | null;
   sold_price_cents: number | null;
-  won_price_cents: number | null; // real winning bid, joined from capture_events
+  won_price_cents: number | null; // real winning bid: capture price, else order-data fallback
+  won_price_source?: 'capture' | 'order_data' | null; // provenance of won_price_cents
   tiktok_title: string | null;    // TikTok product_name, joined from capture_events
   payment_failed: boolean;        // captured sale had a failed payment (logged not_sold)
   order_status: number | null;    // TikTok order status: 2=pending, 3=paid/recovered, 4=cancelled (frozen snapshot)

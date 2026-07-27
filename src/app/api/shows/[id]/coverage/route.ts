@@ -98,6 +98,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     order_created_at: string | null;
     created_at: string | null;
     gmv: number | string | null;
+    shipping: number | string | null;
     sku_name: string | null;
     status: string | null;
     auto_combine_group_id: string | null;
@@ -112,7 +113,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   for (let from = 0; ; from += PAGE) {
     let q = supabase
       .from('synced_order_ids')
-      .select('order_id, order_date, order_created_at, created_at, gmv, sku_name, status, auto_combine_group_id')
+      .select('order_id, order_date, order_created_at, created_at, gmv, shipping, sku_name, status, auto_combine_group_id')
       .eq('user_id', user.id)
       .gte('order_date', startDate)
       .lte('order_date', endDate)
@@ -227,33 +228,70 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     return 'orphan'; // successful captures, but only under NULL/orphan rooms → cannot attribute
   };
 
-  // ── Split the "never captured" gap into the two very different things it actually contains:
-  //    MISSED AUCTION CAPTURES (the real capture-health signal) vs CATALOG SALES (pre-listed items
-  //    — mouth tape / nasal strips sold via normal listings, never auctions, never pick/packed).
-  //    Signal: an auction sale's seller_sku is the internal SKU NUMBER (numeric sku_name that
-  //    resolves to a real inventory_skus.sku_number); catalog variants are text ("1 Black",
-  //    "1 Month Supply"). ~98.5% of the raw gap is catalog, so surfacing them as one number badly
-  //    overstates a capture problem. We split, but keep the catalog count visible (never hidden).
-  const skuByNumber = new Set<number>();
+  // ── Split the never-captured gap into MISSED AUCTION CAPTURES (real capture-health signal) vs
+  //    CATALOG SALES (pre-listed items — "1 Black", "1 Month Supply" — sold via normal listings,
+  //    never auctions). Signal = numeric sku_name that resolves to a real inventory_skus.sku_number
+  //    (~98.5% of the raw gap is catalog, so one combined number badly overstates a capture problem).
+  //    The MISSED-AUCTION set is ALSO the BINDABLE (eligible) set, so gapRow carries the identification
+  //    + derived price (gmv − shipping) the bind UI needs; catalog stays read-only.
+  const skuByNumber = new Map<number, string>(); // sku_number → inventory id (resolution)
   {
-    const { data: inv } = await supabase.from('inventory_skus').select('sku_number').eq('user_id', userId);
-    for (const s of inv ?? []) if (s.sku_number != null) skuByNumber.add(Number(s.sku_number));
+    const { data: inv } = await supabase.from('inventory_skus').select('id, sku_number').eq('user_id', userId);
+    for (const s of inv ?? []) if (s.sku_number != null) skuByNumber.set(Number(s.sku_number), String(s.id));
   }
-  const isMissedAuction = (name: string | null): boolean => {
-    if (!name || !/^[0-9]+$/.test(name.trim())) return false;
+  const skuNumberOf = (name: string | null): number | null => {
+    if (!name || !/^[0-9]+$/.test(name.trim())) return null;
     const n = Number(name.trim());
-    return Number.isFinite(n) && skuByNumber.has(n);
+    return Number.isFinite(n) ? n : null;
   };
+  const isMissedAuction = (name: string | null): boolean => {
+    const n = skuNumberOf(name);
+    return n != null && skuByNumber.has(n);
+  };
+  // Concurrency: OTHER same-store sessions whose live window overlaps this show's. Never-captured
+  // orders have no room, so a bind here (attributed by store+window) may belong to one of these —
+  // the UI warns when this is > 0.
+  let concurrentOverlap = 0;
+  if (session.store_id) {
+    const { data: sibs } = await supabase.from('live_sessions')
+      .select('id, started_at, ended_at').eq('user_id', userId).eq('store_id', session.store_id).neq('id', id);
+    const s0 = new Date(startIso).getTime(), e0 = new Date(endIso).getTime();
+    for (const s of sibs ?? []) {
+      if (!s.started_at) continue;
+      const ss = new Date(s.started_at).getTime();
+      const se = s.ended_at ? new Date(s.ended_at).getTime() : Date.now();
+      if (ss < e0 && se > s0) concurrentOverlap++;
+    }
+  }
 
   interface GapRow {
     order_id: string; order_date: string | null; created_at: string | null; buyer: string | null;
-    gmv: number | null; status: string | null; auto_combine_group_id: string | null; sku_name: string | null;
+    gmv: number | null; status: string | null; auto_combine_group_id: string | null;
+    sku_name: string | null;
+    derived_price_cents: number | null;  // gmv − shipping (shipping-excluded product revenue)
+    eligible: boolean;                    // numeric sku_name resolves to a real SKU → bindable
+    resolved_sku_id: string | null;
+    resolved_sku_number: number | null;
+    ineligible_reason: string | null;
   }
-  const gapRow = (r: typeof scoped[number]): GapRow => ({
-    order_id: r.order_id, order_date: r.order_date, created_at: r.created_at, buyer: null,
-    gmv: r.gmv == null ? null : Number(r.gmv), status: r.status, auto_combine_group_id: r.auto_combine_group_id,
-    sku_name: r.sku_name ?? null,
-  });
+  const gapRow = (r: typeof scoped[number]): GapRow => {
+    const n = skuNumberOf(r.sku_name);
+    const resolvedId = n != null ? (skuByNumber.get(n) ?? null) : null;
+    const gmv = r.gmv == null ? null : Number(r.gmv);
+    const ship = r.shipping == null ? 0 : Number(r.shipping) || 0;
+    const eligible = n != null && resolvedId != null;
+    return {
+      order_id: r.order_id, order_date: r.order_date, created_at: r.created_at, buyer: null,
+      gmv, status: r.status, auto_combine_group_id: r.auto_combine_group_id,
+      sku_name: r.sku_name ?? null,
+      derived_price_cents: gmv == null ? null : Math.round((gmv - ship) * 100),
+      eligible,
+      resolved_sku_id: resolvedId,
+      resolved_sku_number: eligible ? n : null,
+      ineligible_reason: n == null ? 'catalog variant — not an auction item'
+        : resolvedId == null ? `SKU #${n} not found in inventory` : null,
+    };
+  };
 
   const capturedButUnboundIds: string[] = [];
   const missedCapture: GapRow[] = []; // never-captured AND auction-shaped → the real capture gap
@@ -292,6 +330,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       start_at: startIso,
       end_at: endIso,
       store_id: session.store_id ?? null,
+      // OTHER same-store lives overlapping this show's window. >0 → never-captured binds here are
+      // ambiguous (the order may belong to a concurrent show); the UI warns before binding.
+      concurrent_overlap: concurrentOverlap,
       // Scoping transparency: how many scoped rows used the precise timestamp vs
       // fell back to date granularity (pre-backfill rows with a NULL order_created_at).
       timestamp_scoped_rows: timestampScopedRows,

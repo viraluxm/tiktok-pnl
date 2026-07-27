@@ -3,7 +3,7 @@
 import { Fragment, useMemo, useState, type KeyboardEvent } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
+import { useLiveSessions, useShowCoverage, showCoverageKey, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
 import { useAuctionBoard, useUnbind, type AuctionItem, type SessionSku } from '@/hooks/useLiveAuctions';
 import { notSoldBadge, paidNeedsFlip } from '@/lib/paymentStatus';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
@@ -1101,7 +1101,13 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                       )}
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums text-tt-muted">{money(it.expected_price_cents)}</td>
-                    <td className="px-4 py-3 text-right tabular-nums">{money(sold ? won : null)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {money(sold ? won : null)}
+                      {sold && won != null && it.won_price_source === 'order_data' && (
+                        <span className="ml-1 text-[10px] uppercase text-tt-yellow cursor-help"
+                          title="Price from TikTok order data (gmv − shipping), not a live capture — this order was never captured.">order data</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right tabular-nums">{money(cost)}</td>
                     <td className={`px-4 py-3 text-right tabular-nums ${profit == null ? 'text-tt-muted' : profitClass(profit)}`}>
                       {profit == null ? '—' : money(profit)}
@@ -1340,6 +1346,42 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
 function CoveragePanel({ sessionId }: { sessionId: string }) {
   const { data, isLoading, isError } = useShowCoverage(sessionId);
   const [showCatalog, setShowCatalog] = useState(false);
+  const { data: invSkus = [] } = useInventorySkus();
+  const { user } = useUser();
+  const qc = useQueryClient();
+  // Never-captured binding state: which gap row is open, the picked SKU/qty per order, and a
+  // confirm gate (concurrency ambiguity, or out-of-stock → allow_negative).
+  const [openOrder, setOpenOrder] = useState<string | null>(null);
+  const [pick, setPick] = useState<Record<string, { sku_id: string; qty: number }>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [ncNotice, setNcNotice] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [ncConfirm, setNcConfirm] = useState<{ order_id: string; sku_id: string; qty: number; msg: string; allowNegative: boolean } | null>(null);
+
+  async function doBind(order_id: string, sku_id: string, qty: number, allowNegative: boolean) {
+    setBusy(order_id); setNcNotice(null);
+    try {
+      const res = await fetch(`/api/live/sessions/${sessionId}/bind`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id, lines: [{ sku_id, qty }], allow_negative: allowNegative }),
+      });
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (res.ok) {
+        setOpenOrder(null);
+        setNcNotice({ type: 'success', msg: `Bound ${order_id} to inventory${allowNegative ? ' — stock went negative (recount flagged).' : '.'}` });
+        qc.invalidateQueries({ queryKey: ['auction-board', sessionId] });
+        qc.invalidateQueries({ queryKey: showCoverageKey(sessionId, user?.id) });
+        qc.invalidateQueries({ queryKey: ['inventory-skus'] });
+      } else if (res.status === 409 && /stock/i.test(j.error || '') && !allowNegative) {
+        setNcConfirm({ order_id, sku_id, qty, allowNegative: true, msg: `${j.error}. This is a real sale — bind anyway and let stock go negative?` });
+      } else {
+        setNcNotice({ type: 'error', msg: `Bind failed for ${order_id}: ${j.error || 'Unknown error'}` });
+      }
+    } catch {
+      setNcNotice({ type: 'error', msg: `Bind failed for ${order_id}: network error` });
+    } finally {
+      setBusy(null);
+    }
+  }
 
   if (isLoading) {
     return (
@@ -1400,35 +1442,104 @@ function CoveragePanel({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      {/* PRIMARY: genuinely-missed auction captures (the real capture-health signal). */}
-      {hasMissed && (
+      {/* PRIMARY: genuinely-missed auction captures — all resolve to a real SKU, so all bindable. */}
+      {hasMissed && (() => {
+        const overlap = data.window?.concurrent_overlap ?? 0;
+        return (
         <div className="mt-3">
+          {ncNotice && (
+            <div className={`mb-2 rounded-lg px-3 py-2 text-sm ${ncNotice.type === 'success' ? 'border border-tt-green/40 bg-tt-green/10 text-tt-green' : 'border border-tt-red/40 bg-tt-red/10 text-tt-red'}`}>{ncNotice.msg}</div>
+          )}
           <div className="text-xs text-amber-200/80 mb-2">
-            <span className="font-semibold">{missed}</span> auction sale{missed === 1 ? '' : 's'} synced but {missed === 1 ? 'was' : 'were'} never captured during the live — genuinely missing from the auction log (their seller SKU is a real inventory SKU number). Catalog/pre-listed sales are counted separately below.
+            <span className="font-semibold">{missed}</span> auction sale{missed === 1 ? '' : 's'} synced but {missed === 1 ? 'was' : 'were'} never captured during the live — genuinely missing from the auction log (seller SKU is a real inventory SKU number). Bind below to attach the SKU (price from order data, shipping excluded). Catalog/pre-listed sales are counted separately, below.
           </div>
+          {overlap > 0 && (
+            <div className="mb-2 rounded-lg border border-tt-red/40 bg-tt-red/10 px-3 py-2 text-xs text-tt-red">
+              ⚠ This show’s window overlaps <span className="font-semibold">{overlap}</span> other same-store live{overlap === 1 ? '' : 's'}. Never-captured orders have no room, so one bound here may belong to a different show — binding attributes its revenue and host performance to THIS host. You’ll confirm each bind.
+            </div>
+          )}
           <div className="overflow-x-auto rounded-lg border border-amber-400/20">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-amber-400/20 text-amber-200/70 text-xs uppercase tracking-wide">
                   <th className="text-left font-medium px-3 py-2">Order ID</th>
                   <th className="text-left font-medium px-3 py-2">Date</th>
+                  <th className="text-right font-medium px-3 py-2">Price (order data)</th>
                   <th className="text-left font-medium px-3 py-2">Seller SKU</th>
-                  <th className="text-right font-medium px-3 py-2">GMV</th>
-                  <th className="text-left font-medium px-3 py-2">Status</th>
+                  <th className="text-right font-medium px-3 py-2">Action</th>
                 </tr>
               </thead>
               <tbody>
-                {data.missed_capture.map((o) => (
-                  <tr key={o.order_id} className="border-b border-amber-400/10 last:border-0">
+                {data.missed_capture.map((o) => {
+                  const open = openOrder === o.order_id;
+                  const p = pick[o.order_id] ?? { sku_id: o.resolved_sku_id ?? '', qty: 1 };
+                  return (
+                  <Fragment key={o.order_id}>
+                  <tr className="border-b border-amber-400/10 last:border-0">
                     <td className="px-3 py-2 font-mono text-xs text-tt-text">{o.order_id}</td>
                     <td className="px-3 py-2 text-tt-text/80">{o.order_date ?? '—'}</td>
-                    <td className="px-3 py-2 font-mono text-tt-cyan">#{o.sku_name}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-tt-text/80">{o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}</td>
-                    <td className="px-3 py-2 text-tt-muted">{o.status ?? '—'}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-tt-text/80">{o.derived_price_cents == null ? '—' : money(o.derived_price_cents)}</td>
+                    <td className="px-3 py-2 text-tt-muted">
+                      {o.eligible ? <span className="text-tt-text">{o.sku_name} → <span className="font-mono text-tt-cyan">#{o.resolved_sku_number}</span></span> : <span className="italic">{o.sku_name || '—'}</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {o.eligible ? (
+                        <button
+                          onClick={() => { setPick((pp) => pp[o.order_id] ? pp : { ...pp, [o.order_id]: { sku_id: o.resolved_sku_id ?? '', qty: 1 } }); setOpenOrder(open ? null : o.order_id); }}
+                          className="text-xs font-semibold rounded-md bg-tt-cyan/20 text-tt-cyan ring-1 ring-tt-cyan/40 px-2 py-0.5 cursor-pointer hover:bg-tt-cyan/30"
+                        >{open ? 'Close' : 'Bind'}</button>
+                      ) : (
+                        <span className="text-[11px] text-tt-muted italic">{o.ineligible_reason ?? 'not bindable'}</span>
+                      )}
+                    </td>
                   </tr>
-                ))}
+                  {open && o.eligible && (
+                    <tr className="bg-tt-card/60">
+                      <td colSpan={5} className="px-3 py-3">
+                        <div className="flex flex-wrap items-end gap-3">
+                          <div className="text-xs text-tt-muted">
+                            Price <span className="text-tt-text tabular-nums">{o.derived_price_cents == null ? '—' : money(o.derived_price_cents)}</span>
+                            <span className="ml-1 text-[10px] uppercase text-tt-yellow">order data, shipping excluded</span>
+                          </div>
+                          <RankedSkuPicker
+                            value={p.sku_id}
+                            onChange={(sid) => setPick((pp) => ({ ...pp, [o.order_id]: { sku_id: sid, qty: pp[o.order_id]?.qty ?? 1 } }))}
+                            allSkus={invSkus}
+                            primaryIds={new Set()}
+                            nearbyIds={o.resolved_sku_id ? [o.resolved_sku_id] : []}
+                          />
+                          <input type="number" min={1} value={p.qty}
+                            onChange={(e) => setPick((pp) => ({ ...pp, [o.order_id]: { sku_id: pp[o.order_id]?.sku_id ?? o.resolved_sku_id ?? '', qty: Math.max(1, Math.trunc(Number(e.target.value) || 1)) } }))}
+                            className="w-16 rounded-md border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none tabular-nums" aria-label="Quantity" />
+                          <button
+                            onClick={() => { if (!p.sku_id) return; if (overlap > 0) setNcConfirm({ order_id: o.order_id, sku_id: p.sku_id, qty: p.qty, allowNegative: false, msg: `This show’s window overlaps ${overlap} other same-store live${overlap === 1 ? '' : 's'}. This order has no room, so it may belong to a different show — binding here attributes its revenue and host performance to THIS host. Bind anyway?` }); else void doBind(o.order_id, p.sku_id, p.qty, false); }}
+                            disabled={!p.sku_id || busy === o.order_id}
+                            className="px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                          >{busy === o.order_id ? 'Binding…' : 'Bind to inventory'}</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                  );
+                })}
               </tbody>
             </table>
+          </div>
+        </div>
+        );
+      })()}
+
+      {/* Never-captured bind confirm — concurrency ambiguity, then out-of-stock (allow_negative). */}
+      {ncConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setNcConfirm(null)} role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-2xl border border-tt-border bg-tt-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm font-semibold text-tt-text mb-2">Confirm bind</div>
+            <div className="text-sm text-tt-muted mb-4">{ncConfirm.msg}</div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setNcConfirm(null)} className="px-4 py-2 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover">Cancel</button>
+              <button onClick={() => { const c = ncConfirm; setNcConfirm(null); void doBind(c.order_id, c.sku_id, c.qty, c.allowNegative); }} className="px-4 py-2 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90">Bind</button>
+            </div>
           </div>
         </div>
       )}

@@ -38,7 +38,14 @@ export interface CoverageGapOrder {
   gmv: number | null;
   status: string | null;
   auto_combine_group_id: string | null;
+  // Never-captured binding: identification + derived price. eligible only when sku_name is a
+  // numeric SKU that resolves to a real inventory SKU (catalog variants stay ineligible).
   sku_name: string | null;
+  derived_price_cents: number | null; // gmv − shipping (shipping-excluded product revenue)
+  eligible: boolean;
+  resolved_sku_id: string | null;
+  resolved_sku_number: number | null;
+  ineligible_reason: string | null;
 }
 
 export interface ShowCoverage {
@@ -58,7 +65,7 @@ export interface ShowCoverage {
   // Captured but attributable to NO show (null/orphan room) — cannot be bound on any board.
   room_unknown_count: number;
   room_unknown: CoverageGapOrder[];
-  window: { start_date: string | null; end_date: string | null; store_id: string | null };
+  window: { start_date: string | null; end_date: string | null; store_id: string | null; concurrent_overlap?: number };
 }
 
 export const showCoverageKey = (id: string, userId?: string) => ['show-coverage', userId, id];
