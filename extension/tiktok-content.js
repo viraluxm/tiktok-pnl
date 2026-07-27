@@ -112,6 +112,10 @@
   // background/session logic. API detection (currentAccount) takes priority. See
   // detectVisibleAccount / renderStatusLine.
   var domAccountLabel = null;
+  // Backstop verdict for the CURRENT domAccountLabel, returned by the worker: null (not
+  // yet judged), or { handle, known, classification, written }. Gates what the overlay
+  // shows so scraped UI text ("10s"/"English") is not presented as a confident channel.
+  var channelMapState = null;
   // Half-2: the DOM-read channel name is sent to the background (→ persisted on the
   // session, → mapped to a store). Dedup key = name|room so it re-sends when either
   // changes (e.g. label detected before the room, then the room arrives).
@@ -2753,7 +2757,7 @@
       renderAccount(data.account || null);
       if (data.account) {
         try {
-          chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: data.account, roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
+          chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: data.account, roomId: currentRoomId || null }, function (resp) { if (chrome.runtime.lastError) return; onChannelVerdict(resp); });
         } catch (_) {}
       }
       return;
@@ -2802,17 +2806,38 @@
     renderStatusLine();
   }
 
-  // The account to show, preferring the API identity over the visible-DOM label.
+  // The account to show, preferring the API identity over the visible-DOM label. The
+  // candidate label is then gated through the worker's backstop verdict (channelMapState)
+  // so scraped UI text is never presented as a confident channel:
+  //   state 'known'   → show normally (● name)
+  //   state 'unmapped'→ show a ⚠ "unmapped" warning (real-but-not-in-map, add it)
+  //   state null      → garbage (the DOM lied) → show nothing (falls to "unverified")
+  //   state 'pending' → no verdict yet for this handle → show normally
   function accountDisplay() {
+    var name = null, src = null, key = null, handle = null;
     if (currentAccount && (currentAccount.handle || currentAccount.nickname || currentAccount.id)) {
-      return {
-        name: currentAccount.handle ? '@' + currentAccount.handle : (currentAccount.nickname || currentAccount.id),
-        src: 'API',
-        key: currentAccount.key || null,
-      };
+      handle = currentAccount.handle || null;
+      name = currentAccount.handle ? '@' + currentAccount.handle : (currentAccount.nickname || currentAccount.id);
+      src = 'API'; key = currentAccount.key || null;
+    } else if (domAccountLabel) {
+      handle = domAccountLabel; name = domAccountLabel; src = 'dashboard';
+    } else {
+      return null;
     }
-    if (domAccountLabel) return { name: domAccountLabel, src: 'dashboard', key: null };
-    return null;
+    if (channelMapState && handle &&
+        normHandle(String(channelMapState.handle || '')).toLowerCase() === normHandle(String(handle)).toLowerCase()) {
+      if (channelMapState.known) return { name: name, src: src, key: key, state: 'known' };
+      if (channelMapState.classification === 'plausible') return { name: name, src: src, key: key, state: 'unmapped' };
+      return null; // garbage — do not present a bogus channel
+    }
+    return { name: name, src: src, key: key, state: 'pending' };
+  }
+
+  // Record the worker's backstop verdict for the current handle and repaint.
+  function onChannelVerdict(resp) {
+    if (!resp || typeof resp !== 'object' || !resp.handle) return;
+    channelMapState = resp;
+    try { renderStatusLine(); } catch (_) {}
   }
 
   // Compact combined status row: "Connected \u00b7 \u25cf name" / "Connected \u00b7 \u26a0 Account
@@ -2831,7 +2856,12 @@
     sessionStatusEl.appendChild(document.createTextNode('Connected'));
     sessionStatusEl.appendChild(el('span', 'lensed-acct-sep', ' \u00b7 '));
     var acct = accountDisplay();
-    if (acct) {
+    if (acct && acct.state === 'unmapped') {
+      var warn = el('span', 'lensed-acct-warn', '\u26a0 unmapped: ' + acct.name);
+      warn.title = 'Detected channel "' + acct.name + '" is not in the channel\u2192store map. '
+        + 'Add it in Lensed to attribute this session (nothing was written).';
+      sessionStatusEl.appendChild(warn);
+    } else if (acct) {
       sessionStatusEl.appendChild(el('span', 'lensed-acct-dot', '\u25cf'));
       var nm = el('span', 'lensed-acct-name', ' ' + acct.name);
       nm.title = 'Detected ' + acct.src + ' account: ' + acct.name + (acct.key ? ' (' + acct.key + ')' : '');
@@ -3098,7 +3128,7 @@
     if (key === lastChannelNameSentKey) return;
     lastChannelNameSentKey = key;
     try {
-      chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: { handle: domAccountLabel, source: 'dom', strategy: lastDetectWhy || null, score: lastDetectScore || null }, roomId: currentRoomId || null }, function () { void chrome.runtime.lastError; });
+      chrome.runtime.sendMessage({ type: 'TIKTOK_ACCOUNT', account: { handle: domAccountLabel, source: 'dom', strategy: lastDetectWhy || null, score: lastDetectScore || null }, roomId: currentRoomId || null }, function (resp) { if (chrome.runtime.lastError) return; onChannelVerdict(resp); });
     } catch (_) {}
   }
 

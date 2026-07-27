@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
 import { useAuctionBoard, useUnbind, type AuctionItem, type SessionSku } from '@/hooks/useLiveAuctions';
 import { notSoldBadge, paidNeedsFlip } from '@/lib/paymentStatus';
+import { ASP_GOAL_MULTIPLIER, aspGoalCents } from '@/lib/asp';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
 import { useStores } from '@/hooks/useStores';
@@ -78,7 +79,7 @@ function aspPerUnitCents(s: ShowSummary): number {
 }
 
 // Per-show ASP-hit / below-break-even rates, same definitions as the roster badges but
-// scoped to this session. break_even = Σ cost snapshots; asp_goal = break_even × 3;
+// scoped to this session. break_even = Σ cost snapshots; asp_goal = break_even × 4 (unified, see @/lib/asp);
 // final_price = captured won price. CRITICAL: only auctions with status='sold' AND a
 // realized won price AND a known break-even count — payment-failed / unsold / uncosted
 // rows are excluded from BOTH numerator and denominator (a failed payment is NOT a loss).
@@ -91,7 +92,7 @@ function showRates(items: AuctionItem[]): ShowRates {
     const breakEven = it.total_cost_cents;
     if (finalPrice == null || breakEven == null) continue; // exclude non-sales / uncosted
     n += 1;
-    if (finalPrice >= breakEven * 3) hits += 1;
+    if (finalPrice >= breakEven * ASP_GOAL_MULTIPLIER) hits += 1;
     if (finalPrice < breakEven) below += 1;
   }
   return {
@@ -1100,7 +1101,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                         })()
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-tt-muted">{money(it.expected_price_cents)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums text-tt-muted">{money(aspGoalCents(it.total_cost_cents))}</td>
                     <td className="px-4 py-3 text-right tabular-nums">{money(sold ? won : null)}</td>
                     <td className="px-4 py-3 text-right tabular-nums">{money(cost)}</td>
                     <td className={`px-4 py-3 text-right tabular-nums ${profit == null ? 'text-tt-muted' : profitClass(profit)}`}>
@@ -1245,7 +1246,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 }
                 stats={[
                   { label: 'Qty', value: it.units },
-                  { label: 'ASP Goal', value: money(it.expected_price_cents) },
+                  { label: 'ASP Goal', value: money(aspGoalCents(it.total_cost_cents)) },
                   { label: 'Won price', value: money(sold ? won : null) },
                   { label: 'Cost', value: money(cost) },
                   {
