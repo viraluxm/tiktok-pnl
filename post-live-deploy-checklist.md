@@ -100,3 +100,16 @@ Source-only version bumps are NOT shippable. `dist/` and `lensed-extension-v*.zi
 
 ## Known gap (unverifiable rollout)
 The DB carries **no extension-version field** — `EXT_VERSION` lives only in local diagnostics, never written to `capture_events`/sessions. So "every host is on v<version>" cannot be confirmed from data. Fix: stamp `EXT_VERSION` into the capture write, then query the per-host version distribution.
+
+---
+
+# Settled investigations — do NOT re-open
+
+## The ~5.3s "won item lingers in the overlay before clearing" lag is TikTok's poll cadence, not a defect
+Measured across **2,310 captures / 12 lives / multiple hosts and days** (`capture_events.created_at − ordered_at`, i.e. order-created-on-TikTok → our row written): median **5.31s**, IQR **4.82–5.86s** (~1s wide), **97% within 3–10s**, p99 15.5s. Every one of 12 separate lives has a median of **4.96–5.63s** (per-live stddev 1.1–2.5s). That cross-live tightness is a **fixed upstream poll interval** (TikTok's page fetches `auction_result/get` ~every 5s; we observe it passively), **not** our-side variability.
+
+Key facts so nobody re-derives them:
+- The overlay clears **optimistically on detection** — `clearStaged()` runs synchronously on `AUTO_BIND` dispatch (`tiktok-content.js:1309`), **not** on the PostgREST write returning. It is **not** blocked on the write.
+- A failed write after the clear raises a **persistent fail-loud banner** (`showBindIssue` → `.lensed-warn`; unauth → red pulsing `.lensed-queue-banner`) **and** rolls back the status-dedup so the next cumulative `auction_result/get` re-send **auto-retries** (idempotent on `user_id,order_id`). No silent loss.
+- The Fix A persisted sale queue (`SK_SALE_QUEUE`) is **unauthenticated-only** — zero latency in the happy path.
+- **There is no write-path change that reduces this lag.** An "optimistic clear" is a no-op (already optimistic). The only lever on the *cosmetic* lag is a "closing…" transitional grey state gated on finding a per-auction close event — see `extension/DEV-PAYLOAD-CAPTURE.md` (question 2). Do **not** decouple clear from dispatch: clearing on a close signal before the `order_id` is in hand reintroduces the silent-loss pattern.
