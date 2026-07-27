@@ -22,6 +22,8 @@ echo "╚═══════════════════════�
 echo ""
 
 rsync -a \
+  --include='README.md' \
+  --exclude='*.md' \
   --exclude='node_modules' \
   --exclude='dist' \
   --exclude='build.sh' \
