@@ -95,7 +95,7 @@ Source-only version bumps are NOT shippable. `dist/` and `lensed-extension-v*.zi
    - `grep '"version"' extension/dist/manifest.json`
    - `unzip -p extension/lensed-extension-v<version>.zip manifest.json | grep '"version"'`
    Both MUST equal the source version. (A stale `dist/` at the old version is the classic failure.)
-5. **Distribute** `lensed-extension-v<version>.zip` to host machines (it is git-ignored — attach to a GitHub Release or share directly; do NOT assume `git pull` delivers it).
+5. **Distribute via a GitHub Release** (the canonical channel — the zip is git-ignored, so `git pull` never delivers it): `gh release create v<version> extension/lensed-extension-v<version>.zip --target main --title "Extension v<version>" --notes "…install steps…"`. Hosts download the asset from the release page.
 6. Confirm each host **removes the old unpacked extension and loads the freshly-unzipped folder** (see extension/README "Load unpacked"). Loading a stale `extension/dist/` is the other classic failure.
 
 ## Known gap (unverifiable rollout)
