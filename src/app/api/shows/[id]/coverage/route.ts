@@ -47,7 +47,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const { data: session } = await supabase
     .from('live_sessions')
-    .select('id, started_at, ended_at, store_id, created_at')
+    .select('id, started_at, ended_at, store_id, created_at, tiktok_live_id')
     .eq('id', id).eq('user_id', user.id).maybeSingle();
   if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
 
@@ -98,6 +98,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     order_created_at: string | null;
     created_at: string | null;
     gmv: number | string | null;
+    sku_name: string | null;
     status: string | null;
     auto_combine_group_id: string | null;
   }
@@ -111,7 +112,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   for (let from = 0; ; from += PAGE) {
     let q = supabase
       .from('synced_order_ids')
-      .select('order_id, order_date, order_created_at, created_at, gmv, status, auto_combine_group_id')
+      .select('order_id, order_date, order_created_at, created_at, gmv, sku_name, status, auto_combine_group_id')
       .eq('user_id', user.id)
       .gte('order_date', startDate)
       .lte('order_date', endDate)
@@ -177,36 +178,94 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     return present;
   }
 
-  const capturedSet = orderIds.length ? await presentIds('capture_events', 'order_id') : new Set<string>();
   const boundSet = orderIds.length ? await presentIds('live_auction_items', 'client_idempotency_key') : new Set<string>();
 
-  // Partition the synced universe into the three disjoint buckets.
-  const capturedButUnboundIds: string[] = [];
-  const coverageGap: Array<{
-    order_id: string;
-    order_date: string | null;
-    created_at: string | null;
-    buyer: string | null; // synced_order_ids has no buyer column → always null (documented)
-    gmv: number | null;
-    status: string | null;
-    auto_combine_group_id: string | null;
-  }> = [];
+  // ── ROOM-RESPECTING capture attribution. capture_events.room_id (= a session's
+  //    tiktok_live_id) is the ONLY reliable attribution under concurrent same-store lives, so a
+  //    captured order is "captured FOR THIS SHOW" only when a (successful) capture carries THIS
+  //    session's room. This matches the board table exactly and removes the phantom cross-listing
+  //    that room-agnostic scoping produced across concurrent shows.
+  //      never captured  → no capture row at all (coverage gap; the reconcile-blind set)
+  //      captured-but-unbound → captured under THIS room, not bound (the actionable table set)
+  //      room unknown    → captured only under a NULL / orphan room (matches no session) — cannot
+  //                        attribute to any show; surfaced separately so it never silently vanishes
+  //                        (the strict room filter means it appears on no board)
+  //      (captured under a SIBLING session's room → belongs to that show; excluded here)
+  const thisRoom = (session.tiktok_live_id as string | null) ?? null;
+  const knownRooms = new Set<string>();
+  {
+    const { data: rs } = await supabase.from('live_sessions')
+      .select('tiktok_live_id').eq('user_id', userId).not('tiktok_live_id', 'is', null);
+    for (const r of rs ?? []) if (r.tiktok_live_id) knownRooms.add(String(r.tiktok_live_id));
+  }
+  // Per scoped order: whether it has ANY capture, and the rooms of its SUCCESSFUL captures.
+  const anyCapture = new Set<string>();
+  const okRoomsByOrder = new Map<string, Set<string | null>>();
+  {
+    const CH = 300;
+    for (let i = 0; i < orderIds.length; i += CH) {
+      const chunk = orderIds.slice(i, i + CH);
+      const { data, error } = await supabase.from('capture_events')
+        .select('order_id, room_id, is_payment_successful').eq('user_id', userId).in('order_id', chunk);
+      if (error) { console.error('[shows/coverage] capture-room lookup error:', error.message); continue; }
+      for (const c of (data ?? []) as { order_id: string; room_id: string | null; is_payment_successful: boolean | null }[]) {
+        const oid = String(c.order_id);
+        anyCapture.add(oid);
+        if (c.is_payment_successful === false) continue; // failed payment ≠ a bindable sale
+        if (!okRoomsByOrder.has(oid)) okRoomsByOrder.set(oid, new Set());
+        okRoomsByOrder.get(oid)!.add(c.room_id ?? null);
+      }
+    }
+  }
+  // never | thisRoom | otherKnown | orphan | failed(captured but no successful capture)
+  const classify = (oid: string): 'never' | 'thisRoom' | 'otherKnown' | 'orphan' | 'failed' => {
+    if (!anyCapture.has(oid)) return 'never';
+    const rooms = okRoomsByOrder.get(oid);
+    if (!rooms || rooms.size === 0) return 'failed';
+    if (thisRoom && rooms.has(thisRoom)) return 'thisRoom';
+    for (const r of rooms) if (r && r !== thisRoom && knownRooms.has(r)) return 'otherKnown';
+    return 'orphan'; // successful captures, but only under NULL/orphan rooms → cannot attribute
+  };
 
+  // ── Split the "never captured" gap into the two very different things it actually contains:
+  //    MISSED AUCTION CAPTURES (the real capture-health signal) vs CATALOG SALES (pre-listed items
+  //    — mouth tape / nasal strips sold via normal listings, never auctions, never pick/packed).
+  //    Signal: an auction sale's seller_sku is the internal SKU NUMBER (numeric sku_name that
+  //    resolves to a real inventory_skus.sku_number); catalog variants are text ("1 Black",
+  //    "1 Month Supply"). ~98.5% of the raw gap is catalog, so surfacing them as one number badly
+  //    overstates a capture problem. We split, but keep the catalog count visible (never hidden).
+  const skuByNumber = new Set<number>();
+  {
+    const { data: inv } = await supabase.from('inventory_skus').select('sku_number').eq('user_id', userId);
+    for (const s of inv ?? []) if (s.sku_number != null) skuByNumber.add(Number(s.sku_number));
+  }
+  const isMissedAuction = (name: string | null): boolean => {
+    if (!name || !/^[0-9]+$/.test(name.trim())) return false;
+    const n = Number(name.trim());
+    return Number.isFinite(n) && skuByNumber.has(n);
+  };
+
+  interface GapRow {
+    order_id: string; order_date: string | null; created_at: string | null; buyer: string | null;
+    gmv: number | null; status: string | null; auto_combine_group_id: string | null; sku_name: string | null;
+  }
+  const gapRow = (r: typeof scoped[number]): GapRow => ({
+    order_id: r.order_id, order_date: r.order_date, created_at: r.created_at, buyer: null,
+    gmv: r.gmv == null ? null : Number(r.gmv), status: r.status, auto_combine_group_id: r.auto_combine_group_id,
+    sku_name: r.sku_name ?? null,
+  });
+
+  const capturedButUnboundIds: string[] = [];
+  const missedCapture: GapRow[] = []; // never-captured AND auction-shaped → the real capture gap
+  const catalogSales: GapRow[] = [];  // never-captured but a pre-listed catalog item → not an auction
+  const roomUnknown: GapRow[] = [];
   for (const r of scoped) {
-    const captured = capturedSet.has(r.order_id);
-    const bound = boundSet.has(r.order_id);
-    if (!captured && !bound) {
-      coverageGap.push({
-        order_id: r.order_id,
-        order_date: r.order_date,
-        created_at: r.created_at,
-        buyer: null,
-        gmv: r.gmv == null ? null : Number(r.gmv),
-        status: r.status,
-        auto_combine_group_id: r.auto_combine_group_id,
-      });
-    } else if (captured && !bound) {
-      capturedButUnboundIds.push(r.order_id);
+    if (boundSet.has(r.order_id)) continue; // bound (any session) → not actionable here
+    switch (classify(r.order_id)) {
+      case 'never': (isMissedAuction(r.sku_name) ? missedCapture : catalogSales).push(gapRow(r)); break;
+      case 'thisRoom': capturedButUnboundIds.push(r.order_id); break;
+      case 'orphan': roomUnknown.push(gapRow(r)); break;
+      // 'otherKnown' (sibling live's sale) and 'failed' (payment failed) are intentionally not surfaced here
     }
   }
 
@@ -214,8 +273,19 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     total_synced: scoped.length,
     captured_but_unbound_count: capturedButUnboundIds.length,
     captured_but_unbound_ids: capturedButUnboundIds,
-    coverage_gap_count: coverageGap.length,
-    coverage_gap: coverageGap,
+    // PRIMARY capture-health signal: genuinely-missed AUCTION captures only.
+    missed_capture_count: missedCapture.length,
+    missed_capture: missedCapture,
+    // SECONDARY (de-emphasised, never hidden): catalog sales in the window — pre-listed items, not auctions.
+    catalog_count: catalogSales.length,
+    catalog: catalogSales,
+    // Back-compat: the full never-captured set (missed + catalog) kept for any consumer doing math.
+    coverage_gap_count: missedCapture.length + catalogSales.length,
+    coverage_gap: [...missedCapture, ...catalogSales],
+    // Captured but attributable to NO show (null/orphan room). Not bindable on any board — shown
+    // as its own labeled group so it never silently disappears.
+    room_unknown_count: roomUnknown.length,
+    room_unknown: roomUnknown,
     window: {
       start_date: startDate,
       end_date: endDate,

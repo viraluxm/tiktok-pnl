@@ -58,7 +58,8 @@ function computeFromSkus(skus: { qty: number; unit_cost_cents: number | null; sk
 export default function HostTrackingShell({ sessionId }: { sessionId: string }) {
   const { data: session, isLoading: sessionLoading, isError } = useLiveSession(sessionId);
   const { data: allSkus = [] } = useInventorySkus();
-  const { data: board = [] } = useAuctionBoard(sessionId);
+  const { data: boardData } = useAuctionBoard(sessionId);
+  const board = boardData?.items ?? [];
   const quickClose = useQuickClose();
   const deleteItem = useDeleteAuctionItem();
   const endSession = useEndSession();
@@ -296,6 +297,7 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
           pendingState: x.state,
           error: x.error,
           order_status: null as number | null, // optimistic rows have no capture yet
+          synced_status: null as string | null, // optimistic rows aren't swept yet
           payment_failed: false,
         };
       });
@@ -313,6 +315,7 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
       pendingState: undefined as PendingRow['state'] | undefined,
       error: undefined as string | undefined,
       order_status: b.order_status,
+      synced_status: b.synced_status,
       payment_failed: b.payment_failed,
     }));
     return [...p, ...s].sort((a, b) => b.number - a.number);
@@ -532,8 +535,9 @@ export default function HostTrackingShell({ sessionId }: { sessionId: string }) 
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
                               {r.status === 'not_sold' ? (
-                                // Show the payment-recovery state (order_status) on not_sold rows.
-                                (() => { const b = notSoldBadge(r.order_status, r.payment_failed); return (
+                                // Show the truthful payment state on not_sold rows (synced
+                                // status first, frozen order_status snapshot as fallback).
+                                (() => { const b = notSoldBadge(r.synced_status, r.order_status, r.payment_failed); return (
                                   <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>
                                 ); })()
                               ) : (

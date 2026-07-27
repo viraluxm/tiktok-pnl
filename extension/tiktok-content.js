@@ -68,6 +68,18 @@
   // live never inherits a previous live's number (chrome.storage key below).
   var seenOrderIds = Object.create(null);
   var counterSessionId = null;
+
+  // ── Live session metrics (host-visible): cumulative revenue, revenue/hour, ASP hit rate.
+  //    Accumulated at the SINGLE dedup point (renderSale first-seen) so a reload — which
+  //    re-fires TikTok's cumulative backlog — never double-counts (each order_id is already in
+  //    seenOrderIds). Totals persist alongside the counter and restore on reload.
+  var revenueCents = 0;   // Σ shipping-excluded product revenue of counted PAID sales
+  var aspHits = 0;        // counted PAID sales that met the (unified 4x) ASP goal
+  var aspEligible = 0;    // counted PAID sales with a known cost (goal computable → bound)
+  var sessionStartMs = 0; // when this session's tracking began; persisted, never reset on reload
+  var orderGoalCents = new Map(); // orderId → ASP goal cents (from staged cost at bind); session-only
+  var metricRevEl = null, metricRphEl = null, metricAspEl = null; // metric value DOM nodes
+  var metricsTimer = null; // interval that advances rev/hr's elapsed clock
   var LK_COUNTER = 'lensed_live_counter';
   // Persisted staged-SKU selection, scoped to a session id. Restored after a Live
   // Manager reload / SW restart / reconnect so a mid-auction selection survives;
@@ -348,6 +360,20 @@
       display: flex; gap: 10px; align-items: stretch; flex: 1 1 auto; min-height: 0;\
     }\
     .lensed-sku-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }\
+    .lensed-metrics {\
+      display: flex; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #2a2a2e;\
+    }\
+    .lensed-metric {\
+      flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center;\
+      text-align: center; padding: 4px 2px; border-radius: 6px; background: #17171b;\
+    }\
+    .lensed-metric-label {\
+      font-size: 9px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;\
+      color: #9a9aa2; margin-bottom: 3px;\
+    }\
+    .lensed-metric-value {\
+      font-size: 20px; font-weight: 800; color: #e6e6ea; line-height: 1; white-space: nowrap;\
+    }\
     .lensed-asp {\
       flex-shrink: 0; width: 132px; padding-left: 12px; border-left: 1px solid #2a2a2e;\
       display: flex; flex-direction: column; align-items: flex-end;\
@@ -913,9 +939,28 @@
     return totalCost;
   }
 
-  // ASP goal = break-even cost × 3 (a 3x markup target on staged cost).
+  // ASP goal multiplier. UNIFIED at 4x across categories: both squish and electronics realize
+  // ~2x cost at the median, so a common 4x bar makes hosts directly comparable (an electronics
+  // host isn't flattered by a softer 3x goal). Kept as a per-category map (+ default) so a
+  // category can be re-diverged later by changing a single number.
+  var CATEGORY_ASP_MULTIPLIER = { squish: 4, electronics: 4 };
+  var DEFAULT_ASP_MULTIPLIER = 4;
+  function aspMultiplierFor(category) {
+    var m = CATEGORY_ASP_MULTIPLIER[String(category || '').toLowerCase()];
+    return Number.isFinite(m) ? m : DEFAULT_ASP_MULTIPLIER;
+  }
+
+  // ASP goal = Σ (unit_cost × qty × multiplier(category)) over staged SKUs. Cost-WEIGHTED per SKU
+  // (structure preserved so categories can re-diverge); with the current unified 4x this equals
+  // 4× the staged break-even.
   function aspGoalCents() {
-    return stagedCostCents() * 3;
+    var goal = 0;
+    for (var i = 0; i < stagedSkus.length; i++) {
+      var c = Number(stagedSkus[i].unit_cost_cents);
+      if (!Number.isFinite(c)) c = 0;
+      goal += c * (stagedSkus[i].qty || 1) * aspMultiplierFor(stagedSkus[i].category);
+    }
+    return goal;
   }
 
   // Live-auction bids are whole dollars, so the ASP goal and break-even targets
@@ -935,6 +980,53 @@
   function updateAspGoal() {
     if (aspValueEl) aspValueEl.textContent = formatBidGoalDollars(aspGoalCents());
     if (breakEvenValueEl) breakEvenValueEl.textContent = formatBidGoalDollars(stagedCostCents());
+  }
+
+  // ── Live session metrics ───────────────────────────────────────────────────
+  // Revenue/hour = cumulative revenue ÷ ELAPSED wall-clock since session start, in real
+  // minutes/60 (a live that started 9:05 shows 0.92h at 10:00 — never rounded to clock hours).
+  // Returns null under a minute (rate is meaningless that early; cumulative revenue anchors it).
+  function revPerHourCents() {
+    if (!sessionStartMs) return null;
+    var elapsedMs = Date.now() - sessionStartMs;
+    if (elapsedMs < 60000) return null;
+    return revenueCents / (elapsedMs / 3600000);
+  }
+  function dollarsRounded(cents) { return '$' + Math.round(Number(cents) / 100).toLocaleString('en-US'); }
+  function renderMetrics() {
+    if (metricRevEl) metricRevEl.textContent = dollarsRounded(revenueCents);
+    if (metricRphEl) {
+      var rph = revPerHourCents();
+      metricRphEl.textContent = rph == null ? '—' : (dollarsRounded(rph) + '/hr');
+    }
+    if (metricAspEl) metricAspEl.textContent = aspEligible > 0 ? (Math.round((aspHits / aspEligible) * 100) + '%') : '—';
+  }
+
+  // Accumulate ONE counted (deduped, first-seen) sale. Failed payments are neither revenue nor
+  // a scored outcome (matches P&L). ASP hit needs a known cost (goal) — only bound sales have one
+  // (orderGoalCents, set at bind time). Called from the single dedup point in renderSale, so a
+  // reload's cumulative-backlog replay never re-accumulates (order_id already seen).
+  function accumulateMetrics(sale, orderId) {
+    if (sale && sale.isPaymentSuccessful === false) return;
+    if (!sessionStartMs) sessionStartMs = Date.now(); // fallback if session adoption didn't set it
+    var cents = priceStrToCents(sale && sale.sellingPrice);
+    if (cents != null && cents > 0) revenueCents += cents;
+    var goal = orderId != null ? orderGoalCents.get(orderId) : null;
+    if (goal != null && goal > 0 && cents != null) {
+      aspEligible++;
+      if (cents >= goal) aspHits++;
+    }
+    renderMetrics();
+  }
+
+  // Restore the persisted metric accumulators from a counter/pre-session record (shared shape).
+  function restoreMetricsFrom(rec) {
+    if (!rec) return;
+    revenueCents = typeof rec.revenueCents === 'number' ? rec.revenueCents : 0;
+    aspHits = typeof rec.aspHits === 'number' ? rec.aspHits : 0;
+    aspEligible = typeof rec.aspEligible === 'number' ? rec.aspEligible : 0;
+    if (typeof rec.startMs === 'number' && rec.startMs > 0) sessionStartMs = rec.startMs;
+    renderMetrics();
   }
 
   // Show a red stock-limit message (used when an increment would exceed qty_on_hand).
@@ -966,6 +1058,7 @@
       existing.qty = currentQty + 1;
       existing.qty_on_hand = cap; // refresh with latest stock
       existing.unit_cost_cents = pendingResolve.unit_cost_cents;
+      existing.category = pendingResolve.category || null; // for the category-relative ASP goal
       existing.live_seller_notes = pendingResolve.live_seller_notes || [];
     } else {
       stagedSkus.push({
@@ -975,6 +1068,7 @@
         qty: 1,
         qty_on_hand: cap,
         unit_cost_cents: pendingResolve.unit_cost_cents,
+        category: pendingResolve.category || null, // for the category-relative ASP goal
         live_seller_notes: pendingResolve.live_seller_notes || [],
       });
     }
@@ -1008,7 +1102,7 @@
     // Deep-copy so later qty edits don't mutate the saved set. The previous set was
     // already within stock when it bound, so it stays valid on re-stage.
     stagedSkus = previousSkus.map(function (s) {
-      return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+      return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
     });
     renderStagedPills();
     clearResolveLine();
@@ -1143,7 +1237,7 @@
       // bind payload — so it carries live_seller_notes. Persists across the
       // auto-clear below.
       previousSkus = stagedSkus.map(function (s) {
-        return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+        return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
       });
     }
 
@@ -1157,6 +1251,10 @@
         return { sku_number: s.sku_number, title: s.title, qty: s.qty };
       }));
       capMap(sessionBoundSkus);
+      // Record this order's ASP goal from the staged cost (category-relative multiplier — staging
+      // is still present here) so the live ASP-hit metric scores it when the sale is counted.
+      // Session-only; the accumulated totals (persisted) are what survive a reload.
+      if (sale.orderId) { orderGoalCents.set(sale.orderId, aspGoalCents()); capMap(orderGoalCents); }
     }
 
     var dispatched = false;
@@ -1494,6 +1592,29 @@
     statusBar.appendChild(hostRowEl);
 
     panel.appendChild(header);
+
+    // ── Live session metrics (host-visible): Revenue · Rev/hr · ASP hit ──────────
+    // Cumulative revenue is the anchor (never wrong, just small early); rev/hr and ASP hit
+    // sit beside it. Below-break-even is deliberately NOT shown — it's an internal Team-tab
+    // diagnostic. The per-item break-even PRICE stays in the stage section (operational floor).
+    var metricsRow = el('div', 'lensed-metrics');
+    function metricCell(label) {
+      var cell = el('div', 'lensed-metric');
+      cell.appendChild(el('span', 'lensed-metric-label', label));
+      var v = el('span', 'lensed-metric-value', '—');
+      cell.appendChild(v);
+      metricsRow.appendChild(cell);
+      return v;
+    }
+    metricRevEl = metricCell('Revenue');
+    metricRphEl = metricCell('Rev/hr');
+    metricAspEl = metricCell('ASP hit');
+    panel.appendChild(metricsRow);
+    renderMetrics();
+    // Tick so rev/hr's elapsed advances even with no new sales (cheap; text-only repaint).
+    if (metricsTimer) clearInterval(metricsTimer);
+    metricsTimer = setInterval(renderMetrics, 30000);
+
     panel.appendChild(queueBannerEl); // top of panel, under the header — most visible
     panel.appendChild(statusBar);
     panel.appendChild(skuBar);
@@ -1658,6 +1779,7 @@
       if (countOrderId) seenOrderIds[countOrderId] = true;
       salesCount++;
       if (countEl) countEl.textContent = String(salesCount);
+      accumulateMetrics(sale, countOrderId); // running revenue / rev-hr / ASP-hit (deduped here)
       persistCounter();
     }
 
@@ -1720,7 +1842,9 @@
         sessionId: counterSessionId,
         salesCount: salesCount,
         orderIds: Object.keys(seenOrderIds),
-        capturedOnly: capturedOnlyCount
+        capturedOnly: capturedOnlyCount,
+        // Live metrics accumulators — persisted so a reload restores the running totals.
+        revenueCents: revenueCents, aspHits: aspHits, aspEligible: aspEligible, startMs: sessionStartMs
       };
       chrome.storage.local.set(rec);
     } catch (_) {}
@@ -1767,6 +1891,8 @@
         salesCount: salesCount,
         orderIds: Object.keys(seenOrderIds),
         capturedOnly: capturedOnlyCount,
+        // Live metrics accumulators (pre-session) — carried into the session on migration.
+        revenueCents: revenueCents, aspHits: aspHits, aspEligible: aspEligible, startMs: sessionStartMs,
         hostId: selectedHostId || null
       };
       chrome.storage.local.set(rec);
@@ -1809,12 +1935,13 @@
           return;
         }
         stagedSkus = rec.skus.map(function (s) {
-          return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+          return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
         });
         seenOrderIds = Object.create(null);
         if (Array.isArray(rec.orderIds)) { for (var i = 0; i < rec.orderIds.length; i++) seenOrderIds[rec.orderIds[i]] = true; }
         salesCount = typeof rec.salesCount === 'number' ? rec.salesCount : 0;
         capturedOnlyCount = typeof rec.capturedOnly === 'number' ? rec.capturedOnly : 0;
+        restoreMetricsFrom(rec); // pre-session running metrics survive the reload / migrate to session
         if (rec.hostId && !selectedHostId) selectedHostId = rec.hostId;
         try { renderStagedPills(); updateStagedLabel(); } catch (_) {}
         try { if (countEl) countEl.textContent = String(salesCount); renderCapturedOnlyWarning(); } catch (_) {}
@@ -1861,6 +1988,9 @@
     shotEndOrderIds = Object.create(null); // new live → its own auction_end dedup set
     salesCount = 0;
     capturedOnlyCount = 0;
+    // New live → reset the live metrics accumulators (a fresh show starts at $0 / 0%).
+    revenueCents = 0; aspHits = 0; aspEligible = 0; sessionStartMs = 0; orderGoalCents = new Map();
+    renderMetrics();
     // Clear the per-order dedup Maps too: a new live's orders are legitimately
     // distinct, so cross-live dedup state must not carry over (and this bounds them).
     boundOrderStatus = new Map();
@@ -1908,14 +2038,18 @@
           }
           salesCount = typeof rec.salesCount === 'number' ? rec.salesCount : rec.orderIds ? rec.orderIds.length : 0;
           capturedOnlyCount = typeof rec.capturedOnly === 'number' ? rec.capturedOnly : 0;
+          restoreMetricsFrom(rec); // running revenue / rev-hr / ASP-hit survive the reload
           if (countEl) countEl.textContent = String(salesCount);
           renderCapturedOnlyWarning();
           console.log('[LENSED][TT] counter restored for session', counterSessionId, '→', salesCount, '· captured-only', capturedOnlyCount);
         } else {
-          // New session. On a pre-session migration, KEEP the restored in-memory counter;
-          // otherwise start this session's captured-only tally clean. Persist either way.
+          // New session. On a pre-session migration, KEEP the restored in-memory counter +
+          // metrics; otherwise start this session's captured-only tally clean. Stamp the session
+          // start (≈ live start) when not already carried from a migration. Persist either way.
           console.log('[LENSED][TT] counter scoped to new session', counterSessionId, migrating ? '(migrated)' : '');
           if (!migrating) capturedOnlyCount = 0;
+          if (!sessionStartMs) sessionStartMs = Date.now();
+          renderMetrics();
           renderCapturedOnlyWarning();
           persistCounter();
         }
@@ -1926,7 +2060,7 @@
         var srec = data[LK_STAGED];
         if (srec && srec.sessionId === counterSessionId && Array.isArray(srec.skus) && srec.skus.length > 0) {
           stagedSkus = srec.skus.map(function (s) {
-            return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, live_seller_notes: s.live_seller_notes || [] };
+            return { id: s.id, sku_number: s.sku_number, title: s.title, qty: s.qty || 1, qty_on_hand: s.qty_on_hand, unit_cost_cents: s.unit_cost_cents, category: s.category || null, live_seller_notes: s.live_seller_notes || [] };
           });
           renderStagedPills();
           updateStagedLabel();

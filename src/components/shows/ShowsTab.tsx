@@ -1,11 +1,11 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState, type KeyboardEvent } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
-import { useAuctionBoard, type AuctionItem } from '@/hooks/useLiveAuctions';
-import { notSoldBadge } from '@/lib/paymentStatus';
+import { useAuctionBoard, useUnbind, type AuctionItem, type SessionSku } from '@/hooks/useLiveAuctions';
+import { notSoldBadge, paidNeedsFlip } from '@/lib/paymentStatus';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
 import { useStores } from '@/hooks/useStores';
@@ -158,6 +158,114 @@ function shortConfirmMessage(short: { n: number; cur: number; qty: number; large
     : `These SKUs will go negative:\n${short.map((s) => `  ${shortLine(s)}`).join('\n')}\n\n${tail.trim()}`;
 }
 
+// Bound sales nearest IN TIME to a captured-but-unbound row → the SKUs most likely to be the
+// same item. Unbound rows have no sequence, so we rank by capture-time proximity (their
+// ordered_at vs bound rows' closed_at). Returns sku_ids closest-first (deduped). Empty when the
+// show has no bound sales yet — the caller then degrades to "no context available".
+function nearbySkuIdsForTime(targetIso: string | null | undefined, items: AuctionItem[]): string[] {
+  if (!targetIso) return [];
+  const t = new Date(targetIso).getTime();
+  if (!Number.isFinite(t)) return [];
+  const bound = items
+    .filter((i) => !i.unbound && i.skus.length > 0 && i.logged_at)
+    .map((i) => ({ dt: Math.abs(new Date(i.logged_at).getTime() - t), ids: i.skus.map((s) => String(s.inventory_sku_id)) }))
+    .filter((x) => Number.isFinite(x.dt))
+    .sort((a, b) => a.dt - b.dt);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const b of bound) {
+    for (const id of b.ids) if (!seen.has(id)) { seen.add(id); out.push(id); }
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+// Ranked, scannable SKU picker for one bind line. NEVER a flat catalogue: temporally-adjacent
+// SKUs first (nearby), then everything sold in THIS show (primary/category), and the full
+// catalogue only surfaces once the operator searches (fallback). Scanning a barcode (or typing
+// it + Enter) selects the exact SKU — same muscle memory as the live flow.
+function RankedSkuPicker({
+  value, onChange, allSkus, primaryIds, nearbyIds, disabled,
+}: {
+  value: string;
+  onChange: (id: string) => void;
+  allSkus: InventorySku[];
+  primaryIds: Set<string>;
+  nearbyIds: string[];
+  disabled?: boolean;
+}) {
+  const [q, setQ] = useState('');
+  const [scanMsg, setScanMsg] = useState<string | null>(null);
+  const byId = useMemo(() => new Map(allSkus.map((s) => [s.id, s])), [allSkus]);
+  const selected = value ? byId.get(value) ?? null : null;
+
+  const query = q.trim().toLowerCase();
+  const match = (s: InventorySku) =>
+    !query || `#${s.sku_number} ${s.title} ${s.category ?? ''} ${s.barcode ?? ''}`.toLowerCase().includes(query);
+  const nearby = nearbyIds.map((id) => byId.get(id)).filter((s): s is InventorySku => !!s);
+  const nearbySet = new Set(nearby.map((s) => s.id));
+  const primary = allSkus.filter((s) => primaryIds.has(s.id) && !nearbySet.has(s.id) && match(s));
+  // Fallback: the rest of the catalogue, ONLY while searching (never the flat 217 by default).
+  const fallback = query
+    ? allSkus.filter((s) => !primaryIds.has(s.id) && !nearbySet.has(s.id) && match(s)).slice(0, 25)
+    : [];
+  const groups = [
+    { key: 'nearby', label: 'Nearby in this show', skus: nearby.filter(match) },
+    { key: 'primary', label: 'Sold in this show', skus: primary },
+    { key: 'all', label: 'All SKUs (search)', skus: fallback },
+  ].filter((g) => g.skus.length > 0);
+
+  function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const code = q.trim();
+    if (!code) return;
+    const hit = allSkus.find((s) => s.barcode && s.barcode === code); // exact barcode = scan
+    if (hit) { onChange(hit.id); setQ(''); setScanMsg(null); }
+    else setScanMsg(`No SKU with barcode "${code}"`);
+  }
+
+  return (
+    <div className="min-w-[15rem]">
+      {selected && (
+        <div className="flex items-center gap-2 mb-1 text-xs">
+          <span><span className="font-mono text-tt-cyan">#{selected.sku_number}</span> {selected.title || 'Untitled'}</span>
+          <button onClick={() => onChange('')} disabled={disabled} className="text-tt-muted hover:text-tt-red cursor-pointer">change</button>
+        </div>
+      )}
+      <input
+        value={q}
+        onChange={(e) => { setQ(e.target.value); setScanMsg(null); }}
+        onKeyDown={onKeyDown}
+        disabled={disabled}
+        placeholder="Search or scan barcode…"
+        className="w-full rounded-md border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none"
+      />
+      {scanMsg && <div className="text-[10px] text-tt-red mt-0.5">{scanMsg}</div>}
+      {groups.length > 0 && (
+        <div className="mt-1 max-h-44 overflow-y-auto rounded-md border border-tt-border divide-y divide-tt-border/50">
+          {groups.map((g) => (
+            <div key={g.key}>
+              <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-tt-muted bg-tt-card sticky top-0">{g.label}</div>
+              {g.skus.map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => { onChange(s.id); setQ(''); }}
+                  disabled={disabled}
+                  className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-xs cursor-pointer hover:bg-tt-card-hover ${s.id === value ? 'bg-tt-card-hover' : ''}`}
+                >
+                  <span className="truncate"><span className="font-mono text-tt-cyan">#{s.sku_number}</span> {s.title || 'Untitled'}</span>
+                  <span className="shrink-0 text-tt-muted">{s.category ? `${s.category} · ` : ''}{s.qty_on_hand}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ShowsTab() {
   const { data: sessions = [], isLoading } = useLiveSessions();
   const { user } = useUser();
@@ -257,7 +365,8 @@ function PracticeModeCard() {
 // One list row; fetches its own board (cached, reused by the detail view) to
 // compute the show's summary totals.
 function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: string) => void }) {
-  const { data: items = [], isLoading } = useAuctionBoard(session.id);
+  const { data: boardData, isLoading } = useAuctionBoard(session.id);
+  const items = boardData?.items ?? [];
   const sum = useMemo(() => summarize(items), [items]);
 
   return (
@@ -300,7 +409,8 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
 // Mobile counterpart of ShowRow — same board hook, same summary, same open
 // handler, rendered as a stacked card (shown only <md via the parent wrapper).
 function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id: string) => void }) {
-  const { data: items = [], isLoading } = useAuctionBoard(session.id);
+  const { data: boardData, isLoading } = useAuctionBoard(session.id);
+  const items = boardData?.items ?? [];
   const sum = useMemo(() => summarize(items), [items]);
 
   // host · store · date — identical wording/tone to the desktop row.
@@ -338,7 +448,9 @@ function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id
 }
 
 function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => void }) {
-  const { data: items = [], isLoading } = useAuctionBoard(session.id);
+  const { data: boardData, isLoading } = useAuctionBoard(session.id);
+  const items = useMemo(() => boardData?.items ?? [], [boardData]);
+  const sessionSkus = useMemo(() => boardData?.session_skus ?? [], [boardData]);
   const sum = useMemo(() => summarize(items), [items]);
   const rates = useMemo(() => showRates(items), [items]);
   // Net profit (so far) + its cost base, over costed sold items that HAVE a
@@ -409,6 +521,50 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // In-app (themed) out-of-stock confirm — replaces window.confirm. Holds the
   // pending bind until the user confirms (→ allow_negative) or cancels (→ abort).
   const [bindConfirm, setBindConfirm] = useState<{ u: UnboundOrder; orderLines: { sku_id: string; qty: number }[]; short: { n: number; cur: number; qty: number; largest: number }[] } | null>(null);
+  // ── Bind-from-table (the primary surface): captured-but-unbound rows are unioned into the
+  //    board `items` (unbound=true). Expand one to bind it; unbind a bound row to correct it.
+  const unbind = useUnbind(session.id);
+  const [expandedOrder, setExpandedOrder] = useState<string | null>(null);
+  const [unbindConfirm, setUnbindConfirm] = useState<{ order_id: string; label: string } | null>(null);
+  const [unbindingId, setUnbindingId] = useState<string | null>(null);
+  // Bound THIS session → drives the "N unbound · M remaining" progress (total = remaining + bound).
+  const [boundThisSession, setBoundThisSession] = useState(0);
+  // Discoverability: on a 100+ row show, unbound rows are unfindable interleaved. This filters
+  // the table to just the actionable (unbound) rows. Toggled from the progress banner.
+  const [onlyUnbound, setOnlyUnbound] = useState(false);
+  const displayItems = useMemo(() => (onlyUnbound ? items.filter((i) => i.unbound) : items), [onlyUnbound, items]);
+  // PRIMARY narrowing set: SKUs sold in this show (from the board) — the picker's default list.
+  const primaryIdSet = useMemo(() => new Set(sessionSkus.map((s) => s.id)), [sessionSkus]);
+
+  // A board unbound row → the UnboundOrder shape the existing bind path expects (reuse, not rebuild).
+  const asUnbound = (it: AuctionItem): UnboundOrder => ({
+    order_id: it.order_id ?? '', buyer: it.buyer_handle ?? '',
+    won_price_cents: it.won_price_cents, seller_sku: it.seller_sku_hint ?? '',
+    quantity: 1, status: 'sold',
+  });
+  // Expand/collapse a table row's bind editor; seed one line, pre-picked from the seller_sku hint.
+  function toggleExpand(it: AuctionItem) {
+    const oid = it.order_id ?? '';
+    if (!oid) return;
+    if (expandedOrder === oid) { setExpandedOrder(null); return; }
+    if (!lines[oid]) {
+      const m = allSkus.find((s) => String(s.sku_number) === (it.seller_sku_hint ?? ''));
+      setLinesFor(oid, [{ sku_id: m?.id ?? '', qty: 1 }]);
+    }
+    setExpandedOrder(oid);
+  }
+  async function doUnbind(orderId: string) {
+    setUnbindingId(orderId);
+    try {
+      const r = await unbind.mutateAsync(orderId);
+      setBindNotice({ type: 'success', msg: `Unbound order ${orderId} — restocked ${r.restocked_units} unit${r.restocked_units === 1 ? '' : 's'}.` });
+    } catch (e) {
+      setBindNotice({ type: 'error', msg: `Unbind failed for order ${orderId}: ${e instanceof Error ? e.message : 'error'}` });
+    } finally {
+      setUnbindingId(null);
+      setUnbindConfirm(null);
+    }
+  }
 
   function setLinesFor(orderId: string, next: { sku_id: string; qty: number }[]) {
     setLines((l) => ({ ...l, [orderId]: next }));
@@ -543,11 +699,13 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ order_id: u.order_id, lines: orderLines, allow_negative: allowNegative }),
       });
-      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      const json = (await res.json().catch(() => ({}))) as { error?: string; already_bound?: boolean };
       if (res.ok) {
         setRecon((r) => (r ? { ...r, unbound: r.unbound.filter((x) => x.order_id !== u.order_id) } : r));
         qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
         qc.invalidateQueries({ queryKey: ['inventory-skus'] });
+        if (!json.already_bound) setBoundThisSession((n) => n + 1); // progress: one fewer remaining
+        setExpandedOrder(null); // collapse the table editor on success
         setBindNotice({ type: 'success', msg: `Bound order ${u.order_id} to inventory${allowNegative ? ' — stock went negative (recount flagged).' : '.'}` });
       } else {
         setBindNotice({ type: 'error', msg: `Bind failed for order ${u.order_id}: ${json.error || 'Unknown error'}` });
@@ -810,6 +968,39 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         </div>
       )}
 
+      {/* PAID — needs flip: not_sold rows TikTok confirms as paid (real revenue sitting
+          mislabeled). Surfaced as a count so it's visible without scanning the table. */}
+      {(() => {
+        const needsFlip = items.filter((it) => it.status === 'not_sold' && paidNeedsFlip(it.synced_status)).length;
+        return needsFlip > 0 ? (
+          <div className="mb-4 rounded-lg border border-tt-green/40 bg-tt-green/10 px-4 py-2.5 text-sm text-tt-green">
+            <span className="font-semibold">{needsFlip}</span> paid order{needsFlip === 1 ? '' : 's'} still marked
+            not sold (PAID — needs flip) — real revenue not yet counted.
+          </div>
+        ) : null;
+      })()}
+
+      {/* Bind progress + discoverability filter — captured-but-unbound rows are actionable inline. */}
+      {(() => {
+        const remaining = items.filter((i) => i.unbound).length;
+        const total = remaining + boundThisSession;
+        if (total === 0) return null;
+        return (
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+            <span className="inline-flex items-center rounded-md bg-tt-yellow/15 px-2 py-0.5 text-xs font-semibold text-tt-yellow ring-1 ring-tt-yellow/30">
+              {total} unbound · {remaining} remaining
+            </span>
+            {remaining > 0 && (
+              <button
+                onClick={() => setOnlyUnbound((v) => !v)}
+                className={`text-xs rounded-md px-2 py-0.5 cursor-pointer transition-colors ${onlyUnbound ? 'bg-tt-cyan text-black font-semibold' : 'border border-tt-border text-tt-cyan hover:bg-tt-card-hover'}`}
+              >{onlyUnbound ? 'Showing only unbound — show all' : `Show only unbound (${remaining})`}</button>
+            )}
+            <span className="text-xs text-tt-muted">Click a “Unbound — bind” row to attach its SKU(s).</span>
+          </div>
+        );
+      })()}
+
       {/* Items table */}
       {isLoading ? (
         <div className="flex items-center justify-center py-16 text-tt-muted">
@@ -819,6 +1010,11 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
       ) : items.length === 0 ? (
         <div className="rounded-2xl border border-tt-border bg-tt-card py-12 text-center text-tt-muted text-sm">
           No auction items captured for this show.
+        </div>
+      ) : displayItems.length === 0 ? (
+        <div className="rounded-2xl border border-tt-border bg-tt-card py-12 text-center text-tt-muted text-sm">
+          No unbound rows remaining.{' '}
+          <button onClick={() => setOnlyUnbound(false)} className="text-tt-cyan cursor-pointer hover:underline">Show all rows</button>
         </div>
       ) : (
         <div className="hidden md:block rounded-2xl border border-tt-border bg-tt-card overflow-x-auto">
@@ -839,28 +1035,34 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
               </tr>
             </thead>
             <tbody>
-              {items.map((it) => {
+              {displayItems.map((it) => {
+                const isUnbound = !!it.unbound;
                 const sold = it.status === 'sold';
                 const won = wonCents(it); // real winning bid (sold items only)
                 const cost = it.total_cost_cents;
-                // ONE adaptive profit figure (always the best available), blank-not-zero:
-                //   payout present → payout − cost (true, after fees)
-                //   else won present → won − cost (provisional)
-                //   no cost → '—'.
+                // Bound sold rows carry an order_id + SKU lines → they can be unbound/corrected.
+                const canUnbind = sold && !isUnbound && !!it.order_id && it.skus.length > 0;
                 let profit: number | null = null;
                 if (sold && cost != null) {
                   if (it.net_payout_cents != null) profit = it.net_payout_cents - cost;
                   else if (won != null) profit = won - cost;
                 }
+                const expanded = isUnbound && expandedOrder === it.order_id;
+                const orderLines = it.order_id ? (lines[it.order_id] ?? []) : [];
+                const nearby = isUnbound ? nearbySkuIdsForTime(it.logged_at, items) : [];
+                const pickedCount = orderLines.filter((x) => x.sku_id).length;
                 return (
-                  <tr key={it.id} className="border-b border-tt-border last:border-0">
-                    <td className="px-4 py-3 text-tt-muted tabular-nums">{it.auction_number}</td>
+                  <Fragment key={it.id}>
+                  <tr className={`border-b border-tt-border last:border-0 ${isUnbound ? 'bg-tt-yellow/[0.04]' : ''}`}>
+                    <td className="px-4 py-3 text-tt-muted tabular-nums">{isUnbound ? '—' : it.auction_number}</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-0.5">
                         {it.tiktok_title ? (
                           <span className="min-w-0 truncate text-tt-text">{it.tiktok_title}</span>
                         ) : null}
-                        {it.skus.length === 0 ? (
+                        {isUnbound ? (
+                          <span className="text-xs text-tt-yellow">Captured · no SKU bound</span>
+                        ) : it.skus.length === 0 ? (
                           !it.tiktok_title ? <span className="text-tt-muted">—</span> : null
                         ) : (
                           it.skus.map((sk) => (
@@ -871,16 +1073,29 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                             </span>
                           ))
                         )}
+                        {canUnbind && (
+                          <button
+                            onClick={() => setUnbindConfirm({ order_id: it.order_id!, label: it.skus.map((s) => `#${s.sku_number}`).join(', ') })}
+                            disabled={unbindingId === it.order_id}
+                            className="mt-0.5 self-start text-[11px] text-tt-muted hover:text-tt-red cursor-pointer disabled:opacity-50"
+                          >{unbindingId === it.order_id ? 'Unbinding…' : 'Unbind / change SKU'}</button>
+                        )}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">{it.units}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">{isUnbound ? '—' : it.units}</td>
                     <td className="px-4 py-3 text-center">
-                      {sold ? (
+                      {isUnbound ? (
+                        <button
+                          onClick={() => toggleExpand(it)}
+                          className="text-xs font-semibold rounded-md bg-tt-yellow/20 text-tt-yellow ring-1 ring-tt-yellow/40 px-2 py-0.5 cursor-pointer hover:bg-tt-yellow/30"
+                        >{expanded ? 'Close' : 'Unbound — bind'}</button>
+                      ) : sold ? (
                         <span className="text-xs font-medium text-tt-green">Sold</span>
                       ) : (
                         (() => {
-                          // not_sold → show the payment-recovery state from order_status.
-                          const b = notSoldBadge(it.order_status, it.payment_failed);
+                          // not_sold → show the truthful payment state (synced status first,
+                          // frozen order_status snapshot as fallback).
+                          const b = notSoldBadge(it.synced_status, it.order_status, it.payment_failed);
                           return <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>;
                         })()
                       )}
@@ -908,6 +1123,72 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                       )}
                     </td>
                   </tr>
+                  {expanded && it.order_id && (
+                    <tr className="bg-tt-card/60">
+                      <td colSpan={9} className="px-4 py-4">
+                        {/* Inline context: sale time, price, buyer, order id, seller_sku hint. */}
+                        <div className="text-xs text-tt-muted mb-2 flex flex-wrap gap-x-4 gap-y-1">
+                          <span>Sale time: <span className="text-tt-text">{fmtDate(it.logged_at || null)}</span></span>
+                          <span>Price: <span className="text-tt-text">{money(it.won_price_cents)}</span></span>
+                          <span>Buyer: <span className="text-tt-text">@{it.buyer_handle || '—'}</span></span>
+                          <span>Order: <span className="font-mono text-tt-text">{it.order_id}</span></span>
+                          {it.seller_sku_hint ? <span>seller_sku hint: <span className="font-mono text-tt-text">{it.seller_sku_hint}</span></span> : null}
+                        </div>
+                        {/* Degrade honestly: no bound sales in this show → no temporal context. */}
+                        <div className="text-[11px] text-tt-muted mb-3">
+                          {nearby.length > 0 ? (
+                            <>Nearest bound sales by time: {nearby.slice(0, 5).map((id) => { const s = allSkus.find((x) => x.id === id); return s ? `#${s.sku_number}` : null; }).filter(Boolean).join(', ')}</>
+                          ) : (
+                            <span className="italic">No context available — no bound sales in this show to compare by time.</span>
+                          )}
+                        </div>
+                        {/* Multi-SKU lines: each its own qty, a ranked+scannable picker, one confirm. */}
+                        <div className="space-y-2">
+                          {orderLines.map((ln, idx) => (
+                            <div key={idx} className="flex flex-wrap items-start gap-2">
+                              <RankedSkuPicker
+                                value={ln.sku_id}
+                                onChange={(sid) => updateLine(it.order_id!, idx, { sku_id: sid })}
+                                allSkus={allSkus}
+                                primaryIds={primaryIdSet}
+                                nearbyIds={nearby}
+                              />
+                              <input
+                                type="number" min={1} value={ln.qty}
+                                onChange={(e) => updateLine(it.order_id!, idx, { qty: Math.max(1, Math.trunc(Number(e.target.value) || 1)) })}
+                                className="w-16 rounded-md border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none tabular-nums" aria-label="Quantity"
+                              />
+                              <button
+                                onClick={() => { setQuickAdd({ orderId: it.order_id!, idx }); setQaName(''); setQaCost(''); setQaError(null); }}
+                                className="text-xs text-tt-cyan cursor-pointer hover:underline px-1" title="Create a new inventory SKU"
+                              >+ New SKU</button>
+                              {orderLines.length > 1 && (
+                                <button onClick={() => removeLine(it.order_id!, idx)} className="text-tt-muted hover:text-tt-red text-xs px-1" aria-label="Remove line">✕</button>
+                              )}
+                              {quickAdd?.orderId === it.order_id && quickAdd?.idx === idx && (
+                                <div className="mt-1 flex flex-wrap items-center gap-2 rounded-lg border border-tt-border bg-tt-input-bg/40 p-2 w-full">
+                                  <input autoFocus placeholder="New SKU name" value={qaName} onChange={(e) => setQaName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submitQuickAdd(); if (e.key === 'Escape') setQuickAdd(null); }} className="flex-1 min-w-[10rem] rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none" />
+                                  <input placeholder="Cost $" inputMode="decimal" value={qaCost} onChange={(e) => setQaCost(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submitQuickAdd(); if (e.key === 'Escape') setQuickAdd(null); }} className="w-24 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text outline-none tabular-nums" />
+                                  <button onClick={submitQuickAdd} disabled={qaSaving || !qaName.trim()} className="px-2.5 py-1 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40">{qaSaving ? 'Creating…' : 'Create & select'}</button>
+                                  <button onClick={() => setQuickAdd(null)} className="text-tt-muted hover:text-tt-text text-xs px-1">Cancel</button>
+                                  {qaError && <span className="text-tt-red text-xs w-full">{qaError}</span>}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="mt-3 flex items-center gap-3">
+                          <button onClick={() => addLine(it.order_id!)} className="text-xs text-tt-cyan cursor-pointer hover:underline">+ add SKU line</button>
+                          <button
+                            onClick={() => bindOne(asUnbound(it))}
+                            disabled={pickedCount === 0 || bindingId === it.order_id}
+                            className="px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                          >{bindingId === it.order_id ? 'Binding…' : `Bind ${pickedCount} SKU${pickedCount === 1 ? '' : 's'}`}</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -931,7 +1212,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
               <span className="text-xs font-medium text-tt-green">Sold</span>
             ) : (
               (() => {
-                const b = notSoldBadge(it.order_status, it.payment_failed);
+                const b = notSoldBadge(it.synced_status, it.order_status, it.payment_failed);
                 return <span className={`text-xs font-medium ${b.cls}`}>{b.label}</span>;
               })()
             );
@@ -1028,6 +1309,25 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           </div>
         </div>
       )}
+
+      {/* Unbind / change-SKU confirm — reverses a bind (restocks + deletes the item). */}
+      {unbindConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setUnbindConfirm(null)} role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-2xl border border-tt-border bg-tt-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm font-semibold text-tt-text mb-2">Unbind this sale?</div>
+            <div className="text-sm text-tt-muted mb-4">
+              Order <span className="font-mono text-tt-text">{unbindConfirm.order_id}</span> is bound to <span className="text-tt-text">{unbindConfirm.label || 'its SKU(s)'}</span>.
+              Unbinding restocks the quantity (a fresh cost layer at the snapshot cost) and returns the row to unbound so you can re-bind a different SKU.
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setUnbindConfirm(null)} className="px-4 py-2 rounded-lg border border-tt-border text-sm font-medium text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors">Cancel</button>
+              <button onClick={() => { void doUnbind(unbindConfirm.order_id); }} disabled={unbindingId === unbindConfirm.order_id} className="px-4 py-2 rounded-lg bg-tt-red text-white text-sm font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40">
+                {unbindingId === unbindConfirm.order_id ? 'Unbinding…' : 'Unbind'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1039,6 +1339,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
 // reconcile handles — the two are shown as separate figures, never merged.
 function CoveragePanel({ sessionId }: { sessionId: string }) {
   const { data, isLoading, isError } = useShowCoverage(sessionId);
+  const [showCatalog, setShowCatalog] = useState(false);
 
   if (isLoading) {
     return (
@@ -1055,60 +1356,118 @@ function CoveragePanel({ sessionId }: { sessionId: string }) {
     );
   }
 
-  const gap = data.coverage_gap_count;
-  const hasGap = gap > 0;
+  const missed = data.missed_capture_count;
+  const catalog = data.catalog_count;
+  const hasMissed = missed > 0;
 
   return (
     <div
       className={`mb-5 rounded-xl border px-4 py-3 ${
-        hasGap ? 'border-amber-400/40 bg-amber-400/10' : 'border-tt-border bg-tt-card'
+        hasMissed ? 'border-amber-400/40 bg-amber-400/10' : 'border-tt-border bg-tt-card'
       }`}
     >
-      <div className="flex items-center gap-2">
-        <span className={`text-xs font-semibold uppercase tracking-wide ${hasGap ? 'text-amber-300' : 'text-tt-muted'}`}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className={`text-xs font-semibold uppercase tracking-wide ${hasMissed ? 'text-amber-300' : 'text-tt-muted'}`}>
           Order coverage
         </span>
-        <span className={`text-sm ${hasGap ? 'text-amber-200' : 'text-tt-text'}`}>
+        <span className={`text-sm ${hasMissed ? 'text-amber-200' : 'text-tt-text'}`}>
           {data.total_synced} synced order{data.total_synced === 1 ? '' : 's'} ·{' '}
           {data.captured_but_unbound_count} captured but unbound ·{' '}
-          <span className={hasGap ? 'font-semibold text-amber-300' : ''}>
-            {gap} never captured (coverage gap)
+          {/* PRIMARY signal: genuinely-missed AUCTION captures only. */}
+          <span className={hasMissed ? 'font-semibold text-amber-300' : 'text-tt-text'}>
+            {missed} missed auction capture{missed === 1 ? '' : 's'}
           </span>
+          {/* SECONDARY, de-emphasised but visible. */}
+          {catalog > 0 && (
+            <span className="text-tt-muted"> · {catalog} catalog sale{catalog === 1 ? '' : 's'} (pre-listed, not auctions)</span>
+          )}
+          {data.room_unknown_count > 0 && (
+            <> · <span className="font-semibold text-tt-red">{data.room_unknown_count} room unknown</span></>
+          )}
         </span>
       </div>
 
-      {hasGap && (
+      {data.room_unknown_count > 0 && (
+        <div className="mt-3 rounded-lg border border-tt-red/30 bg-tt-red/5 px-3 py-2">
+          <div className="text-xs font-semibold text-tt-red mb-0.5">
+            {data.room_unknown_count} captured, room unknown — cannot attribute to a show
+          </div>
+          <div className="text-[11px] text-tt-muted">
+            These sales were captured under a live room that matches no tracked session (or none at all),
+            so they can’t be attributed to a host and don’t appear on any show’s bind table. Surfaced here
+            for visibility — resolve by tracking the missing session or binding from the correct show.
+          </div>
+        </div>
+      )}
+
+      {/* PRIMARY: genuinely-missed auction captures (the real capture-health signal). */}
+      {hasMissed && (
         <div className="mt-3">
           <div className="text-xs text-amber-200/80 mb-2">
-            These TikTok orders synced but were never captured during the live, so they have no
-            SKU and are invisible to Reconcile. Listed for visibility only — no binding here yet.
+            <span className="font-semibold">{missed}</span> auction sale{missed === 1 ? '' : 's'} synced but {missed === 1 ? 'was' : 'were'} never captured during the live — genuinely missing from the auction log (their seller SKU is a real inventory SKU number). Catalog/pre-listed sales are counted separately below.
           </div>
           <div className="overflow-x-auto rounded-lg border border-amber-400/20">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-amber-400/20 text-amber-200/70 text-xs uppercase tracking-wide">
                   <th className="text-left font-medium px-3 py-2">Order ID</th>
-                  <th className="text-left font-medium px-3 py-2">Order date</th>
-                  <th className="text-left font-medium px-3 py-2">Buyer</th>
+                  <th className="text-left font-medium px-3 py-2">Date</th>
+                  <th className="text-left font-medium px-3 py-2">Seller SKU</th>
                   <th className="text-right font-medium px-3 py-2">GMV</th>
                   <th className="text-left font-medium px-3 py-2">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {data.coverage_gap.map((o) => (
+                {data.missed_capture.map((o) => (
                   <tr key={o.order_id} className="border-b border-amber-400/10 last:border-0">
                     <td className="px-3 py-2 font-mono text-xs text-tt-text">{o.order_id}</td>
                     <td className="px-3 py-2 text-tt-text/80">{o.order_date ?? '—'}</td>
-                    <td className="px-3 py-2 text-tt-muted">{o.buyer ?? '—'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-tt-text/80">
-                      {o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}
-                    </td>
+                    <td className="px-3 py-2 font-mono text-tt-cyan">#{o.sku_name}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-tt-text/80">{o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}</td>
                     <td className="px-3 py-2 text-tt-muted">{o.status ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* SECONDARY: catalog sales — de-emphasised, collapsed by default, but the count + list stay available. */}
+      {catalog > 0 && (
+        <div className="mt-3 rounded-lg border border-tt-border bg-tt-card/40 px-3 py-2">
+          <button onClick={() => setShowCatalog((v) => !v)} className="flex w-full items-start justify-between gap-2 text-left cursor-pointer">
+            <span className="text-xs text-tt-muted">
+              <span className="font-semibold text-tt-text/80">{catalog}</span> catalog sale{catalog === 1 ? '' : 's'} in this window — pre-listed items (mouth tape, nasal strips…) sold via normal listings, <span className="text-tt-text/70">not auctions</span> and not pick/packed. Not a capture problem.
+            </span>
+            <span className="text-xs text-tt-cyan shrink-0">{showCatalog ? 'Hide' : 'Show'}</span>
+          </button>
+          {showCatalog && (
+            <div className="mt-2 overflow-x-auto rounded-lg border border-tt-border">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-tt-border text-tt-muted text-xs uppercase tracking-wide">
+                    <th className="text-left font-medium px-3 py-2">Order ID</th>
+                    <th className="text-left font-medium px-3 py-2">Date</th>
+                    <th className="text-left font-medium px-3 py-2">Variant</th>
+                    <th className="text-right font-medium px-3 py-2">GMV</th>
+                    <th className="text-left font-medium px-3 py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.catalog.map((o) => (
+                    <tr key={o.order_id} className="border-b border-tt-border/60 last:border-0">
+                      <td className="px-3 py-2 font-mono text-xs text-tt-text/80">{o.order_id}</td>
+                      <td className="px-3 py-2 text-tt-muted">{o.order_date ?? '—'}</td>
+                      <td className="px-3 py-2 text-tt-muted">{o.sku_name ?? '—'}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-tt-muted">{o.gmv == null ? '—' : `$${o.gmv.toFixed(2)}`}</td>
+                      <td className="px-3 py-2 text-tt-muted">{o.status ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>

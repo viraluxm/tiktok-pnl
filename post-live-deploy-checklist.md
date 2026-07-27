@@ -78,3 +78,25 @@ Freezes past recurring-shift days into real `shifts` rows so deleting/deactivati
 
 ## Rollback
 - Set `SHIFT_MATERIALIZE_WRITE_ENABLED` unset (back to log-only) to stop writes immediately; the column/FK are additive and safe to leave in place.
+
+---
+
+# Extension Release — build & distribute (part of DONE on any `extension/` PR)
+
+Source-only version bumps are NOT shippable. `dist/` and `lensed-extension-v*.zip` are
+**git-ignored build outputs** — merging a PR does NOT rebuild them, so after any change under
+`extension/` the release artifact must be rebuilt and distributed by hand. Run this every time.
+
+## Checklist
+1. **Bump `extension/manifest.json` `version`** in the PR (a code change with no version bump ships as the old version).
+2. After merge, `git checkout main && git pull`. Confirm `grep '"version"' extension/manifest.json` is the new version. *(If not, a merge dropped the bump — stop.)*
+3. `cd extension && npm install && npm run build` (`build.sh`: rsync → terser minify → `validate-build.mjs` → zip). A **validation failure fails the build — do not distribute.**
+4. **Verify BOTH built manifests match source**, since `dist/` is a stale-prone local dir:
+   - `grep '"version"' extension/dist/manifest.json`
+   - `unzip -p extension/lensed-extension-v<version>.zip manifest.json | grep '"version"'`
+   Both MUST equal the source version. (A stale `dist/` at the old version is the classic failure.)
+5. **Distribute via a GitHub Release** (the canonical channel — the zip is git-ignored, so `git pull` never delivers it): `gh release create v<version> extension/lensed-extension-v<version>.zip --target main --title "Extension v<version>" --notes "…install steps…"`. Hosts download the asset from the release page.
+6. Confirm each host **removes the old unpacked extension and loads the freshly-unzipped folder** (see extension/README "Load unpacked"). Loading a stale `extension/dist/` is the other classic failure.
+
+## Known gap (unverifiable rollout)
+The DB carries **no extension-version field** — `EXT_VERSION` lives only in local diagnostics, never written to `capture_events`/sessions. So "every host is on v<version>" cannot be confirmed from data. Fix: stamp `EXT_VERSION` into the capture write, then query the per-host version distribution.
