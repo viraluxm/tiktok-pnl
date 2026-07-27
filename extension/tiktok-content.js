@@ -2826,6 +2826,12 @@
     }
     if (channelMapState && handle &&
         normHandle(String(channelMapState.handle || '')).toLowerCase() === normHandle(String(handle)).toLowerCase()) {
+      if (channelMapState.guardOn === false) {
+        // Guard offline (map empty/unavailable). Garbage was rejected by the denylist;
+        // a plausible handle was written via fallback — show it, but flag the guard is off.
+        if (channelMapState.classification === 'garbage') return null;
+        return { name: name, src: src, key: key, state: 'guard_offline' };
+      }
       if (channelMapState.known) return { name: name, src: src, key: key, state: 'known' };
       if (channelMapState.classification === 'plausible') return { name: name, src: src, key: key, state: 'unmapped' };
       return null; // garbage — do not present a bogus channel
@@ -2856,7 +2862,12 @@
     sessionStatusEl.appendChild(document.createTextNode('Connected'));
     sessionStatusEl.appendChild(el('span', 'lensed-acct-sep', ' \u00b7 '));
     var acct = accountDisplay();
-    if (acct && acct.state === 'unmapped') {
+    if (acct && acct.state === 'guard_offline') {
+      var goff = el('span', 'lensed-acct-warn', '\u26a0 ' + acct.name + ' (guard offline)');
+      goff.title = 'Channel guard is OFFLINE (channel_store_map unavailable) \u2014 handle written via '
+        + 'fallback detection, NOT validated against the known-channel set. Check RLS / connectivity.';
+      sessionStatusEl.appendChild(goff);
+    } else if (acct && acct.state === 'unmapped') {
       var warn = el('span', 'lensed-acct-warn', '\u26a0 unmapped: ' + acct.name);
       warn.title = 'Detected channel "' + acct.name + '" is not in the channel\u2192store map. '
         + 'Add it in Lensed to attribute this session (nothing was written).';
@@ -3043,6 +3054,52 @@
   // Returns { label, why, scanned, topRightCount, samples } \u2014 label is null if nothing
   // confident was found. Our own overlay lives in a shadow root, so it is invisible to
   // these document queries and can never be picked up.
+  // Class string of an element (handles SVG className objects).
+  function classOf(n) {
+    var c = n && n.className;
+    if (c && typeof c === 'object' && 'baseVal' in c) return c.baseVal || '';
+    return typeof c === 'string' ? c : '';
+  }
+
+  // Is this m4b_avatar in the COLLAPSED, VISIBLE header (NOT the account-switcher dropdown,
+  // not otherwise hidden)? The dropdown (div.absolute.top-32.right-0 ... hidden) holds OTHER
+  // accounts and is the source of the jumbosteals->lotsofsteals bug, so it is excluded in
+  // BOTH states: 'hidden' when collapsed, and absolute+top-32/right-0 when open.
+  function isCollapsedHeaderAvatar(el) {
+    try {
+      var n = el;
+      while (n && n.nodeType === 1 && n !== document.body) {
+        var cls = classOf(n);
+        if (/\bhidden\b/.test(cls)) return false;
+        if (/\babsolute\b/.test(cls) && (/\btop-32\b/.test(cls) || /\bright-0\b/.test(cls))) return false;
+        var st = null; try { st = getComputedStyle(n); } catch (_) {}
+        if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+        n = n.parentElement;
+      }
+      if (el.getClientRects().length === 0) return false; // not laid out -> hidden
+      return true;
+    } catch (_) { return false; }
+  }
+
+  // The handle is the text beside the avatar within the collapsed-header parent
+  // (div.flex-c.cursor-pointer): the first direct child that is NOT the avatar branch and
+  // carries text; fallback to parent text minus the avatar's own text.
+  function handleTextBesideAvatar(parent, avatar) {
+    try {
+      var kids = parent.children || [];
+      for (var i = 0; i < kids.length; i++) {
+        var elc = kids[i];
+        if (elc === avatar || elc.contains(avatar)) continue; // skip the avatar branch
+        var t = (elc.textContent || '').trim();
+        if (t) return t;
+      }
+      var pt = (parent.textContent || '').trim();
+      var at = (avatar.textContent || '').trim();
+      if (pt && at) pt = pt.split(at).join('').trim();
+      return pt || null;
+    } catch (_) { return null; }
+  }
+
   function detectVisibleAccount() {
     var best = null;         // { text, score, why }
     var samples = [];        // rejected top-right texts, for the failure diagnostic
@@ -3059,6 +3116,28 @@
       }
       if (!best || score > best.score) best = { text: normHandle(t), score: score, why: why };
     }
+
+    // PRIMARY - structural anchor. data-tid is a TEST id TikTok's own tests depend on, so it
+    // is far more stable than classes/screen position. The account name is the span beside
+    // [data-tid="m4b_avatar"] in the collapsed header (div.flex-c.cursor-pointer). We read
+    // ONLY the visible collapsed header - never the account-switcher dropdown or a hidden node.
+    try {
+      var avatars = document.querySelectorAll('[data-tid="m4b_avatar"]');
+      for (var a = 0; a < avatars.length; a++) {
+        var av = avatars[a];
+        if (!isCollapsedHeaderAvatar(av)) continue; // excludes dropdown + hidden
+        scanned++; topRightCount++;
+        var hparent = av.closest('div.flex-c.cursor-pointer') || av.parentElement;
+        if (!hparent || !isCollapsedHeaderAvatar(hparent)) continue;
+        var anchoredHandle = handleTextBesideAvatar(hparent, av);
+        if (anchoredHandle) consider(anchoredHandle, 10, 'data-tid=m4b_avatar'); // score 10 -> trusted at once
+      }
+    } catch (_) {}
+
+    // FALLBACK - only if the anchor found nothing (a layout without the test id). Legacy
+    // top-right scan, kept as a safety net; weak by design so the known-set guard + the
+    // two-sighting corroboration filter any corner garbage. NOT the primary path.
+    if (!best) {
 
     // Strategy 1 \u2014 avatar alt text near the top (avatars usually carry the account name).
     try {
@@ -3104,6 +3183,8 @@
         if (txt) consider(txt, 6, 'top-right-text');
       }
     } catch (_) {}
+
+    }
 
     return {
       label: best ? best.text : null,
