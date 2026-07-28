@@ -229,9 +229,16 @@ export default function ShippingTab() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const confirmedRef = useRef(false); // fire /confirm + count once per box
+  // Pick start time = the instant the current box loaded. Set on every successful box load
+  // (so a different box resets it), preserved across "Change picker" (same loaded box), and
+  // cleared when returning to Ready. Sent on confirm to record true per-box pick duration.
+  const pickStartedAtRef = useRef<string | null>(null);
 
   const focusInput = useCallback(() => { requestAnimationFrame(() => inputRef.current?.focus()); }, []);
-  useEffect(() => { if (focus) focusInput(); }, [focus, screen, box, focusInput]);
+  // Keep the scanner aimed at the hidden input while in focus mode — but NOT while the picker
+  // gate is open (the modal owns focus then). When the gate closes this re-runs and re-arms the
+  // scanner, which is what "activates" scanning the moment a picker is chosen.
+  useEffect(() => { if (focus && !pickerModalOpen) focusInput(); }, [focus, screen, box, pickerModalOpen, focusInput]);
 
   // Leaving the tab (unmount) while still full-screen → drop out of fullscreen. Self-contained
   // (no external deps) so it runs exactly once on unmount.
@@ -265,6 +272,7 @@ export default function ShippingTab() {
       }
       const b = json as Box;
       setBox(b); setCounts({}); setActiveIdx(0); confirmedRef.current = false; setErr(null);
+      pickStartedAtRef.current = new Date().toISOString(); // box loaded → start the pick clock (resets per box)
       // Only UNBOUND-AUCTION orders trigger the set-aside alert (mixed box → the warning WINS).
       // Catalog orders are pickable and never suppress a real unresolved warning.
       const unbound = (b.missing_orders?.length ?? 0) > 0 || b.missing_order_ids.length > 0;
@@ -280,7 +288,9 @@ export default function ShippingTab() {
   }
 
   function onScan() {
-    const v = value.trim(); setValue(''); focusInput();
+    const v = value.trim(); setValue('');
+    if (pickerModalOpen) return; // picker gate open → swallow the scan (value already cleared)
+    focusInput();
     if (!v || loading) return;
     if (screen === 'pick' && anyPicked) { setAbandon({ scan: v }); return; } // guard mid-pick
     loadBox(v);
@@ -310,15 +320,23 @@ export default function ShippingTab() {
     if (!confirmedRef.current) {
       confirmedRef.current = true;
       setPickedToday((n) => n + 1);
-      // Preserve the existing verify write — the box records as verified on finish.
+      // Preserve the existing verify write — the box records as verified on finish. Now also
+      // sends the selected picker so the completion is attributed (Phase 1). The picker is
+      // gated at "Start scanning", so pickerId is set here; the server validates + falls back
+      // to Unassigned if it is ever missing/invalid (never blocks the write).
       fetch('/api/shipping/confirm', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ group_key: b.group_key, order_ids: b.order_ids }),
+        body: JSON.stringify({
+          group_key: b.group_key,
+          order_ids: b.order_ids,
+          picker_employee_id: pickerId || undefined,
+          pick_started_at: pickStartedAtRef.current || undefined,
+        }),
       }).catch(() => {});
     }
   }
 
-  const backToReady = () => { setBox(null); setCounts({}); setErr(null); setScreen('ready'); focusInput(); };
+  const backToReady = () => { setBox(null); setCounts({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
 
   // ── true-fullscreen takeover (hides browser chrome: URL bar, etc.) ──
   // MUST be invoked from the tap handler — browsers block programmatic fullscreen outside a user
@@ -337,12 +355,20 @@ export default function ShippingTab() {
 
   // ── focus enter / hold-to-exit ──
   const startScanning = () => { enterFullscreen(); setFocus(true); setBox(null); setCounts({}); setErr(null); setScreen('ready'); focusInput(); };
-  const beginHold = () => { setHolding(true); holdTimer.current = setTimeout(() => { setHolding(false); exitFullscreen(); setFocus(false); backToReady(); }, 900); };
+  // "Start scanning" now enters the full-screen scanner FIRST, then gates it behind the picker
+  // modal — the picker is chosen over the (blurred) scanner, never before entering fullscreen.
+  const beginSession = () => { startScanning(); setPickerModalOpen(true); };
+  const beginHold = () => { setHolding(true); holdTimer.current = setTimeout(() => { setHolding(false); exitFullscreen(); setFocus(false); setPickerModalOpen(false); backToReady(); }, 900); };
   const cancelHold = () => { setHolding(false); if (holdTimer.current) clearTimeout(holdTimer.current); };
 
-  // Confirm the picker, then enter the EXISTING scanner (startScanning, unchanged). When the
-  // modal is opened mid-session via "Change picker" (already in focus), just close it.
-  const confirmPicker = () => { if (!pickerId) return; setPickerModalOpen(false); if (!focus) startScanning(); };
+  // Picker chosen → drop the gate. We're already in focus mode (Start scanning entered it, or
+  // this is a mid-session "Change picker"), so just close the modal; the refocus effect re-arms
+  // the scanner. Clearing value discards any stray characters typed while the gate was up.
+  const confirmPicker = () => { if (!pickerId) return; setValue(''); setPickerModalOpen(false); };
+  // Cancel the gate. With NO picker chosen this backs fully out of the session (exit fullscreen +
+  // reset temp state) so scanning never begins unattributed; with a picker already set (e.g. from
+  // "Change picker"), it just closes and keeps the session running.
+  const dismissPicker = () => { setPickerModalOpen(false); if (!pickerId) { exitFullscreen(); setFocus(false); backToReady(); } };
 
   const storeName = activeStore === 'all'
     ? 'All stores'
@@ -441,7 +467,7 @@ export default function ShippingTab() {
 
   // ── picker-selection modal (small, opened by "Start scanning"; also by "Change picker") ──
   const pickerModal = pickerModalOpen ? (
-    <div className="fixed inset-0 z-[210] bg-black/60 flex items-center justify-center p-6">
+    <div className="fixed inset-0 z-[210] bg-black/70 backdrop-blur-md flex items-center justify-center p-4 sm:p-6">
       <div className="bg-tt-card border border-tt-border rounded-2xl p-6 max-w-sm w-full">
         <div className="text-lg font-bold text-tt-text">Who&apos;s picking?</div>
         <label htmlFor="picker-select" className="block text-xs uppercase tracking-wide text-tt-muted mt-4 mb-2">Picker</label>
@@ -455,7 +481,7 @@ export default function ShippingTab() {
           <div className="mt-3 text-sm text-tt-muted">No active fulfillment employees found. Add one with role “Fulfillment” in the Team tab.</div>
         )}
         <div className="mt-5 flex gap-3">
-          <button onClick={() => setPickerModalOpen(false)} className="flex-1 min-h-[44px] py-3 rounded-xl border border-tt-border text-tt-text cursor-pointer">Cancel</button>
+          <button onClick={dismissPicker} className="flex-1 min-h-[44px] py-3 rounded-xl border border-tt-border text-tt-text cursor-pointer">Cancel</button>
           <button
             onClick={confirmPicker}
             disabled={!pickerId}
@@ -474,7 +500,7 @@ export default function ShippingTab() {
         <div className="text-sm text-tt-muted mt-1 mb-6">Print your order-id pick tickets, then scan them to pick each box. Full-screen, scanner-driven.</div>
         <div className="flex flex-wrap items-center gap-3">
           <button
-            onClick={() => setPickerModalOpen(true)}
+            onClick={beginSession}
             className="w-full sm:w-auto min-h-[56px] px-8 py-5 rounded-2xl bg-tt-green text-black text-xl font-extrabold cursor-pointer hover:opacity-90 transition-opacity shadow-lg"
           >
             ▶ Start scanning
@@ -546,7 +572,6 @@ export default function ShippingTab() {
         </div>
         {err && <div className="mt-4 text-sm text-tt-red">{err}</div>}
         {pickedToday > 0 && <div className="mt-6 text-sm text-tt-muted">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked this session</div>}
-        {pickerModal}
       </div>
     );
   }
@@ -585,6 +610,7 @@ export default function ShippingTab() {
         ref={inputRef} value={value} onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onScan(); } }}
         inputMode="none"
+        disabled={pickerModalOpen}
         autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}
         className="absolute w-px h-px opacity-0 pointer-events-none" aria-hidden
       />
