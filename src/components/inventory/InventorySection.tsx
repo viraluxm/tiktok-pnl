@@ -14,6 +14,11 @@ import {
 } from '@/hooks/useInventorySkus';
 import { code128ToSvg } from '@/lib/barcode/code128';
 import MobileDataCard from '@/components/ui/MobileDataCard';
+import {
+  deriveVisibleInventorySkus,
+  type InventoryStatusFilter,
+  type InventorySort,
+} from '@/lib/inventory/filterSkus';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
 
@@ -175,7 +180,7 @@ const EMPTY: FormState = {
 };
 
 export default function InventorySection() {
-  const { data: skus = [], isLoading } = useInventorySkus();
+  const { data: skus = [], isLoading, isError } = useInventorySkus();
   const createSku = useCreateSku();
   const updateSku = useUpdateSku();
   const setCategory = useSetSkuCategory();
@@ -197,6 +202,10 @@ export default function InventorySection() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [labelSize, setLabelSize] = useState<LabelSize>('2x1');
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all');
+  // Display-only controls (never affect header totals or the cached query data).
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<InventoryStatusFilter>('all');
+  const [sort, setSort] = useState<InventorySort>('sku-asc');
 
   // Image state for the form.
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -223,6 +232,16 @@ export default function InventorySection() {
     [skus],
   );
 
+  // Rows actually rendered in the table/cards: the category-scoped `visibleSkus`
+  // (unchanged, still what the header totals use) further narrowed by search and
+  // status, then sorted. This is derived from the query result only — it never
+  // mutates or replaces the cached InventorySku[] and is not baked into the query
+  // key, so the optimistic category update keeps working.
+  const displayedSkus = useMemo(
+    () => deriveVisibleInventorySkus(visibleSkus, { search, status: statusFilter, sort }),
+    [visibleSkus, search, statusFilter, sort],
+  );
+
   // SKU currently open in the edit form (for the single-label barcode preview).
   const editingSku = useMemo(
     () => (editingId ? skus.find((s) => s.id === editingId) ?? null : null),
@@ -238,8 +257,8 @@ export default function InventorySection() {
     () => skus.filter((s) => selectedIds.has(s.id)),
     [skus, selectedIds],
   );
-  // Select-all is scoped to the currently visible (filtered) rows.
-  const allSelected = visibleSkus.length > 0 && visibleSkus.every((s) => selectedIds.has(s.id));
+  // Select-all is scoped to the currently displayed (category + search + status) rows.
+  const allSelected = displayedSkus.length > 0 && displayedSkus.every((s) => selectedIds.has(s.id));
 
   function toggleSelected(id: string) {
     setSelectedIds((prev) => {
@@ -253,10 +272,10 @@ export default function InventorySection() {
   function toggleSelectAll() {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (visibleSkus.every((s) => next.has(s.id))) {
-        for (const s of visibleSkus) next.delete(s.id);
+      if (displayedSkus.every((s) => next.has(s.id))) {
+        for (const s of displayedSkus) next.delete(s.id);
       } else {
-        for (const s of visibleSkus) next.add(s.id);
+        for (const s of displayedSkus) next.add(s.id);
       }
       return next;
     });
@@ -794,24 +813,70 @@ export default function InventorySection() {
         </div>
       )}
 
-      {/* Category filter — segmented, styled like the Period buttons. */}
-      {!isLoading && skus.length > 0 && (
-        <div className="flex items-center gap-2 mb-3">
-          <label className="text-[13px] text-tt-muted font-medium">Category:</label>
-          <div className="flex gap-1">
-            {CATEGORY_FILTERS.map((f) => (
-              <button
-                key={f.value}
-                onClick={() => setCategoryFilter(f.value)}
-                className={`px-3 py-1.5 rounded-full border text-xs cursor-pointer transition-all ${
-                  categoryFilter === f.value
-                    ? 'bg-tt-cyan text-black border-tt-cyan font-semibold'
-                    : 'border-tt-border text-tt-muted hover:bg-tt-cyan hover:text-black hover:border-tt-cyan'
-                }`}
+      {/* Toolbar: category filter (existing, unchanged) + search / status / sort
+          (new). Search, status, and sort only narrow/reorder the rows shown
+          below — they never affect the header totals or the cached query data.
+          Stacks to full-width rows on mobile; wraps before it can widen the
+          table. */}
+      {!isLoading && !isError && skus.length > 0 && (
+        <div className="flex flex-col gap-3 mb-3 lg:flex-row lg:items-center lg:justify-between">
+          {/* Category — segmented, styled like the Period buttons. */}
+          <div className="flex items-center gap-2">
+            <label className="text-[13px] text-tt-muted font-medium">Category:</label>
+            <div className="flex gap-1 flex-wrap">
+              {CATEGORY_FILTERS.map((f) => (
+                <button
+                  key={f.value}
+                  onClick={() => setCategoryFilter(f.value)}
+                  className={`px-3 py-1.5 rounded-full border text-xs cursor-pointer transition-all ${
+                    categoryFilter === f.value
+                      ? 'bg-tt-cyan text-black border-tt-cyan font-semibold'
+                      : 'border-tt-border text-tt-muted hover:bg-tt-cyan hover:text-black hover:border-tt-cyan'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Search + status + sort. */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search SKU or product…"
+              aria-label="Search inventory by SKU, barcode, name, or shortcut"
+              className="w-full sm:w-56 bg-tt-input-bg border border-tt-input-border text-tt-text px-3 py-2 rounded-lg text-[13px] focus:outline-none focus:border-tt-cyan transition-colors"
+            />
+            <label className="flex items-center gap-1.5 text-xs text-tt-muted">
+              Status
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as InventoryStatusFilter)}
+                aria-label="Filter by inventory status"
+                className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1.5 text-xs text-tt-text cursor-pointer outline-none"
               >
-                {f.label}
-              </button>
-            ))}
+                <option className="bg-tt-card text-tt-text" value="all">All inventory</option>
+                <option className="bg-tt-card text-tt-text" value="low">Low inventory</option>
+                <option className="bg-tt-card text-tt-text" value="out">Out of stock</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-tt-muted">
+              Sort
+              <select
+                value={sort}
+                onChange={(e) => setSort(e.target.value as InventorySort)}
+                aria-label="Sort inventory"
+                className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1.5 text-xs text-tt-text cursor-pointer outline-none"
+              >
+                <option className="bg-tt-card text-tt-text" value="sku-asc">SKU number</option>
+                <option className="bg-tt-card text-tt-text" value="stock-asc">Lowest stock first</option>
+                <option className="bg-tt-card text-tt-text" value="stock-desc">Highest stock first</option>
+                <option className="bg-tt-card text-tt-text" value="updated-desc">Recently updated</option>
+              </select>
+            </label>
           </div>
         </div>
       )}
@@ -821,6 +886,13 @@ export default function InventorySection() {
         <div className="flex items-center justify-center py-16 text-tt-muted">
           <div className="w-5 h-5 border-2 border-tt-muted border-t-transparent rounded-full animate-spin mr-3" />
           Loading inventory…
+        </div>
+      ) : isError ? (
+        <div className="rounded-2xl border border-tt-red/40 bg-tt-red/10 py-16 text-center">
+          <div className="text-tt-text font-medium">Couldn’t load inventory</div>
+          <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
+            Something went wrong fetching your inventory. Check your connection and try again.
+          </p>
         </div>
       ) : skus.length === 0 ? (
         <div className="rounded-2xl border border-tt-border bg-tt-card py-16 text-center">
@@ -835,6 +907,13 @@ export default function InventorySection() {
           <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
             Nothing tagged “{CATEGORY_FILTERS.find((f) => f.value === categoryFilter)?.label}” yet — tag SKUs from the {' '}
             <span className="text-tt-text">All</span> view using the Category dropdown on each row.
+          </p>
+        </div>
+      ) : displayedSkus.length === 0 ? (
+        <div className="rounded-2xl border border-tt-border bg-tt-card py-16 text-center">
+          <div className="text-tt-text font-medium">No inventory matches your search or filters.</div>
+          <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
+            Try a different SKU, name, or barcode, or reset the status filter.
           </p>
         </div>
       ) : (
@@ -865,7 +944,7 @@ export default function InventorySection() {
               </tr>
             </thead>
             <tbody>
-              {visibleSkus.map((s) => (
+              {displayedSkus.map((s) => (
                 <tr
                   key={s.id}
                   className={`border-b border-tt-border last:border-0 ${s.is_active ? '' : 'opacity-50'}`}
@@ -968,7 +1047,7 @@ export default function InventorySection() {
             />
             Select all
           </label>
-          {visibleSkus.map((s) => {
+          {displayedSkus.map((s) => {
             const negativeQty = (s.qty_on_hand ?? 0) < 0 || s.batches.some((b) => b.qty_remaining < 0);
             return (
               <MobileDataCard
