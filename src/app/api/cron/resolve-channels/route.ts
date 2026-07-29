@@ -33,7 +33,7 @@ export async function GET(req: Request) {
     const result = await resolveChannels({ write: writeEnabled });
     const mode = writeEnabled ? 'WRITE' : 'LOG_ONLY';
     console.log(
-      `[cron/resolve-channels] mode=${mode} candidates=${result.candidates} resolved=${result.resolved} failed=${result.failed}`,
+      `[cron/resolve-channels] mode=${mode} candidates=${result.candidates} resolved=${result.resolved} conflicts=${result.conflicts} failed=${result.failed}`,
     );
     for (const o of result.outcomes) {
       console.log(`[cron/resolve-channels] ${o.action} ${JSON.stringify(o)}`);

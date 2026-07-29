@@ -45,8 +45,8 @@ export interface ResolveOutcome {
   status_code: number | null;
   handle: string | null;
   sec_uid_present: boolean;
-  store_resolved_via: 'existing' | 'handle-map' | 'sec-uid' | 'orders' | 'unmapped' | null;
-  action: 'resolved' | 'would-resolve' | 'failed' | 'skipped';
+  store_resolved_via: 'existing' | 'handle-map' | 'sec-uid' | 'orders' | 'conflict' | 'unmapped' | null;
+  action: 'resolved' | 'would-resolve' | 'failed' | 'skipped' | 'conflict';
 }
 
 export interface ResolveResult {
@@ -54,6 +54,10 @@ export interface ResolveResult {
   candidates: number;
   resolved: number;
   failed: number;
+  // Sessions where order ground truth and the handle map named DIFFERENT stores: the
+  // handle/sec_uid are still written, but store_id is withheld and the row is flagged for
+  // a human. Guessing wrong silently is worse than leaving it unattributed.
+  conflicts: number;
   outcomes: ResolveOutcome[];
 }
 
@@ -123,6 +127,7 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
   const outcomes: ResolveOutcome[] = [];
   let resolved = 0;
   let failed = 0;
+  let conflicts = 0;
 
   for (let i = 0; i < candidates.length; i++) {
     const s = candidates[i];
@@ -159,24 +164,38 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
       continue;
     }
 
-    // Decide store attribution (only fills a NULL store; never overwrites an existing one).
+    // STORE ATTRIBUTION — ORDER-TRUTH-FIRST, then handle-map fallback, REFUSE on conflict.
+    // Order ground truth (session_store_from_orders = the actual fulfilling shop, single
+    // unambiguous store) has been authoritative in every backfill; the handle map has had
+    // a wrong row (jellysteals6→Snore while its orders were all lots-of-steals). So:
+    //   1. existing store → keep (never overwrite).
+    //   2. orders vs map DISAGREE → write NOTHING for store, flag it for a human. Guessing
+    //      wrong silently is worse than leaving it unattributed.
+    //   3. orders present (single store) → use orders (authoritative; also covers agreement).
+    //   4. else map (handle/sec_uid) → fallback for the no-/ambiguous-order case.
+    //   5. else unmapped → store stays null.
+    // channel_handle / sec_uid are ALWAYS written regardless — only store_id is withheld.
     const existingStore = (s.store_id as string | null) ?? null;
+    const orderStore = existingStore ? null : await storeFromOrders(room);
+    const mapStore = owner.displayId && handleToStore.has(owner.displayId)
+      ? handleToStore.get(owner.displayId)!
+      : owner.secUid && secUidToStore.has(owner.secUid) ? secUidToStore.get(owner.secUid)! : null;
+    const mapVia: ResolveOutcome['store_resolved_via'] =
+      owner.displayId && handleToStore.has(owner.displayId) ? 'handle-map' : 'sec-uid';
+
     let storeId: string | null = existingStore;
     let via: ResolveOutcome['store_resolved_via'];
+    let conflict = false;
     if (existingStore) {
       via = 'existing';
-    } else if (owner.displayId && handleToStore.has(owner.displayId)) {
-      storeId = handleToStore.get(owner.displayId)!;
-      via = 'handle-map';
-    } else if (owner.secUid && secUidToStore.has(owner.secUid)) {
-      storeId = secUidToStore.get(owner.secUid)!;
-      via = 'sec-uid';
+    } else if (orderStore && mapStore && orderStore !== mapStore) {
+      conflict = true; via = 'conflict'; storeId = null; // refuse to attribute; flagged below
+    } else if (orderStore) {
+      storeId = orderStore; via = 'orders';
+    } else if (mapStore) {
+      storeId = mapStore; via = mapVia;
     } else {
-      // Handle not in map and no known sec_uid — fall back to order ground truth before
-      // giving up, so store attribution still lands (handle is kept, just unmapped).
-      const orderStore = await storeFromOrders(room);
-      if (orderStore) { storeId = orderStore; via = 'orders'; }
-      else via = 'unmapped'; // store stays null (banner still flags it)
+      via = 'unmapped';
     }
 
     const patch: Record<string, unknown> = {
@@ -185,7 +204,7 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
       channel_nickname: owner.nickname,
       channel_account_id: owner.accountId,
       channel_resolve_attempts: 0,
-      channel_resolve_status: 'ok',
+      channel_resolve_status: conflict ? `store-conflict:orders=${orderStore},map=${mapStore}` : 'ok',
       channel_resolved_at: new Date().toISOString(),
       channel_resolve_next_at: null,
     };
@@ -205,13 +224,13 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
       if (owner.secUid && storeId && !secUidToStore.has(owner.secUid)) secUidToStore.set(owner.secUid, storeId);
     }
 
-    resolved += 1;
+    if (conflict) conflicts += 1; else resolved += 1;
     outcomes.push({
       session_id: s.id as string, room_id: room, status_code: owner.statusCode,
       handle: owner.displayId, sec_uid_present: !!owner.secUid, store_resolved_via: via,
-      action: write ? 'resolved' : 'would-resolve',
+      action: conflict ? 'conflict' : write ? 'resolved' : 'would-resolve',
     });
   }
 
-  return { dry_run: !write, candidates: candidates.length, resolved, failed, outcomes };
+  return { dry_run: !write, candidates: candidates.length, resolved, failed, conflicts, outcomes };
 }
