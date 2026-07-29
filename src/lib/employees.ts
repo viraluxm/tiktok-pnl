@@ -29,9 +29,29 @@ export interface EmployeePay {
   pay: number; // hours * hourly_rate — derived, never stored
 }
 
-// The minimum shape computePay needs from a shift. Both stored one-off `Shift`s and
-// computed recurring `GeneratedShift`s satisfy it, so callers can pass them combined.
-export type ShiftLike = Pick<Shift, 'employee_id' | 'start_time' | 'end_time'>;
+// The minimum shape pay math needs from a shift. Both stored `Shift`s and computed
+// recurring `GeneratedShift`s satisfy it. The time-clock fields are optional so generated
+// recurring instances (which never carry them) are treated as plain, always-payable shifts.
+export type ShiftLike = Pick<Shift, 'employee_id' | 'start_time' | 'end_time'> &
+  Partial<Pick<Shift, 'source' | 'confirmed_at' | 'break_minutes'>>;
+
+// A shift counts toward pay when it is COMPLETED and not an UNCONFIRMED time-clock shift.
+// Manual/recurring shifts (source 'manual' or absent) are payable as soon as they close —
+// identical to behaviour before the time clock. Only a 'time_clock' shift is held back
+// until a manager sets confirmed_at; that gate is what keeps kiosk punches out of pay until
+// they are reviewed (see migration 070 + the kiosk RPCs in 071).
+export function isPayableShift(s: ShiftLike): boolean {
+  if (isOpenShift(s)) return false; // open shift → indeterminate hours
+  if (s.source === 'time_clock' && s.confirmed_at == null) return false; // awaiting manager confirmation
+  return true;
+}
+
+// Net paid hours for one shift: its worked span minus unpaid break minutes, floored at 0.
+// break_minutes is 0/absent for every non-time-clock shift, so their hours are unchanged.
+export function paidShiftHours(s: ShiftLike): number {
+  const breakHours = (s.break_minutes ?? 0) / 60;
+  return Math.max(0, shiftHours(s.start_time, s.end_time) - breakHours);
+}
 
 // Per-employee hours + derived pay owed for the given set of shifts (already scoped to
 // the pay period by the caller). Accepts one-off shifts and/or generated recurring
@@ -39,9 +59,9 @@ export type ShiftLike = Pick<Shift, 'employee_id' | 'start_time' | 'end_time'>;
 export function computePay(employees: Employee[], shifts: ReadonlyArray<ShiftLike>): EmployeePay[] {
   const hoursByEmployee = new Map<string, number>();
   for (const s of shifts) {
-    if (isOpenShift(s)) continue; // open shift → indeterminate hours, excluded from pay
+    if (!isPayableShift(s)) continue; // open, or unconfirmed time-clock → excluded from pay
     const prev = hoursByEmployee.get(s.employee_id) || 0;
-    hoursByEmployee.set(s.employee_id, prev + shiftHours(s.start_time, s.end_time));
+    hoursByEmployee.set(s.employee_id, prev + paidShiftHours(s));
   }
   return employees.map((employee) => {
     const hours = hoursByEmployee.get(employee.id) || 0;
