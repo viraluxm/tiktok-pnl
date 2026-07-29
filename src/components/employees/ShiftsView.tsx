@@ -1,10 +1,12 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { shiftHours, generateRecurringShifts } from '@/lib/employees';
+import Link from 'next/link';
+import { paidShiftHours, generateRecurringShifts } from '@/lib/employees';
+import { confirmErrorMessage, clockErrorToken } from '@/lib/timeclock';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
-import type { Employee, Shift, ShiftRule } from '@/types';
+import type { Employee, Shift, ShiftRule, ShiftSource } from '@/types';
 import CalendarView from './weekly/CalendarView';
 import { Field, WEEKDAYS, daysLabel, inputCls } from './shared';
 import MobileDataCard from '@/components/ui/MobileDataCard';
@@ -20,7 +22,17 @@ import MobileDataCard from '@/components/ui/MobileDataCard';
 // still loads the dashboard FiltersBar range; the Calendar loads only its selected week.
 
 type DisplayRow =
-  | { kind: 'oneoff'; id: string; employee_id: string; date: string; start_time: string; end_time: string | null }
+  | {
+      kind: 'oneoff';
+      id: string;
+      employee_id: string;
+      date: string;
+      start_time: string;
+      end_time: string | null;
+      source: ShiftSource;
+      confirmed_at: string | null;
+      break_minutes: number;
+    }
   | {
       kind: 'recurring';
       id: string;
@@ -42,7 +54,7 @@ export default function ShiftsView({
   dateFrom: string | null;
   dateTo: string | null;
 }) {
-  const { shifts, openShifts, isLoading: shiftsLoading, addShift, endShift, deleteShift } = useShifts(dateFrom, dateTo);
+  const { shifts, openShifts, isLoading: shiftsLoading, addShift, endShift, deleteShift, confirmShift } = useShifts(dateFrom, dateTo);
   const {
     rules,
     exceptions,
@@ -65,6 +77,13 @@ export default function ShiftsView({
     [rules, exceptions, dateFrom, dateTo, materialized],
   );
   const isLoading = shiftsLoading || rulesLoading;
+
+  // Count of time-clock shifts in this period awaiting a manager's confirmation (they are
+  // excluded from Pay until confirmed). Drives the review banner + is a quick "todo" signal.
+  const timeClockPending = useMemo(
+    () => shifts.filter((s) => s.source === 'time_clock' && s.confirmed_at == null).length,
+    [shifts],
+  );
 
   const [mode, setMode] = useState<'oneoff' | 'recurring'>('oneoff');
   // Default to the Calendar view (the new interactive weekly grid). List remains a toggle.
@@ -128,6 +147,9 @@ export default function ShiftsView({
           date: s.date,
           start_time: s.start_time,
           end_time: s.end_time,
+          source: s.source,
+          confirmed_at: s.confirmed_at,
+          break_minutes: s.break_minutes,
         }),
       ),
       ...generated.map(
@@ -289,6 +311,14 @@ export default function ShiftsView({
     }
   }
 
+  async function handleConfirmShift(id: string, confirmed: boolean) {
+    try {
+      await confirmShift.mutateAsync({ id, confirmed });
+    } catch (err) {
+      alert(confirmErrorMessage(clockErrorToken(err)));
+    }
+  }
+
   async function saveEditing() {
     if (!editing) return;
     if (!editing.start || !editing.end) {
@@ -311,8 +341,15 @@ export default function ShiftsView({
 
   return (
     <div className="space-y-6">
-      {/* List | Calendar view toggle */}
-      <div className="flex items-center justify-end">
+      {/* Open the full-screen time-clock kiosk + List | Calendar view toggle */}
+      <div className="flex items-center justify-between gap-3">
+        <Link
+          href="/dashboard/time-clock"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-tt-cyan" />
+          Open Time Clock
+        </Link>
         <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
           {(['list', 'calendar'] as const).map((v) => (
             <button
@@ -327,6 +364,22 @@ export default function ShiftsView({
           ))}
         </div>
       </div>
+
+      {timeClockPending > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-tt-yellow/30 bg-tt-yellow/10 px-5 py-4">
+          <div className="text-sm text-tt-text">
+            <span className="font-semibold">{timeClockPending}</span> time-clock shift{timeClockPending === 1 ? '' : 's'}{' '}
+            need{timeClockPending === 1 ? 's' : ''} confirmation.
+            <span className="text-tt-muted"> They stay out of Pay until you confirm them.</span>
+          </div>
+          <button
+            onClick={() => setView('list')}
+            className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold bg-tt-yellow/20 text-tt-yellow hover:bg-tt-yellow/30 transition-colors"
+          >
+            Review in list
+          </button>
+        </div>
+      )}
 
       {view === 'calendar' ? (
         <CalendarView employees={employees} />
@@ -581,6 +634,18 @@ export default function ShiftsView({
                             <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">
                               <span className="w-1.5 h-1.5 rounded-full bg-tt-green animate-pulse" />In progress
                             </span>
+                          ) : row.source === 'time_clock' ? (
+                            <span className="inline-flex flex-wrap items-center gap-1">
+                              <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Time Clock</span>
+                              {row.confirmed_at == null ? (
+                                <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Needs confirmation</span>
+                              ) : (
+                                <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">Confirmed</span>
+                              )}
+                              {row.break_minutes > 0 && (
+                                <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">{row.break_minutes}m break</span>
+                              )}
+                            </span>
                           ) : (
                             <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">One-off</span>
                           )}
@@ -588,7 +653,7 @@ export default function ShiftsView({
                         <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{row.start_time.slice(0, 5)}</td>
                         <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{isOpen ? '—' : (row.end_time ?? '').slice(0, 5)}</td>
                         <td className={`px-5 py-3 text-[13px] text-right tabular-nums ${skipped ? 'text-tt-muted line-through' : isOpen ? 'text-tt-green' : 'text-tt-text'}`}>
-                          {isOpen ? elapsedLabel(row.date, row.start_time) : shiftHours(row.start_time, row.end_time).toFixed(2)}
+                          {isOpen ? elapsedLabel(row.date, row.start_time) : paidShiftHours(row).toFixed(2)}
                         </td>
                         <td className="px-5 py-3 text-center whitespace-nowrap">
                           {row.kind === 'oneoff' ? (
@@ -608,6 +673,23 @@ export default function ShiftsView({
                                 >
                                   Shift Ended
                                 </button>
+                              )}
+                              {!isOpen && row.source === 'time_clock' && (
+                                row.confirmed_at == null ? (
+                                  <button
+                                    onClick={() => handleConfirmShift(row.id, true)}
+                                    className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                                  >
+                                    Confirm
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => handleConfirmShift(row.id, false)}
+                                    className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
+                                  >
+                                    Unconfirm
+                                  </button>
+                                )
                               )}
                               <button
                                 onClick={() => handleDeleteOneOff(row.id)}
@@ -692,6 +774,18 @@ export default function ShiftsView({
                         <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">
                           <span className="w-1.5 h-1.5 rounded-full bg-tt-green animate-pulse" />In progress
                         </span>
+                      ) : row.source === 'time_clock' ? (
+                        <span className="inline-flex flex-wrap items-center justify-end gap-1">
+                          <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Time Clock</span>
+                          {row.confirmed_at == null ? (
+                            <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Needs confirmation</span>
+                          ) : (
+                            <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-green/15 text-tt-green">Confirmed</span>
+                          )}
+                          {row.break_minutes > 0 && (
+                            <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">{row.break_minutes}m break</span>
+                          )}
+                        </span>
                       ) : (
                         <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-muted/15 text-tt-muted">One-off</span>
                       )
@@ -703,7 +797,7 @@ export default function ShiftsView({
                         label: 'Hours',
                         value: (
                           <span className={`tabular-nums ${skipped ? 'text-tt-muted line-through' : isOpen ? 'text-tt-green' : ''}`}>
-                            {isOpen ? elapsedLabel(row.date, row.start_time) : shiftHours(row.start_time, row.end_time).toFixed(2)}
+                            {isOpen ? elapsedLabel(row.date, row.start_time) : paidShiftHours(row).toFixed(2)}
                           </span>
                         ),
                       },
@@ -726,6 +820,23 @@ export default function ShiftsView({
                             >
                               Shift Ended
                             </button>
+                          )}
+                          {!isOpen && row.source === 'time_clock' && (
+                            row.confirmed_at == null ? (
+                              <button
+                                onClick={() => handleConfirmShift(row.id, true)}
+                                className="rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
+                              >
+                                Confirm
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleConfirmShift(row.id, false)}
+                                className="rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
+                              >
+                                Unconfirm
+                              </button>
+                            )
                           )}
                           <button
                             onClick={() => handleDeleteOneOff(row.id)}

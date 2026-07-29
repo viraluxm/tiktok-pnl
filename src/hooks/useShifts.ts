@@ -123,6 +123,24 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shifts'] }),
   });
 
+  // Manager confirmation gate for TIME-CLOCK shifts — SERVER-AUTHORITATIVE (migration 071).
+  // The browser sends ONLY the shift id; the RPC derives the user from auth.uid(), verifies
+  // ownership + source='time_clock' + a closed linked entry + no open break, then stamps
+  // confirmed_at = now() and confirmed_by = auth.uid() in Postgres. A BEFORE UPDATE guard
+  // (070) blocks any direct write to those columns, so this RPC is the ONLY way confirmation
+  // can change. The kiosk never calls it. Manual shifts ignore confirmation — pay unchanged.
+  const confirmShift = useMutation({
+    mutationFn: async ({ id, confirmed }: { id: string; confirmed: boolean }) => {
+      const fn = confirmed
+        ? 'lensed_confirm_time_clock_shift'
+        : 'lensed_unconfirm_time_clock_shift';
+      const { data, error } = await supabase.rpc(fn, { p_shift_id: id });
+      if (error) throw new Error(error.message); // message is a stable token (see confirmErrorMessage)
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shifts'] }),
+  });
+
   return {
     shifts: query.data || [],
     openShifts: openQuery.data || [],
@@ -131,5 +149,6 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
     endShift,
     updateShift,
     deleteShift,
+    confirmShift,
   };
 }
