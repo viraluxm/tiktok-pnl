@@ -12,21 +12,32 @@ import { fetchRoomOwner } from '@/lib/tiktok/roomOwner';
 //
 // WRITES (only when write=true):
 //   • channel_handle, channel_sec_uid, channel_nickname, channel_account_id
-//   • store_id — ONLY when currently null AND we can attribute it (handle in
-//     channel_store_map, or a sec_uid we've already seen mapped to a store → rename-proof).
-//     When the handle is mapped we can also just write channel_handle and let the
-//     set_store_id trigger derive it; we set it explicitly so the sec_uid fallback and the
-//     trigger path converge on one code path.
-//   • bookkeeping: channel_resolve_attempts / _status / _resolved_at.
+//   • store_id — ONLY when currently null AND we can attribute it, in priority order:
+//       1. handle in channel_store_map,
+//       2. a sec_uid we've already seen mapped to a store (rename-proof),
+//       3. ORDER GROUND TRUTH — the session's captured orders resolve to a single store in
+//          synced_order_ids. This is what takes STORE attribution to 100%: it works even
+//          when room/info fails entirely (e.g. a TikTok-side-removed room, persistent
+//          status 4003110) — we set store_id and leave channel_handle null.
+//   • bookkeeping: channel_resolve_attempts / _status / _resolved_at / _next_at.
 //
-// FRAGILE ENDPOINT HYGIENE: newest-first, small batch, a sleep between calls, and a
-// per-room attempt cap so the handful of permanently-unavailable rooms (status 4003110)
-// aren't retried forever.
+// FRAGILE ENDPOINT HYGIENE: newest-first, small batch, a sleep between calls. Failures are
+// RETRIED ACROSS SWEEPS with backoff (channel_resolve_next_at) — a 4003110 is often
+// transient (an observed room failed for hours, then resolved), so we keep trying, but
+// space attempts out so a truly-dead room isn't hammered. A high attempt cap is only a
+// final backstop.
 
 const BATCH = 20;              // rooms resolved per run (keeps call volume low)
-const MAX_ATTEMPTS = 6;        // give up on a room after this many failed lookups
+const MAX_ATTEMPTS = 40;       // final backstop only — backoff (below) does the real pacing
 const SLEEP_MS = 1200;         // spacing between endpoint calls
 const LOOKBACK_DAYS = 60;      // also covers the historical null-handle backfill
+
+// Backoff before the next retry of a failed room: 30 min × attempts, capped at 12h. Over
+// dozens of attempts this spreads retries across days, so a room that only becomes
+// resolvable much later (transient 4003110) is still eventually caught, without hammering.
+function backoffMs(attempts: number): number {
+  return Math.min(30 * Math.max(attempts, 1), 720) * 60_000;
+}
 
 export interface ResolveOutcome {
   session_id: string;
@@ -34,7 +45,7 @@ export interface ResolveOutcome {
   status_code: number | null;
   handle: string | null;
   sec_uid_present: boolean;
-  store_resolved_via: 'existing' | 'handle-map' | 'sec-uid' | 'unmapped' | null;
+  store_resolved_via: 'existing' | 'handle-map' | 'sec-uid' | 'orders' | 'unmapped' | null;
   action: 'resolved' | 'would-resolve' | 'failed' | 'skipped';
 }
 
@@ -55,11 +66,13 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
   // Candidates: have a room, still missing the rename-proof id OR the handle, not yet
   // exhausted, within the lookback window. Newest first — a live show's attribution
   // matters most; the historical backfill drains over subsequent runs.
+  const nowIso = new Date().toISOString();
   const { data: rows, error } = await admin
     .from('live_sessions')
     .select('id, tiktok_live_id, channel_handle, channel_sec_uid, store_id, channel_resolve_attempts')
     .not('tiktok_live_id', 'is', null)
     .or('channel_sec_uid.is.null,channel_handle.is.null')
+    .or(`channel_resolve_next_at.is.null,channel_resolve_next_at.lte.${nowIso}`) // due for a (re)try
     .lt('channel_resolve_attempts', MAX_ATTEMPTS)
     .gte('started_at', sinceIso)
     .order('started_at', { ascending: false })
@@ -97,6 +110,16 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
     }
   }
 
+  // ORDER GROUND TRUTH: the store for a room's captured orders (synced_order_ids has a
+  // reliable store_id). Returns a store ONLY when the room's orders resolve to a SINGLE
+  // store (unambiguous); null otherwise. This is what closes store attribution to 100% —
+  // it works even when room/info can't resolve the owner at all.
+  async function storeFromOrders(room: string): Promise<string | null> {
+    const { data, error } = await admin.rpc('session_store_from_orders', { p_room: room });
+    if (error) return null;
+    return typeof data === 'string' && data ? data : null;
+  }
+
   const outcomes: ResolveOutcome[] = [];
   let resolved = 0;
   let failed = 0;
@@ -111,15 +134,27 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
     if (!owner.ok) {
       failed += 1;
       const attempts = ((s.channel_resolve_attempts as number | null) ?? 0) + 1;
+      // Even with no owner, recover the STORE from order ground truth (removed-room case).
+      const failStore = (s.store_id as string | null) ?? null;
+      let orderStore: string | null = null;
+      let failVia: ResolveOutcome['store_resolved_via'] = null;
+      if (!failStore) {
+        orderStore = await storeFromOrders(room);
+        if (orderStore) failVia = 'orders';
+      }
       if (write) {
-        await admin
-          .from('live_sessions')
-          .update({ channel_resolve_attempts: attempts, channel_resolve_status: `err:${owner.statusCode ?? 'net'}` })
-          .eq('id', s.id);
+        // Back off before the next retry; keep channel_handle null so we retry for it.
+        const patch: Record<string, unknown> = {
+          channel_resolve_attempts: attempts,
+          channel_resolve_status: `err:${owner.statusCode ?? 'net'}`,
+          channel_resolve_next_at: new Date(Date.now() + backoffMs(attempts)).toISOString(),
+        };
+        if (!failStore && orderStore) patch.store_id = orderStore;
+        await admin.from('live_sessions').update(patch).eq('id', s.id);
       }
       outcomes.push({
         session_id: s.id as string, room_id: room, status_code: owner.statusCode,
-        handle: null, sec_uid_present: false, store_resolved_via: null, action: 'failed',
+        handle: null, sec_uid_present: false, store_resolved_via: failVia, action: 'failed',
       });
       continue;
     }
@@ -137,7 +172,11 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
       storeId = secUidToStore.get(owner.secUid)!;
       via = 'sec-uid';
     } else {
-      via = 'unmapped'; // handle not in map and no known sec_uid → store stays null (banner still flags it)
+      // Handle not in map and no known sec_uid — fall back to order ground truth before
+      // giving up, so store attribution still lands (handle is kept, just unmapped).
+      const orderStore = await storeFromOrders(room);
+      if (orderStore) { storeId = orderStore; via = 'orders'; }
+      else via = 'unmapped'; // store stays null (banner still flags it)
     }
 
     const patch: Record<string, unknown> = {
@@ -148,6 +187,7 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
       channel_resolve_attempts: 0,
       channel_resolve_status: 'ok',
       channel_resolved_at: new Date().toISOString(),
+      channel_resolve_next_at: null,
     };
     if (!existingStore && storeId) patch.store_id = storeId;
 
