@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { inChunks } from '@/lib/supabase/inChunks';
 
 export const dynamic = 'force-dynamic';
 
@@ -44,13 +45,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     { won_price_cents: number | null; tiktok_title: string | null; payment_failed: boolean; order_status: number | null }
   >();
   if (orderIds.length) {
-    const { data: captures, error: capErr } = await supabase
-      .from('capture_events')
-      // order_status is a read-only signal (TikTok tri-state: 2=pending/recoverable,
-      // 3=paid/recovered, 4=cancelled) used only to render a badge on not_sold rows.
-      .select('order_id, selling_price_cents, product_name, is_payment_successful, order_status')
-      .eq('user_id', user.id)
-      .in('order_id', orderIds);
+    const { rows: captures, error: capErr } = await inChunks<Record<string, unknown>>(orderIds, (slice) =>
+      supabase
+        .from('capture_events')
+        // order_status is a read-only signal (TikTok tri-state: 2=pending/recoverable,
+        // 3=paid/recovered, 4=cancelled) used only to render a badge on not_sold rows.
+        .select('order_id, selling_price_cents, product_name, is_payment_successful, order_status')
+        .eq('user_id', user.id)
+        .in('order_id', slice));
     if (capErr) {
       // Non-fatal: the board still works without the capture join.
       console.error('[live/board] capture_events join error:', capErr);
@@ -73,11 +75,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // isn't in synced_order_ids yet. Read-only; keyed by the same order_id.
   const syncedStatusByOrderId = new Map<string, string | null>();
   if (orderIds.length) {
-    const { data: synced, error: syncErr } = await supabase
-      .from('synced_order_ids')
-      .select('order_id, status')
-      .eq('user_id', user.id)
-      .in('order_id', orderIds);
+    const { rows: synced, error: syncErr } = await inChunks<Record<string, unknown>>(orderIds, (slice) =>
+      supabase
+        .from('synced_order_ids')
+        .select('order_id, status')
+        .eq('user_id', user.id)
+        .in('order_id', slice));
     if (syncErr) {
       // Non-fatal: the board still works without the synced-status join (badge falls
       // back to the capture snapshot).
@@ -92,11 +95,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // Join true payout (estimate or settled) by order_id, populated by Reconcile.
   const payoutByOrderId = new Map<string, { net_payout_cents: number | null; payout_settled: boolean }>();
   if (orderIds.length) {
-    const { data: payouts, error: poErr } = await supabase
-      .from('order_payouts')
-      .select('order_id, net_payout_cents, settled')
-      .eq('user_id', user.id)
-      .in('order_id', orderIds);
+    const { rows: payouts, error: poErr } = await inChunks<Record<string, unknown>>(orderIds, (slice) =>
+      supabase
+        .from('order_payouts')
+        .select('order_id, net_payout_cents, settled')
+        .eq('user_id', user.id)
+        .in('order_id', slice));
     if (poErr) {
       console.error('[live/board] order_payouts join error:', poErr);
     } else {
@@ -111,17 +115,23 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const itemIds = (items ?? []).map((i) => i.id);
   let skuRows: Record<string, unknown>[] = [];
+  // NON-FATAL: the skus join enriches rows with units/cost. If it fails we DEGRADE
+  // (units/cost read as unknown) and flag `warning` rather than 500-ing the board —
+  // a show that reads zero must be distinguishable from a show with no sales. Won-price
+  // revenue comes from the capture join above, so the headline sale value still renders.
+  let warning: string | null = null;
   if (itemIds.length) {
-    const { data: skus, error: skuErr } = await supabase
-      .from('live_auction_item_skus')
-      .select('auction_item_id, inventory_sku_id, qty, unit_cost_cents_snapshot, sku_number_snapshot, title_snapshot')
-      .in('auction_item_id', itemIds)
-      .eq('user_id', user.id);
+    const { rows: skus, error: skuErr } = await inChunks<Record<string, unknown>>(itemIds, (slice) =>
+      supabase
+        .from('live_auction_item_skus')
+        .select('auction_item_id, inventory_sku_id, qty, unit_cost_cents_snapshot, sku_number_snapshot, title_snapshot')
+        .in('auction_item_id', slice)
+        .eq('user_id', user.id));
     if (skuErr) {
-      console.error('[live/board] skus error:', skuErr);
-      return NextResponse.json({ error: 'Failed to load log' }, { status: 500 });
+      console.error('[live/board] skus error (degrading, non-fatal):', skuErr);
+      warning = 'Some line-item details (units and cost) could not be loaded, so cost and profit may be incomplete. Sale value is unaffected.';
     }
-    skuRows = skus ?? [];
+    skuRows = skus;
   }
 
   const byItem = new Map<string, Record<string, unknown>[]>();
@@ -194,8 +204,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const soldSkuIds = [...new Set(skuRows.map((s) => String(s.inventory_sku_id)))];
   let sessionSkus: Array<{ id: string; sku_number: number | null; title: string | null; category: string | null; barcode: string | null }> = [];
   if (soldSkuIds.length) {
-    const { data: inv } = await supabase.from('inventory_skus')
-      .select('id, sku_number, title, category, barcode').eq('user_id', user.id).in('id', soldSkuIds);
+    const { rows: inv } = await inChunks<Record<string, unknown>>(soldSkuIds, (slice) =>
+      supabase.from('inventory_skus')
+        .select('id, sku_number, title, category, barcode').eq('user_id', user.id).in('id', slice));
     sessionSkus = (inv ?? []).map((s) => ({
       id: String(s.id), sku_number: (s.sku_number as number | null) ?? null, title: (s.title as string | null) ?? null,
       category: (s.category as string | null) ?? null, barcode: (s.barcode as string | null) ?? null,
@@ -265,5 +276,5 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     }
   }
 
-  return NextResponse.json({ items: [...assembled, ...unboundRows], session_skus: sessionSkus, live_categories: liveCategories });
+  return NextResponse.json({ items: [...assembled, ...unboundRows], session_skus: sessionSkus, live_categories: liveCategories, warning });
 }

@@ -800,6 +800,15 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           amber (not the reconcile red/green) so the two are never confused. */}
       <CoveragePanel sessionId={session.id} />
 
+      {/* Non-fatal board degrade (e.g. an enrichment join failed). The rows + sale value
+          are real; cost/units may be incomplete. Shown so a degraded load is never mistaken
+          for a genuine no-sales show. */}
+      {boardData?.warning && (
+        <div className="mb-5 rounded-lg border border-tt-yellow/40 bg-tt-yellow/10 px-4 py-2.5 text-sm text-tt-yellow" role="alert">
+          {boardData.warning}
+        </div>
+      )}
+
       {/* Reconciliation results */}
       {recon && (
         <div className="mb-5 space-y-3">
