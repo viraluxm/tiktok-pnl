@@ -4,6 +4,18 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { User, Provider } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
+import { exitFullscreen } from '@/lib/fullscreen';
+
+// Land the manager back on Team → Shifts after exiting (one-shot; read by RealDashboard +
+// EmployeesTab on mount). sessionStorage survives the client nav and the OAuth round-trip.
+function markReturnToShifts() {
+  try {
+    sessionStorage.setItem('lensed.dashboardTab', 'employees');
+    sessionStorage.setItem('lensed.employeesSubView', 'shifts');
+  } catch {
+    /* ignore */
+  }
+}
 
 // The "Exit Kiosk" control. Hiding a button is NOT a security boundary — an employee could
 // still find it — so leaving the kiosk requires RE-VERIFYING the owner's identity. Lensed
@@ -66,6 +78,8 @@ export default function ExitKioskButton({ user }: { user: User | null }) {
       setBusy(false);
       return;
     }
+    markReturnToShifts();
+    exitFullscreen(); // drop out of browser fullscreen before returning to the dashboard shell
     router.push('/dashboard');
   };
 
@@ -73,6 +87,8 @@ export default function ExitKioskButton({ user }: { user: User | null }) {
     if (busy || !oauthProvider) return;
     setBusy(true);
     setError(null);
+    markReturnToShifts();
+    exitFullscreen(); // leave fullscreen before the provider redirect / dashboard return
     const supabase = createClient();
     // Re-verify through the provider; the app's callback exchanges the code and forwards to
     // `next` (/dashboard) — so a successful re-verify IS the exit. Mirrors the login flow.

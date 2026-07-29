@@ -28,6 +28,9 @@ const {
   computeBreakMinutes,
   deriveTimeClockShift,
   friendlyClockError,
+  teamOfRole,
+  teamLabel,
+  unavailableReason,
 } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -161,6 +164,36 @@ console.log('\nfriendlyClockError');
   check('NO_ACTIVE_BREAK', friendlyClockError('NO_ACTIVE_BREAK', 'Maria') === 'Maria does not have an active break.');
   check("BREAK_OPEN", friendlyClockError('BREAK_OPEN', 'Maria') === "Please end Maria's break before clocking out.");
   check('clock_out + NOT_CLOCKED_IN → already recorded', friendlyClockError('NOT_CLOCKED_IN', 'Maria', 'clock_out') === 'This action was already recorded.');
+}
+
+// ── team matching (kiosk employee picker) — case-insensitive, safe 'other' fallback ──
+console.log('\nteamOfRole + teamLabel');
+{
+  check("'host' → host", teamOfRole('host') === 'host');
+  check("'Host' (caps) → host", teamOfRole('Host') === 'host');
+  check("' live host ' (spaces/caps) → host", teamOfRole(' Live Host ') === 'host');
+  check("'fulfillment' → fulfillment", teamOfRole('fulfillment') === 'fulfillment');
+  check("'Fulfillment' → fulfillment", teamOfRole('Fulfillment') === 'fulfillment');
+  check("'manager' → other", teamOfRole('manager') === 'other');
+  check("'' → other", teamOfRole('') === 'other');
+  check('null/undefined → other', teamOfRole(null) === 'other' && teamOfRole(undefined) === 'other');
+  check("unexpected free text → other (never hidden)", teamOfRole('Warehouse Lead') === 'other');
+  check("teamLabel(host) = 'Live Host'", teamLabel('host') === 'Live Host');
+  check("teamLabel(fulfillment) = 'Fulfillment'", teamLabel('fulfillment') === 'Fulfillment');
+  check("teamLabel(other) = 'Other'", teamLabel('other') === 'Other');
+}
+
+// ── unavailableReason: short employee-facing text for a disabled card (null = allowed) ──
+console.log('\nunavailableReason');
+{
+  check('working + clock_in → Already clocked in', unavailableReason('working', 'clock_in') === 'Already clocked in');
+  check('on_break + clock_in → Already clocked in', unavailableReason('on_break', 'clock_in') === 'Already clocked in');
+  check('clocked_out + start_break → Not currently clocked in', unavailableReason('clocked_out', 'start_break') === 'Not currently clocked in');
+  check('on_break + start_break → Currently on break', unavailableReason('on_break', 'start_break') === 'Currently on break');
+  check('working + end_break → No active break', unavailableReason('working', 'end_break') === 'No active break');
+  check('on_break + clock_out → Currently on break', unavailableReason('on_break', 'clock_out') === 'Currently on break');
+  check('working + clock_out allowed → null', unavailableReason('working', 'clock_out') === null);
+  check('clocked_out + clock_in allowed → null', unavailableReason('clocked_out', 'clock_in') === null);
 }
 
 console.log(`\nALL PASSED (${passed} assertions)`);
