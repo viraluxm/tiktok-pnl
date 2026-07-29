@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { inChunks } from '@/lib/supabase/inChunks';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,21 +36,25 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // SKU lines for those items.
   let lines: Record<string, unknown>[] = [];
   if (itemIds.length) {
-    const { data } = await supabase
-      .from('live_auction_item_skus')
-      .select('auction_item_id, inventory_sku_id, qty, unit_cost_cents_snapshot')
-      .eq('user_id', user.id).in('auction_item_id', itemIds);
-    lines = data ?? [];
+    // Chunked: a large show has >650 item UUIDs, which would overflow the request URL
+    // and silently drop cost/units columns from the CSV. See @/lib/supabase/inChunks.
+    const { rows } = await inChunks<Record<string, unknown>>(itemIds, (slice) =>
+      supabase
+        .from('live_auction_item_skus')
+        .select('auction_item_id, inventory_sku_id, qty, unit_cost_cents_snapshot')
+        .eq('user_id', user.id).in('auction_item_id', slice));
+    lines = rows;
   }
 
   // Live inventory title/number per SKU.
   const skuIds = [...new Set(lines.map((l) => String(l.inventory_sku_id)))];
   const inv: Record<string, { n: number; t: string }> = {};
   if (skuIds.length) {
-    const { data } = await supabase
-      .from('inventory_skus').select('id, sku_number, title')
-      .eq('user_id', user.id).in('id', skuIds);
-    for (const s of data ?? []) inv[String(s.id)] = { n: s.sku_number as number, t: (s.title as string) || '' };
+    const { rows } = await inChunks<Record<string, unknown>>(skuIds, (slice) =>
+      supabase
+        .from('inventory_skus').select('id, sku_number, title')
+        .eq('user_id', user.id).in('id', slice));
+    for (const s of rows) inv[String(s.id)] = { n: s.sku_number as number, t: (s.title as string) || '' };
   }
 
   // Capture window = this session's lifetime (open session → through now).

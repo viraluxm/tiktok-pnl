@@ -57,6 +57,10 @@ export interface BoardResponse {
   items: AuctionItem[];
   session_skus: SessionSku[];
   live_categories: string[];
+  // Set when the board loaded but a non-fatal enrichment join failed (e.g. the skus
+  // join degraded). The rows/sale value are still real — cost/units may be incomplete.
+  // Distinguishes a degraded load from a genuine no-sales show; surfaced in the UI.
+  warning: string | null;
 }
 
 export function useAuctionBoard(sessionId: string | null) {
@@ -73,6 +77,7 @@ export function useAuctionBoard(sessionId: string | null) {
         items: json.items ?? [],
         session_skus: json.session_skus ?? [],
         live_categories: json.live_categories ?? [],
+        warning: json.warning ?? null,
       };
     },
     staleTime: 5_000,
