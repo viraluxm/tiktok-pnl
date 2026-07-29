@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
@@ -70,6 +70,19 @@ function getPreviousPeriodEntries(
 
 export default function RealDashboard() {
   const [activeView, setActiveView] = useState<ViewTab>('dashboard');
+
+  // One-shot: honor a tab a prior flow asked us to land on (e.g. Exit Kiosk → Team). Read from
+  // sessionStorage in a mount effect (not a lazy initializer) to avoid a hydration mismatch —
+  // same convention as PracticeModeLauncher's storage hydration.
+  useEffect(() => {
+    const t = sessionStorage.getItem('lensed.dashboardTab');
+    if (!t) return;
+    sessionStorage.removeItem('lensed.dashboardTab');
+    if (t === 'dashboard' || t === 'pnl' || t === 'inventory' || t === 'shows' || t === 'shipping' || t === 'employees') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing from sessionStorage on mount
+      setActiveView(t);
+    }
+  }, []);
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { fmt } from '@/lib/calculations';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
 import type { Employee, EmployeeStatus } from '@/types';
@@ -36,6 +36,16 @@ const EMPTY_FORM: EmployeeInput = {
 
 export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   const [subView, setSubView] = useState<SubView>('roster');
+
+  // One-shot: land on a specific sub-tab when a flow requested it (e.g. Exit Kiosk → Shifts).
+  useEffect(() => {
+    const s = sessionStorage.getItem('lensed.employeesSubView');
+    if (!s) return;
+    sessionStorage.removeItem('lensed.employeesSubView');
+    if (s === 'roster' || s === 'shifts' || s === 'pay' || s === 'performance') {
+      setSubView(s);
+    }
+  }, []);
   const { employees, isLoading, addEmployee, updateEmployee, deleteEmployee } = useEmployees();
   // Per-host auction badges (Roster). Read-only; empty until 056 attribution accrues.
   const { data: hostPerf } = useHostPerformance();

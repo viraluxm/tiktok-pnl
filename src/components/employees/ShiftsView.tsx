@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { paidShiftHours, generateRecurringShifts } from '@/lib/employees';
 import { confirmErrorMessage, clockErrorToken } from '@/lib/timeclock';
+import { enterFullscreen } from '@/lib/fullscreen';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee, Shift, ShiftRule, ShiftSource } from '@/types';
@@ -55,6 +56,7 @@ export default function ShiftsView({
   dateTo: string | null;
 }) {
   const { shifts, openShifts, isLoading: shiftsLoading, addShift, endShift, deleteShift, confirmShift } = useShifts(dateFrom, dateTo);
+  const router = useRouter();
   const {
     rules,
     exceptions,
@@ -311,6 +313,15 @@ export default function ShiftsView({
     }
   }
 
+  // Enter real browser fullscreen from THIS click gesture, wait for it to settle (granted or
+  // denied), THEN navigate — so it's part of the user gesture (not a delayed effect on the
+  // destination route, which browsers can reject). Client-side push keeps the same document,
+  // so fullscreen persists into the kiosk. If denied, we still navigate (kiosk fallback covers it).
+  async function openTimeClock() {
+    await enterFullscreen();
+    router.push('/dashboard/time-clock');
+  }
+
   async function handleConfirmShift(id: string, confirmed: boolean) {
     try {
       await confirmShift.mutateAsync({ id, confirmed });
@@ -343,13 +354,14 @@ export default function ShiftsView({
     <div className="space-y-6">
       {/* Open the full-screen time-clock kiosk + List | Calendar view toggle */}
       <div className="flex items-center justify-between gap-3">
-        <Link
-          href="/dashboard/time-clock"
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+        <button
+          type="button"
+          onClick={openTimeClock}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors cursor-pointer"
         >
           <span className="w-1.5 h-1.5 rounded-full bg-tt-cyan" />
           Open Time Clock
-        </Link>
+        </button>
         <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
           {(['list', 'calendar'] as const).map((v) => (
             <button

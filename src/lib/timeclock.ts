@@ -247,3 +247,56 @@ export function clockErrorToken(err: unknown): string {
   const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
   return msg || 'UNKNOWN';
 }
+
+// ── Team grouping for the kiosk employee picker ─────────────────────────────
+// employees.role is FREE TEXT. The app matches it case-insensitively everywhere (PayView
+// role filter, host badges), so we normalise the same way. Known equivalents map to a team;
+// anything else falls into 'other' so an active employee is NEVER hidden by an unexpected
+// role. This is display-only — it does not read or change stored role values.
+export type TeamKey = 'host' | 'fulfillment' | 'other';
+
+export interface TeamMeta {
+  key: TeamKey;
+  label: string;
+}
+
+// Live Host + Fulfillment are always offered; 'Other' is shown only when it has members
+// (the caller checks). Order is display order.
+export const TEAMS: readonly TeamMeta[] = [
+  { key: 'host', label: 'Live Host' },
+  { key: 'fulfillment', label: 'Fulfillment' },
+  { key: 'other', label: 'Other' },
+];
+
+export function teamOfRole(role: string | null | undefined): TeamKey {
+  const r = (role ?? '').trim().toLowerCase();
+  if (r === 'host' || r === 'live host') return 'host';
+  if (r === 'fulfillment') return 'fulfillment';
+  return 'other';
+}
+
+export function teamLabel(key: TeamKey): string {
+  return TEAMS.find((t) => t.key === key)?.label ?? 'Other';
+}
+
+// Short, employee-facing reason the action is unavailable from `state` (null = allowed).
+// Used to render a disabled employee card so nobody silently disappears. The RPC remains
+// the final authority — this only mirrors its state machine for the UI.
+export function unavailableReason(state: AttendanceState, action: TimeClockAction): string | null {
+  const token = blockedReason(state, action);
+  if (!token) return null;
+  switch (token) {
+    case 'ALREADY_CLOCKED_IN':
+      return 'Already clocked in';
+    case 'NOT_CLOCKED_IN':
+      return 'Not currently clocked in';
+    case 'ALREADY_ON_BREAK':
+      return 'Currently on break';
+    case 'BREAK_OPEN':
+      return 'Currently on break';
+    case 'NO_ACTIVE_BREAK':
+      return 'No active break';
+    default:
+      return 'Unavailable';
+  }
+}
