@@ -59,11 +59,13 @@ export async function GET(request: Request) {
     // Get authorized shops — shop_cipher is required for all Shop API calls
     let shopCipher: string | null = null;
     let shopName: string | null = null;
+    let shopId: string | null = null;
     const shops = await getAuthorizedShops(tokenData.access_token);
     console.log('[TikTok callback] getAuthorizedShops returned:', JSON.stringify(shops));
     if (shops.length > 0) {
       shopCipher = shops[0].shop_cipher;
       shopName = shops[0].shop_name;
+      shopId = shops[0].shop_id;
       console.log('[TikTok callback] Using shop:', shopName, 'cipher:', shopCipher);
     } else {
       console.error('[TikTok callback] No authorized shops found — sync will not work');
@@ -103,6 +105,7 @@ export async function GET(request: Request) {
         refresh_token_expires_at,
         shop_cipher: shopCipher,
         shop_name: shopName || tokenData.seller_name || 'TikTok Shop',
+        shop_id: shopId,
         connected_at: new Date().toISOString(),
       }, {
         onConflict: 'user_id,store_id',
