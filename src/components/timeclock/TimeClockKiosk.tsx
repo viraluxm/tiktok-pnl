@@ -156,7 +156,19 @@ type Screen =
 
 export default function TimeClockKiosk() {
   const { user } = useUser();
-  const { employees, isLoading, isError, stateOf, refetchState, punch } = useTimeClock();
+  const { employees, isLoading, isError, stateOf, refetchState, punch, openByEmployee } = useTimeClock();
+  // "Still clocked in" warning: anyone punched in longer than this is likely a forgotten
+  // clock-out. The reconciler auto-closes at TIME_CLOCK_MAX_OPEN_HOURS (default 16h) so pay is
+  // never lost, but surfacing it here lets them fix it before it's flagged for review.
+  const STILL_IN_WARN_HOURS = 12;
+  const stillClockedIn = employees
+    .map((e) => {
+      const cin = openByEmployee.get(e.id)?.clocked_in_at;
+      const hrs = cin ? (Date.now() - new Date(cin).getTime()) / 3_600_000 : 0;
+      return { name: e.name, hrs };
+    })
+    .filter((x) => x.hrs >= STILL_IN_WARN_HOURS)
+    .sort((a, b) => b.hrs - a.hrs);
   const [screen, setScreen] = useState<Screen>({ name: 'home' });
   const [submitting, setSubmitting] = useState(false);
   const [isFs, setIsFs] = useState(false);
@@ -273,6 +285,16 @@ export default function TimeClockKiosk() {
           </button>
         )}
       </div>
+
+      {/* "Still clocked in" warning — forgotten clock-outs, before the reconciler flags them. */}
+      {stillClockedIn.length > 0 && (
+        <div className="mx-6 mb-2 shrink-0 rounded-xl border border-tt-yellow/40 bg-tt-yellow/10 px-4 py-2.5 text-sm text-tt-yellow" role="alert">
+          ⚠ Still clocked in — remember to clock out:{' '}
+          {stillClockedIn.map((x, i) => (
+            <span key={x.name}>{i > 0 ? ', ' : ''}{x.name} ({Math.floor(x.hrs)}h)</span>
+          ))}
+        </div>
+      )}
 
       {/* main */}
       <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-6 pb-6 overflow-y-auto">
