@@ -3,16 +3,11 @@
 import { useState } from 'react';
 import { fmt } from '@/lib/calculations';
 import { useAuctionPerformance } from '@/hooks/useAuctionPerformance';
+import { useStores } from '@/hooks/useStores';
 
 // Team-wide auction performance card (read-only). Realized price comes from
 // capture_events; ASP goal = break-even × 3. Host split is not shown yet —
 // live_sessions.host_id is not populated — so this is a single team-wide rollup.
-
-const STORE_OPTIONS: { label: string; value: string }[] = [
-  { label: 'All', value: 'all' },
-  { label: 'Snore', value: '1d71a4c9-16b1-45f2-858e-64b41c548e9e' },
-  { label: 'Lots of Steals', value: 'afd1c76e-1d92-4c7d-9edf-0468ae7aa3df' },
-];
 
 const WINDOW_OPTIONS = [7, 14, 21, 30];
 
@@ -62,6 +57,15 @@ export default function AuctionPerformanceCard() {
   const [days, setDays] = useState(21);
   const { data, isLoading, isError } = useAuctionPerformance(store, days);
 
+  // Store toggle options come from the live store list, so a newly-added store appears here
+  // automatically (no more hardcoded UUIDs). 'All' is always first. While the list is loading
+  // the toggle renders disabled rather than showing an empty/partial list.
+  const { data: storesData, isLoading: storesLoading } = useStores();
+  const storeOptions = [
+    { label: 'All', value: 'all' },
+    ...(storesData?.stores ?? []).map((s) => ({ label: s.name, value: s.id })),
+  ];
+
   const beTone = data ? belowBeTone(data.below_breakeven_rate, data.below_breakeven_baseline) : 'neutral';
 
   return (
@@ -79,11 +83,12 @@ export default function AuctionPerformanceCard() {
           </div>
           {/* Store toggle — re-runs the window against that store's data + baseline. */}
           <div className="flex gap-1 bg-white/5 rounded-lg p-0.5 shrink-0">
-            {STORE_OPTIONS.map((o) => (
+            {storeOptions.map((o) => (
               <button
                 key={o.value}
                 onClick={() => setStore(o.value)}
-                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                disabled={storesLoading}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                   store === o.value ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'
                 }`}
               >

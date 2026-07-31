@@ -100,23 +100,15 @@ export default function RealDashboard() {
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
-  // Calculate total COGS from product stats + costsMap
-  // No useMemo — must recompute every render to stay in sync with costsMap
-  let totalProductCogs = 0;
-  if (productStats?.length && costsMap) {
-    for (const product of productStats) {
-      if (product.skus.length <= 1) {
-        const cost = costsMap[product.tiktok_product_id] || 0;
-        if (cost > 0) totalProductCogs += cost * product.total_orders;
-      } else {
-        for (const sku of product.skus) {
-          const key = `${product.tiktok_product_id}-${sku.sku_id}`;
-          const cost = costsMap[key] || 0;
-          if (cost > 0) totalProductCogs += cost * sku.orders;
-        }
-      }
-    }
-  }
+  // COGS now comes from the AUCTION COST SNAPSHOT (server-computed in product-stats from
+  // live_auction_item_skus.unit_cost_cents_snapshot — the same populated source P&L uses),
+  // replacing the product_costs/costsMap path that was ~empty and always read $0.
+  // PARTIAL: only auction orders have a snapshot; catalog orders carry no COGS here. The
+  // coverage (cogsCoveredOrders / totalOrders) drives the labelled caveat in the UI below.
+  const totalProductCogs = orderTotals?.snapshotCogs || 0;
+  const cogsCoveredOrders = orderTotals?.cogsCoveredOrders || 0;
+  const cogsTotalOrders = orderTotals?.totalOrders || 0;
+  const cogsCoveragePct = cogsTotalOrders > 0 ? Math.round((cogsCoveredOrders / cogsTotalOrders) * 100) : 0;
 
   // Adjust net profit with product-level COGS and overlay video metrics
   const metrics = useMemo(() => {
@@ -207,8 +199,11 @@ export default function RealDashboard() {
     totalProf -= totalUserCogs;
 
     const hasUserCogs = totalUserCogs > 0;
+    // Labelled "auction orders" because the snapshot COGS only covers auction sales — catalog
+    // orders are NOT costed here, so an unlabelled "COGS" would overstate coverage.
+    const cogsLabel = `COGS (auction orders, ${cogsCoveragePct}% of orders)`;
     const breakdownLabels = hasUserCogs
-      ? ['Platform Fee (6%)', 'COGS', 'Shipping', 'Net Profit']
+      ? ['Platform Fee (6%)', cogsLabel, 'Shipping', 'Net Profit']
       : ['Platform Fee (6%)', 'Shipping', 'Net Profit'];
     const rawAmounts = hasUserCogs
       ? [Math.max(0, totalPlatFee), Math.max(0, totalUserCogs), Math.max(0, totalShip), Math.max(0, totalProf)]

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrgId } from '@/lib/org';
+import { inChunks } from '@/lib/supabase/inChunks';
 
 export async function GET(request: Request) {
   const supabase = await createClient();
@@ -17,7 +18,7 @@ export async function GET(request: Request) {
   // Get per-product stats from synced_order_ids
   let query = admin
     .from('synced_order_ids')
-    .select('tiktok_product_id, sku_id, sku_name, gmv, shipping, affiliate, platform_fee, units, status, order_date')
+    .select('order_id, tiktok_product_id, sku_id, sku_name, gmv, shipping, affiliate, platform_fee, units, status, order_date')
     .eq('user_id', data.user.id);
 
   if (dateFrom) query = query.gte('order_date', dateFrom);
@@ -191,8 +192,35 @@ export async function GET(request: Request) {
     }
   }
 
+  // ── COGS from the AUCTION COST SNAPSHOT (live_auction_item_skus.unit_cost_cents_snapshot) —
+  //    the same populated source P&L/Shows/export use, joined order_id -> sold auction item.
+  //    Replaces the product_costs/costsMap path, which is nearly empty (~13 rows) and read $0.
+  //    PARTIAL BY DESIGN: only AUCTION orders have a snapshot; catalog/non-auction orders carry
+  //    no COGS here (cogsCoveredOrders vs totalOrders lets the UI label that honestly).
+  const orderIds = [...new Set(allRows.map((r) => String(r.order_id || '')).filter(Boolean))];
+  let snapshotCogs = 0;               // dollars
+  const coveredOrders = new Set<string>();
+  if (orderIds.length) {
+    const { rows: items } = await inChunks<{ id: string; client_idempotency_key: string }>(orderIds, (slice) =>
+      admin.from('live_auction_items').select('id, client_idempotency_key')
+        .eq('user_id', data.user.id).eq('status', 'sold').in('client_idempotency_key', slice));
+    const itemToOrder = new Map(items.map((i) => [String(i.id), String(i.client_idempotency_key)]));
+    const itemIds = items.map((i) => String(i.id));
+    if (itemIds.length) {
+      const { rows: skus } = await inChunks<{ auction_item_id: string; qty: number | null; unit_cost_cents_snapshot: number | null }>(itemIds, (slice) =>
+        admin.from('live_auction_item_skus').select('auction_item_id, qty, unit_cost_cents_snapshot')
+          .eq('user_id', data.user.id).in('auction_item_id', slice));
+      for (const s of skus) {
+        snapshotCogs += ((Number(s.unit_cost_cents_snapshot) || 0) * (Number(s.qty) || 1)) / 100;
+        const oid = itemToOrder.get(String(s.auction_item_id));
+        if (oid) coveredOrders.add(oid);
+      }
+    }
+  }
+  const cogsCoveredOrders = coveredOrders.size;
+
   return NextResponse.json({
     products: result,
-    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate, returnsCount, returnsAmount, samplesCount },
+    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate, returnsCount, returnsAmount, samplesCount, snapshotCogs, cogsCoveredOrders },
   });
 }
