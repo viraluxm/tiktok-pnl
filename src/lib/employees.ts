@@ -33,7 +33,7 @@ export interface EmployeePay {
 // recurring `GeneratedShift`s satisfy it. The time-clock fields are optional so generated
 // recurring instances (which never carry them) are treated as plain, always-payable shifts.
 export type ShiftLike = Pick<Shift, 'employee_id' | 'start_time' | 'end_time'> &
-  Partial<Pick<Shift, 'source' | 'confirmed_at' | 'break_minutes'>>;
+  Partial<Pick<Shift, 'source' | 'confirmed_at' | 'break_minutes' | 'clock_in_at' | 'clock_out_at'>>;
 
 // A shift counts toward pay when it is COMPLETED and not an UNCONFIRMED time-clock shift.
 // Manual/recurring shifts (source 'manual' or absent) are payable as soon as they close —
@@ -48,8 +48,17 @@ export function isPayableShift(s: ShiftLike): boolean {
 
 // Net paid hours for one shift: its worked span minus unpaid break minutes, floored at 0.
 // break_minutes is 0/absent for every non-time-clock shift, so their hours are unchanged.
+//
+// For a time-clock shift with the real punch INSTANTS (migration 072), derive hours from the
+// true span (clock_out_at - clock_in_at). start_time/end_time are only local time-of-day, so
+// their midnight wrap silently undercounts any span > 24h (a 26h forgotten-clock-out read as
+// 2h). The instants have no such ceiling. Manual/recurring shifts keep the time-of-day path.
 export function paidShiftHours(s: ShiftLike): number {
   const breakHours = (s.break_minutes ?? 0) / 60;
+  if (s.clock_in_at && s.clock_out_at) {
+    const spanH = (new Date(s.clock_out_at).getTime() - new Date(s.clock_in_at).getTime()) / 3_600_000;
+    return Math.max(0, spanH - breakHours);
+  }
   return Math.max(0, shiftHours(s.start_time, s.end_time) - breakHours);
 }
 

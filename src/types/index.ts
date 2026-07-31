@@ -125,6 +125,12 @@ export interface Shift {
   confirmed_at: string | null; // manager confirmation gate — only 'time_clock' shifts are gated in pay
   confirmed_by: string | null; // auth.users id of the manager who confirmed (set server-side with confirmed_at)
   break_minutes: number;       // unpaid break minutes subtracted from derived pay
+  // Time-clock REAL SPAN (migration 072). For 'time_clock' shifts these are the authoritative
+  // punch instants; pay derives hours from them so a >24h span isn't undercounted by the
+  // start_time/end_time midnight wrap. NULL on manual/recurring shifts (use start/end there).
+  clock_in_at?: string | null;
+  clock_out_at?: string | null;
+  auto_closed?: boolean;       // reconciler auto-closed a forgotten/over-long open punch — FLAG for review
   created_at: string;
   updated_at: string;
 }
@@ -179,6 +185,10 @@ export interface EmployeeTimeEntry {
   clocked_in_at: string;
   clocked_out_at: string | null;
   status: TimeEntryStatus;
+  // migration 072: reconciler set this on an open punch left past the plausible-shift cap (~11h).
+  // The entry is NOT auto-closed — it stays open + out of pay until a human clocks it out with the
+  // real time (which clears this). A loud "needs manual close" flag, never invented hours.
+  needs_manual_close?: boolean;
   created_at: string;
   updated_at: string;
 }
