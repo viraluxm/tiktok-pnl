@@ -180,14 +180,28 @@ export async function POST(req: Request) {
   // with a listing name + seller-SKU for the up-front alert. First line item is representative.
   const orderDetail = new Map<string, { product_name: string; seller_sku: string }>();
   let statusUnverified = false;
+  // CAT4 multi-store: the live-status refresh needs the order's OWN store connection. If the
+  // scanned order has NO store attribution (store_id NULL) we must NOT fall back to an
+  // unfiltered tiktok_connections lookup — LATENT 2-CONNECTION BUG: with 2+ connected stores
+  // that query matches multiple rows and .maybeSingle() errors, which used to surface to the
+  // packer as a misleading "no connection for store". Fail loud with the real cause instead;
+  // never guess a connection.
+  if (!storeId) {
+    return NextResponse.json(
+      { error: `Order ${orderId} has no store attribution (store_id is null), so its live TikTok status can't be verified. Fix this order's store mapping, then re-scan.` },
+      { status: 409 },
+    );
+  }
   try {
     const admin = createAdminClient();
-    let connQ = admin.from('tiktok_connections')
+    // storeId is guaranteed non-null here (guarded above) — always scope to the order's store,
+    // so .maybeSingle() can only ever match that one store's connection, never all of them.
+    const { data: conn } = await admin.from('tiktok_connections')
       .select('id, access_token, refresh_token, shop_cipher, token_expires_at')
-      .eq('user_id', user.id);
-    if (storeId) connQ = connQ.eq('store_id', storeId);
-    const { data: conn } = await connQ.maybeSingle();
-    if (!conn?.access_token || !conn?.shop_cipher) throw new Error('no connection for store');
+      .eq('user_id', user.id)
+      .eq('store_id', storeId)
+      .maybeSingle();
+    if (!conn?.access_token || !conn?.shop_cipher) throw new Error(`no connection for store ${storeId}`);
     const connRow = conn as ConnRow;
     const fresh = await getFreshToken(admin, connRow, { skewMinutes: 30 });
     let token = fresh.accessToken;
