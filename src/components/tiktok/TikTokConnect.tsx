@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useTikTok } from '@/hooks/useTikTok';
-import { useStores, useSetActiveStore, type StoreEntry } from '@/hooks/useStores';
+import { useStores, useSetActiveStore, useCreateStore, type StoreEntry } from '@/hooks/useStores';
 
 // Full-page OAuth connect for a specific owned store (Phase C requires store_id).
 const connectHref = (storeId: string) => `/api/tiktok/auth?store_id=${encodeURIComponent(storeId)}`;
@@ -38,7 +38,8 @@ export default function TikTokConnect() {
   const stores: StoreEntry[] = storesData?.stores ?? [];
   const activeStore = storesData?.activeStore ?? 'all';
 
-  // No stores owned yet — brand-new-store creation is deferred (Phase E note).
+  // No stores owned yet — offer the inline create control (creating the first store makes
+  // stores.length > 0, which swaps this whole block for the switcher on the next render).
   if (stores.length === 0) {
     return (
       <div className="mb-4 p-5 rounded-xl border border-tt-border bg-tt-card">
@@ -49,6 +50,7 @@ export default function TikTokConnect() {
             <p className="text-xs text-tt-muted">Create a store to connect a TikTok Shop.</p>
           </div>
         </div>
+        <AddStore variant="empty" />
       </div>
     );
   }
@@ -178,6 +180,11 @@ export default function TikTokConnect() {
                   );
                 })}
               </div>
+
+              {/* Add a brand-new store — inline, separated from the store rows. On success
+                  the store list refetches and the new store appears with its Connect button. */}
+              <div className="border-t border-tt-border" />
+              <AddStore variant="row" />
             </div>
           )}
         </div>
@@ -203,6 +210,83 @@ export default function TikTokConnect() {
         </div>
       )}
     </>
+  );
+}
+
+// Inline "Add store" control — a trigger that swaps in place to a text input + Save/Cancel
+// (no modal, no route). `variant` matches the two hosts: the dropdown list ('row') and the
+// no-stores empty state ('empty'). Server errors are shown verbatim, never swallowed.
+function AddStore({ variant }: { variant: 'row' | 'empty' }) {
+  const createStore = useCreateStore();
+  const [isAdding, setIsAdding] = useState(false);
+  const [name, setName] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (isAdding) inputRef.current?.focus(); }, [isAdding]);
+
+  const cancel = () => { setIsAdding(false); setName(''); createStore.reset(); };
+  const submit = () => {
+    const trimmed = name.trim();
+    if (!trimmed || createStore.isPending) return;
+    // Do NOT optimistically insert — onSuccess invalidates ['stores'] and the list refetches.
+    createStore.mutate(trimmed, { onSuccess: () => { setIsAdding(false); setName(''); } });
+  };
+
+  if (!isAdding) {
+    return (
+      <button
+        onClick={() => setIsAdding(true)}
+        className={
+          variant === 'empty'
+            ? 'mt-4 flex w-full items-center justify-center gap-2 px-3 py-2 rounded-lg border border-dashed border-tt-border text-tt-muted text-xs font-semibold hover:border-tt-cyan hover:text-tt-cyan transition-all cursor-pointer'
+            : 'w-full flex items-center gap-3 px-4 py-3 text-left text-tt-muted hover:bg-[rgba(255,255,255,0.03)] transition-colors cursor-pointer'
+        }
+      >
+        <PlusIcon />
+        <span className="text-sm font-semibold">Add store</span>
+      </button>
+    );
+  }
+
+  return (
+    <div className={variant === 'empty' ? 'mt-4' : 'p-3'}>
+      <div className="flex items-center gap-2">
+        <input
+          ref={inputRef}
+          type="text"
+          value={name}
+          maxLength={80}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') cancel(); }}
+          placeholder="Store name"
+          className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-[#111] border border-tt-border text-sm text-tt-text placeholder:text-tt-muted focus:border-tt-cyan focus:outline-none"
+        />
+        <button
+          onClick={submit}
+          disabled={!name.trim() || createStore.isPending}
+          className="px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold hover:opacity-90 transition-opacity disabled:opacity-50 cursor-pointer flex-shrink-0"
+        >
+          {createStore.isPending ? 'Saving…' : 'Save'}
+        </button>
+        <button
+          onClick={cancel}
+          className="px-3 py-1.5 rounded-lg border border-tt-border text-tt-muted text-xs font-medium hover:text-tt-text transition-all cursor-pointer flex-shrink-0"
+        >
+          Cancel
+        </button>
+      </div>
+      {createStore.isError && (
+        <p className="mt-2 text-xs text-tt-red">{createStore.error.message}</p>
+      )}
+    </div>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
   );
 }
 
