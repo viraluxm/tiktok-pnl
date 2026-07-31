@@ -138,8 +138,12 @@ export async function POST(req: Request) {
   const decodeCursor = (s: string | undefined): Cursor => {
     if (!s) return { phase: 'T', ts: null, id: null };
     const p = s.split('|');
-    if (p[0] === 'N') return { phase: 'N', ts: null, id: p[1] ?? '' };
-    if (p[0] === 'T') return { phase: 'T', ts: p[1] ?? null, id: p[2] ?? null };
+    // Use `|| null` (not `?? null`): an unadvanced store re-encodes its null-start as 'T||' /
+    // 'N|', so the round-trip must map the EMPTY segments back to null. `?? null` kept '' and,
+    // for phase T, built the filter `order_created_at.gt.` → Postgres 400 (invalid timestamp '')
+    // → the whole write pass 500s on the second (chained) invocation.
+    if (p[0] === 'N') return { phase: 'N', ts: null, id: p[1] || null };
+    if (p[0] === 'T') return { phase: 'T', ts: p[1] || null, id: p[2] || null };
     return { phase: 'T', ts: null, id: null };
   };
   const encodeCursor = (cur: Cursor): string =>
@@ -161,6 +165,12 @@ export async function POST(req: Request) {
     return (ct ?? 0) + (cn ?? 0);
   };
 
+  // Split the call budget across stores so a later store isn't starved to zero every pass
+  // (processing is sequential per conn; without this, the first store consumed the whole
+  // budget and the second always returned its null-start cursor, never progressing). Each
+  // store gets a fair share; the global callBudget still caps the total.
+  const perStoreCap = Math.max(1, Math.ceil(callBudget / Math.max(1, conns.length)));
+
   for (const c of conns) {
     const storeId = String(c.store_id);
     const ownerUserId = String(c.user_id);
@@ -170,10 +180,11 @@ export async function POST(req: Request) {
 
     const cur = decodeCursor(afterIn[storeId]);
     let storeDone = false;
+    let callsThisStore = 0;
     let token = ''; let cipher = ''; let tokenLoaded = false;
 
     outer: while (true) {
-      if (callsUsed >= callBudget || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break; }
+      if (callsUsed >= callBudget || callsThisStore >= perStoreCap || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break; }
 
       // Fetch the next keyset page for the current phase.
       let pageRows: { order_id: string; status: string; order_created_at: string | null }[] = [];
@@ -203,7 +214,7 @@ export async function POST(req: Request) {
       }
 
       for (let i = 0; i < pageRows.length; i += CHUNK) {
-        if (callsUsed >= callBudget || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break outer; }
+        if (callsUsed >= callBudget || callsThisStore >= perStoreCap || Date.now() - started >= timeBudgetMs) { budgetExhausted = true; break outer; }
         const chunkRows = pageRows.slice(i, i + CHUNK);
         const storedById = new Map(chunkRows.map((r) => [String(r.order_id), String(r.status)]));
         const chunk = [...storedById.keys()];
@@ -217,7 +228,7 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'getOrderById failed', detail: msg, store_id: storeId }, { status: 502 });
           }
         }
-        callsUsed++; ps.calls++;
+        callsUsed++; ps.calls++; callsThisStore++;
 
         const returned = new Set<string>();
         for (const o of got) {
