@@ -47,6 +47,10 @@ export interface ResolveOutcome {
   sec_uid_present: boolean;
   store_resolved_via: 'existing' | 'handle-map' | 'sec-uid' | 'orders' | 'conflict' | 'unmapped' | null;
   action: 'resolved' | 'would-resolve' | 'failed' | 'skipped' | 'conflict';
+  // The authoritative owner handle disagreed with a non-null stored channel_handle. The
+  // handle is STILL overwritten (resolver is authoritative); this only flags that the
+  // disagreement was recorded to channel_resolve_conflict_log (when write=true).
+  handle_conflict?: boolean;
 }
 
 export interface ResolveResult {
@@ -58,6 +62,11 @@ export interface ResolveResult {
   // handle/sec_uid are still written, but store_id is withheld and the row is flagged for
   // a human. Guessing wrong silently is worse than leaving it unattributed.
   conflicts: number;
+  // Sessions whose authoritative owner handle disagreed with a non-null stored handle. The
+  // handle is overwritten regardless (resolver is authoritative) — this is the count of
+  // disagreements recorded to channel_resolve_conflict_log. Distinct from `conflicts`
+  // (which is STORE attribution: orders vs. map).
+  handle_conflicts: number;
   outcomes: ResolveOutcome[];
 }
 
@@ -128,6 +137,7 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
   let resolved = 0;
   let failed = 0;
   let conflicts = 0;
+  let handleConflicts = 0;
 
   for (let i = 0; i < candidates.length; i++) {
     const s = candidates[i];
@@ -175,6 +185,16 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
     //   4. else map (handle/sec_uid) → fallback for the no-/ambiguous-order case.
     //   5. else unmapped → store stays null.
     // channel_handle / sec_uid are ALWAYS written regardless — only store_id is withheld.
+
+    // HANDLE-CONFLICT INSTRUMENTATION. The resolver is authoritative and we always
+    // overwrite channel_handle below. But when it disagrees with a non-null stored handle
+    // (typically the extension's DOM scrape having written the wrong channel), record the
+    // disagreement to channel_resolve_conflict_log BEFORE overwriting, so a bad scrape is
+    // traceable. Pure instrumentation — computed here, never gates the overwrite. On
+    // AGREEMENT there is nothing to log; channel_sec_uid is still populated by the patch.
+    const existingHandle = (s.channel_handle as string | null) ?? null;
+    const handleConflict = !!existingHandle && !!owner.displayId && owner.displayId !== existingHandle;
+
     const existingStore = (s.store_id as string | null) ?? null;
     const orderStore = existingStore ? null : await storeFromOrders(room);
     const mapStore = owner.displayId && handleToStore.has(owner.displayId)
@@ -217,20 +237,40 @@ export async function resolveChannels({ write }: { write: boolean }): Promise<Re
         outcomes.push({
           session_id: s.id as string, room_id: room, status_code: owner.statusCode,
           handle: owner.displayId, sec_uid_present: !!owner.secUid, store_resolved_via: via, action: 'failed',
+          handle_conflict: handleConflict,
         });
         continue;
       }
       // Learn this sec_uid → store for the rest of this run.
       if (owner.secUid && storeId && !secUidToStore.has(owner.secUid)) secUidToStore.set(owner.secUid, storeId);
+
+      // NON-FATAL conflict-log insert. The overwrite has already succeeded above; this only
+      // records the disagreement. Wrapped so a failed/throwing insert can NEVER abort or
+      // skip a resolution — instrumentation must not break the thing it instruments.
+      if (handleConflict) {
+        try {
+          const { error: logErr } = await admin.from('channel_resolve_conflict_log').insert({
+            session_id: s.id,
+            stored_handle: existingHandle,
+            resolved_handle: owner.displayId,
+            resolved_sec_uid: owner.secUid,
+          });
+          if (logErr) console.warn(`[resolveChannels] conflict-log insert failed (non-fatal) session=${s.id}: ${logErr.message}`);
+        } catch (e) {
+          console.warn(`[resolveChannels] conflict-log insert threw (non-fatal) session=${s.id}: ${(e as Error).message}`);
+        }
+      }
     }
 
+    if (handleConflict) handleConflicts += 1;
     if (conflict) conflicts += 1; else resolved += 1;
     outcomes.push({
       session_id: s.id as string, room_id: room, status_code: owner.statusCode,
       handle: owner.displayId, sec_uid_present: !!owner.secUid, store_resolved_via: via,
       action: conflict ? 'conflict' : write ? 'resolved' : 'would-resolve',
+      handle_conflict: handleConflict,
     });
   }
 
-  return { dry_run: !write, candidates: candidates.length, resolved, failed, conflicts, outcomes };
+  return { dry_run: !write, candidates: candidates.length, resolved, failed, conflicts, handle_conflicts: handleConflicts, outcomes };
 }
