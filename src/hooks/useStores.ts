@@ -30,28 +30,6 @@ export function useStores() {
   });
 }
 
-// Creates a store the caller owns (POST /api/stores), then refetches the store list so
-// the new store appears immediately with its Connect button. Throws the server's error
-// message verbatim so the caller can surface it inline (never a generic fallback).
-export function useCreateStore() {
-  const qc = useQueryClient();
-  return useMutation<StoreEntry, Error, string>({
-    mutationFn: async (name: string) => {
-      const res = await fetch('/api/stores', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(json?.error || 'Failed to create store');
-      return json as StoreEntry;
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['stores'] });
-    },
-  });
-}
-
 // Sets the active store (server-validated cookie) and refetches everything scoped by
 // it, so the dashboard/status/analytics switch to the new store immediately.
 export function useSetActiveStore() {
