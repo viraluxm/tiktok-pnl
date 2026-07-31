@@ -109,13 +109,15 @@ export default function RealDashboard() {
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
-  // COGS now comes from the AUCTION COST SNAPSHOT (server-computed in product-stats from
-  // live_auction_item_skus.unit_cost_cents_snapshot — the same populated source P&L uses),
-  // replacing the product_costs/costsMap path that was ~empty and always read $0.
-  // PARTIAL: only auction orders have a snapshot; catalog orders carry no COGS here. The
-  // coverage (cogsCoveredOrders / totalOrders) drives the labelled caveat in the UI below.
-  const totalProductCogs = orderTotals?.snapshotCogs || 0;
-  const cogsCoveredOrders = orderTotals?.cogsCoveredOrders || 0;
+  // COGS from TWO server-computed sources (product-stats): the AUCTION cost snapshot
+  // (live_auction_item_skus.unit_cost_cents_snapshot) for auction orders, PLUS the name-based
+  // CATALOG resolver ($0.80×(boxes+1)) for non-auction storefront orders. Together they cost
+  // both halves of the business; what's still uncosted is surfaced (catalog unparseable names +
+  // class-c auction-lot orders), never silently zero-costed.
+  const snapshotCogs = orderTotals?.snapshotCogs || 0;
+  const catalogCogs = orderTotals?.catalogCogs || 0;
+  const totalProductCogs = snapshotCogs + catalogCogs;
+  const cogsCoveredOrders = (orderTotals?.cogsCoveredOrders || 0) + (orderTotals?.catalogCostedOrders || 0);
   const cogsTotalOrders = orderTotals?.totalOrders || 0;
   const cogsCoveragePct = cogsTotalOrders > 0 ? Math.round((cogsCoveredOrders / cogsTotalOrders) * 100) : 0;
 
@@ -215,9 +217,9 @@ export default function RealDashboard() {
     totalProf -= totalUserCogs;
 
     const hasUserCogs = totalUserCogs > 0;
-    // Labelled "auction orders" because the snapshot COGS only covers auction sales — catalog
-    // orders are NOT costed here, so an unlabelled "COGS" would overstate coverage.
-    const cogsLabel = `COGS (auction orders, ${cogsCoveragePct}% of orders)`;
+    // COGS now spans auction (snapshot) + catalog (name resolver). The % is the combined coverage;
+    // the remainder is uncosted (catalog unparseable names + class-c auction-lot orders).
+    const cogsLabel = `COGS (auction + catalog, ${cogsCoveragePct}% of orders)`;
     const breakdownLabels = hasUserCogs
       ? ['Platform Fee (6%)', cogsLabel, 'Shipping', 'Net Profit']
       : ['Platform Fee (6%)', 'Shipping', 'Net Profit'];

@@ -219,8 +219,68 @@ export async function GET(request: Request) {
   }
   const cogsCoveredOrders = coveredOrders.size;
 
+  // ── CATALOG COGS (non-auction storefront orders) ─────────────────────────────
+  // Auction orders get COGS from the snapshot above. Catalog (storefront) orders never touch
+  // an auction, so they have no snapshot — resolve their cost from the sku NAME via the Snore
+  // tape cost curve. Name-based ON PURPOSE: the product is re-listed constantly (6× so far),
+  // each re-list minting new sku_ids that orphan product_costs; the name pattern is stable.
+  //   cost = $0.80 × (boxes + 1)  PER ORDER — a "3 Black" bundle is $3.20 total, not ×3.
+  //   Verified against all 12 legacy product_costs tiers (1→$1.60, 4→$4.00, 12/"1 Year"→$10.40).
+  // TWO HARD GUARDS (both produced wrong answers in analysis):
+  //   • "N Pcs" = N/30 boxes ("120 Pcs" = 4, not 120) — a leading-int read overcounts 30×.
+  //   • pure-numeric sku_names ("9","21") are AUCTION LOT numbers (class-c never-captured
+  //     auction), NOT catalog — excluded entirely, never given tape cost (this is what made
+  //     June's modeled COGS exceed its revenue during analysis).
+  // Unresolvable names ("Default", no pack indicator) are LEFT UNCOSTED and COUNTED — never
+  // silently defaulted. Catalog = orders with NO capture_events row (every auction order, bound
+  // or unbound, has one); that filter plus the numeric guard isolates true storefront sales.
+  let catalogCogs = 0;                  // dollars
+  const catalogCostedOrders = new Set<string>();
+  let catalogUncostedUnparseable = 0;   // named but no pack indicator (e.g. "Default")
+  let catalogExcludedNumeric = 0;       // class-c auction lots sitting in the no-capture set
+  if (orderIds.length) {
+    const { rows: caps } = await inChunks<{ order_id: string }>(orderIds, (slice) =>
+      admin.from('capture_events').select('order_id').eq('user_id', data.user.id).in('order_id', slice));
+    const captureSet = new Set(caps.map((c) => String(c.order_id)));
+    for (const row of allRows) {
+      const oid = String(row.order_id || '');
+      if (!oid || captureSet.has(oid) || coveredOrders.has(oid)) continue; // any auction order → skip
+      const status = String(row.status || '').toUpperCase();
+      if (/CANCEL|REVERSE|REFUND|RETURN/.test(status)) continue;           // mirror GMV's exclusion
+      const boxes = resolveCatalogBoxes(String(row.sku_name || ''));
+      if (boxes === 'numeric') { catalogExcludedNumeric += 1; continue; }
+      if (boxes == null) { catalogUncostedUnparseable += 1; continue; }
+      const units = Number(row.units) || 1;
+      catalogCogs += 0.8 * (boxes + 1) * units;
+      catalogCostedOrders.add(oid);
+    }
+  }
+  const catalogCostedOrdersCount = catalogCostedOrders.size;
+
   return NextResponse.json({
     products: result,
-    totals: { totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate, returnsCount, returnsAmount, samplesCount, snapshotCogs, cogsCoveredOrders },
+    totals: {
+      totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate,
+      returnsCount, returnsAmount, samplesCount,
+      snapshotCogs, cogsCoveredOrders,
+      catalogCogs, catalogCostedOrders: catalogCostedOrdersCount,
+      catalogUncostedUnparseable, catalogExcludedNumeric,
+    },
   });
+}
+
+// Resolve the number of 30-day BOXES a catalog sku_name represents, for the $0.80×(boxes+1)
+// tape cost curve. Returns 'numeric' for pure-numeric auction lot numbers (NOT catalog — must be
+// excluded), or null when the name has no pack indicator (leave uncosted + count, never guess).
+// Order matters: numeric guard → "year" (=12) → "N Pcs" (÷30) → any leading/embedded integer.
+export function resolveCatalogBoxes(rawName: string): number | 'numeric' | null {
+  const name = rawName.trim();
+  if (!name) return null;
+  if (/^\d+$/.test(name)) return 'numeric';                 // auction lot number, not catalog
+  if (/year/i.test(name)) return 12;                        // "1 Year" / "360 Pcs (1 Year Supply)"
+  const pcs = name.match(/(\d+)\s*pcs?\b/i);                // "120 Pcs" → round(120/30) = 4 boxes
+  if (pcs) return Math.max(1, Math.round(parseInt(pcs[1], 10) / 30));
+  const lead = name.match(/\d+/);                           // "3 Black", "Black, 1 Pack", "2 Month Supply"
+  if (lead) return parseInt(lead[0], 10);
+  return null;                                              // no pack indicator — uncosted, counted
 }
