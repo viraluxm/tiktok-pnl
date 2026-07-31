@@ -188,6 +188,10 @@ export async function shopPost(path: string, accessToken: string, body: Record<s
 // ==================== SHOP ENDPOINTS ====================
 
 export interface ShopInfo {
+  // TikTok's numeric shop id, kept as a STRING — ids can exceed JS safe-integer range, so
+  // it must never be parsed as a number. Stable per-shop identity (unlike shop_cipher, whose
+  // stability across re-auth is unverified). null only if the API omits it.
+  shop_id: string | null;
   shop_cipher: string;
   shop_name: string;
   region: string;
@@ -198,6 +202,7 @@ export async function getAuthorizedShops(accessToken: string): Promise<ShopInfo[
   const data = await shopGet('/authorization/202309/shops', accessToken);
   if (!data?.shops) return [];
   return data.shops.map((s: Record<string, unknown>) => ({
+    shop_id: String(s.id || '') || null,
     shop_cipher: String(s.cipher || ''),
     shop_name: String(s.name || ''),
     region: String(s.region || ''),
