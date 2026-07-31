@@ -33,6 +33,9 @@ type DisplayRow =
       source: ShiftSource;
       confirmed_at: string | null;
       break_minutes: number;
+      // migration 072: reconciler stamped a capped clock-out on a forgotten/over-long punch.
+      // The hours shown are a POLICY DEFAULT, not measured — surface loudly + gate confirm.
+      auto_closed: boolean;
     }
   | {
       kind: 'recurring';
@@ -152,6 +155,7 @@ export default function ShiftsView({
           source: s.source,
           confirmed_at: s.confirmed_at,
           break_minutes: s.break_minutes,
+          auto_closed: s.auto_closed ?? false,
         }),
       ),
       ...generated.map(
@@ -322,7 +326,26 @@ export default function ShiftsView({
     router.push('/dashboard/time-clock');
   }
 
-  async function handleConfirmShift(id: string, confirmed: boolean) {
+  async function handleConfirmShift(
+    id: string,
+    confirmed: boolean,
+    opts?: { autoClosed?: boolean; hours?: number },
+  ) {
+    // Auto-closed shifts carry a policy-default number of hours, not measured ones. Don't let a
+    // manager confirm one with a single click — force an explicit acknowledgement first so the
+    // flag actually changes behaviour. (Editing the real finish time on the raw punch is the
+    // right fix; this gate exists to stop a guess being rubber-stamped as truth.)
+    if (confirmed && opts?.autoClosed) {
+      const hrs = typeof opts.hours === 'number' ? opts.hours.toFixed(2) : '—';
+      const ok = window.confirm(
+        `⚠ Auto-closed at the cap — verify hours before confirming.\n\n` +
+          `This shift was auto-closed by the reconciler because the punch was left open past the cap. ` +
+          `The ${hrs}h shown is a POLICY DEFAULT, not what was actually worked.\n\n` +
+          `Correct the real finish time on the time entry first if it's wrong. ` +
+          `Confirm these hours as-is anyway?`,
+      );
+      if (!ok) return;
+    }
     try {
       await confirmShift.mutateAsync({ id, confirmed });
     } catch (err) {
@@ -649,6 +672,14 @@ export default function ShiftsView({
                           ) : row.source === 'time_clock' ? (
                             <span className="inline-flex flex-wrap items-center gap-1">
                               <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Time Clock</span>
+                              {row.auto_closed && (
+                                <span
+                                  title="Reconciler auto-closed a forgotten punch at the hour cap — the hours shown are a policy default, not measured. Verify before confirming."
+                                  className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-red/20 text-tt-red"
+                                >
+                                  ⚠ Auto-closed
+                                </span>
+                              )}
                               {row.confirmed_at == null ? (
                                 <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Needs confirmation</span>
                               ) : (
@@ -689,7 +720,7 @@ export default function ShiftsView({
                               {!isOpen && row.source === 'time_clock' && (
                                 row.confirmed_at == null ? (
                                   <button
-                                    onClick={() => handleConfirmShift(row.id, true)}
+                                    onClick={() => handleConfirmShift(row.id, true, { autoClosed: row.auto_closed, hours: paidShiftHours(row) })}
                                     className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
                                   >
                                     Confirm
@@ -789,6 +820,9 @@ export default function ShiftsView({
                       ) : row.source === 'time_clock' ? (
                         <span className="inline-flex flex-wrap items-center justify-end gap-1">
                           <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-cyan/15 text-tt-cyan">Time Clock</span>
+                          {row.auto_closed && (
+                            <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-red/20 text-tt-red">⚠ Auto-closed</span>
+                          )}
                           {row.confirmed_at == null ? (
                             <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-tt-yellow/15 text-tt-yellow">Needs confirmation</span>
                           ) : (
@@ -836,7 +870,7 @@ export default function ShiftsView({
                           {!isOpen && row.source === 'time_clock' && (
                             row.confirmed_at == null ? (
                               <button
-                                onClick={() => handleConfirmShift(row.id, true)}
+                                onClick={() => handleConfirmShift(row.id, true, { autoClosed: row.auto_closed, hours: paidShiftHours(row) })}
                                 className="rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
                               >
                                 Confirm
