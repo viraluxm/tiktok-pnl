@@ -1,6 +1,7 @@
 import { createServerClient } from '@supabase/ssr';
 import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { NextResponse, type NextRequest } from 'next/server';
+import { getUserWithTimeout } from './authTimeout';
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -12,6 +13,13 @@ export async function updateSession(request: NextRequest) {
   if (!supabaseUrl || !supabaseKey || supabaseUrl.includes('your_supabase')) {
     return supabaseResponse;
   }
+
+  // Abort the in-flight Supabase auth request if it blows past the hard timeout
+  // applied below, so a hung call is actively cancelled instead of being left to
+  // run against Vercel's 25s Edge-Middleware limit. Wired through the client's
+  // own `fetch` so the AbortController reaches the ACTUAL network request that
+  // supabase-js makes (and every internal retry it makes on the same signal).
+  const authAbort = new AbortController();
 
   const supabase = createServerClient(supabaseUrl, supabaseKey, {
     cookies: {
@@ -28,16 +36,31 @@ export async function updateSession(request: NextRequest) {
         );
       },
     },
+    global: {
+      fetch: (input, init) =>
+        fetch(input, { ...init, signal: authAbort.signal }),
+    },
   });
 
+  // Bound the auth call with a hard timeout (see ./authTimeout). Supabase Auth
+  // intermittently hangs / returns 504 and supabase-js retries internally;
+  // without this cap the middleware runs until Vercel's 25s Edge limit and every
+  // protected route 504s (MIDDLEWARE_INVOCATION_TIMEOUT). A timeout surfaces as
+  // `timedOut` and is treated as a transient failure below — never a forced
+  // logout.
   const {
     data: { user },
     error,
-  } = await supabase.auth.getUser();
+    timedOut,
+  } = await getUserWithTimeout(() => supabase.auth.getUser(), {
+    onTimeout: () => authAbort.abort(),
+  });
 
   // A refresh/validation call that fails for a TRANSIENT reason (network blip,
   // Supabase 5xx, cold edge) returns { user: null, error } even though the
-  // session is still valid. Treat that as "still logged in" for the page shell:
+  // session is still valid. A call that HANGS past our hard timeout (timedOut)
+  // is the same class of event — Supabase Auth is momentarily unavailable — and
+  // is treated identically. Treat both as "still logged in" for the page shell:
   // redirecting to /login here would log the user out on a temporary glitch.
   // This does NOT weaken data protection — every API route re-checks getUser()
   // and RLS enforces auth.uid(), so a briefly-null shell exposes nothing. A
@@ -47,7 +70,7 @@ export async function updateSession(request: NextRequest) {
     .getAll()
     .some((c) => c.name.startsWith('sb-') && c.name.includes('-auth-token'));
   const transientAuthFailure =
-    !user && hasAuthCookie && isAuthRetryableFetchError(error);
+    !user && hasAuthCookie && (timedOut || isAuthRetryableFetchError(error));
 
   // Build a redirect that preserves any refreshed/rotated auth cookies Supabase
   // wrote onto supabaseResponse. Without this, a token refresh that coincides

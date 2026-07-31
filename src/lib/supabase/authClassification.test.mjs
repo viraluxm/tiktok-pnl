@@ -1,13 +1,16 @@
 // Dependency-free tests (Node's built-in `node:test`, matching extension/test/*.test.mjs).
 // Run: `node --test src/lib/supabase/authClassification.test.mjs`
 //
-// Scope: the auth-error CLASSIFICATION that PR #36's transient-tolerance depends on.
-// Node 20 in this repo cannot import the .ts source directly (no type stripping and
-// no transpiler is added for this PR), so the two pure predicates below are mirrored
-// from src/lib/supabase/middleware.ts and MUST be kept in sync with it. The
-// classification primitive itself is exercised against the REAL @supabase/supabase-js
-// error classes, so it also guards against an upstream change to how these errors are
-// classified.
+// Scope: the auth-error CLASSIFICATION + transient-tolerance DECISION the
+// middleware redirect depends on — including the hard-timeout term added for the
+// 2026-07-31 production 504 incident (a hung getUser() is treated as transient,
+// not a logout). Node 20 in this repo cannot import the .ts source directly (no
+// type stripping / no persistent transpiler), so the pure predicates below are
+// mirrored from src/lib/supabase/middleware.ts and MUST be kept in sync with it.
+// The timeout MECHANISM itself (getUserWithTimeout) is transpiled and exercised
+// directly in authTimeout.test.mjs. The classification primitive is exercised
+// against the REAL @supabase/supabase-js error classes, so it also guards against
+// an upstream change to how these errors are classified.
 //
 // NOT covered here (require @testing-library/react + jsdom + a runner, i.e. broad new
 // test infra not added without approval): the UserMenu/layout component navigation
@@ -24,10 +27,14 @@ import {
 } from '@supabase/supabase-js';
 
 // ── Mirrors of the pure predicates in src/lib/supabase/middleware.ts (keep in sync) ──
+// `transientAuthFailure` now also treats a hard-timeout (timedOut) on the auth
+// call as transient — see src/lib/supabase/authTimeout.ts and the middleware.
+// The `timedOut` param defaults to false so the classification-only cases below
+// read unchanged.
 const hasSupabaseAuthCookie = (cookies) =>
   cookies.some((c) => c.name.startsWith('sb-') && c.name.includes('-auth-token'));
-const isTransientAuthFailure = (user, hasAuthCookie, error) =>
-  !user && hasAuthCookie && isAuthRetryableFetchError(error);
+const isTransientAuthFailure = (user, hasAuthCookie, error, timedOut = false) =>
+  !user && hasAuthCookie && (timedOut || isAuthRetryableFetchError(error));
 
 // ── Classification primitive (real supabase-js error classes) ──
 test('AuthRetryableFetchError classifies as transient (ride it out)', () => {
@@ -91,4 +98,25 @@ test('no auth cookie (genuinely signed out) → do NOT suppress even if error lo
 
 test('authenticated user present → not a suppression case', () => {
   assert.equal(isTransientAuthFailure({ id: 'u1' }, true, null), false);
+});
+
+// ── Hard-timeout term (2026-07-31 incident): a hung getUser() that trips the
+//    middleware timeout is transient — ride it out exactly like a retryable
+//    fetch error, never a forced logout. ──
+test('timeout WITH auth cookie and no user → suppress redirect (ride it out)', () => {
+  // timedOut=true, no returned error object at all (the call never resolved).
+  assert.equal(isTransientAuthFailure(null, true, null, true), true);
+});
+
+test('timeout withOUT an auth cookie (no session to preserve) → do NOT suppress → redirect', () => {
+  assert.equal(isTransientAuthFailure(null, false, null, true), false);
+});
+
+test('timeout is irrelevant once a user is present → not a suppression case', () => {
+  assert.equal(isTransientAuthFailure({ id: 'u1' }, true, null, true), false);
+});
+
+test('confirmed missing session that did NOT time out still redirects', () => {
+  // No timeout, no retryable error → definitive signed-out → redirect.
+  assert.equal(isTransientAuthFailure(null, true, new AuthSessionMissingError(), false), false);
 });
