@@ -380,9 +380,9 @@ export default function RealDashboard() {
                       ${hostLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       <span className="ml-2 text-xs font-normal text-tt-muted">{laborData.host.hours}h × ${laborData.host.rate_dollars}/h</span>
                     </div>
-                    {(laborData.host.excluded_over_8h_count > 0 || laborData.host.rates_differ) && (
+                    {(laborData.host.excluded_over_cap_count > 0 || laborData.host.rates_differ) && (
                       <div className="mt-1 text-[11px] text-tt-yellow" role="note">
-                        ⚠ undercount: {laborData.host.excluded_over_8h_count} session{laborData.host.excluded_over_8h_count === 1 ? '' : 's'} &gt;8h excluded ({laborData.host.excluded_over_8h_hours}h){laborData.host.rates_differ ? '; hosts have differing rates — using the lowest' : ''}
+                        ⚠ undercount: {laborData.host.excluded_over_cap_count} session{laborData.host.excluded_over_cap_count === 1 ? '' : 's'} &gt;{laborData.host.cap_hours}h excluded ({laborData.host.excluded_over_cap_hours}h){laborData.host.rates_differ ? '; hosts have differing rates — using the lowest' : ''}
                       </div>
                     )}
                   </div>

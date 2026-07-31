@@ -11,11 +11,13 @@ export const dynamic = 'force-dynamic';
 //                    pack-time exists, so it is entered, not computed.
 // GET returns both (+ what was excluded from the host measure). PUT upserts the packer figure.
 //
-// Duration bound: 10 min ≤ dur ≤ 8 h. The >8h exclusions are un-split multi-lives that would
-// wildly overstate a single host's hours; they're reported (excluded_over_8h_*) so the host
-// figure is honestly an UNDERCOUNT, never a silent one.
+// Duration bound: 10 min ≤ dur ≤ 11 h. The 11h ceiling matches the time-clock plausible-shift
+// cap (genuine shifts top out ~10.5h) — one consistent threshold everywhere. The >11h exclusions
+// are un-split multi-lives / forgotten-to-end sessions that would wildly overstate a single host's
+// hours; they're reported (excluded_over_cap_*) so the host figure is honestly an UNDERCOUNT,
+// never a silent one.
 const MIN_H = 10 / 60;
-const MAX_H = 8;
+const MAX_H = 11;
 const TZ = 'America/Los_Angeles';
 
 export async function GET(request: Request) {
@@ -44,13 +46,13 @@ export async function GET(request: Request) {
     .gte('started_at', `${from}T00:00:00-07:00`)
     .lte('started_at', `${to}T23:59:59-07:00`);
 
-  let hostHours = 0, excludedOver8hHours = 0, excludedOver8hCount = 0, excludedUnder10m = 0, counted = 0;
+  let hostHours = 0, excludedOverCapHours = 0, excludedOverCapCount = 0, excludedUnder10m = 0, counted = 0;
   for (const s of sessions ?? []) {
     const start = new Date(s.started_at as string).getTime();
     const endRaw = (s.ended_at as string | null) ?? (s.last_seen_at as string | null);
     if (!endRaw) continue;
     const dur = (new Date(endRaw).getTime() - start) / 3_600_000;
-    if (dur > MAX_H) { excludedOver8hHours += dur; excludedOver8hCount += 1; continue; }
+    if (dur > MAX_H) { excludedOverCapHours += dur; excludedOverCapCount += 1; continue; }
     if (dur < MIN_H) { excludedUnder10m += 1; continue; }
     hostHours += dur; counted += 1;
   }
@@ -71,8 +73,9 @@ export async function GET(request: Request) {
       rate_dollars: hostRate,
       rates_differ: hostRatesDiffer,     // if true, hostRate is the MIN and the figure undercounts
       sessions_counted: counted,
-      excluded_over_8h_count: excludedOver8hCount,   // un-split multi-lives → host figure is an undercount
-      excluded_over_8h_hours: Math.round(excludedOver8hHours * 10) / 10,
+      excluded_over_cap_count: excludedOverCapCount,   // >11h un-split multi-lives → host figure is an undercount
+      excluded_over_cap_hours: Math.round(excludedOverCapHours * 10) / 10,
+      cap_hours: MAX_H,
       excluded_under_10m: excludedUnder10m,
     },
     packer: {

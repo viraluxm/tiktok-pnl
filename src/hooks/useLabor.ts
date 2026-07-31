@@ -11,8 +11,9 @@ export interface LaborData {
     rate_dollars: number;
     rates_differ: boolean;
     sessions_counted: number;
-    excluded_over_8h_count: number;
-    excluded_over_8h_hours: number;
+    excluded_over_cap_count: number;
+    excluded_over_cap_hours: number;
+    cap_hours: number;
     excluded_under_10m: number;
   };
   packer: { labor_cents: number; note: string | null; updated_at: string | null; entered: boolean };
