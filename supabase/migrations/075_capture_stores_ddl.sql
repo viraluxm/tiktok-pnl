@@ -1,4 +1,4 @@
--- 062_capture_stores_ddl.sql
+-- 075_capture_stores_ddl.sql
 --
 -- Captures the DDL for public.stores and public.store_members. These two tables were
 -- created OUT-OF-BAND directly in production and never had a CREATE TABLE in this repo,
@@ -12,9 +12,13 @@
 -- constraints, and defaults are left exactly as they are. It only does real work on a
 -- fresh database that has no stores/store_members yet.
 --
--- Filename note: there is already a `062_synced_order_tracking_number.sql`; this reuses the
--- 062 number (the repo already double-numbers — see the two 066_* files and 035b). Order is
--- irrelevant here because the statements are idempotent and independent of that migration.
+-- Filename note: numbered 075 — the next free prefix above main's highest (074). This capture
+-- has been renumbered twice to dodge hand-applied-ledger collisions: it was first authored as
+-- 062 (collided with 062_synced_order_tracking_number.sql), then 073 (collided with the
+-- concurrent 073_period_labor.sql that landed on main). The live DB has NO migration ledger —
+-- migrations are applied BY HAND — so a duplicated prefix is a real skip / double-apply hazard,
+-- not just cosmetic; verify the live schema before hand-applying. Order is irrelevant anyway:
+-- the statements are idempotent and independent of any other migration.
 --
 -- SCHEMA SOURCE: inspected live via the Management API on project dvucodtdojumvplmgjeu.
 --   stores:        id, org_id (NOT NULL, FK organizations), name, slug, created_at, updated_at.
@@ -28,6 +32,13 @@
 -- deferred "RLS cutover" note). Reproducing prod faithfully therefore means NOT enabling
 -- RLS and adding NO policies. The explicit `disable row level security` below is a true
 -- no-op (tables are created RLS-off) that records the observed state unambiguously.
+--
+-- ⚠️ The `disable row level security` lines CAPTURE THE CURRENTLY-OBSERVED PROD STATE — they
+-- are NOT an intentional design choice. RLS-off here is a snapshot of what prod happens to be
+-- today (the "RLS cutover" is deferred, not decided against). If someone later enables RLS
+-- properly on these tables (adds policies, turns row security on), this migration must be
+-- updated to match — do NOT let a fresh replay silently RE-DISABLE RLS and quietly undo that
+-- hardening. Treat these two lines as "reflect prod", never as "RLS should stay off".
 
 begin;
 
