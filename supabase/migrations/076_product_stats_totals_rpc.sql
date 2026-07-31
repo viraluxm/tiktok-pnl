@@ -102,3 +102,10 @@ $$;
 
 grant execute on function public.lensed_product_stats_totals(uuid, uuid, date, date)
   to service_role, authenticated;
+
+-- Postgres AUTO-GRANTS EXECUTE to PUBLIC on function creation, so the grant above is NOT
+-- sufficient to scope access — PUBLIC (and thus the anon role) would otherwise be able to call
+-- this SECURITY DEFINER function with any p_user_id and read that user's aggregates. Revoke it
+-- so only service_role + authenticated can execute. (Applied to prod alongside the create.)
+revoke execute on function public.lensed_product_stats_totals(uuid, uuid, date, date)
+  from public, anon;
