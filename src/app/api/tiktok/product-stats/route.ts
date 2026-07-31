@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrgId } from '@/lib/org';
 import { inChunks } from '@/lib/supabase/inChunks';
+import { getActiveStore } from '@/lib/tiktok/activeStore';
 
 export async function GET(request: Request) {
   const supabase = await createClient();
@@ -13,6 +14,12 @@ export async function GET(request: Request) {
   const dateFrom = searchParams.get('from');
   const dateTo = searchParams.get('to');
 
+  // Store scoping: the switcher's active store (cookie). 'all' → null → aggregate across the
+  // user's stores; a specific store → scope every query below to it. Without this the dashboard
+  // showed org-wide totals under any single store.
+  const activeStore = await getActiveStore();
+  const storeParam = activeStore === 'all' ? null : activeStore;
+
   const admin = createAdminClient();
 
   // Get per-product stats from synced_order_ids
@@ -21,6 +28,7 @@ export async function GET(request: Request) {
     .select('order_id, tiktok_product_id, sku_id, sku_name, gmv, shipping, affiliate, platform_fee, units, status, order_date')
     .eq('user_id', data.user.id);
 
+  if (storeParam) query = query.eq('store_id', storeParam);
   if (dateFrom) query = query.gte('order_date', dateFrom);
   if (dateTo) query = query.lte('order_date', dateTo);
 
@@ -31,7 +39,12 @@ export async function GET(request: Request) {
   const PAGE = 1000; // Supabase default row limit per request
   while (true) {
     const { data: page, error } = await query.range(offset, offset + PAGE - 1);
-    if (error) { console.error('Product stats error:', error); break; }
+    // FAIL LOUD: a page error must NOT `break` and return partial/zero totals — a silent
+    // undercount looks like valid data. Surface a real 500 so the UI shows an error, not $0.
+    if (error) {
+      console.error('[product-stats] order page fetch failed:', error);
+      return NextResponse.json({ error: `Failed to load orders: ${error.message}` }, { status: 500 });
+    }
     if (!page || page.length === 0) break;
     allRows.push(...page);
     if (page.length < PAGE) break;
@@ -144,53 +157,28 @@ export async function GET(request: Request) {
       };
     });
 
-  // Compute aggregate dashboard totals from the same raw order data
-  let totalGMV = 0;
-  let totalShipping = 0;
-  let totalAffiliate = 0;
-  let totalPlatformFee = 0;
-  let totalUnits = 0;
-  let totalOrders = 0;
-  const byDate: Record<string, { gmv: number; shipping: number; affiliate: number; platformFee: number }> = {};
-
-  let returnsCount = 0;
-  let returnsAmount = 0;
-  let samplesCount = 0;
-
-  for (const row of allRows) {
-    const status = String(row.status || '').toUpperCase();
-    const gmv = Number(row.gmv) || 0;
-    const shipping = Number(row.shipping) || 0;
-    const affiliate = Number(row.affiliate) || 0;
-    const platformFee = Number(row.platform_fee) || 0;
-    const date = String(row.order_date || '');
-
-    // Count returns/cancellations
-    if (status === 'CANCELLED' || status.includes('CANCEL') || status.includes('REVERSE') || status.includes('REFUND') || status.includes('RETURN')) {
-      returnsCount += 1;
-      returnsAmount += gmv;
-      continue; // Don't include in GMV totals
-    }
-
-    // Count samples ($0 GMV completed orders)
-    if (gmv === 0 && (status === 'COMPLETED' || status === 'DELIVERED' || status === 'IN_TRANSIT' || status === '')) {
-      samplesCount += 1;
-    }
-
-    totalGMV += gmv;
-    totalShipping += shipping;
-    totalAffiliate += affiliate;
-    totalPlatformFee += platformFee;
-    totalUnits += Number(row.units) || 0;
-    totalOrders += 1;
-    if (date) {
-      if (!byDate[date]) byDate[date] = { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0 };
-      byDate[date].gmv += gmv;
-      byDate[date].shipping += shipping;
-      byDate[date].affiliate += affiliate;
-      byDate[date].platformFee += platformFee;
-    }
+  // ── Top-line dashboard totals via server-side aggregation (RPC), NOT a JS sum over the
+  //    fetched rows. One round-trip, store+date scoped, so 'all' no longer depends on pulling
+  //    the entire dataset into JS. Classification is byte-identical to the former JS loop
+  //    (returns = CANCEL|REVERSE|REFUND|RETURN excluded + counted; samples = $0 non-return in
+  //    COMPLETED/DELIVERED/IN_TRANSIT/''; byDate over non-return rows) — see migration 076.
+  const { data: totalsJson, error: totalsErr } = await admin.rpc('lensed_product_stats_totals', {
+    p_user_id: data.user.id,
+    p_store_id: storeParam,   // null = all of the user's stores
+    p_date_from: dateFrom,
+    p_date_to: dateTo,
+  });
+  if (totalsErr || !totalsJson) {
+    // FAIL LOUD: never return zeros on an aggregation failure.
+    console.error('[product-stats] totals RPC failed:', totalsErr);
+    return NextResponse.json({ error: `Failed to aggregate totals: ${totalsErr?.message ?? 'no result'}` }, { status: 500 });
   }
+  const totals = totalsJson as {
+    totalGMV: number; totalShipping: number; totalAffiliate: number; totalPlatformFee: number;
+    totalUnits: number; totalOrders: number;
+    returnsCount: number; returnsAmount: number; samplesCount: number;
+    byDate: Record<string, { gmv: number; shipping: number; affiliate: number; platformFee: number }>;
+  };
 
   // ── COGS from the AUCTION COST SNAPSHOT (live_auction_item_skus.unit_cost_cents_snapshot) —
   //    the same populated source P&L/Shows/export use, joined order_id -> sold auction item.
@@ -201,15 +189,24 @@ export async function GET(request: Request) {
   let snapshotCogs = 0;               // dollars
   const coveredOrders = new Set<string>();
   if (orderIds.length) {
-    const { rows: items } = await inChunks<{ id: string; client_idempotency_key: string }>(orderIds, (slice) =>
+    const { rows: items, error: itemsErr } = await inChunks<{ id: string; client_idempotency_key: string }>(orderIds, (slice) =>
       admin.from('live_auction_items').select('id, client_idempotency_key')
         .eq('user_id', data.user.id).eq('status', 'sold').in('client_idempotency_key', slice));
+    // FAIL LOUD: a chunk error would undercount COGS → overstated net profit. Fail, don't return partial.
+    if (itemsErr) {
+      console.error('[product-stats] auction items fetch failed:', itemsErr);
+      return NextResponse.json({ error: `Failed to load auction items: ${(itemsErr as { message?: string })?.message ?? String(itemsErr)}` }, { status: 500 });
+    }
     const itemToOrder = new Map(items.map((i) => [String(i.id), String(i.client_idempotency_key)]));
     const itemIds = items.map((i) => String(i.id));
     if (itemIds.length) {
-      const { rows: skus } = await inChunks<{ auction_item_id: string; qty: number | null; unit_cost_cents_snapshot: number | null }>(itemIds, (slice) =>
+      const { rows: skus, error: skusErr } = await inChunks<{ auction_item_id: string; qty: number | null; unit_cost_cents_snapshot: number | null }>(itemIds, (slice) =>
         admin.from('live_auction_item_skus').select('auction_item_id, qty, unit_cost_cents_snapshot')
           .eq('user_id', data.user.id).in('auction_item_id', slice));
+      if (skusErr) {
+        console.error('[product-stats] auction item skus fetch failed:', skusErr);
+        return NextResponse.json({ error: `Failed to load auction cost snapshots: ${(skusErr as { message?: string })?.message ?? String(skusErr)}` }, { status: 500 });
+      }
       for (const s of skus) {
         snapshotCogs += ((Number(s.unit_cost_cents_snapshot) || 0) * (Number(s.qty) || 1)) / 100;
         const oid = itemToOrder.get(String(s.auction_item_id));
@@ -239,8 +236,13 @@ export async function GET(request: Request) {
   let catalogUncostedUnparseable = 0;   // named but no pack indicator (e.g. "Default")
   let catalogExcludedNumeric = 0;       // class-c auction lots sitting in the no-capture set
   if (orderIds.length) {
-    const { rows: caps } = await inChunks<{ order_id: string }>(orderIds, (slice) =>
+    const { rows: caps, error: capsErr } = await inChunks<{ order_id: string }>(orderIds, (slice) =>
       admin.from('capture_events').select('order_id').eq('user_id', data.user.id).in('order_id', slice));
+    // FAIL LOUD: a chunk error would mis-split auction vs catalog → wrong catalog COGS.
+    if (capsErr) {
+      console.error('[product-stats] capture_events fetch failed:', capsErr);
+      return NextResponse.json({ error: `Failed to load capture events: ${(capsErr as { message?: string })?.message ?? String(capsErr)}` }, { status: 500 });
+    }
     const captureSet = new Set(caps.map((c) => String(c.order_id)));
     for (const row of allRows) {
       const oid = String(row.order_id || '');
@@ -260,8 +262,9 @@ export async function GET(request: Request) {
   return NextResponse.json({
     products: result,
     totals: {
-      totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate,
-      returnsCount, returnsAmount, samplesCount,
+      // Top-line aggregates from the RPC (store+date scoped)…
+      ...totals,
+      // …plus the COGS resolvers (kept as store-scoped JS for now, over the scoped rows above).
       snapshotCogs, cogsCoveredOrders,
       catalogCogs, catalogCostedOrders: catalogCostedOrdersCount,
       catalogUncostedUnparseable, catalogExcludedNumeric,

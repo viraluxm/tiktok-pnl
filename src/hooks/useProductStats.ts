@@ -2,6 +2,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { useUser } from './useUser';
+import { useStores } from './useStores';
 
 export interface ProductSku {
   sku_id: string;
@@ -60,9 +61,13 @@ export interface ProductStatsResponse {
 
 export function useProductStats(dateFrom: string | null, dateTo: string | null) {
   const { user } = useUser();
+  // The route scopes by the active-store cookie server-side; include activeStore in the key so
+  // the cache is per-store and switching stores refetches (not just reuses the prior store's data).
+  const { data: storesData } = useStores();
+  const activeStore = storesData?.activeStore ?? 'all';
 
   return useQuery<ProductStatsResponse>({
-    queryKey: ['product-stats', user?.id, dateFrom, dateTo],
+    queryKey: ['product-stats', user?.id, activeStore, dateFrom, dateTo],
     enabled: !!user,
     queryFn: async () => {
       const params = new URLSearchParams();

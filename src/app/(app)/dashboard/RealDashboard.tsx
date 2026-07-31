@@ -89,7 +89,7 @@ export default function RealDashboard() {
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
   const { costsMap } = useProductCosts();
-  const { data: productStatsData } = useProductStats(filters.dateFrom, filters.dateTo);
+  const { data: productStatsData, isLoading: statsLoading, isError: statsError } = useProductStats(filters.dateFrom, filters.dateTo);
   const productStats = productStatsData?.products;
   const orderTotals = productStatsData?.totals;
   const { data: videoMetrics } = useShopVideos(filters.dateFrom, filters.dateTo);
@@ -121,15 +121,19 @@ export default function RealDashboard() {
   const cogsTotalOrders = orderTotals?.totalOrders || 0;
   const cogsCoveragePct = cogsTotalOrders > 0 ? Math.round((cogsCoveredOrders / cogsTotalOrders) * 100) : 0;
 
-  // Adjust net profit with product-level COGS and overlay video metrics
-  const metrics = useMemo(() => {
+  // Adjust net profit with product-level COGS and overlay video metrics.
+  // Returns null when order totals are ABSENT (loading or fetch error) — no `|| 0` masking that
+  // would render a failed/pending fetch as a real $0. SummaryCards distinguishes the three states.
+  const metrics = useMemo<DashboardMetrics | null>(() => {
     // Compute base metrics from order totals (synced_order_ids) — more reliable than entries table
     const t = orderTotals;
-    const gmv = t?.totalGMV || 0;
-    const shipping = t?.totalShipping || 0;
-    const affiliate = t?.totalAffiliate || 0;
-    const platformFee = t?.totalPlatformFee || 0;
-    const effectivePlatformFee = platformFee || (gmv * 0.06);
+    if (!t) return null; // data absent → let the tiles show loading/error, never a masked zero
+
+    const gmv = t.totalGMV;
+    const shipping = t.totalShipping;
+    const affiliate = t.totalAffiliate;
+    const platformFee = t.totalPlatformFee;
+    const effectivePlatformFee = platformFee || (gmv * 0.06); // 0 fee → estimate 6% (not data-masking)
     const baseProfit = gmv - effectivePlatformFee - shipping - affiliate - totalProductCogs;
 
     let result: DashboardMetrics = {
@@ -141,18 +145,18 @@ export default function RealDashboard() {
       totalAds: 0,
       totalAffiliate: affiliate,
       totalShipping: shipping,
-      totalUnitsSold: t?.totalOrders || 0,
-      totalUnits: t?.totalUnits || 0, // actual units/qty (same orderTotals source as GMV/Net Profit)
-      entryCount: t?.totalOrders || 0,
+      totalUnitsSold: t.totalOrders,
+      totalUnits: t.totalUnits, // actual units/qty (same orderTotals source as GMV/Net Profit)
+      entryCount: t.totalOrders,
       avgViewsPerVideo: 0,
       revenuePerVideo: 0,
       profitPerVideo: 0,
       roas: null,
       topProduct: null,
       productProfits: {},
-      returnsCount: returnsData?.summary?.totalReturns ?? t?.returnsCount ?? 0,
-      returnsAmount: returnsData?.summary?.totalAmount ?? t?.returnsAmount ?? 0,
-      samplesCount: t?.samplesCount || 0,
+      returnsCount: returnsData?.summary?.totalReturns ?? t.returnsCount,
+      returnsAmount: returnsData?.summary?.totalAmount ?? t.returnsAmount,
+      samplesCount: t.samplesCount,
     };
 
     // Override video metrics from shop_videos table if available
@@ -362,7 +366,7 @@ export default function RealDashboard() {
         {/* Dashboard View */}
         {activeView === 'dashboard' && (
           <>
-            <SummaryCards metrics={metrics} prevMetrics={prevMetrics} />
+            <SummaryCards metrics={metrics} prevMetrics={prevMetrics} loading={statsLoading} error={statsError} />
             {/* LABOR — two separate lines. Host is MEASURED (live_sessions); packer is ENTERED. */}
             {laborData && (
               <div className="rounded-xl border border-tt-border bg-tt-card p-4">
