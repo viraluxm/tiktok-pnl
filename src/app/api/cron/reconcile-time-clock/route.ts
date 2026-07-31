@@ -8,10 +8,11 @@ export const maxDuration = 60;
 // GET: time-clock RECONCILER (Vercel cron — see vercel.json). Backstop for the two ways a
 // punch can otherwise lose pay, since lensed_clock_out is the ONLY (atomic, no self-heal) shift
 // creator:
-//   (a) a forgotten clock-out (open punch) → auto-closed at the cap into a FLAGGED shift, so
-//       the time is captured for review instead of silently dropped;
+//   (a) a forgotten clock-out (open punch past the cap) → FLAGGED needs_manual_close and LEFT
+//       OPEN. We never invent a clock-out — genuine shifts top out ~10.5h, so a capped time would
+//       be fabricated hours. It stays out of pay and loud in the kiosk until a human closes it.
 //   (b) a closed punch with no shift (orphaned by any non-RPC close) → the missing shift is
-//       backfilled and linked.
+//       backfilled and linked (pure recovery of genuine hours — no guessing).
 // Calls public.lensed_reconcile_time_clock (SECURITY DEFINER; acts across all users).
 //
 // SAFETY RAMP (mirrors auto-end-sessions): writes gated behind TIME_CLOCK_RECONCILE_WRITE_ENABLED.
@@ -30,7 +31,7 @@ export async function GET(req: Request) {
   }
   if (!authorized) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const maxOpenHours = Math.max(1, Math.trunc(Number(process.env.TIME_CLOCK_MAX_OPEN_HOURS) || 16));
+  const maxOpenHours = Math.max(1, Math.trunc(Number(process.env.TIME_CLOCK_MAX_OPEN_HOURS) || 11));
   const writeEnabled = process.env.TIME_CLOCK_RECONCILE_WRITE_ENABLED === 'true';
   const admin = createAdminClient();
 
@@ -44,8 +45,8 @@ export async function GET(req: Request) {
     ]);
 
     if (!writeEnabled) {
-      console.log(`[cron/reconcile-time-clock] LOG_ONLY would_auto_close=${staleOpen ?? 0} would_backfill=${orphanClosed ?? 0} (max_open_hours=${maxOpenHours})`);
-      return NextResponse.json({ mode: 'log_only', would_auto_close: staleOpen ?? 0, would_backfill: orphanClosed ?? 0, max_open_hours: maxOpenHours });
+      console.log(`[cron/reconcile-time-clock] LOG_ONLY would_flag=${staleOpen ?? 0} would_backfill=${orphanClosed ?? 0} (max_open_hours=${maxOpenHours})`);
+      return NextResponse.json({ mode: 'log_only', would_flag: staleOpen ?? 0, would_backfill: orphanClosed ?? 0, max_open_hours: maxOpenHours });
     }
 
     const { data, error } = await admin.rpc('lensed_reconcile_time_clock', { p_max_open_hours: maxOpenHours });

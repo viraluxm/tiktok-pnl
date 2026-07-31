@@ -157,10 +157,11 @@ type Screen =
 export default function TimeClockKiosk() {
   const { user } = useUser();
   const { employees, isLoading, isError, stateOf, refetchState, punch, openByEmployee } = useTimeClock();
-  // "Still clocked in" warning: anyone punched in longer than this is likely a forgotten
-  // clock-out. The reconciler auto-closes at TIME_CLOCK_MAX_OPEN_HOURS (default 16h) so pay is
-  // never lost, but surfacing it here lets them fix it before it's flagged for review.
-  const STILL_IN_WARN_HOURS = 12;
+  // "Still clocked in" warning: anyone punched in longer than this is almost certainly a forgotten
+  // clock-out — genuine shifts top out ~10.5h. The reconciler FLAGS these needs_manual_close at
+  // TIME_CLOCK_MAX_OPEN_HOURS (default 11h) but never invents a clock-out, so the hours stay out of
+  // pay until someone closes the punch with the real time. Surfacing it here prompts that fix.
+  const STILL_IN_WARN_HOURS = 11;
   const stillClockedIn = employees
     .map((e) => {
       const cin = openByEmployee.get(e.id)?.clocked_in_at;
@@ -286,10 +287,11 @@ export default function TimeClockKiosk() {
         )}
       </div>
 
-      {/* "Still clocked in" warning — forgotten clock-outs, before the reconciler flags them. */}
+      {/* "Needs manual close" — open punches past the plausible-shift cap. These won't be paid
+          (no shift is created) until someone clocks them out with the real finish time. */}
       {stillClockedIn.length > 0 && (
-        <div className="mx-6 mb-2 shrink-0 rounded-xl border border-tt-yellow/40 bg-tt-yellow/10 px-4 py-2.5 text-sm text-tt-yellow" role="alert">
-          ⚠ Still clocked in — remember to clock out:{' '}
+        <div className="mx-6 mb-2 shrink-0 rounded-xl border border-tt-red/40 bg-tt-red/10 px-4 py-2.5 text-sm text-tt-red" role="alert">
+          ⚠ Needs manual close — clock out with the real time (not counted in pay until you do):{' '}
           {stillClockedIn.map((x, i) => (
             <span key={x.name}>{i > 0 ? ', ' : ''}{x.name} ({Math.floor(x.hrs)}h)</span>
           ))}
