@@ -32,12 +32,42 @@ interface SyncProgress {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// ─── Single-owner election (module scope) ────────────────────────────────────
+// useTikTok is mounted by BOTH RealDashboard AND TikTokConnect, so a single dashboard
+// session had TWO instances, each with its own refs — each spawning a sync driver and a
+// 5-min auto-sync interval → two drivers hammering /api/tiktok/sync in parallel. We elect
+// ONE owner across all instances; only the owner runs the sync-driving effects. On the
+// owner's unmount, ownership hands off to another still-mounted instance so the driver is
+// never orphaned. React Query already dedups the shared status query, so non-owners still
+// see connection state — they just don't drive sync.
+let syncOwner: symbol | null = null;
+const ownerClaimers = new Set<() => void>();
+
 export function useTikTok() {
   const { user } = useUser();
   const queryClient = useQueryClient();
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const loopRunningRef = useRef(false);
   const loopStartedRef = useRef(false);
+  const ownerIdRef = useRef<symbol | null>(null);
+  if (ownerIdRef.current === null) ownerIdRef.current = Symbol('useTikTok');
+  const [isOwner, setIsOwner] = useState(false);
+
+  // Claim sync ownership on mount; release + hand off on unmount.
+  useEffect(() => {
+    const id = ownerIdRef.current!;
+    const tryClaim = () => { if (syncOwner === null) { syncOwner = id; setIsOwner(true); } };
+    ownerClaimers.add(tryClaim);
+    tryClaim();
+    return () => {
+      ownerClaimers.delete(tryClaim);
+      if (syncOwner === id) {
+        syncOwner = null;
+        setIsOwner(false);
+        for (const claim of ownerClaimers) { claim(); if (syncOwner !== null) break; }
+      }
+    };
+  }, []);
 
   const connectionQuery = useQuery<TikTokStatusResponse>({
     queryKey: ['tiktok-status', user?.id],
@@ -127,8 +157,9 @@ export function useTikTok() {
     }
   }, [queryClient]);
 
-  // Auto-start when connected and not caught up
+  // Auto-start when connected and not caught up — OWNER ONLY (see single-owner election).
   useEffect(() => {
+    if (!isOwner) return;
     const conn = connectionQuery.data?.connection;
     if (!conn || !connectionQuery.data?.connected) return;
     if (loopStartedRef.current) return;
@@ -136,7 +167,7 @@ export function useTikTok() {
 
     loopStartedRef.current = true;
     runSyncDriver();
-  }, [connectionQuery.data?.connected, connectionQuery.data?.connection?.isCaughtUp, runSyncDriver]);
+  }, [isOwner, connectionQuery.data?.connected, connectionQuery.data?.connection?.isCaughtUp, runSyncDriver]);
 
   // Disconnect
   const disconnect = useCallback(async () => {
@@ -157,9 +188,10 @@ export function useTikTok() {
     runSyncDriver();
   }, [runSyncDriver]);
 
-  // Auto-sync on page load + poll every 5 minutes while tab is active
+  // Auto-sync on page load + poll every 5 minutes while tab is active — OWNER ONLY.
   const autoSyncRef = useRef(false);
   useEffect(() => {
+    if (!isOwner) return;
     if (!connectionQuery.data?.connected || autoSyncRef.current) return;
     autoSyncRef.current = true;
 
@@ -189,7 +221,7 @@ export function useTikTok() {
     }, 5 * 60 * 1000);
 
     return () => clearInterval(interval);
-  }, [connectionQuery.data?.connected, queryClient]);
+  }, [isOwner, connectionQuery.data?.connected, queryClient]);
 
   return {
     isConnected: connectionQuery.data?.connected ?? false,
