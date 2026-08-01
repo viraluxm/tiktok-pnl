@@ -457,10 +457,11 @@ export default function ShippingTab() {
           setSyncMsg('Couldn’t reach the server — check your connection and try again.'); return;
         }
         if (!res.ok) {
-          // Distinguish the failure modes so the packer knows what actually happened.
+          // Distinguish the failure modes so the packer knows what actually happened. The route no
+          // longer refuses writes during a live (the write gate was removed — sync-tracking writes
+          // synced_order_ids, disjoint from the auction path), so a 409 "paused" can't happen here.
           const body = await res.json().catch(() => ({} as { error?: string }));
-          if (res.status === 409) setSyncMsg('Paused — a live is running. Tracking will fetch when it ends.');
-          else if (res.status === 500) setSyncMsg(`Sync failed: ${body.error ?? 'server error'}`);
+          if (res.status === 500) setSyncMsg(`Sync failed: ${body.error ?? 'server error'}`);
           else setSyncMsg(`Sync failed (${res.status}) — try again.`);
           return;
         }

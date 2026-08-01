@@ -32,10 +32,10 @@ export const maxDuration = 300;
 // wider candidate set and let getOrderById's LIVE result decide: fill/correct fire only on a
 // non-empty live tracking, so genuinely-held orders (no label) are naturally no-ops.
 //
-// WRITE GATE (the deploy gate): writes are REFUSED while a live is active — most-recent write to
-// capture_events / live_auction_items within ACTIVITY_WINDOW_MIN. Mirrors PR #74's gate (NOT
-// gated on live_sessions.status: orphaned 'live' rows make it unreliable). Reported on every call;
-// enforced (409) only in write mode. Reads/dry-runs are always allowed.
+// WRITE GATE: INFORMATIONAL ONLY — never refuses. It reports the most-recent auction write
+// (capture_events / live_auction_items) for observability, but does NOT block writes. The old 409
+// refusal was cargo-culted from PR #74; this route writes synced_order_ids.tracking_number, a table
+// disjoint from the auction path, so there is no contention to gate against. Safe to run mid-live.
 //
 // GET  ?store_id=…  → coverage for the store (total_ac, with_tracking, missing_tracking).
 // POST { store_id, dry_run?, correct?, after? }
@@ -47,9 +47,10 @@ export const maxDuration = 300;
 // Open/non-terminal statuses whose stored value may be a stale snapshot of a live-packable order.
 // Matches PR #74's CORE_OPEN so both passes reason about the same frozen-status set.
 const TARGET_STATUSES = ['AWAITING_COLLECTION', 'AWAITING_SHIPMENT', 'ON_HOLD', 'PARTIALLY_SHIPPING'];
-const ACTIVITY_WINDOW_MIN = 15;  // no auction write within this window ⇒ live over ⇒ safe to write
+const ACTIVITY_WINDOW_MIN = 15;  // informational readout only (gate no longer enforced)
 const CALL_BUDGET = 80;          // 80 × 50-id calls ≈ 4000 orders/invocation, < maxDuration
 const TIME_BUDGET_MS = 240_000;
+const MAX_429_RETRIES = 3;       // rate-limit backoff (mirrors refresh-status): retry, don't 502
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Most-recent auction write across capture_events + live_auction_items → the deploy/write gate.
@@ -117,15 +118,12 @@ export async function POST(req: Request) {
   const { admin, conn, ownerId } = a;
   if (!conn || !ownerId) return NextResponse.json({ error: 'no TikTok connection for store' }, { status: 400 });
 
-  // Deploy/write gate: refuse to write while a live is active. Checked for every call (reported
-  // in the response); enforced only when actually writing. Dry-runs and reads pass through.
+  // Write-gate readout — INFORMATIONAL ONLY (no longer enforced). The 409 refusal was cargo-culted
+  // from PR #74: this route writes synced_order_ids.tracking_number, a table DISJOINT from the
+  // auction path (capture_events / live_auction_items), so there is no write contention to gate
+  // against. Refusing writes during a live only blocked the normal case — syncing the previous
+  // show's labels while the next one runs. Kept in the response for observability; enforcement gone.
   const writeGate = await writeGateStatus(admin);
-  if (!dryRun && writeGate.blocked) {
-    return NextResponse.json({
-      aborted: true, dry_run: false, store_id: storeId, write_gate: writeGate,
-      note: `Refusing to write: last auction activity ${writeGate.minutes_since}m ago (< ${ACTIVITY_WINDOW_MIN}m). Re-run when quiet.`,
-    }, { status: 409 });
-  }
 
   const started = Date.now();
   let token = '', cipher = '', tokenLoaded = false;
@@ -160,8 +158,17 @@ export async function POST(req: Request) {
       if (calls >= CALL_BUDGET || Date.now() - started >= TIME_BUDGET_MS) { budgetExhausted = true; break outer; }
       const chunk = ids.slice(i, i + 50);
       let got: Record<string, unknown>[] = [];
-      try { got = await getOrderById(token, cipher, chunk); }
-      catch (e) { return NextResponse.json({ error: 'getOrderById failed', detail: String(e) }, { status: 502 }); }
+      for (let attempt = 0; ; attempt++) {
+        try { got = await getOrderById(token, cipher, chunk); break; }
+        catch (e) {
+          const msg = String(e);
+          // Self-limit under load: on a rate-limit, back off and retry (up to MAX_429_RETRIES)
+          // rather than failing the whole sweep. Any other error — or a 429 past the retries —
+          // still surfaces as 502. Mirrors refresh-status's net; makes the route safe mid-live.
+          if (/429|rate|too many/i.test(msg) && attempt < MAX_429_RETRIES) { await sleep(1000 * (attempt + 1)); continue; }
+          return NextResponse.json({ error: 'getOrderById failed', detail: msg }, { status: 502 });
+        }
+      }
       calls++;
       const returned = new Set<string>();
       for (const o of got) {
