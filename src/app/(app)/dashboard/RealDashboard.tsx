@@ -105,6 +105,19 @@ export default function RealDashboard() {
   const totalLaborDollars = hostLaborDollars + packerLaborDollars;
   const [packerInput, setPackerInput] = useState<string>('');
 
+  // A running background sync shows as a DISMISSIBLE banner (below), never a full-page gate —
+  // being locked out of the pack station by a background job is what turned a slow sync into an
+  // outage. Re-arm when a NEW sync begins (isSyncing false→true) so dismissing one cycle doesn't
+  // hide every future sync. Done via the "adjust state during render" pattern (compare against the
+  // previous value) rather than an effect — no cascading-render round-trip.
+  const isSyncing = !!syncProgress?.isSyncing;
+  const [syncBannerDismissed, setSyncBannerDismissed] = useState(false);
+  const [prevIsSyncing, setPrevIsSyncing] = useState(isSyncing);
+  if (isSyncing !== prevIsSyncing) {
+    setPrevIsSyncing(isSyncing);
+    if (isSyncing) setSyncBannerDismissed(false);
+  }
+
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
@@ -306,33 +319,36 @@ export default function RealDashboard() {
           </div>
         )}
 
-        {/* Sync hero — show until isCaughtUp is true */}
-        {isConnected && syncProgress?.isSyncing && (
-          <div className="mb-8 p-8 rounded-2xl border border-tt-cyan/30 bg-gradient-to-br from-[rgba(105,201,208,0.12)] to-[rgba(105,201,208,0.03)]">
-            <div className="flex flex-col items-center gap-5 text-center">
-              <div className="w-14 h-14 border-[3px] border-tt-cyan border-t-transparent rounded-full animate-spin" />
-              <div>
-                <h2 className="text-lg font-bold text-tt-text mb-2">Syncing your TikTok Shop data...</h2>
+        {/* Sync banner — a running background sync is a DISMISSIBLE notice, not a full-page gate.
+            The whole dashboard (incl. Shipping/Shows/P&L) stays usable while it runs. */}
+        {isConnected && syncProgress?.isSyncing && !syncBannerDismissed && (
+          <div className="mb-6 flex items-center gap-3 px-4 py-3 rounded-xl border border-tt-cyan/30 bg-gradient-to-br from-[rgba(105,201,208,0.12)] to-[rgba(105,201,208,0.03)]">
+            <div className="w-5 h-5 shrink-0 border-2 border-tt-cyan border-t-transparent rounded-full animate-spin" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-tt-text font-medium truncate">
+                Syncing your TikTok Shop data…
                 {syncProgress && (
-                  <p className="text-sm text-tt-cyan font-semibold mb-1">
-                    {syncProgress.totalOrders.toLocaleString()} orders imported
-                  </p>
+                  <span className="text-tt-cyan font-semibold"> {syncProgress.totalOrders.toLocaleString()} orders imported</span>
                 )}
                 {syncProgress?.currentRange && (
-                  <p className="text-xs text-tt-muted mb-3">
-                    ({syncProgress.currentRange})
-                  </p>
+                  <span className="text-tt-muted"> ({syncProgress.currentRange})</span>
                 )}
-                <p className="text-xs text-tt-muted max-w-md mx-auto leading-relaxed">
-                  Usually takes 1–3 minutes. You can close this page and come back later.
-                </p>
-              </div>
+              </p>
+              <p className="text-xs text-tt-muted">Runs in the background — the rest of the dashboard stays available.</p>
             </div>
+            <button
+              onClick={() => setSyncBannerDismissed(true)}
+              aria-label="Dismiss sync notice"
+              className="shrink-0 text-tt-muted hover:text-tt-text transition-colors text-xl leading-none px-1"
+            >
+              ×
+            </button>
           </div>
         )}
 
-        {/* Show dashboard when sync is complete or not connected */}
-        {(!isConnected || !syncProgress?.isSyncing) && (
+        {/* Dashboard body ALWAYS renders — a background sync must never gate the app. Shipping,
+            Shows and P&L stay reachable; sync state is the dismissible banner above. */}
+        {(
           <>
         <FiltersBar
           filters={filters}
