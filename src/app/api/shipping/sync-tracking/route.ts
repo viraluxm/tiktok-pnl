@@ -92,12 +92,15 @@ export async function GET(req: Request) {
   if (a.error) return a.error;
   const { admin, ownerId } = a;
   if (!ownerId) return NextResponse.json({ error: 'no TikTok connection for store' }, { status: 400 });
-  // Coverage is measured on the packable AWAITING_COLLECTION set (the label-bought orders scanning depends on).
+  // Coverage over the WHOLE packable set (TARGET_STATUSES) — not just AWAITING_COLLECTION. Orders
+  // get labels while still AWAITING_SHIPMENT, and those trackings arrive later, so measuring only
+  // AWAITING_COLLECTION reads 100% while thousands of AWAITING_SHIPMENT/ON_HOLD orders sit NULL and
+  // fail the label scan. This is the number a packer must see before starting.
   const base = () => admin.from('synced_order_ids').select('order_id', { count: 'exact', head: true })
-    .eq('user_id', ownerId).eq('store_id', storeId).eq('status', 'AWAITING_COLLECTION');
+    .eq('user_id', ownerId).eq('store_id', storeId).in('status', TARGET_STATUSES);
   const { count: total } = await base();
   const { count: withTrk } = await base().not('tracking_number', 'is', null);
-  return NextResponse.json({ store_id: storeId, total_ac: total ?? 0, with_tracking: withTrk ?? 0, missing_tracking: (total ?? 0) - (withTrk ?? 0) });
+  return NextResponse.json({ store_id: storeId, total: total ?? 0, with_tracking: withTrk ?? 0, missing_tracking: (total ?? 0) - (withTrk ?? 0) });
 }
 
 type CorrectionProposal = { order_id: string; combine_group_id: string | null; old: string; new: string };
