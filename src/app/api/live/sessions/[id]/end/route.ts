@@ -3,8 +3,12 @@ import { createClient } from '@/lib/supabase/server';
 
 export const dynamic = 'force-dynamic';
 
+// Real columns match the LiveSession type (store_id/channel_handle/host_id). The derived
+// store_name/host_name are NOT added here: the /end response is never displayed (useEndSession
+// discards it), so a name-join on the end path would be dead work. The single-session GET, which
+// IS read, derives both.
 const SELECT_COLS =
-  'id, title, status, started_at, ended_at, tiktok_live_id, source, created_at, updated_at';
+  'id, title, status, started_at, ended_at, tiktok_live_id, source, created_at, updated_at, store_id, channel_handle, host_id';
 
 // End a live session: sets status='ended' + ended_at. Idempotent-ish (409 if already ended).
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {

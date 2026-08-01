@@ -210,7 +210,7 @@ export default function ShippingTab() {
   );
   const pickerName = useMemo(() => employees.find((e) => e.id === pickerId)?.name ?? '', [employees, pickerId]);
   // Tracking coverage for the active store (label-barcode scanning depends on stored tracking).
-  const [coverage, setCoverage] = useState<null | { total_ac: number; with_tracking: number; missing_tracking: number }>(null);
+  const [coverage, setCoverage] = useState<null | { total: number; with_tracking: number; missing_tracking: number }>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   // Pick-ticket batch: age window + the route's included/excluded counts (always surfaced so we
@@ -441,23 +441,37 @@ export default function ShippingTab() {
   // Recover tracking for the active store: loop the bounded route until done, showing progress.
   async function syncTracking() {
     if (!activeStore || activeStore === 'all') { setSyncMsg('Pick a specific store first.'); return; }
-    setSyncing(true); setSyncMsg('Syncing tracking…'); setErr(null);
+    setSyncing(true); setSyncMsg('Fetching label tracking…'); setErr(null);
     try {
-      let after: string | null = null; let updated = 0; let noLabel = 0; let guard = 0;
+      // Count from the route's ACTUAL fields (filled + corrected). The old code read `j.updated`,
+      // which the route never sends → it always showed "0 recovered" even on a full write.
+      let after: string | null = null; let filled = 0; let corrected = 0; let noLabel = 0; let guard = 0;
       for (;;) {
-        const res: Response = await fetch('/api/shipping/sync-tracking', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ store_id: activeStore, dry_run: false, after }),
-        });
-        if (!res.ok) { setSyncMsg('Sync failed — try again.'); break; }
-        const j: { updated?: number; no_label?: number; remaining?: number; done?: boolean; next_after?: string | null } = await res.json();
-        updated += j.updated ?? 0; noLabel = j.no_label ?? noLabel;
-        setSyncMsg(`Recovered ${updated} so far${j.remaining ? ` · ${j.remaining} to check…` : ''}`);
+        let res: Response;
+        try {
+          res = await fetch('/api/shipping/sync-tracking', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ store_id: activeStore, dry_run: false, after }),
+          });
+        } catch {
+          setSyncMsg('Couldn’t reach the server — check your connection and try again.'); return;
+        }
+        if (!res.ok) {
+          // Distinguish the failure modes so the packer knows what actually happened.
+          const body = await res.json().catch(() => ({} as { error?: string }));
+          if (res.status === 409) setSyncMsg('Paused — a live is running. Tracking will fetch when it ends.');
+          else if (res.status === 500) setSyncMsg(`Sync failed: ${body.error ?? 'server error'}`);
+          else setSyncMsg(`Sync failed (${res.status}) — try again.`);
+          return;
+        }
+        const j: { filled?: number; corrected?: number; no_label?: number; remaining?: number; done?: boolean; next_after?: string | null } = await res.json();
+        filled += j.filled ?? 0; corrected += j.corrected ?? 0; noLabel = j.no_label ?? noLabel;
+        setSyncMsg(`Filled ${filled} · corrected ${corrected} so far${j.remaining ? ` · ${j.remaining} to check…` : ''}`);
         if (j.done || !j.next_after || ++guard > 50) { break; }
         after = j.next_after;
       }
       await loadCoverage();
-      setSyncMsg(`Recovered tracking on ${updated} order${updated === 1 ? '' : 's'}.${noLabel ? ` ${noLabel} have no label purchased yet.` : ''}`);
+      setSyncMsg(`Filled ${filled} · corrected ${corrected}${noLabel ? ` · ${noLabel} have no label yet` : ''}.`);
     } catch {
       setSyncMsg('Sync failed — try again.');
     } finally {
@@ -511,7 +525,7 @@ export default function ShippingTab() {
             title="Recover tracking numbers from TikTok so label scanning works — run after buying labels"
             className="flex-1 sm:flex-none min-h-[44px] px-6 py-4 rounded-2xl border border-tt-border text-tt-text text-base font-semibold cursor-pointer hover:bg-tt-card-hover transition-colors disabled:opacity-50"
           >
-            {syncing ? 'Syncing…' : '🔄 Sync tracking'}
+            {syncing ? 'Fetching…' : '🔄 Fetch label tracking'}
           </button>
           <button
             onClick={printTickets}
@@ -541,9 +555,9 @@ export default function ShippingTab() {
               <span className={syncing ? 'text-tt-cyan' : 'text-tt-text'}>{syncMsg}</span>
             ) : coverage ? (
               coverage.missing_tracking > 0 ? (
-                <span className="text-tt-red font-semibold">{coverage.missing_tracking.toLocaleString()} order{coverage.missing_tracking === 1 ? '' : 's'} missing tracking — sync before printing</span>
+                <span className="text-tt-red font-semibold">{coverage.missing_tracking.toLocaleString()} order{coverage.missing_tracking === 1 ? '' : 's'} missing tracking — fetch before packing</span>
               ) : (
-                <span className="text-tt-muted">{coverage.total_ac.toLocaleString()} of {coverage.total_ac.toLocaleString()} orders have tracking</span>
+                <span className="text-tt-muted">{coverage.with_tracking.toLocaleString()} of {coverage.total.toLocaleString()} orders have tracking</span>
               )
             ) : (
               <span className="text-tt-muted">Checking tracking coverage…</span>
