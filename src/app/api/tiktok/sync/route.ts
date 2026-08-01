@@ -240,7 +240,17 @@ async function syncConnection(
   const oldestDayThisBatch = currentDay;
   const startProgress = (connection.sync_progress_orders as number) || 0;
 
-  console.log(`[Sync] store=${storeId} START cursor=${currentDay} target=${todayStr}`);
+  // Mid-day resume checkpoint — fixes the stuck-cursor stampede. A day too big to finish inside
+  // one 50s budget window used to restart from page 1 on EVERY run, so the cursor never advanced
+  // and the client retried forever (the outage mechanism). Now a mid-day stop saves the TikTok
+  // page cursor (sync_page_cursor) tagged to that day (sync_progress_day), and the next run RESUMES
+  // from it. Guard: the saved cursor is honored ONLY for the exact day it belongs to, so a stale
+  // token can never be applied to the wrong day. Advancement is still gated on natural page
+  // exhaustion below, so resuming can never skip orders — it only avoids re-fetching finished pages.
+  const savedPageCursor = (connection.sync_page_cursor as string) || null;
+  const savedPageDay = (connection.sync_progress_day as string) || null;
+
+  console.log(`[Sync] store=${storeId} START cursor=${currentDay} target=${todayStr}${savedPageCursor && savedPageDay === currentDay ? ` (resuming ${currentDay} mid-day)` : ''}`);
 
   // Mark sync in progress
   await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString() })
@@ -257,15 +267,26 @@ async function syncConnection(
   // with the cursor LEFT on the failed day (+ a visible sync_error) — never a silent skip
   // (the root cause of the 7-day outage). A time-budget cut mid-day also does NOT advance:
   // the day is redone (idempotent upsert) on the next run, so no partial day is ever lost.
+  // Set when the run stops MID-day (budget cut / page ceiling) to the page cursor to resume from.
+  // Stays null when every day this run touched completed — which CLEARS the stored checkpoint.
+  let resumePageToken: string | null = null;
   while (currentDay <= todayStr) {
     // Only START a new day if budget remains — keeps the request within maxDuration while
     // making each day all-or-nothing (no half-synced day that then advances the cursor).
-    if (Date.now() - batchStart >= TIME_BUDGET_MS) break;
+    if (Date.now() - batchStart >= TIME_BUDGET_MS) {
+      // Out of budget before starting this day. If it's the day we were resuming and never
+      // reached, preserve the existing checkpoint so the next run still resumes it (rather
+      // than clearing it below and restarting that day from page 1).
+      if (savedPageCursor && savedPageDay === currentDay) resumePageToken = savedPageCursor;
+      break;
+    }
     const nextDay = advanceDay(currentDay);
     const startTs = dayToTs(currentDay);
     const endTs = dayToTs(nextDay);
 
-    let pageToken: string | null = null;
+    // Resume mid-day if a prior run checkpointed THIS exact day; otherwise start at page 1.
+    let pageToken: string | null =
+      savedPageCursor && savedPageDay === currentDay ? savedPageCursor : null;
     let dayOrders = 0;
     let pageNum = 0;
     let budgetCut = false;
@@ -273,7 +294,9 @@ async function syncConnection(
     try {
       do {
         if (Date.now() - batchStart >= TIME_BUDGET_MS) { budgetCut = true; break; }
-        if (pageNum >= 500) break; // Safety: max 500 pages per day (25,000 orders)
+        // Per-run page ceiling. Treat it like a budget cut — checkpoint and resume next run
+        // rather than break-and-advance, so a day past 500 pages is never silently truncated.
+        if (pageNum >= 500) { budgetCut = true; break; }
         pageNum++;
 
         // Throws only after refresh-on-use + retries are exhausted → a hard day failure,
@@ -348,6 +371,7 @@ async function syncConnection(
       console.error(`[Sync] store=${storeId} ABORT on day ${currentDay} (p${pageNum}): ${msg}`);
       await admin.from('tiktok_connections').update({
         sync_cursor: currentDay,            // stay on the failed day → next run retries it
+        sync_page_cursor: pageToken,        // resume AT the page we failed on (idempotent re-fetch)
         sync_started_at: null,
         sync_progress_orders: startProgress + totalNew,
         sync_progress_day: currentDay,
@@ -357,8 +381,10 @@ async function syncConnection(
       throw new Error(`store ${storeId} sync aborted on day ${currentDay}: ${msg}`);
     }
 
-    // Time-budget cut mid-day: leave the cursor on currentDay (redone next run) — not an error.
-    if (budgetCut) break;
+    // Stopped mid-day (time budget or page ceiling): do NOT advance. Remember the page cursor so
+    // the next run resumes here instead of re-fetching from page 1. pageToken holds the cursor for
+    // the next UN-fetched page (the budget check sits at the top of the page loop, before the fetch).
+    if (budgetCut) { resumePageToken = pageToken; break; }
 
     if (dayOrders > 50) console.log(`[Sync] store=${storeId} Day ${currentDay}: ${pageNum} pages, ${dayOrders} orders`);
 
@@ -366,10 +392,12 @@ async function syncConnection(
     currentDay = nextDay;
     daysProcessed++;
 
-    // Save progress every 10 days
+    // Save progress every 10 days. These are all COMPLETED days, so clear any resume checkpoint —
+    // the invariant is: sync_page_cursor is non-null ONLY while sync_progress_day is incomplete.
     if (daysProcessed % 10 === 0) {
       await admin.from('tiktok_connections').update({
         sync_cursor: currentDay,
+        sync_page_cursor: null,
         sync_progress_orders: startProgress + totalNew,
         sync_progress_day: currentDay,
       }).eq('user_id', userId).eq('store_id', storeId);
@@ -382,6 +410,9 @@ async function syncConnection(
   // cleanly (caught up, or stopped only on the time budget) — a previously-stuck store recovers.
   const { error: saveErr } = await admin.from('tiktok_connections').update({
     sync_cursor: isCaughtUp ? todayStr : currentDay,
+    // Resume point for a still-incomplete day; null when every touched day completed (checkpoint
+    // cleared). Paired with sync_progress_day so the next run only honors it for the same day.
+    sync_page_cursor: resumePageToken,
     sync_started_at: null,
     sync_progress_orders: startProgress + totalNew,
     sync_progress_day: currentDay,
