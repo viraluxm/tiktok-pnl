@@ -115,7 +115,9 @@ async function fillTracking(admin: Admin, conn: Conn, write: boolean, started: n
   return { store_id: storeId, calls, examined, would_fill: wouldFill, filled, would_correct: wouldCorrect, corrected, no_label: noLabel, error };
 }
 
-export async function POST(req: Request) {
+// GET, not POST: Vercel cron jobs invoke the endpoint with a GET request (matches every other cron
+// in this app). A POST-only handler is never called by the scheduler.
+export async function GET(req: Request) {
   const started = Date.now();
   // Auth: Vercel cron (Bearer CRON_SECRET) OR a logged-in admin. Never public.
   const cronSecret = process.env.CRON_SECRET;
@@ -125,8 +127,8 @@ export async function POST(req: Request) {
   else { const supabase = await createClient(); const { data: { user } } = await supabase.auth.getUser(); if (user?.app_metadata?.role === 'admin') authorized = true; }
   if (!authorized) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const body = await req.json().catch(() => ({})) as { write?: boolean };
-  const write = process.env.CRON_SYNC_WRITE === 'true' || body.write === true;
+  // Write override for a manual admin trigger (?write=true). The scheduled cron uses CRON_SYNC_WRITE.
+  const write = process.env.CRON_SYNC_WRITE === 'true' || new URL(req.url).searchParams.get('write') === 'true';
 
   const admin = createAdminClient();
   // Most-stale store FIRST (last_synced_at asc, nulls first) so a fat store can't starve the others.
