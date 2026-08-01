@@ -32,6 +32,15 @@ interface SyncProgress {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// The sync route is a Vercel function with maxDuration = 60s. Abort the client fetch just
+// BELOW that (55s) so the client gives up when the server is already being killed — the old
+// 90s wait meant the client kept waiting on (then re-firing) a request the platform had
+// already terminated at 60s. And cap the driver at a sane number of batches per run (was 30
+// — 30 hammer calls at an already-struggling server); the 5-min auto-sync resumes any
+// remaining backfill on the next tick, so a lower cap costs nothing but incident load.
+const SYNC_BATCH_TIMEOUT_MS = 55_000;
+const MAX_SYNC_BATCHES = 10;
+
 // ─── Single-owner election (module scope) ────────────────────────────────────
 // useTikTok is mounted by BOTH RealDashboard AND TikTokConnect, so a single dashboard
 // session had TWO instances, each with its own refs — each spawning a sync driver and a
@@ -88,12 +97,12 @@ export function useTikTok() {
     console.log('[SyncDriver] Starting');
 
     try {
-      for (let attempt = 0; attempt < 30; attempt++) {
-        // 1. Fire sync call (with 90s timeout to handle slow batches)
+      for (let attempt = 0; attempt < MAX_SYNC_BATCHES; attempt++) {
+        // 1. Fire sync call. Abort just below the 60s server maxDuration (see constant).
         console.log(`[SyncDriver] Firing sync batch ${attempt + 1}`);
         try {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 90_000);
+          const timeout = setTimeout(() => controller.abort(), SYNC_BATCH_TIMEOUT_MS);
           const res = await fetch('/api/tiktok/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
