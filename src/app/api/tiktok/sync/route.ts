@@ -93,13 +93,28 @@ export async function POST() {
     }
   }
 
-  // Entries are USER-level daily aggregates (across all the user's stores) — rebuild
-  // once after all in-scope stores have synced this batch.
-  const { data: rebuildCount, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: userId });
-  if (rebuildErr) console.error('[Rebuild] Error:', rebuildErr.message);
-
   const isCaughtUp = perStore.every((s) => s.isCaughtUp !== false);
   const ordersThisBatch = perStore.reduce((a, s) => a + (Number(s.ordersThisBatch) || 0), 0);
+
+  // Entries are USER-level daily aggregates — rebuild once after all in-scope stores synced.
+  // COST FIX: the old call rebuilt the user's ENTIRE 365-day history on every batch, even a
+  // caught-up poll that touched nothing new. Now:
+  //   • no orders touched this batch → SKIP the rebuild entirely (nothing changed);
+  //   • otherwise → scope it to the earliest date any store touched (p_since), so a routine
+  //     poll rebuilds only today, not a year. Full rebuild (p_since null) is still available
+  //     for callers that want it.
+  let rebuildCount: number | null = null;
+  if (ordersThisBatch > 0) {
+    const sinceDate = perStore
+      .filter((s) => Number(s.ordersThisBatch) > 0 && typeof s.oldestDayThisBatch === 'string')
+      .map((s) => s.oldestDayThisBatch as string)
+      .sort()[0] ?? null; // lexicographic min of YYYY-MM-DD == earliest date
+    const { data, error: rebuildErr } = await admin.rpc('rebuild_entries', { p_user_id: userId, p_since: sinceDate });
+    if (rebuildErr) console.error('[Rebuild] Error:', rebuildErr.message);
+    else rebuildCount = data as number;
+  } else {
+    console.log('[Rebuild] Skipped — no orders changed this batch');
+  }
   const totalUniqueOrders = perStore.reduce((a, s) => a + (Number(s.totalUniqueOrders) || 0), 0);
 
   console.log(`[Sync] DONE ${perStore.length} store(s): +${ordersThisBatch} orders, entries=${rebuildCount || 0}, caught_up=${isCaughtUp}, ${Date.now() - batchStart}ms`);
@@ -220,6 +235,9 @@ async function syncConnection(
   const rawCursor = (connection.sync_cursor as string) || backfillStartStr;
   let currentDay = rawCursor > todayStr ? todayStr : rawCursor;
   if (currentDay < backfillStartStr) currentDay = backfillStartStr;
+  // Earliest date this batch can touch: the loop walks FORWARD from here, so any entries change
+  // is on/after this day. The caller uses it to scope rebuild_entries instead of a full rebuild.
+  const oldestDayThisBatch = currentDay;
   const startProgress = (connection.sync_progress_orders as number) || 0;
 
   console.log(`[Sync] store=${storeId} START cursor=${currentDay} target=${todayStr}`);
@@ -382,6 +400,7 @@ async function syncConnection(
     totalUniqueOrders: startProgress + totalNew,
     daysProcessed,
     currentDay,
+    oldestDayThisBatch,
   };
 }
 
