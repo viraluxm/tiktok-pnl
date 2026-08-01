@@ -5,6 +5,7 @@ import { fetchOrdersPage } from '@/lib/tiktok/client';
 import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
 import { getOrgId } from '@/lib/org';
 import { getActiveStore } from '@/lib/tiktok/activeStore';
+import { parseOrder } from '@/lib/tiktok/orderRows';
 
 const BACKFILL_DAYS = 365;
 const TIME_BUDGET_MS = 50_000; // 50s for fetching, rest for DB work
@@ -16,13 +17,6 @@ const SYNC_LOCK_TTL_MS = 120_000;
 export const maxDuration = 60;
 
 type AdminClient = ReturnType<typeof createAdminClient>;
-
-function toNum(val: unknown): number {
-  if (val === null || val === undefined) return 0;
-  if (typeof val === 'number') return val;
-  if (typeof val === 'string') return parseFloat(val) || 0;
-  return 0;
-}
 
 export async function POST() {
   const batchStart = Date.now();
@@ -439,11 +433,6 @@ async function syncConnection(
 
 const SHOP_TIMEZONE = 'America/Los_Angeles';
 
-// Convert Unix timestamp to YYYY-MM-DD in shop's timezone
-function toLocalDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString('en-CA', { timeZone: SHOP_TIMEZONE });
-}
-
 // Convert YYYY-MM-DD to Unix timestamp at midnight in shop's timezone
 // Uses Intl to get the exact UTC offset (handles DST correctly)
 function dayToTs(day: string): number {
@@ -472,64 +461,6 @@ function advanceDay(day: string): string {
   const d = new Date(day + 'T00:00:00Z');
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().split('T')[0];
-}
-
-function parseOrder(userId: string, o: Record<string, unknown>): Record<string, unknown> {
-  const orderId = String(o.id || '');
-  const createTime = o.create_time as number;
-  const date = createTime ? toLocalDate(createTime) : '';
-  // Precise order timestamp (create_time is unix SECONDS). Kept ALONGSIDE order_date
-  // — order_date stays exactly as before; this is additive. Null-safe: a missing
-  // create_time writes null rather than crashing (migration 051).
-  const orderCreatedAt = createTime ? new Date(createTime * 1000).toISOString() : null;
-  const updateTime = o.update_time as number;
-  const updatedDate = updateTime ? toLocalDate(updateTime) : '';
-  const status = String(o.status || '').toUpperCase();
-  // TikTok's combine-shipment group id (assigned at order time; groups a buyer's
-  // multiple orders into one shipment). Stored so pick-verify reads it from our DB.
-  const autoCombineGroupId = o.auto_combine_group_id != null ? String(o.auto_combine_group_id) || null : null;
-  // Shipping label tracking (USPS IMpb etc.) — returned inline by order search/detail.
-  // Stored so a scanned shipping label resolves to this order in the packing station.
-  const trackingNumber = String(o.tracking_number || '') || null;
-  const payment = (o.payment || {}) as Record<string, unknown>;
-  // TikTok GMV = Price × Items + Shipping - Seller promotions - Platform co-funding (excludes tax)
-  const productPrice = toNum(payment.original_total_product_price) || toNum(payment.sub_total) || 0;
-  const shippingFee = toNum(payment.shipping_fee) || 0;
-  const sellerDiscount = toNum(payment.seller_discount) || 0;
-  const platformDiscount = toNum(payment.platform_discount) || 0;
-  const gmv = productPrice + shippingFee - sellerDiscount - platformDiscount;
-  const shipping = shippingFee;
-  const platformFee = toNum(payment.platform_commission) || toNum(payment.platform_fee) || 0;
-  let affiliate = toNum(payment.affiliate_commission) || toNum(payment.creator_commission) || 0;
-
-  const lineItems = (o.line_items || o.order_line_list || []) as Record<string, unknown>[];
-  let units = 0;
-  let tikTokProductId: string | null = null;
-  let skuId: string | null = null;
-  let skuName: string | null = null;
-
-  let productName: string | null = null;
-
-  for (const item of lineItems) {
-    units += Number(item.quantity) || 1;
-    if (affiliate === 0) affiliate += toNum(item.affiliate_commission) || toNum(item.creator_commission) || 0;
-    if (!tikTokProductId) {
-      tikTokProductId = String(item.product_id || '') || null;
-      skuId = String(item.sku_id || '') || null;
-      skuName = String(item.sku_name || '') || null;
-      productName = String(item.product_name || '') || null;
-    }
-  }
-  if (units === 0) units = 1;
-
-  return {
-    user_id: userId, order_id: orderId, order_date: date, updated_date: updatedDate,
-    order_created_at: orderCreatedAt,
-    gmv, shipping, affiliate, platform_fee: platformFee, units,
-    tiktok_product_id: tikTokProductId, sku_id: skuId, sku_name: skuName,
-    product_name: productName, status, auto_combine_group_id: autoCombineGroupId,
-    tracking_number: trackingNumber,
-  };
 }
 
 async function getOrCreateProduct(admin: AdminClient, userId: string, shopName: string) {
