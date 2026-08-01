@@ -131,9 +131,12 @@ export async function GET(req: Request) {
   const write = process.env.CRON_SYNC_WRITE === 'true' || new URL(req.url).searchParams.get('write') === 'true';
 
   const admin = createAdminClient();
-  // Most-stale store FIRST (last_synced_at asc, nulls first) so a fat store can't starve the others.
+  // select('*') — syncConnection reads sync_cursor / sync_page_cursor / sync_progress_day /
+  // sync_progress_orders / sync_rescan_at off the row; a narrow column list left them undefined, so
+  // every store looked never-synced and re-backfilled 365 days (watermark never engaged). Match the
+  // interactive route, which passes the full connection. Most-stale store FIRST (last_synced_at asc).
   const { data: conns, error: connErr } = await admin.from('tiktok_connections')
-    .select('id, user_id, store_id, shop_name, access_token, refresh_token, shop_cipher, token_expires_at')
+    .select('*')
     .order('last_synced_at', { ascending: true, nullsFirst: true });
   if (connErr || !conns?.length) return NextResponse.json({ error: 'no connections' }, { status: connErr ? 500 : 404 });
 
