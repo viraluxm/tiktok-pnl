@@ -222,7 +222,11 @@ async function syncConnection(
   //      order (lag: Snore p99 2.7h, max 12.7h). So at most once per RESCAN_INTERVAL we pull the
   //      cursor back to the start of the trailing 48h window and re-walk it FULLY (no watermark),
   //      catching anything TikTok indexed out of order. Idempotent; the checkpoint carries it across
-  //      runs. sync_rescan_at is stamped only when the re-scan actually COMPLETES (reaches today).
+  //      runs. sync_rescan_at is stamped when the re-scan STARTS (below) — NOT on completion — so
+  //      rescanDue clears for the interval and a budget-spanning re-scan walks FORWARD to the end
+  //      instead of re-pulling to the window start every time the cursor touches today (which would
+  //      restart it forever). If the walk is interrupted before reaching today, sync_rescan_at goes
+  //      stale → the staleness alarm fires; nothing is silent.
   const { data: wmRow } = await admin.from('synced_order_ids')
     .select('order_created_at').eq('store_id', storeId)
     .not('order_created_at', 'is', null).order('order_created_at', { ascending: false }).limit(1);
@@ -235,11 +239,14 @@ async function syncConnection(
   if (lastRescanMs && Date.now() - lastRescanMs > 3 * RESCAN_INTERVAL_MS) {
     console.warn(`[Sync] store=${storeId} trailing 48h re-scan STALE — last completed ${Math.round((Date.now() - lastRescanMs) / 60000)}m ago (>3h). The late-index safety net may not be firing.`);
   }
-  // Pull back ONLY when starting caught-up — a continuation run (cursor already behind) just walks
-  // forward, so a multi-run re-scan can't restart itself. Never move forward, never below backfill.
+  // Pull back ONLY when starting caught-up. rescanStarting is stamped to sync_rescan_at below, which
+  // clears rescanDue for the interval — so once a re-scan begins, later runs (whether cursor is
+  // behind OR budget-cut back onto today) just walk forward to completion and can't re-trigger the
+  // pull-back. Never move forward, never below backfill.
+  let rescanStarting = false;
   if (rescanDue && startedCaughtUp) {
     const rescanStartDay = new Date(Date.now() - RESCAN_WINDOW_MS).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-    if (rescanStartDay < currentDay && rescanStartDay >= backfillStartStr) currentDay = rescanStartDay;
+    if (rescanStartDay < currentDay && rescanStartDay >= backfillStartStr) { currentDay = rescanStartDay; rescanStarting = true; }
   }
 
   // Mid-day resume checkpoint — a day too big to finish in one 50s budget window used to restart
@@ -253,8 +260,13 @@ async function syncConnection(
 
   console.log(`[Sync] store=${storeId} START cursor=${currentDay} target=${todayStr}${savedPageCursor && savedPageDay === currentDay ? ` (resuming ${currentDay} mid-day)` : ''}`);
 
-  // Mark sync in progress
-  await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString() })
+  // Mark sync in progress. Stamp sync_rescan_at HERE when a re-scan is STARTING (see above): it
+  // clears rescanDue for the interval so the re-scan walks forward to completion instead of
+  // restarting itself. It means sync_rescan_at reads "last re-scan STARTED" — completion is evidenced
+  // by the cursor returning to today + the incremental page count dropping; staleness still alarms.
+  const markPayload: Record<string, unknown> = { sync_started_at: new Date().toISOString() };
+  if (rescanStarting) markPayload.sync_rescan_at = new Date().toISOString();
+  await admin.from('tiktok_connections').update(markPayload)
     .eq('user_id', userId).eq('store_id', storeId);
 
   const shopName = (connection.shop_name as string) || 'TikTok Shop';
@@ -429,10 +441,7 @@ async function syncConnection(
     sync_error: null,
     sync_error_at: null,
   };
-  // Stamp the trailing 48h re-scan complete ONLY when it actually finished (reached today) — if it
-  // was budget-cut mid-window, leave sync_rescan_at so the next run continues it (as a plain
-  // forward walk, since it's no longer startedCaughtUp).
-  if (rescanDue && isCaughtUp) savePayload.sync_rescan_at = new Date().toISOString();
+  // (sync_rescan_at is stamped at re-scan START, in the mark-in-progress update above — not here.)
   const { error: saveErr } = await admin.from('tiktok_connections').update(savePayload)
     .eq('user_id', userId).eq('store_id', storeId);
   if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
