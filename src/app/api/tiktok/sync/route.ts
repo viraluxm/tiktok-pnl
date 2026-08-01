@@ -8,6 +8,10 @@ import { getActiveStore } from '@/lib/tiktok/activeStore';
 
 const BACKFILL_DAYS = 365;
 const TIME_BUDGET_MS = 50_000; // 50s for fetching, rest for DB work
+// Incremental-watermark tuning (item 1):
+const FORWARD_OVERLAP_MS = 15 * 60 * 1000;    // (A) forward edge: re-pull the last 15 min each run
+const RESCAN_INTERVAL_MS = 60 * 60 * 1000;    // (B) the "slower beat": at most one re-scan per hour
+const RESCAN_WINDOW_MS = 48 * 60 * 60 * 1000; // (B) trailing 48h re-walk — covers the lag tail (p99 2.7h, max 12.7h)
 
 export const maxDuration = 60;
 
@@ -198,11 +202,45 @@ async function syncConnection(
   backfillStart.setDate(backfillStart.getDate() - BACKFILL_DAYS);
   const backfillStartStr = backfillStart.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
 
-  // Always re-sync today: clamp cursor so it never skips past today
+  // Clamp cursor so it never skips past today.
   const rawCursor = (connection.sync_cursor as string) || backfillStartStr;
   let currentDay = rawCursor > todayStr ? todayStr : rawCursor;
   if (currentDay < backfillStartStr) currentDay = backfillStartStr;
   const startProgress = (connection.sync_progress_orders as number) || 0;
+  // startedCaughtUp: this run began with nothing to backfill (cursor already at/after today). The
+  // watermark's forward-edge shortcut applies ONLY in that state; a store that is behind (backfill)
+  // OR pulled back by a re-scan walks its days FULLY. Captured BEFORE any re-scan pull-back below.
+  const startedCaughtUp = rawCursor >= todayStr;
+
+  // ── INCREMENTAL WATERMARK (A) + TRAILING 48h RE-SCAN (B) ────────────────────────────────────
+  // The old "always re-sync today" re-fetched today's WHOLE day (page 1..N) every run — pure waste
+  // once caught up (Snore re-walked ~53 pages every 5 min).
+  //  (A) WATERMARK — forward edge. On a caught-up run, TODAY's fetch starts at the newest order we
+  //      already stored (max order_created_at) minus a small overlap, so we pull only NEW orders — a
+  //      handful of pages, not the whole day. Applied at the day loop's startTs below.
+  //  (B) 48h RE-SCAN — safety net. A fixed forward overlap alone would SILENTLY skip a late-indexed
+  //      order (lag: Snore p99 2.7h, max 12.7h). So at most once per RESCAN_INTERVAL we pull the
+  //      cursor back to the start of the trailing 48h window and re-walk it FULLY (no watermark),
+  //      catching anything TikTok indexed out of order. Idempotent; the checkpoint carries it across
+  //      runs. sync_rescan_at is stamped only when the re-scan actually COMPLETES (reaches today).
+  const { data: wmRow } = await admin.from('synced_order_ids')
+    .select('order_created_at').eq('store_id', storeId)
+    .not('order_created_at', 'is', null).order('order_created_at', { ascending: false }).limit(1);
+  const watermarkMs = wmRow?.[0]?.order_created_at ? new Date(wmRow[0].order_created_at as string).getTime() : null;
+  const lastRescanMs = connection.sync_rescan_at ? new Date(connection.sync_rescan_at as string).getTime() : null;
+  const rescanDue = !lastRescanMs || (Date.now() - lastRescanMs) >= RESCAN_INTERVAL_MS;
+  // OBSERVABILITY: a re-scan that never completes must not be silent. If it's overdue by 3× the
+  // interval, log it loudly — and sync_rescan_at is a queryable column, so staleness is monitorable
+  // externally too (a store whose sync_rescan_at lags hours behind is the alarm).
+  if (lastRescanMs && Date.now() - lastRescanMs > 3 * RESCAN_INTERVAL_MS) {
+    console.warn(`[Sync] store=${storeId} trailing 48h re-scan STALE — last completed ${Math.round((Date.now() - lastRescanMs) / 60000)}m ago (>3h). The late-index safety net may not be firing.`);
+  }
+  // Pull back ONLY when starting caught-up — a continuation run (cursor already behind) just walks
+  // forward, so a multi-run re-scan can't restart itself. Never move forward, never below backfill.
+  if (rescanDue && startedCaughtUp) {
+    const rescanStartDay = new Date(Date.now() - RESCAN_WINDOW_MS).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    if (rescanStartDay < currentDay && rescanStartDay >= backfillStartStr) currentDay = rescanStartDay;
+  }
 
   // Mid-day resume checkpoint — a day too big to finish in one 50s budget window used to restart
   // from page 1 on EVERY run, so the cursor never advanced (Snore's 2,601-order 07-31). Now a
@@ -223,6 +261,7 @@ async function syncConnection(
   await getOrCreateProduct(admin, userId, shopName);
   let totalNew = 0;
   let daysProcessed = 0;
+  let totalPages = 0; // order-search pages fetched this run (observability — proves the waste is gone)
 
   // ===== MAIN LOOP: one day at a time, paginate within each day =====
   // HARDENED: a day advances ONLY after it fully syncs. A hard fetch failure (an
@@ -243,7 +282,14 @@ async function syncConnection(
       break;
     }
     const nextDay = advanceDay(currentDay);
-    const startTs = dayToTs(currentDay);
+    // (A) Forward-edge incremental: on a caught-up run (not a re-scan, not a backfill), TODAY's fetch
+    // starts at the watermark instead of the day's midnight — only new orders. Clamped to the day
+    // start, so it engages only once the watermark is within today; the first fetch of a fresh today
+    // still walks the full day.
+    let startTs = dayToTs(currentDay);
+    if (startedCaughtUp && !rescanDue && currentDay === todayStr && watermarkMs) {
+      startTs = Math.max(startTs, Math.floor((watermarkMs - FORWARD_OVERLAP_MS) / 1000));
+    }
     const endTs = dayToTs(nextDay);
 
     // Resume mid-day if a prior run checkpointed THIS exact day; otherwise start at page 1.
@@ -259,7 +305,7 @@ async function syncConnection(
         // Per-run page ceiling. Treat it like a budget cut — checkpoint and resume next run
         // rather than break-and-advance, so a day past 500 pages is never silently truncated.
         if (pageNum >= 500) { budgetCut = true; break; }
-        pageNum++;
+        pageNum++; totalPages++;
 
         // Throws only after refresh-on-use + retries are exhausted → a hard day failure,
         // caught below (abort, do NOT advance).
@@ -370,7 +416,7 @@ async function syncConnection(
 
   // Save cursor + clear lock. Clear sync_error too: reaching here means this store synced
   // cleanly (caught up, or stopped only on the time budget) — a previously-stuck store recovers.
-  const { error: saveErr } = await admin.from('tiktok_connections').update({
+  const savePayload: Record<string, unknown> = {
     sync_cursor: isCaughtUp ? todayStr : currentDay,
     // Resume point for a still-incomplete day; null when every touched day completed (checkpoint
     // cleared). Paired with sync_progress_day so the next run only honors it for the same day.
@@ -378,10 +424,17 @@ async function syncConnection(
     sync_started_at: null,
     sync_progress_orders: startProgress + totalNew,
     sync_progress_day: currentDay,
+    sync_last_pages: totalPages,
     last_synced_at: new Date().toISOString(),
     sync_error: null,
     sync_error_at: null,
-  }).eq('user_id', userId).eq('store_id', storeId);
+  };
+  // Stamp the trailing 48h re-scan complete ONLY when it actually finished (reached today) — if it
+  // was budget-cut mid-window, leave sync_rescan_at so the next run continues it (as a plain
+  // forward walk, since it's no longer startedCaughtUp).
+  if (rescanDue && isCaughtUp) savePayload.sync_rescan_at = new Date().toISOString();
+  const { error: saveErr } = await admin.from('tiktok_connections').update(savePayload)
+    .eq('user_id', userId).eq('store_id', storeId);
   if (saveErr) console.error('[Sync] SAVE FAILED:', saveErr.message);
 
   console.log(`[Sync] store=${storeId} DONE: ${daysProcessed}d, ${totalNew} orders, caught_up=${isCaughtUp}`);
