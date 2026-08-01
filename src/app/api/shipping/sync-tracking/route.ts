@@ -48,10 +48,19 @@ export const maxDuration = 300;
 // Matches PR #74's CORE_OPEN so both passes reason about the same frozen-status set.
 const TARGET_STATUSES = ['AWAITING_COLLECTION', 'AWAITING_SHIPMENT', 'ON_HOLD', 'PARTIALLY_SHIPPING'];
 const ACTIVITY_WINDOW_MIN = 15;  // informational readout only (gate no longer enforced)
-const CALL_BUDGET = 80;          // 80 × 50-id calls ≈ 4000 orders/invocation, < maxDuration
-const TIME_BUDGET_MS = 240_000;
-const MAX_429_RETRIES = 3;       // rate-limit backoff (mirrors refresh-status): retry, don't 502
+const CALL_BUDGET = 80;          // secondary cap: ≤80 × 50-id calls per invocation
+// Per-invocation TIME budget, kept BELOW a conservative 60s platform floor so a pass always RETURNS
+// cleanly (with a resumable next_after) instead of being killed mid-flight — maxDuration=300 is the
+// declared ceiling, but we don't depend on the plan honoring it. Consequence: the full open-status
+// sweep (~9.7k orders ≈ ~196 calls) is inherently MULTI-PASS — ~4–5 invocations, chained by the
+// caller via next_after. The UI labels the pass so it never looks stalled.
+const TIME_BUDGET_MS = 50_000;
+const MAX_429_RETRIES = 3;       // rate-limit backoff: retry, don't fail the sweep
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// TikTok signals throttling in several shapes; match them all so backoff engages instead of the
+// error path stopping the sweep. 105005 = "Request is too frequent" (the common one). Widen once
+// the exact prod code is confirmed from the Vercel logs.
+const isRateLimit = (msg: string) => /429|rate ?-?limit|too many|too frequent|frequent|105005/i.test(msg);
 
 // Most-recent auction write across capture_events + live_auction_items → the deploy/write gate.
 async function writeGateStatus(admin: ReturnType<typeof createAdminClient>) {
@@ -128,6 +137,7 @@ export async function POST(req: Request) {
   const started = Date.now();
   let token = '', cipher = '', tokenLoaded = false;
   let calls = 0, examined = 0, filled = 0, corrected = 0, unchanged = 0, noLabel = 0, notReturned = 0, budgetExhausted = false;
+  let stoppedReason: string | null = null;   // set if a call fails non-recoverably → return partial, don't throw the sweep away
   const proposedFills: string[] = [];              // order_ids that would receive a first tracking (dry-run)
   const proposedCorrections: CorrectionProposal[] = []; // stored→live overwrites (dry-run OR executed)
   let cursor = after;
@@ -158,17 +168,21 @@ export async function POST(req: Request) {
       if (calls >= CALL_BUDGET || Date.now() - started >= TIME_BUDGET_MS) { budgetExhausted = true; break outer; }
       const chunk = ids.slice(i, i + 50);
       let got: Record<string, unknown>[] = [];
+      let callErr: string | null = null;
       for (let attempt = 0; ; attempt++) {
         try { got = await getOrderById(token, cipher, chunk); break; }
         catch (e) {
           const msg = String(e);
-          // Self-limit under load: on a rate-limit, back off and retry (up to MAX_429_RETRIES)
-          // rather than failing the whole sweep. Any other error — or a 429 past the retries —
-          // still surfaces as 502. Mirrors refresh-status's net; makes the route safe mid-live.
-          if (/429|rate|too many/i.test(msg) && attempt < MAX_429_RETRIES) { await sleep(1000 * (attempt + 1)); continue; }
-          return NextResponse.json({ error: 'getOrderById failed', detail: msg }, { status: 502 });
+          // Self-limit under load: on a throttle, back off and retry (up to MAX_429_RETRIES).
+          if (isRateLimit(msg) && attempt < MAX_429_RETRIES) { await sleep(1000 * (attempt + 1)); continue; }
+          callErr = msg; break;
         }
       }
+      // A failed call must NOT throw away the sweep. The cursor advances only after a fully-processed
+      // chunk, so it still points at the last GOOD position → stop cleanly and let the normal return
+      // hand back {filled, corrected, remaining, next_after} + stopped_reason. The caller resumes the
+      // failed chunk on the next pass. (217 rows written must be reported as 217, never discarded.)
+      if (callErr) { stoppedReason = callErr; break outer; }
       calls++;
       const returned = new Set<string>();
       for (const o of got) {
@@ -230,18 +244,24 @@ export async function POST(req: Request) {
     byGroup[k].changes.push({ order_id: c.order_id, old: c.old, new: c.new });
   }
 
+  const stopped = stoppedReason != null;
   return NextResponse.json({
     dry_run: dryRun, correct: doCorrect, store_id: storeId,
     write_gate: writeGate,
     examined, filled, corrected, unchanged, no_label: noLabel, not_returned: notReturned,
     remaining: remaining ?? 0, next_after: (remaining ?? 0) > 0 ? cursor : null,
-    done: (remaining ?? 0) === 0,
+    // NOT done when we stopped on an error — there is work left AND the caller should resume.
+    done: (remaining ?? 0) === 0 && !stopped,
+    partial: stopped,
+    stopped_reason: stoppedReason,
     corrections_by_group: byGroup,
     corrections_group_count: Object.keys(byGroup).length,
     proposed_fill_count: dryRun ? proposedFills.length : undefined,
     note: dryRun
       ? 'DRY RUN — nothing written. `filled`=would fill NULLs, `corrected`=would overwrite STALE (see corrections_by_group).'
-      : 'Writes applied: NULLs filled (COALESCE-safe) + STALE overwritten (logged to tracking_correction_log, reversible via old_tracking).',
+      : stopped
+        ? `Stopped after writing (filled ${filled}, corrected ${corrected}). Progress SAVED — resume with next_after. Reason: ${stoppedReason}`
+        : 'Writes applied: NULLs filled (COALESCE-safe) + STALE overwritten (logged to tracking_correction_log, reversible via old_tracking).',
     budget: { calls, ms_used: Date.now() - started, exhausted: budgetExhausted },
   });
 }
