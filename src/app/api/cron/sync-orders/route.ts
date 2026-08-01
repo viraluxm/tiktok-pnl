@@ -159,5 +159,8 @@ export async function POST(req: Request) {
 
   const summary = { write, mode: write ? 'WRITE' : 'DRY-RUN (log-only ramp)', ms: Date.now() - started, budget_exhausted: overBudget(started), stores: conns.length, orders, statuses, tracking };
   console.log('[cron/sync-orders]', JSON.stringify(summary));
+  // Telemetry (both modes): persist the run summary so the log-only ramp's would-write + read-load
+  // numbers are queryable. Not order data — a dry run still persists nothing of consequence.
+  await admin.from('cron_sync_runs').insert({ is_write: write, summary }).then(({ error }) => { if (error) console.error('[cron] log insert', error.message); });
   return NextResponse.json(summary);
 }
