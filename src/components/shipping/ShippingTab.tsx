@@ -210,9 +210,13 @@ export default function ShippingTab() {
   );
   const pickerName = useMemo(() => employees.find((e) => e.id === pickerId)?.name ?? '', [employees, pickerId]);
   // Tracking coverage for the active store (label-barcode scanning depends on stored tracking).
-  const [coverage, setCoverage] = useState<null | { total: number; with_tracking: number; missing_tracking: number }>(null);
+  const [coverage, setCoverage] = useState<null | { total: number; with_tracking: number; missing_tracking: number; last_synced_at?: string | null; newest_order_date?: string | null }>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  // Resume cursor (order_id keyset) that survives across button clicks: a throttled/partial sweep
+  // saves its next_after here so the next Fetch continues from there rather than restarting at zero
+  // (which would re-examine everything and re-trigger the same throttle).
+  const syncCursorRef = useRef<string | null>(null);
   // Pick-ticket batch: age window + the route's included/excluded counts (always surfaced so we
   // never show a bare "included" number). Fetched on the idle view; reused verbatim on print.
   const [ticketDays, setTicketDays] = useState<'1' | '3' | '7' | 'all'>('3');
@@ -441,12 +445,18 @@ export default function ShippingTab() {
   // Recover tracking for the active store: loop the bounded route until done, showing progress.
   async function syncTracking() {
     if (!activeStore || activeStore === 'all') { setSyncMsg('Pick a specific store first.'); return; }
-    setSyncing(true); setSyncMsg('Fetching label tracking…'); setErr(null);
+    setSyncing(true); setErr(null);
+    // Resume from where a prior partial/throttled run stopped, if any.
+    let after: string | null = syncCursorRef.current;
+    setSyncMsg(after ? 'Resuming label tracking…' : 'Fetching label tracking…');
     try {
-      // Count from the route's ACTUAL fields (filled + corrected). The old code read `j.updated`,
-      // which the route never sends → it always showed "0 recovered" even on a full write.
-      let after: string | null = null; let filled = 0; let corrected = 0; let noLabel = 0; let guard = 0;
+      // Count from the route's ACTUAL fields (filled + corrected). The sweep is inherently multi-pass
+      // (~9.7k orders / ~4–5 invocations), chained here via next_after; show the pass so it never
+      // looks stalled. A partial/error result RETURNS what it wrote — we report it, never zero it.
+      let filled = 0; let corrected = 0; let noLabel = 0; let guard = 0; let pass = 0;
+      const soFar = () => `Filled ${filled} · corrected ${corrected}`;
       for (;;) {
+        pass++;
         let res: Response;
         try {
           res = await fetch('/api/shipping/sync-tracking', {
@@ -454,24 +464,43 @@ export default function ShippingTab() {
             body: JSON.stringify({ store_id: activeStore, dry_run: false, after }),
           });
         } catch {
-          setSyncMsg('Couldn’t reach the server — check your connection and try again.'); return;
+          syncCursorRef.current = after;  // save resume point — writes so far persisted
+          setSyncMsg(filled + corrected > 0
+            ? `${soFar()} so far, then lost connection. Click Fetch to resume.`
+            : 'Couldn’t reach the server — check your connection and try again.');
+          await loadCoverage(); return;
         }
         if (!res.ok) {
-          // Distinguish the failure modes so the packer knows what actually happened.
+          // Hard error. Report accumulated progress from prior passes — never discard it. The write
+          // gate is gone, so a 409 "paused" can't happen here. Cursor saved so a click resumes.
+          syncCursorRef.current = after;
           const body = await res.json().catch(() => ({} as { error?: string }));
-          if (res.status === 409) setSyncMsg('Paused — a live is running. Tracking will fetch when it ends.');
-          else if (res.status === 500) setSyncMsg(`Sync failed: ${body.error ?? 'server error'}`);
-          else setSyncMsg(`Sync failed (${res.status}) — try again.`);
-          return;
+          const lead = filled + corrected > 0 ? `${soFar()} so far, then ` : '';
+          if (res.status === 500) setSyncMsg(`${lead}failed: ${body.error ?? 'server error'}.${lead ? ' Click Fetch to resume.' : ''}`);
+          else setSyncMsg(`${lead}failed (${res.status}).${lead ? ' Click Fetch to resume.' : ' Try again.'}`);
+          await loadCoverage(); return;
         }
-        const j: { filled?: number; corrected?: number; no_label?: number; remaining?: number; done?: boolean; next_after?: string | null } = await res.json();
+        const j: { filled?: number; corrected?: number; no_label?: number; examined?: number; remaining?: number;
+                   done?: boolean; partial?: boolean; stopped_reason?: string | null; next_after?: string | null } = await res.json();
         filled += j.filled ?? 0; corrected += j.corrected ?? 0; noLabel = j.no_label ?? noLabel;
-        setSyncMsg(`Filled ${filled} · corrected ${corrected} so far${j.remaining ? ` · ${j.remaining} to check…` : ''}`);
-        if (j.done || !j.next_after || ++guard > 50) { break; }
+        const remaining = j.remaining ?? 0;
+        if (j.partial) {
+          // Route stopped on a recoverable error (e.g. a TikTok throttle) AFTER writing. Progress is
+          // saved + resumable — stop auto-looping so we don't hammer the failing chunk; user resumes.
+          syncCursorRef.current = j.next_after ?? after;
+          const kind = /frequent|429|rate|too many/i.test(j.stopped_reason ?? '') ? 'rate limit' : 'error';
+          setSyncMsg(`${soFar()} — paused (${kind}), ${remaining} left. Click Fetch to resume.`);
+          await loadCoverage(); return;
+        }
+        const estTotal = pass + Math.ceil(remaining / Math.max(1, j.examined ?? 1));
+        setSyncMsg(`Pass ${pass} of ~${estTotal} · ${soFar()}${remaining ? ` · ${remaining} to check…` : ''}`);
+        if (j.done) { syncCursorRef.current = null; break; }                       // clean finish
+        if (!j.next_after || ++guard > 50) { syncCursorRef.current = j.next_after ?? after; break; }
         after = j.next_after;
       }
       await loadCoverage();
-      setSyncMsg(`Filled ${filled} · corrected ${corrected}${noLabel ? ` · ${noLabel} have no label yet` : ''}.`);
+      const doneClean = syncCursorRef.current === null;
+      setSyncMsg(`${soFar()}${noLabel ? ` · ${noLabel} have no label yet` : ''}.${doneClean ? ' Done.' : ' Click Fetch to continue.'}`);
     } catch {
       setSyncMsg('Sync failed — try again.');
     } finally {
@@ -550,17 +579,31 @@ export default function ShippingTab() {
         </div>
         {/* Tracking coverage — staleness visible without clicking; label scanning needs stored tracking. */}
         {activeStore !== 'all' && (
-          <div className="mt-3 text-sm">
+          <div className="mt-3 text-sm space-y-1">
+            {/* Sync freshness — a packer must see stale DATA before scanning: a stuck order sync means
+                tonight's orders aren't in the DB and no label will scan. Warning-coloured past 2h. */}
+            {coverage?.last_synced_at != null && (() => {
+              const ageMs = Date.now() - new Date(coverage.last_synced_at as string).getTime();
+              const ageH = ageMs / 3_600_000;
+              const stale = ageH >= 2;
+              const when = new Date(coverage.last_synced_at as string).toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+              const ago = ageH >= 1 ? `${Math.round(ageH)}h ago` : `${Math.max(1, Math.round(ageMs / 60_000))}m ago`;
+              return (
+                <div className={stale ? 'text-tt-red font-semibold' : 'text-tt-muted'}>
+                  {stale ? '⚠ ' : ''}Orders synced through {when} ({ago}){stale ? ' — may be stale, run a sync before packing' : ''}
+                </div>
+              );
+            })()}
             {syncMsg ? (
-              <span className={syncing ? 'text-tt-cyan' : 'text-tt-text'}>{syncMsg}</span>
+              <div className={syncing ? 'text-tt-cyan' : 'text-tt-text'}>{syncMsg}</div>
             ) : coverage ? (
               coverage.missing_tracking > 0 ? (
-                <span className="text-tt-red font-semibold">{coverage.missing_tracking.toLocaleString()} order{coverage.missing_tracking === 1 ? '' : 's'} missing tracking — fetch before packing</span>
+                <div className="text-tt-red font-semibold">{coverage.missing_tracking.toLocaleString()} order{coverage.missing_tracking === 1 ? '' : 's'} missing tracking — fetch before packing</div>
               ) : (
-                <span className="text-tt-muted">{coverage.with_tracking.toLocaleString()} of {coverage.total.toLocaleString()} orders have tracking</span>
+                <div className="text-tt-muted">{coverage.with_tracking.toLocaleString()} of {coverage.total.toLocaleString()} orders have tracking</div>
               )
             ) : (
-              <span className="text-tt-muted">Checking tracking coverage…</span>
+              <div className="text-tt-muted">Checking tracking coverage…</div>
             )}
           </div>
         )}
