@@ -8,6 +8,10 @@ import { getActiveStore } from '@/lib/tiktok/activeStore';
 
 const BACKFILL_DAYS = 365;
 const TIME_BUDGET_MS = 50_000; // 50s for fetching, rest for DB work
+// Single-flight lock TTL. A store whose sync_started_at is newer than this is being synced by
+// another in-flight request → skip it (don't stampede the same connection with the duplicate
+// drivers / multiple tabs). maxDuration is 60s, so any lock older than 2m is a dead holder.
+const SYNC_LOCK_TTL_MS = 120_000;
 
 export const maxDuration = 60;
 
@@ -53,6 +57,20 @@ export async function POST() {
     if (Date.now() - batchStart >= TIME_BUDGET_MS) break; // shared budget across stores
     if (!connection.shop_cipher) {
       perStore.push({ store_id: connection.store_id, skipped: 'no_shop_cipher' });
+      continue;
+    }
+    // SINGLE-FLIGHT: atomically claim the per-store lock. The conditional UPDATE only matches
+    // when the lock is free or stale; Postgres re-checks the qual under the row lock, so of two
+    // concurrent syncs exactly one claims and the other gets 0 rows → skips (no stampede on the
+    // same connection from the duplicate drivers / multiple tabs). Released (null) at the end.
+    const staleBefore = new Date(Date.now() - SYNC_LOCK_TTL_MS).toISOString();
+    const { data: claimed } = await admin.from('tiktok_connections')
+      .update({ sync_started_at: new Date().toISOString() })
+      .eq('user_id', userId).eq('store_id', connection.store_id)
+      .or(`sync_started_at.is.null,sync_started_at.lt.${staleBefore}`)
+      .select('store_id');
+    if (!claimed || claimed.length === 0) {
+      perStore.push({ store_id: connection.store_id, skipped: 'sync_in_flight', isCaughtUp: false });
       continue;
     }
     try {
