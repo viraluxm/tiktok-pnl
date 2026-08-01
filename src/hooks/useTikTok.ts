@@ -167,16 +167,26 @@ export function useTikTok() {
   }, [queryClient]);
 
   // Auto-start when connected and not caught up — OWNER ONLY (see single-owner election).
+  // Re-fires on STORE CHANGE too: selecting a different store invalidates ['tiktok-status'], so the
+  // connection refetches with the new store's id/caught-up state. Previously loopStartedRef (a
+  // once-per-mount latch) blocked the driver from re-running for the newly-selected store — so a
+  // packer could sit on any tab with a store selected and nothing synced. Now a change in the
+  // connection id resets the latch, kicking that store's sync from wherever useTikTok is mounted.
+  const activeConnIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!isOwner) return;
     const conn = connectionQuery.data?.connection;
     if (!conn || !connectionQuery.data?.connected) return;
+    if (conn.id !== activeConnIdRef.current) {
+      activeConnIdRef.current = conn.id;   // new store selected → allow the driver to run for it
+      loopStartedRef.current = false;
+    }
     if (loopStartedRef.current) return;
     if (conn.isCaughtUp) return;
 
     loopStartedRef.current = true;
     runSyncDriver();
-  }, [isOwner, connectionQuery.data?.connected, connectionQuery.data?.connection?.isCaughtUp, runSyncDriver]);
+  }, [isOwner, connectionQuery.data?.connected, connectionQuery.data?.connection?.id, connectionQuery.data?.connection?.isCaughtUp, runSyncDriver]);
 
   // Disconnect
   const disconnect = useCallback(async () => {
