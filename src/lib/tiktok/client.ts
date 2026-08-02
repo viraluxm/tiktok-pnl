@@ -226,25 +226,33 @@ export interface FetchOrdersPageResult {
   nextCursor: string | null;
 }
 
+// Fetch one page of orders/search. Defaults to the create_time window (DESC) used by the
+// historical backfill. Pass opts.timeField='update_time' (ASC) for the incremental
+// change-feed: the endpoint filters + sorts by update_time (probe-verified 2026-08-02 —
+// filters honored, sort monotonic non-decreasing, returns created-earlier-but-changed
+// orders, and update_time_ge is INCLUSIVE).
 export async function fetchOrdersPage(
   accessToken: string,
   shopCipher: string,
   startTs: number,
   endTs: number,
   pageCursor: string | null,
+  opts: { timeField?: 'create_time' | 'update_time'; sortOrder?: 'ASC' | 'DESC' } = {},
 ): Promise<FetchOrdersPageResult> {
   const path = '/order/202309/orders/search';
+  const timeField = opts.timeField ?? 'create_time';
+  const sortOrder = opts.sortOrder ?? 'DESC';
 
   const body: Record<string, unknown> = {
-    create_time_ge: startTs,
-    create_time_lt: endTs,
+    [`${timeField}_ge`]: startTs,
+    [`${timeField}_lt`]: endTs,
   };
 
   const queryParams: Record<string, string> = {
     shop_cipher: shopCipher,
     page_size: '50',
-    sort_field: 'create_time',
-    sort_order: 'DESC',
+    sort_field: timeField,
+    sort_order: sortOrder,
   };
   if (pageCursor) {
     queryParams.page_token = pageCursor;
@@ -256,7 +264,7 @@ export async function fetchOrdersPage(
 
   // Log pagination info for debugging
   if (orders.length >= 50 || pageCursor) {
-    console.log(`[Pagination] ${orders.length} orders, next_page_token=${nextCursor ? 'yes' : 'no'}, sent_page_token=${pageCursor ? 'yes' : 'no'}, data_keys=${Object.keys(data || {}).join(',')}`);
+    console.log(`[Pagination:${timeField}] ${orders.length} orders, next_page_token=${nextCursor ? 'yes' : 'no'}, sent_page_token=${pageCursor ? 'yes' : 'no'}, data_keys=${Object.keys(data || {}).join(',')}`);
   }
 
   return {
