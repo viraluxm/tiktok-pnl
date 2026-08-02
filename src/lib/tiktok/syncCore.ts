@@ -39,6 +39,11 @@ export interface SyncStoreResult {
   currentDay: string;
   pages: number;
   wrote: boolean;             // false in a dry run — makes log-only unmistakable in the summary
+  // Which path ran this store: 'incremental' (caught-up update_time change-feed) vs 'backfill'
+  // (create_time day-walk). Queryable from cron_sync_runs.summary so the dry-run day can count
+  // how often a store drops to backfill (churn returning via the side door).
+  mode: 'incremental' | 'backfill';
+  budgetCut: boolean;         // true = stopped on the 50s budget and will resume next run
 }
 
 // Sync ONE store's connection: (optional) shop logo + catalog + day-loop of orders. All
@@ -68,11 +73,14 @@ export async function syncConnection(
 
   // 105002 refresh-on-use net: 3 attempts w/ backoff, refresh ONCE on expired creds + retry.
   let refreshedOnce = false;
-  async function fetchPageWithRefresh(sTs: number, eTs: number, pageToken: string | null) {
+  async function fetchPageWithRefresh(
+    sTs: number, eTs: number, pageToken: string | null,
+    opts?: { timeField?: 'create_time' | 'update_time'; sortOrder?: 'ASC' | 'DESC' },
+  ) {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        return await fetchOrdersPage(accessToken, shopCipher, sTs, eTs, pageToken);
+        return await fetchOrdersPage(accessToken, shopCipher, sTs, eTs, pageToken, opts);
       } catch (e) {
         lastErr = e;
         if (!refreshedOnce && isExpiredCredsError(e)) {
@@ -131,7 +139,106 @@ export async function syncConnection(
   // re-scan pull-back below.
   const startedCaughtUp = rawCursor >= todayStr;
 
-  // ── (A) WATERMARK forward edge + (B) trailing 48h RE-SCAN ──
+  // ── INCREMENTAL CHANGE-FEED (caught-up stores) ──────────────────────────────────────
+  // Once history is backfilled, we no longer re-walk create_time (the old forward-edge +
+  // trailing-48h re-scan re-upserted the whole recent window every hour — churn that grows
+  // with volume). Instead we pull ONLY orders changed since the update_time watermark. This
+  // catches new orders (their update_time==create_time) AND status/tracking changes on older
+  // orders, at a cost proportional to real activity, not backlog size. Probe-verified
+  // (2026-08-02): update_time filters, sorts monotonically ASC, returns created-earlier-but-
+  // changed orders, and update_time_ge is INCLUSIVE — so next cursor = max(update_time) seen
+  // and the order_id upsert dedups the re-included boundary second (zero skip risk).
+  if (startedCaughtUp) {
+    // First switch (null cursor) seeds the last 48h of changes — a one-time catch-up that
+    // matches the old re-scan window; thereafter it rides forward. endUpd fixed at run start;
+    // anything changed mid-run has update_time > endUpd and is picked up next run (ge <= endUpd).
+    const storedUpd = (connection.sync_update_cursor as number | null) ?? null;
+    const startUpd = storedUpd ?? Math.floor((Date.now() - RESCAN_WINDOW_MS) / 1000);
+    const endUpd = Math.floor(Date.now() / 1000) + 1;
+    if (write) {
+      await admin.from('tiktok_connections').update({ sync_started_at: new Date().toISOString() })
+        .eq('user_id', userId).eq('store_id', storeId);
+      await getOrCreateProduct(admin, userId, (connection.shop_name as string) || 'TikTok Shop');
+    }
+    let pageToken: string | null = null;
+    let maxUpd = startUpd;
+    let changed = 0;
+    let incPages = 0;
+    let incBudgetCut = false;
+    try {
+      do {
+        if (Date.now() - batchStart >= TIME_BUDGET_MS || incPages >= 500) { incBudgetCut = true; break; }
+        incPages++;
+        // ASC so we walk oldest-change first; a budget cut leaves everything <= maxUpd done.
+        const { orders, nextCursor } = await fetchPageWithRefresh(startUpd, endUpd, pageToken, { timeField: 'update_time', sortOrder: 'ASC' });
+        if (orders.length > 0) {
+          const rows = new Map<string, Record<string, unknown>>();
+          for (const o of orders) {
+            const parsed = parseOrder(userId, o as Record<string, unknown>);
+            const oid = String(parsed.order_id || '');
+            if (oid) rows.set(oid, parsed);
+            const ut = Number((o as Record<string, unknown>).update_time) || 0;
+            if (ut > maxUpd) maxUpd = ut;
+          }
+          const upsertData = [...rows.values()];
+          const dbRows: Record<string, unknown>[] = upsertData.map(({ product_name: _p, ...rest }) => ({ ...rest, store_id: storeId }));
+          const withTracking = dbRows.filter((r) => r.tracking_number != null);
+          const withoutTracking = dbRows.filter((r) => r.tracking_number == null).map(({ tracking_number: _tn, ...rest }) => rest);
+          if (write) {
+            let upsertErr: { message: string } | null = null;
+            if (withTracking.length) { const { error } = await admin.from('synced_order_ids').upsert(withTracking, { onConflict: 'user_id,order_id' }); if (error) upsertErr = error; }
+            if (!upsertErr && withoutTracking.length) { const { error } = await admin.from('synced_order_ids').upsert(withoutTracking, { onConflict: 'user_id,order_id' }); if (error) upsertErr = error; }
+            if (upsertErr) console.error('[Sync:update] upsert error:', upsertErr.message); else changed += upsertData.length;
+            // Capture products for orders new to us (same as the create_time path).
+            const products = new Map<string, Record<string, unknown>>();
+            for (const row of upsertData) {
+              const pid = row.tiktok_product_id as string;
+              if (pid && !products.has(pid)) {
+                const name = String(row.product_name || '') || String(row.sku_name || '') || `Product ${pid.slice(-6)}`;
+                products.set(pid, { user_id: userId, org_id: orgId, tiktok_product_id: pid, name, _hasRealName: !!String(row.product_name || '') });
+              }
+            }
+            for (const [, prod] of products) {
+              const hasRealName = prod._hasRealName; delete prod._hasRealName;
+              const { error: pErr } = await admin.from('products').upsert(prod, { onConflict: 'user_id,tiktok_product_id', ignoreDuplicates: !hasRealName });
+              if (pErr) { /* ignore */ }
+            }
+          } else {
+            changed += upsertData.length; // DRY RUN: count would-write, persist nothing
+          }
+        }
+        pageToken = nextCursor;
+      } while (pageToken);
+    } catch (incErr) {
+      const msg = (incErr as Error).message;
+      console.error(`[Sync:update] store=${storeId} ABORT: ${msg}`);
+      if (write) {
+        await admin.from('tiktok_connections').update({
+          sync_started_at: null, sync_error: `update-sync failed: ${msg}`.slice(0, 500), sync_error_at: new Date().toISOString(),
+        }).eq('user_id', userId).eq('store_id', storeId);
+      }
+      throw new Error(`store ${storeId} update-sync aborted: ${msg}`);
+    }
+    if (write) {
+      // Advance the cursor to max(update_time) seen (INCLUSIVE next ge; upsert dedups the
+      // boundary). sync_cursor stays pinned to today so the store remains "caught up".
+      const { error: saveErr } = await admin.from('tiktok_connections').update({
+        sync_update_cursor: maxUpd, sync_cursor: todayStr, sync_page_cursor: null,
+        sync_started_at: null, sync_progress_day: todayStr, sync_last_pages: incPages,
+        last_synced_at: new Date().toISOString(), sync_error: null, sync_error_at: null,
+      }).eq('user_id', userId).eq('store_id', storeId);
+      if (saveErr) console.error('[Sync:update] SAVE FAILED:', saveErr.message);
+    }
+    console.log(`[Sync]${write ? '' : '[DRY]'} store=${storeId} INCREMENTAL: ${changed} changed since ${startUpd}${incBudgetCut ? ' (budget-cut, resumes at cursor)' : ''}, pages=${incPages}`);
+    return {
+      store_id: storeId, isCaughtUp: !incBudgetCut,
+      ordersThisBatch: changed, totalUniqueOrders: startProgress,
+      daysProcessed: 0, currentDay: todayStr, pages: incPages, wrote: write,
+      mode: 'incremental', budgetCut: incBudgetCut,
+    };
+  }
+
+  // ── (A) WATERMARK forward edge + (B) trailing 48h RE-SCAN ── (BACKFILL / not-yet-caught-up only)
   // (A) on a caught-up run TODAY starts at max(order_created_at)-15m (only new orders); (B) at most
   // once/hour pull the cursor back to the 48h window start and re-walk it FULLY, catching a
   // late-indexed order the overlap would skip. sync_rescan_at is stamped at re-scan START (below), so
@@ -292,6 +399,7 @@ export async function syncConnection(
     store_id: storeId, isCaughtUp,
     ordersThisBatch: totalNew, totalUniqueOrders: startProgress + totalNew,
     daysProcessed, currentDay, pages: totalPages, wrote: write,
+    mode: 'backfill', budgetCut: resumePageToken != null,
   };
 }
 
