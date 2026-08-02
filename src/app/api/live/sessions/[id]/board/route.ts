@@ -42,7 +42,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .filter((k): k is string => typeof k === 'string' && k.length > 0);
   const captureByOrderId = new Map<
     string,
-    { won_price_cents: number | null; tiktok_title: string | null; payment_failed: boolean; order_status: number | null }
+    { won_price_cents: number | null; tiktok_title: string | null; payment_failed: boolean; order_status: number | null; seller_sku_hint: string | null }
   >();
   if (orderIds.length) {
     const { rows: captures, error: capErr } = await inChunks<Record<string, unknown>>(orderIds, (slice) =>
@@ -50,7 +50,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
         .from('capture_events')
         // order_status is a read-only signal (TikTok tri-state: 2=pending/recoverable,
         // 3=paid/recovered, 4=cancelled) used only to render a badge on not_sold rows.
-        .select('order_id, selling_price_cents, product_name, is_payment_successful, order_status')
+        // platform_sku_ref is the TikTok live LOT number (order.sku_desc) — a per-show
+        // sequence, NOT the inventory sku_number. Surfaced on bound rows too so the UI can
+        // order the board by lot and use bound lots as neighbour hints for unbound ones.
+        .select('order_id, selling_price_cents, product_name, is_payment_successful, order_status, platform_sku_ref')
         .eq('user_id', user.id)
         .in('order_id', slice));
     if (capErr) {
@@ -64,6 +67,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
           // Only an explicit false means the payment failed (null/true = ok).
           payment_failed: c.is_payment_successful === false,
           order_status: (c.order_status as number | null) ?? null,
+          seller_sku_hint: (c.platform_sku_ref as string | null) ?? null,
         });
       }
     }
@@ -171,6 +175,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       won_price_cents: capture?.won_price_cents ?? null,
       // TikTok auction item title from the capture (e.g. "Random Electronics").
       tiktok_title: capture?.tiktok_title ?? null,
+      // TikTok live LOT number (per-show sequence) for this bound sale. Lets the UI
+      // order the board by lot and flank an unbound lot with its bound neighbours.
+      seller_sku_hint: capture?.seller_sku_hint ?? null,
       // True when the captured sale had a failed payment (logged as not_sold).
       payment_failed: capture?.payment_failed ?? false,
       // TikTok order status (read-only display signal): 2=pending/recoverable,

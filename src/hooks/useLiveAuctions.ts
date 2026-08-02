@@ -36,6 +36,10 @@ export interface AuctionItem {
   // via /bind; carries the capture context for identification. Absent/false on normal bound rows.
   unbound?: boolean;
   order_id?: string;
+  // TikTok live LOT number (order.sku_desc / synced sku_name) — a per-show sequence
+  // (1,2,3…), NOT the inventory sku_number. Present on BOTH bound and unbound rows so
+  // the board can be replayed in lot order and an unbound lot can borrow the SKU of its
+  // nearest bound lots as a hint. Numeric for auction shows; absent/text for catalog stores.
   seller_sku_hint?: string | null;
 }
 

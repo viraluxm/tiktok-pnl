@@ -181,18 +181,80 @@ function nearbySkuIdsForTime(targetIso: string | null | undefined, items: Auctio
   return out;
 }
 
-// Ranked, scannable SKU picker for one bind line. NEVER a flat catalogue: temporally-adjacent
-// SKUs first (nearby), then everything sold in THIS show (primary/category), and the full
-// catalogue only surfaces once the operator searches (fallback). Scanning a barcode (or typing
-// it + Enter) selects the exact SKU — same muscle memory as the live flow.
+// The TikTok live LOT number for a row (per-show sequence 1,2,3…), or null when the ref isn't a
+// pure number. Catalog stores have text variation names ("1 Black"), not lots — those return null
+// so the lot column/ordering simply don't apply. NEVER an inventory key: the lot is NOT sku_number
+// (confirmed: it matched the bound sku_number only 0.2% of the time — pure coincidence).
+function lotOf(it: AuctionItem): number | null {
+  const raw = it.seller_sku_hint;
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  return /^[0-9]+$/.test(s) ? Number(s) : null;
+}
+
+interface LotNeighbour { lot: number; sku_number: number; title: string; inventory_sku_id: string }
+
+// Bound sales nearest to an unbound row BY LOT NUMBER — the strongest available hint, since hosts
+// auction in runs so a neighbouring lot is usually the same or a related item (measured: the true
+// SKU is within ±3 lots 26% of the time and the true CATEGORY 99% of the time). Returns the nearest
+// bound lot below and above (flanking context — NOT strictly ±1, since consecutive lots are often
+// both unbound), a ranked list of their sku_ids closest-first (picker's top tier), and a reason per
+// sku_id ("lot 3 was #212 Blue Gummy") so the host is reminded, not just handed a list. Empty when
+// the row has no numeric lot or the show has no bound sales yet.
+function lotNeighbours(target: AuctionItem, items: AuctionItem[]): {
+  below: LotNeighbour | null;
+  above: LotNeighbour | null;
+  rankedSkuIds: string[];
+  reasonById: Map<string, string>;
+} {
+  const tl = lotOf(target);
+  if (tl == null) return { below: null, above: null, rankedSkuIds: [], reasonById: new Map() };
+  // Bound rows (real SKU lines) carrying a numeric lot, sorted by absolute lot distance.
+  const bound = items
+    .filter((i) => !i.unbound && i.skus.length > 0)
+    .map((i) => ({ it: i, lot: lotOf(i) }))
+    .filter((x): x is { it: AuctionItem; lot: number } => x.lot != null && x.lot !== tl)
+    .map((x) => ({ ...x, dist: Math.abs(x.lot - tl) }))
+    .sort((a, b) => a.dist - b.dist || a.lot - b.lot);
+
+  const firstSku = (it: AuctionItem | undefined): LotNeighbour | null => {
+    if (!it) return null;
+    const s = it.skus[0];
+    return s ? { lot: lotOf(it)!, sku_number: s.sku_number, title: s.title, inventory_sku_id: String(s.inventory_sku_id) } : null;
+  };
+  const below = firstSku(bound.filter((b) => b.lot < tl).sort((a, b) => b.lot - a.lot)[0]?.it);
+  const above = firstSku(bound.filter((b) => b.lot > tl).sort((a, b) => a.lot - b.lot)[0]?.it);
+
+  const rankedSkuIds: string[] = [];
+  const reasonById = new Map<string, string>();
+  const seen = new Set<string>();
+  for (const b of bound) {
+    for (const sk of b.it.skus) {
+      const id = String(sk.inventory_sku_id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      rankedSkuIds.push(id);
+      reasonById.set(id, `lot ${b.lot} was #${sk.sku_number}${sk.title ? ` ${sk.title}` : ''}`);
+    }
+    if (rankedSkuIds.length >= 8) break;
+  }
+  return { below, above, rankedSkuIds, reasonById };
+}
+
+// Ranked, scannable SKU picker for one bind line. NEVER a flat catalogue. Tiers, in order:
+// nearby LOTS in this show (with a why-reason), then everything sold in THIS show, then SKUs in
+// the same CATEGORY as those neighbour lots, and the full catalogue only once the operator
+// searches (fallback). Scanning a barcode (or typing it + Enter) selects the exact SKU.
 function RankedSkuPicker({
-  value, onChange, allSkus, primaryIds, nearbyIds, disabled,
+  value, onChange, allSkus, primaryIds, nearbyIds, reasonById, categoryIds, disabled,
 }: {
   value: string;
   onChange: (id: string) => void;
   allSkus: InventorySku[];
   primaryIds: Set<string>;
   nearbyIds: string[];
+  reasonById?: Map<string, string>;
+  categoryIds?: Set<string>;
   disabled?: boolean;
 }) {
   const [q, setQ] = useState('');
@@ -206,13 +268,20 @@ function RankedSkuPicker({
   const nearby = nearbyIds.map((id) => byId.get(id)).filter((s): s is InventorySku => !!s);
   const nearbySet = new Set(nearby.map((s) => s.id));
   const primary = allSkus.filter((s) => primaryIds.has(s.id) && !nearbySet.has(s.id) && match(s));
+  const primarySet = new Set(primary.map((s) => s.id));
+  // Same category as the neighbour lots — surfaces the right family when the exact SKU isn't a
+  // neighbour (the true category is a neighbour's category 99% of the time).
+  const catSet = categoryIds ?? new Set<string>();
+  const category = allSkus.filter((s) => catSet.has(s.id) && !nearbySet.has(s.id) && !primarySet.has(s.id) && match(s));
+  const categoryShown = new Set(category.map((s) => s.id));
   // Fallback: the rest of the catalogue, ONLY while searching (never the flat 217 by default).
   const fallback = query
-    ? allSkus.filter((s) => !primaryIds.has(s.id) && !nearbySet.has(s.id) && match(s)).slice(0, 25)
+    ? allSkus.filter((s) => !primaryIds.has(s.id) && !nearbySet.has(s.id) && !categoryShown.has(s.id) && match(s)).slice(0, 25)
     : [];
   const groups = [
-    { key: 'nearby', label: 'Nearby in this show', skus: nearby.filter(match) },
+    { key: 'nearby', label: 'Nearby lots in this show', skus: nearby.filter(match) },
     { key: 'primary', label: 'Sold in this show', skus: primary },
+    { key: 'category', label: 'Same category as nearby lots', skus: category },
     { key: 'all', label: 'All SKUs (search)', skus: fallback },
   ].filter((g) => g.skus.length > 0);
 
@@ -248,22 +317,57 @@ function RankedSkuPicker({
           {groups.map((g) => (
             <div key={g.key}>
               <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-tt-muted bg-tt-card sticky top-0">{g.label}</div>
-              {g.skus.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => { onChange(s.id); setQ(''); }}
-                  disabled={disabled}
-                  className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-xs cursor-pointer hover:bg-tt-card-hover ${s.id === value ? 'bg-tt-card-hover' : ''}`}
-                >
-                  <span className="truncate"><span className="font-mono text-tt-cyan">#{s.sku_number}</span> {s.title || 'Untitled'}</span>
-                  <span className="shrink-0 text-tt-muted">{s.category ? `${s.category} · ` : ''}{s.qty_on_hand}</span>
-                </button>
-              ))}
+              {g.skus.map((s) => {
+                const reason = g.key === 'nearby' ? reasonById?.get(s.id) : undefined;
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => { onChange(s.id); setQ(''); }}
+                    disabled={disabled}
+                    className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-xs cursor-pointer hover:bg-tt-card-hover ${s.id === value ? 'bg-tt-card-hover' : ''}`}
+                  >
+                    <span className="min-w-0 truncate">
+                      <span className="truncate"><span className="font-mono text-tt-cyan">#{s.sku_number}</span> {s.title || 'Untitled'}</span>
+                      {/* Why this SKU is suggested — reminds the host of the neighbouring lot. */}
+                      {reason ? <span className="block text-[10px] text-tt-muted truncate">{reason}</span> : null}
+                    </span>
+                    <span className="shrink-0 text-tt-muted">{s.category ? `${s.category} · ` : ''}{s.qty_on_hand}</span>
+                  </button>
+                );
+              })}
             </div>
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+// The order ID is the ground-truth bridge to TikTok Seller Center, where every order carries a
+// VIDEO RECEIPT of the item being auctioned — 100% certain vs a neighbour hint. A per-order deep
+// link isn't publicly constructible (Seller Center is a SPA with no documented order URL), so we
+// give the reliable path: copy the ID and open the orders list to paste it. If TikTok's per-order
+// URL is ever confirmed, swap the anchor's href for a true one-click deep link.
+function OrderReceiptLink({ orderId }: { orderId: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="font-mono text-tt-text">{orderId}</span>
+      <button
+        onClick={async () => {
+          try { await navigator.clipboard.writeText(orderId); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard blocked */ }
+        }}
+        className="text-tt-cyan hover:underline cursor-pointer"
+        title="Copy the order ID to paste into Seller Center's order search"
+      >{copied ? 'copied!' : 'copy'}</button>
+      <a
+        href="https://seller-us.tiktok.com/order"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-tt-cyan hover:underline"
+        title="Opens TikTok Seller Center orders — paste the copied ID to open the order and its video receipt"
+      >Seller Center ↗</a>
+    </span>
   );
 }
 
@@ -533,7 +637,21 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // Discoverability: on a 100+ row show, unbound rows are unfindable interleaved. This filters
   // the table to just the actionable (unbound) rows. Toggled from the progress banner.
   const [onlyUnbound, setOnlyUnbound] = useState(false);
-  const displayItems = useMemo(() => (onlyUnbound ? items.filter((i) => i.unbound) : items), [onlyUnbound, items]);
+  // Lot-based show = an auction with numeric TikTok lot numbers (catalog stores have none). Gates
+  // the lot column + lot ordering so they simply don't appear where lots are meaningless.
+  const lotBased = useMemo(() => items.some((i) => lotOf(i) != null), [items]);
+  const displayItems = useMemo(() => {
+    const base = onlyUnbound ? items.filter((i) => i.unbound) : items;
+    if (!lotBased) return base;
+    // Replay the show in lot order (bound + unbound interleaved). Rows without a lot sink last.
+    return [...base].sort((a, b) => {
+      const la = lotOf(a), lb = lotOf(b);
+      if (la == null && lb == null) return 0;
+      if (la == null) return 1;
+      if (lb == null) return -1;
+      return la - lb;
+    });
+  }, [onlyUnbound, items, lotBased]);
   // PRIMARY narrowing set: SKUs sold in this show (from the board) — the picker's default list.
   const primaryIdSet = useMemo(() => new Set(sessionSkus.map((s) => s.id)), [sessionSkus]);
 
@@ -543,15 +661,15 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     won_price_cents: it.won_price_cents, seller_sku: it.seller_sku_hint ?? '',
     quantity: 1, status: 'sold',
   });
-  // Expand/collapse a table row's bind editor; seed one line, pre-picked from the seller_sku hint.
+  // Expand/collapse a table row's bind editor; seed one EMPTY line. We deliberately do NOT
+  // pre-pick from the lot number — the lot is a per-show sequence, not the inventory sku_number
+  // (matching sku_number to it was wrong 99.5% of the time). The picker ranks the likely SKUs by
+  // lot adjacency instead, so the host confirms rather than inherits a bad guess.
   function toggleExpand(it: AuctionItem) {
     const oid = it.order_id ?? '';
     if (!oid) return;
     if (expandedOrder === oid) { setExpandedOrder(null); return; }
-    if (!lines[oid]) {
-      const m = allSkus.find((s) => String(s.sku_number) === (it.seller_sku_hint ?? ''));
-      setLinesFor(oid, [{ sku_id: m?.id ?? '', qty: 1 }]);
-    }
+    if (!lines[oid]) setLinesFor(oid, [{ sku_id: '', qty: 1 }]);
     setExpandedOrder(oid);
   }
   async function doUnbind(orderId: string) {
@@ -1059,12 +1177,30 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 }
                 const expanded = isUnbound && expandedOrder === it.order_id;
                 const orderLines = it.order_id ? (lines[it.order_id] ?? []) : [];
-                const nearby = isUnbound ? nearbySkuIdsForTime(it.logged_at, items) : [];
+                // Neighbour hints only matter for the expanded bind editor — compute lazily.
+                // Rank by lot adjacency; fall back to time proximity when the row has no numeric
+                // lot or there are no bound lots to borrow from.
+                const nb = expanded ? lotNeighbours(it, items) : null;
+                const nearby = nb
+                  ? (nb.rankedSkuIds.length ? nb.rankedSkuIds : nearbySkuIdsForTime(it.logged_at, items))
+                  : [];
+                // SKUs sharing a category with the neighbour lots (picker's category tier).
+                const categoryIds = new Set<string>();
+                if (nb && nb.rankedSkuIds.length) {
+                  const cats = new Set(
+                    nb.rankedSkuIds.map((id) => allSkus.find((s) => s.id === id)?.category).filter((c): c is string => !!c),
+                  );
+                  if (cats.size) for (const s of allSkus) if (s.category && cats.has(s.category)) categoryIds.add(s.id);
+                }
+                // Lot number for the # column (both bound and unbound in lot-based shows); falls
+                // back to the internal sequence for bound rows, or — for unbound rows without one.
+                const lot = lotOf(it);
+                const numCell = lotBased ? (lot ?? (isUnbound ? '—' : it.auction_number)) : (isUnbound ? '—' : it.auction_number);
                 const pickedCount = orderLines.filter((x) => x.sku_id).length;
                 return (
                   <Fragment key={it.id}>
                   <tr className={`border-b border-tt-border last:border-0 ${isUnbound ? 'bg-tt-yellow/[0.04]' : ''}`}>
-                    <td className="px-4 py-3 text-tt-muted tabular-nums">{isUnbound ? '—' : it.auction_number}</td>
+                    <td className="px-4 py-3 text-tt-muted tabular-nums">{numCell}</td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-0.5">
                         {it.tiktok_title ? (
@@ -1136,20 +1272,27 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                   {expanded && it.order_id && (
                     <tr className="bg-tt-card/60">
                       <td colSpan={9} className="px-4 py-4">
-                        {/* Inline context: sale time, price, buyer, order id, seller_sku hint. */}
+                        {/* Inline context: sale time, price, buyer, order id, lot number. */}
                         <div className="text-xs text-tt-muted mb-2 flex flex-wrap gap-x-4 gap-y-1">
                           <span>Sale time: <span className="text-tt-text">{fmtDate(it.logged_at || null)}</span></span>
                           <span>Price: <span className="text-tt-text">{money(it.won_price_cents)}</span></span>
                           <span>Buyer: <span className="text-tt-text">@{it.buyer_handle || '—'}</span></span>
-                          <span>Order: <span className="font-mono text-tt-text">{it.order_id}</span></span>
-                          {it.seller_sku_hint ? <span>seller_sku hint: <span className="font-mono text-tt-text">{it.seller_sku_hint}</span></span> : null}
+                          <span>Order: <OrderReceiptLink orderId={it.order_id} /></span>
+                          {lot != null ? <span>Lot: <span className="font-mono text-tt-text">{lot}</span></span> : null}
                         </div>
-                        {/* Degrade honestly: no bound sales in this show → no temporal context. */}
+                        {/* Flanking bound lots — the strongest hint. Nearest bound lot each side (not
+                            strictly ±1: consecutive lots are often both unbound). Degrade honestly. */}
                         <div className="text-[11px] text-tt-muted mb-3">
-                          {nearby.length > 0 ? (
+                          {nb && (nb.below || nb.above) ? (
+                            <>Adjacent bound lots:{' '}
+                              {nb.below ? <span>lot {nb.below.lot} was <span className="text-tt-text">#{nb.below.sku_number} {nb.below.title}</span></span> : null}
+                              {nb.below && nb.above ? <span> · </span> : null}
+                              {nb.above ? <span>lot {nb.above.lot} was <span className="text-tt-text">#{nb.above.sku_number} {nb.above.title}</span></span> : null}
+                            </>
+                          ) : nearby.length > 0 ? (
                             <>Nearest bound sales by time: {nearby.slice(0, 5).map((id) => { const s = allSkus.find((x) => x.id === id); return s ? `#${s.sku_number}` : null; }).filter(Boolean).join(', ')}</>
                           ) : (
-                            <span className="italic">No context available — no bound sales in this show to compare by time.</span>
+                            <span className="italic">No context available — no bound sales in this show to compare.</span>
                           )}
                         </div>
                         {/* Multi-SKU lines: each its own qty, a ranked+scannable picker, one confirm. */}
@@ -1162,6 +1305,8 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                                 allSkus={allSkus}
                                 primaryIds={primaryIdSet}
                                 nearbyIds={nearby}
+                                reasonById={nb?.reasonById}
+                                categoryIds={categoryIds}
                               />
                               <input
                                 type="number" min={1} value={ln.qty}
@@ -1231,7 +1376,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 key={it.id}
                 thumbnail={
                   <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg border border-tt-border px-2 text-xs font-mono text-tt-muted tabular-nums">
-                    {it.auction_number}
+                    {lotBased ? (lotOf(it) ?? it.auction_number) : it.auction_number}
                   </span>
                 }
                 badge={resultBadge}
