@@ -715,7 +715,9 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         setBindNotice({ type: 'error', msg: `No changes to save for order ${oid} — the lines already match the current bind.` });
         return;
       }
-      await unbind.mutateAsync(oid); // restock ALL current lines first
+      console.log('[edit-debug] calling unbind', { oid }); // TEMP DEBUG
+      const unbindRes = await unbind.mutateAsync(oid); // restock ALL current lines first
+      console.log('[edit-debug] unbind returned', unbindRes); // TEMP DEBUG
       if (next.length === 0) {
         // (4) zero lines = full unbind, not a rebind-with-nothing.
         qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
@@ -724,11 +726,13 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         setBindNotice({ type: 'success', msg: `Order ${oid} unbound — all SKUs restocked; row returned to unbound.` });
         return;
       }
+      console.log('[edit-debug] calling rebind', { oid, lines: next }); // TEMP DEBUG
       const res = await fetch(`/api/live/sessions/${session.id}/bind`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ order_id: oid, lines: next, allow_negative: false }),
       });
       const json = (await res.json().catch(() => ({}))) as { error?: string };
+      console.log('[edit-debug] rebind returned', { status: res.status, ok: res.ok, json }); // TEMP DEBUG
       qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
       qc.invalidateQueries({ queryKey: ['inventory-skus'] });
       setExpandedOrder(null);
@@ -741,6 +745,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         setBindNotice({ type: 'error', msg: `Order ${oid} is now UNBOUND — rebind failed (${json.error || 'error'}). Retry the bind on the unbound row (your SKUs are still filled in).` });
       }
     } catch (e) {
+      console.log('[edit-debug] saveEdit CAUGHT', e); // TEMP DEBUG
       qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
       setExpandedOrder(null);
       setBindNotice({ type: 'error', msg: `Edit failed for order ${oid}: ${e instanceof Error ? e.message : 'error'} — check the row and retry.` });
