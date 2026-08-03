@@ -346,7 +346,7 @@ function RankedSkuPicker({
 // The order ID is the ground-truth bridge to TikTok Seller Center's order search. We surface a
 // copy button so an operator can paste it there directly. (The generic "Seller Center" link was
 // removed — it only opened the orders list, which wasn't worth the width; copy is the useful part.)
-function OrderReceiptLink({ orderId }: { orderId: string }) {
+function OrderIdWithCopy({ orderId }: { orderId: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -940,7 +940,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                 {recon.unbound.map((u) => (
                   <div key={u.order_id} className="flex flex-wrap items-start gap-3 text-sm border-t border-tt-red/20 pt-3 first:border-0 first:pt-0">
                     <div className="min-w-[12rem]">
-                      <div><span className="font-mono text-tt-muted">{u.order_id}</span> <span className="text-tt-text">@{u.buyer || '—'}</span></div>
+                      <div className="flex flex-wrap items-center gap-x-2"><OrderIdWithCopy orderId={u.order_id} /> <span className="text-tt-text">@{u.buyer || '—'}</span></div>
                       <div className="text-xs text-tt-muted">
                         {u.won_price_cents == null ? '—' : `$${(u.won_price_cents / 100).toFixed(2)}`} · seller_sku hint: <span className="font-mono text-tt-text">{u.seller_sku || '—'}</span>
                       </div>
@@ -1204,7 +1204,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                                 copy button — no view-switch to look one up. Kept text-xs so the
                                 already-wide table doesn't wrap on the pack screen. */}
                             {it.order_id ? (
-                              <span className="text-xs"><OrderReceiptLink orderId={it.order_id} /></span>
+                              <span className="text-xs"><OrderIdWithCopy orderId={it.order_id} /></span>
                             ) : null}
                           </>
                         ) : it.skus.length === 0 ? (
@@ -1276,7 +1276,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                           <span>Sale time: <span className="text-tt-text">{fmtDate(it.logged_at || null)}</span></span>
                           <span>Price: <span className="text-tt-text">{money(it.won_price_cents)}</span></span>
                           <span>Buyer: <span className="text-tt-text">@{it.buyer_handle || '—'}</span></span>
-                          <span>Order: <OrderReceiptLink orderId={it.order_id} /></span>
+                          <span>Order: <OrderIdWithCopy orderId={it.order_id} /></span>
                           {lot != null ? <span>Lot: <span className="font-mono text-tt-text">{lot}</span></span> : null}
                         </div>
                         {/* Flanking bound lots — the strongest hint. Nearest bound lot each side (not
