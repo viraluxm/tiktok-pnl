@@ -131,6 +131,8 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
   // can change. The kiosk never calls it. Manual shifts ignore confirmation — pay unchanged.
   const confirmShift = useMutation({
     mutationFn: async ({ id, confirmed }: { id: string; confirmed: boolean }) => {
+      // rpc-grants: lensed_confirm_time_clock_shift, lensed_unconfirm_time_clock_shift
+      // (dynamic .rpc(fn) — annotation lets check-rpc-grants.mjs verify both grants.)
       const fn = confirmed
         ? 'lensed_confirm_time_clock_shift'
         : 'lensed_unconfirm_time_clock_shift';

@@ -1,0 +1,27 @@
+name: RPC grant check
+
+# Fails a PR if any RPC the app calls from a user session lacks EXECUTE for `authenticated`
+# (the "built + deployed + silently 500s on first use" class). Checks against the LIVE database
+# via the Management API, so it also catches grants applied outside migrations.
+#
+# Requires repo secrets:
+#   SUPABASE_PROJECT_REF   — the project ref (e.g. dvucodtdojumvplmgjeu)
+#   SUPABASE_ACCESS_TOKEN  — a Supabase Management API PAT (read-only DB query is enough)
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  rpc-grants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Verify every app-callable RPC is granted to authenticated
+        run: node scripts/check-rpc-grants.mjs
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
