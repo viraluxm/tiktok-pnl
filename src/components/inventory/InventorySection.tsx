@@ -10,7 +10,10 @@ import {
   useDeleteSku,
   useAddBatch,
   useSettleBatch,
+  useEditBatch,
+  useDeleteBatch,
   type InventorySku,
+  type SkuBatch,
 } from '@/hooks/useInventorySkus';
 import { code128ToSvg } from '@/lib/barcode/code128';
 import MobileDataCard from '@/components/ui/MobileDataCard';
@@ -21,6 +24,20 @@ import {
 } from '@/lib/inventory/filterSkus';
 
 const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
+
+// Why a cost layer can't be physically deleted (null ⇒ deletable). Mirrors the
+// lensed_delete_batch RPC's check ORDER (untouched-ness first, then last-layer) so
+// the disabled-button tooltip matches what the server would actually return. The
+// server enforces the rule regardless of what the UI shows.
+function batchDeleteBlockReason(b: SkuBatch, totalLayers: number): string | null {
+  if (b.qty_added == null || b.qty_remaining !== b.qty_added) {
+    return 'This layer has unverified or existing sales history and cannot be deleted. Edit its remaining quantity to 0 instead.';
+  }
+  if (totalLayers <= 1) {
+    return "This is the SKU's only cost layer and can't be deleted. Add another layer first, or edit its remaining quantity instead.";
+  }
+  return null;
+}
 
 // FIXED category taxonomy (CHECK-enforced in the DB). null = untagged.
 type Category = 'squish' | 'electronics';
@@ -188,11 +205,18 @@ export default function InventorySection() {
   const deleteSku = useDeleteSku();
   const addBatch = useAddBatch();
   const settleBatch = useSettleBatch();
+  const editBatch = useEditBatch();
+  const deleteBatch = useDeleteBatch();
 
   // Add-batch form inputs (lives in the Edit panel; the SKU is `editingId`).
   const [batchQty, setBatchQty] = useState('');
   const [batchCost, setBatchCost] = useState('');
   const [batchErr, setBatchErr] = useState<string | null>(null);
+  // Per-layer edit/delete state (one layer at a time within the open SKU).
+  const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
+  const [editBatchQty, setEditBatchQty] = useState('');   // remaining quantity
+  const [editBatchCost, setEditBatchCost] = useState(''); // unit cost, dollars
+  const [confirmDeleteBatchId, setConfirmDeleteBatchId] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -303,6 +327,7 @@ export default function InventorySection() {
     setError(null);
     clearImageState();
     setBatchQty(''); setBatchCost(''); setBatchErr(null);
+    setEditingBatchId(null); setEditBatchQty(''); setEditBatchCost(''); setConfirmDeleteBatchId(null);
     setExistingThumbUrl(s.thumbnail_url);
     setEditingId(s.id);
     setForm({
@@ -329,6 +354,7 @@ export default function InventorySection() {
     setForm(EMPTY);
     setError(null);
     setBatchQty(''); setBatchCost(''); setBatchErr(null);
+    setEditingBatchId(null); setEditBatchQty(''); setEditBatchCost(''); setConfirmDeleteBatchId(null);
   }
 
   async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
@@ -429,6 +455,54 @@ export default function InventorySection() {
       await settleBatch.mutateAsync({ skuId, batchId });
     } catch (e) {
       setBatchErr(e instanceof Error ? e.message : 'Failed to settle batch');
+    }
+  }
+
+  // Enter inline edit for one layer: prefill remaining qty + unit cost (dollars).
+  function openEditBatch(b: SkuBatch) {
+    setConfirmDeleteBatchId(null);
+    setBatchErr(null);
+    setEditingBatchId(b.id);
+    setEditBatchQty(String(b.qty_remaining));
+    setEditBatchCost(b.unit_cost_cents != null ? (b.unit_cost_cents / 100).toFixed(2) : '');
+  }
+
+  function cancelEditBatch() {
+    setEditingBatchId(null);
+    setEditBatchQty(''); setEditBatchCost(''); setBatchErr(null);
+  }
+
+  // Save a layer edit as ONE mutation. Remaining qty: whole number ≥ 0 (an exact
+  // correction, no truncation). Unit cost: blank ⇒ null (unknown), else ≥ 0.
+  async function submitEditBatch(skuId: string, batchId: string) {
+    const qtyNum = Number(editBatchQty);
+    if (editBatchQty.trim() === '' || !Number.isInteger(qtyNum) || qtyNum < 0) {
+      setBatchErr('Remaining quantity must be a whole number of at least 0');
+      return;
+    }
+    const cost = editBatchCost.trim() === '' ? null : Math.round(Number(editBatchCost) * 100);
+    if (cost != null && (!Number.isFinite(cost) || cost < 0)) {
+      setBatchErr('Unit cost must be empty or an amount of at least 0');
+      return;
+    }
+    setBatchErr(null);
+    try {
+      await editBatch.mutateAsync({ skuId, batchId, qty_remaining: qtyNum, unit_cost_cents: cost });
+      setEditingBatchId(null);
+      setEditBatchQty(''); setEditBatchCost('');
+    } catch (e) {
+      setBatchErr(e instanceof Error ? e.message : 'Failed to edit batch');
+    }
+  }
+
+  async function onDeleteBatch(skuId: string, batchId: string) {
+    setBatchErr(null);
+    try {
+      await deleteBatch.mutateAsync({ skuId, batchId });
+      setConfirmDeleteBatchId(null);
+    } catch (e) {
+      setBatchErr(e instanceof Error ? e.message : 'Failed to delete batch');
+      setConfirmDeleteBatchId(null);
     }
   }
 
@@ -711,32 +785,126 @@ export default function InventorySection() {
           {/* Cost layers (FIFO) — the home for managing a SKU's stock + cost. */}
           {editingSku && (
             <div className="mt-5 rounded-xl border border-tt-border bg-tt-bg/40 p-4">
-              <div className="flex items-baseline justify-between mb-2">
+              <div className="flex items-baseline justify-between gap-3 mb-2">
                 <span className="text-xs font-semibold text-tt-text">Cost layers (FIFO)</span>
-                <span className="text-[11px] text-tt-muted">a sale draws fully from the oldest layer that can cover it · total = Σ layers = {editingSku.qty_on_hand ?? 0}</span>
+                <span className="text-[11px] text-tt-muted text-right">Remaining quantity @ unit cost · a sale draws fully from the oldest layer that can cover it · total = Σ layers = {editingSku.qty_on_hand ?? 0}</span>
               </div>
               <div className="space-y-1.5 mb-3">
                 {editingSku.batches.length === 0 ? (
                   <div className="text-xs text-tt-muted">No layers.</div>
                 ) : (
-                  editingSku.batches.map((b) => (
-                    <div key={b.id} className="flex items-center gap-3 text-sm">
-                      <span className="text-tt-muted tabular-nums w-8">#{b.sequence}</span>
-                      <span className={`tabular-nums w-16 text-right ${b.qty_remaining < 0 ? 'text-tt-red font-semibold' : 'text-tt-text'}`}>{b.qty_remaining}</span>
-                      <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>
-                      {b.qty_remaining < 0 && (
-                        <button
-                          type="button"
-                          onClick={() => onSettle(editingSku.id, b.id)}
-                          disabled={settleBatch.isPending}
-                          className="ml-1 px-2 py-0.5 rounded-md border border-tt-red/50 text-tt-red text-xs font-medium cursor-pointer hover:bg-tt-red/10 disabled:opacity-50"
-                          title={`Add ${-b.qty_remaining} unit(s) to bring this layer to 0 — quantity only, never changes a recorded sale cost`}
-                        >
-                          Settle ({-b.qty_remaining} → 0)
-                        </button>
-                      )}
-                    </div>
-                  ))
+                  editingSku.batches.map((b) => {
+                    const isEditing = editingBatchId === b.id;
+                    const isConfirmingDelete = confirmDeleteBatchId === b.id;
+                    const delReason = batchDeleteBlockReason(b, editingSku.batches.length);
+                    // Any in-flight layer mutation disables the other rows' actions
+                    // (prevents overlapping/double submissions on shared stock).
+                    const mutating = editBatch.isPending || deleteBatch.isPending || settleBatch.isPending;
+                    const qtyClass = `tabular-nums ${b.qty_remaining < 0 ? 'text-tt-red font-semibold' : 'text-tt-text'}`;
+                    return (
+                      <div key={b.id} className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="text-tt-muted tabular-nums w-8 shrink-0">#{b.sequence}</span>
+                        {isEditing ? (
+                          <>
+                            <label className="flex items-center gap-1">
+                              <span className="text-[10px] uppercase tracking-wide text-tt-muted">Remaining quantity</span>
+                              <input
+                                type="number" min={0} step={1} value={editBatchQty}
+                                onChange={(e) => setEditBatchQty(e.target.value)}
+                                aria-label="Remaining quantity"
+                                className="w-20 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
+                              />
+                            </label>
+                            <label className="flex items-center gap-1">
+                              <span className="text-[10px] uppercase tracking-wide text-tt-muted">@ $</span>
+                              <input
+                                inputMode="decimal" placeholder="cost" value={editBatchCost}
+                                onChange={(e) => setEditBatchCost(e.target.value)}
+                                aria-label="Unit cost in dollars"
+                                className="w-24 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => submitEditBatch(editingSku.id, b.id)}
+                              disabled={editBatch.isPending}
+                              className="px-2.5 py-1 rounded-md bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                            >
+                              {editBatch.isPending ? 'Saving…' : 'Save'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEditBatch}
+                              disabled={editBatch.isPending}
+                              className="px-2.5 py-1 rounded-md border border-tt-border text-tt-muted text-xs cursor-pointer hover:bg-tt-card-hover disabled:opacity-40"
+                            >
+                              Cancel
+                            </button>
+                            <span className="w-full text-[10px] text-tt-muted">
+                              Cost changes affect future sales only. Previously recorded COGS will not change.
+                            </span>
+                          </>
+                        ) : isConfirmingDelete ? (
+                          <>
+                            <span className={`${qtyClass} w-16 text-right`}>{b.qty_remaining}</span>
+                            <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>
+                            <span className="ml-auto text-[11px] text-tt-muted">Delete this layer?</span>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteBatch(editingSku.id, b.id)}
+                              disabled={deleteBatch.isPending}
+                              className="px-2.5 py-1 rounded-md border border-tt-red/50 text-tt-red text-xs font-semibold cursor-pointer hover:bg-tt-red/10 disabled:opacity-50"
+                            >
+                              {deleteBatch.isPending ? 'Deleting…' : 'Yes, delete'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteBatchId(null)}
+                              disabled={deleteBatch.isPending}
+                              className="px-2.5 py-1 rounded-md border border-tt-border text-tt-muted text-xs cursor-pointer hover:bg-tt-card-hover disabled:opacity-50"
+                            >
+                              No
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <span className={`${qtyClass} w-16 text-right`}>{b.qty_remaining}</span>
+                            <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>
+                            <div className="ml-auto flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => openEditBatch(b)}
+                                disabled={mutating}
+                                className="px-2.5 py-1 rounded-md border border-tt-border text-tt-cyan text-xs font-medium cursor-pointer hover:bg-tt-card-hover disabled:opacity-40"
+                              >
+                                Edit
+                              </button>
+                              {b.qty_remaining < 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => onSettle(editingSku.id, b.id)}
+                                  disabled={settleBatch.isPending}
+                                  className="px-2.5 py-1 rounded-md border border-tt-red/50 text-tt-red text-xs font-medium cursor-pointer hover:bg-tt-red/10 disabled:opacity-50"
+                                  title={`Add ${-b.qty_remaining} unit(s) to bring this layer to 0 — quantity only, never changes a recorded sale cost`}
+                                >
+                                  Settle ({-b.qty_remaining} → 0)
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => { setBatchErr(null); setConfirmDeleteBatchId(b.id); }}
+                                disabled={!!delReason || mutating}
+                                title={delReason ?? 'Delete this cost layer'}
+                                className="px-2.5 py-1 rounded-md border border-tt-border text-tt-muted text-xs font-medium cursor-pointer hover:bg-tt-card-hover hover:text-tt-red disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-tt-muted"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
               <div className="flex flex-wrap items-end gap-2 border-t border-tt-border pt-3">

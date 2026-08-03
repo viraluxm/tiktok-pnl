@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { buildSeedBatchRow } from '@/lib/inventory/batchMutations';
 
 export const dynamic = 'force-dynamic';
 
@@ -86,7 +87,7 @@ export async function GET() {
   // breakdown and the bind flow can detect Option-X oversell client-side.
   const { data: batchRows } = await supabase
     .from('sku_batches')
-    .select('id, sku_id, sequence, qty_remaining, unit_cost_cents')
+    .select('id, sku_id, sequence, qty_remaining, unit_cost_cents, qty_added')
     .order('sequence', { ascending: true });
   const batchesBySku = new Map<string, Record<string, unknown>[]>();
   for (const b of batchRows ?? []) {
@@ -95,6 +96,9 @@ export async function GET() {
     batchesBySku.get(k)!.push({
       id: b.id, sequence: b.sequence,
       qty_remaining: b.qty_remaining, unit_cost_cents: b.unit_cost_cents,
+      // qty_added: original inserted qty (NULL for legacy layers). The UI uses it
+      // ONLY to decide whether Delete is offered; the RPC enforces the rule.
+      qty_added: b.qty_added,
     });
   }
   return NextResponse.json({
@@ -185,13 +189,14 @@ export async function POST(req: Request) {
   // qty @ cost (quick-add sends qty 0 → a 0-qty layer that goes negative on the
   // first oversell bind). On failure, compensate by removing the orphan SKU so a
   // SKU never exists without a batch.
-  const { data: firstBatch, error: batchErr } = await supabase.from('sku_batches').insert({
-    user_id: user.id,
-    sku_id: created.id as string,
-    qty_remaining: (created.qty_on_hand as number | null) ?? 0,
-    unit_cost_cents: (created.unit_cost_cents as number | null) ?? null,
-    sequence: 1,
-  }).select('id, sequence, qty_remaining, unit_cost_cents').single();
+  const { data: firstBatch, error: batchErr } = await supabase.from('sku_batches').insert(
+    buildSeedBatchRow({
+      userId: user.id,
+      skuId: created.id as string,
+      qtyOnHand: (created.qty_on_hand as number | null) ?? null,
+      unitCostCents: (created.unit_cost_cents as number | null) ?? null,
+    }),
+  ).select('id, sequence, qty_remaining, unit_cost_cents, qty_added').single();
   if (batchErr || !firstBatch) {
     await supabase.from('inventory_skus').delete().eq('id', created.id as string).eq('user_id', user.id);
     console.error('[inventory/skus] initial batch insert failed:', batchErr);
