@@ -658,7 +658,6 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // lot adjacency instead, so the host confirms rather than inherits a bad guess.
   function toggleExpand(it: AuctionItem) {
     const oid = it.order_id ?? '';
-    console.log('[edit-debug] toggleExpand', { oid, unbound: it.unbound, skusLen: it.skus?.length, alreadyOpen: expandedOrder === oid, existingLines: lines[oid] }); // TEMP DEBUG
     if (!oid) return;
     if (expandedOrder === oid) { setExpandedOrder(null); return; }
     // Seed the editor: a BOUND row opens pre-populated with its current SKUs/qtys (edit =
@@ -697,7 +696,6 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // leaves the row UNBOUND and says so — never a silent half-state.
   async function saveEdit(it: AuctionItem, editedLines: { sku_id: string; qty: number }[]) {
     const oid = it.order_id ?? '';
-    console.log('[edit-debug] saveEdit CALLED', { oid, editedLines, itSkus: it.skus, linesState: lines[oid] }); // TEMP DEBUG
     if (!oid) return;
     const dropLines = (o: string) => setLines((l) => { const n = { ...l }; delete n[o]; return n; });
     setBindNotice(null);
@@ -709,15 +707,12 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
       const next = collapseLines(editedLines ?? []);
       const current = collapseLines((it.skus ?? []).map((s) => ({ sku_id: String(s.inventory_sku_id), qty: s.qty })));
       const unchanged = next.length === current.length && next.every((n, i) => n.sku_id === current[i].sku_id && n.qty === current[i].qty);
-      console.log('[edit-debug] saveEdit compare', { next, current, unchanged }); // TEMP DEBUG
       if (unchanged) { // (3) no-op — but SAY so; never silently close
         setExpandedOrder(null);
         setBindNotice({ type: 'error', msg: `No changes to save for order ${oid} — the lines already match the current bind.` });
         return;
       }
-      console.log('[edit-debug] calling unbind', { oid }); // TEMP DEBUG
-      const unbindRes = await unbind.mutateAsync(oid); // restock ALL current lines first
-      console.log('[edit-debug] unbind returned', unbindRes); // TEMP DEBUG
+      await unbind.mutateAsync(oid); // restock ALL current lines first
       if (next.length === 0) {
         // (4) zero lines = full unbind, not a rebind-with-nothing.
         qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
@@ -726,13 +721,11 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         setBindNotice({ type: 'success', msg: `Order ${oid} unbound — all SKUs restocked; row returned to unbound.` });
         return;
       }
-      console.log('[edit-debug] calling rebind', { oid, lines: next }); // TEMP DEBUG
       const res = await fetch(`/api/live/sessions/${session.id}/bind`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ order_id: oid, lines: next, allow_negative: false }),
       });
       const json = (await res.json().catch(() => ({}))) as { error?: string };
-      console.log('[edit-debug] rebind returned', { status: res.status, ok: res.ok, json }); // TEMP DEBUG
       qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
       qc.invalidateQueries({ queryKey: ['inventory-skus'] });
       setExpandedOrder(null);
@@ -745,7 +738,6 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         setBindNotice({ type: 'error', msg: `Order ${oid} is now UNBOUND — rebind failed (${json.error || 'error'}). Retry the bind on the unbound row (your SKUs are still filled in).` });
       }
     } catch (e) {
-      console.log('[edit-debug] saveEdit CAUGHT', e); // TEMP DEBUG
       qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
       setExpandedOrder(null);
       setBindNotice({ type: 'error', msg: `Edit failed for order ${oid}: ${e instanceof Error ? e.message : 'error'} — check the row and retry.` });
@@ -764,12 +756,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     setLines((l) => ({ ...l, [orderId]: [...(l[orderId] ?? []), { sku_id: '', qty: 1 }] }));
   }
   function removeLine(orderId: string, idx: number) {
-    setLines((l) => {
-      const before = l[orderId] ?? [];
-      const after = before.filter((_, i) => i !== idx);
-      console.log('[edit-debug] removeLine', { orderId, idx, before, after }); // TEMP DEBUG
-      return { ...l, [orderId]: after };
-    });
+    setLines((l) => ({ ...l, [orderId]: (l[orderId] ?? []).filter((_, i) => i !== idx) }));
   }
 
   // Post-show reconcile: flip stuck paid orders + compute revenue + detect unbound orders.
@@ -857,7 +844,6 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // A bind is a real sale that already happened, so insufficient stock is a
   // miscount, not a blocker: confirm, then allow inventory to go negative.
   async function bindOne(u: UnboundOrder) {
-    console.log('[edit-debug] bindOne CALLED (unbound/bind path — NOT the edit path)', { order_id: u.order_id }); // TEMP DEBUG
     const orderLines = (lines[u.order_id] ?? []).filter((x) => x.sku_id);
     if (orderLines.length === 0) return;
     setBindNotice(null);
