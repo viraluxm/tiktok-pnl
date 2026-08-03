@@ -660,7 +660,14 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     const oid = it.order_id ?? '';
     if (!oid) return;
     if (expandedOrder === oid) { setExpandedOrder(null); return; }
-    if (!lines[oid]) setLinesFor(oid, [{ sku_id: '', qty: 1 }]);
+    // Seed the editor: a BOUND row opens pre-populated with its current SKUs/qtys (edit =
+    // unbind→rebind under the hood); an UNBOUND row opens with one blank line (fresh bind).
+    if (!lines[oid]) {
+      const seed = (!it.unbound && it.skus.length > 0)
+        ? it.skus.map((s) => ({ sku_id: String(s.inventory_sku_id), qty: Math.max(1, s.qty || 1) }))
+        : [{ sku_id: '', qty: 1 }];
+      setLinesFor(oid, seed);
+    }
     setExpandedOrder(oid);
   }
   async function doUnbind(orderId: string) {
@@ -673,6 +680,62 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     } finally {
       setUnbindingId(null);
       setUnbindConfirm(null);
+    }
+  }
+
+  // Collapse lines by SKU (sum qty), sorted — for the "did anything change?" no-op check.
+  function collapseLines(arr: { sku_id: string; qty: number }[]) {
+    const m = new Map<string, number>();
+    for (const l of arr) if (l.sku_id) m.set(l.sku_id, (m.get(l.sku_id) ?? 0) + Math.max(1, l.qty || 1));
+    return [...m.entries()].map(([sku_id, qty]) => ({ sku_id, qty })).sort((a, b) => a.sku_id.localeCompare(b.sku_id));
+  }
+
+  // Edit a BOUND row's SKUs. No partial-edit RPC exists, so this is unbind→rebind under one
+  // action, which keeps FIFO exact (unbind restocks every current line; rebind draws the new
+  // set). Guards: (3) unchanged → no-op; (4) zero lines → full unbind; (2) a rebind failure
+  // leaves the row UNBOUND and says so — never a silent half-state.
+  async function saveEdit(it: AuctionItem) {
+    const oid = it.order_id ?? '';
+    if (!oid) return;
+    const next = collapseLines(lines[oid] ?? []);
+    const current = collapseLines(it.skus.map((s) => ({ sku_id: String(s.inventory_sku_id), qty: s.qty })));
+    const unchanged = next.length === current.length && next.every((n, i) => n.sku_id === current[i].sku_id && n.qty === current[i].qty);
+    if (unchanged) { setExpandedOrder(null); return; } // (3) nothing to do
+    const dropLines = (o: string) => setLines((l) => { const n = { ...l }; delete n[o]; return n; });
+    setBindingId(oid);
+    setBindNotice(null);
+    try {
+      await unbind.mutateAsync(oid); // restock ALL current lines first
+      if (next.length === 0) {
+        // (4) zero lines = full unbind, not a rebind-with-nothing.
+        qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
+        qc.invalidateQueries({ queryKey: ['inventory-skus'] });
+        dropLines(oid); setExpandedOrder(null);
+        setBindNotice({ type: 'success', msg: `Order ${oid} unbound — all SKUs restocked; row returned to unbound.` });
+        return;
+      }
+      const res = await fetch(`/api/live/sessions/${session.id}/bind`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: oid, lines: next, allow_negative: false }),
+      });
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
+      qc.invalidateQueries({ queryKey: ['inventory-skus'] });
+      setExpandedOrder(null);
+      if (res.ok) {
+        const label = next.map((n) => { const s = allSkus.find((x) => x.id === n.sku_id); return s ? `#${s.sku_number}` : ''; }).filter(Boolean).join(', ');
+        dropLines(oid); // clear so a reopen re-seeds from the fresh bind
+        setBindNotice({ type: 'success', msg: `Order ${oid} updated — re-bound to ${label}.` });
+      } else {
+        // (2) half-state made explicit. Row is now UNBOUND; keep `lines` so the retry is pre-filled.
+        setBindNotice({ type: 'error', msg: `Order ${oid} is now UNBOUND — rebind failed (${json.error || 'error'}). Retry the bind on the unbound row (your SKUs are still filled in).` });
+      }
+    } catch (e) {
+      qc.invalidateQueries({ queryKey: ['auction-board', session.id] });
+      setExpandedOrder(null);
+      setBindNotice({ type: 'error', msg: `Edit failed for order ${oid}: ${e instanceof Error ? e.message : 'error'} — check the row and retry.` });
+    } finally {
+      setBindingId(null);
     }
   }
 
@@ -1166,7 +1229,9 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                   if (it.net_payout_cents != null) profit = it.net_payout_cents - cost;
                   else if (won != null) profit = won - cost;
                 }
-                const expanded = isUnbound && expandedOrder === it.order_id;
+                // Editor opens for unbound rows (fresh bind) AND bound-editable rows (edit).
+                const expanded = expandedOrder === it.order_id && (isUnbound || canUnbind);
+                const isEditing = expanded && !isUnbound; // bound row → unbind→rebind on save
                 const orderLines = it.order_id ? (lines[it.order_id] ?? []) : [];
                 // Neighbour hints only matter for the expanded bind editor — compute lazily.
                 // Rank by lot adjacency; fall back to time proximity when the row has no numeric
@@ -1219,11 +1284,20 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                           ))
                         )}
                         {canUnbind && (
-                          <button
-                            onClick={() => setUnbindConfirm({ order_id: it.order_id!, label: it.skus.map((s) => `#${s.sku_number}`).join(', ') })}
-                            disabled={unbindingId === it.order_id}
-                            className="mt-0.5 self-start text-[11px] text-tt-muted hover:text-tt-red cursor-pointer disabled:opacity-50"
-                          >{unbindingId === it.order_id ? 'Unbinding…' : 'Unbind / change SKU'}</button>
+                          // Two intents, kept distinct: "Edit SKUs" opens the pre-populated editor
+                          // (unbind→rebind on save); "Unbind" is the standalone full-unbind confirm.
+                          <div className="mt-0.5 flex items-center gap-2 text-[11px]">
+                            <button
+                              onClick={() => toggleExpand(it)}
+                              className="self-start text-tt-cyan hover:underline cursor-pointer"
+                            >{expanded ? 'Close editor' : 'Edit SKUs'}</button>
+                            <span className="text-tt-border">·</span>
+                            <button
+                              onClick={() => setUnbindConfirm({ order_id: it.order_id!, label: it.skus.map((s) => `#${s.sku_number}`).join(', ') })}
+                              disabled={unbindingId === it.order_id}
+                              className="self-start text-tt-muted hover:text-tt-red cursor-pointer disabled:opacity-50"
+                            >{unbindingId === it.order_id ? 'Unbinding…' : 'Unbind'}</button>
+                          </div>
                         )}
                       </div>
                     </td>
@@ -1333,11 +1407,20 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                         </div>
                         <div className="mt-3 flex items-center gap-3">
                           <button onClick={() => addLine(it.order_id!)} className="text-xs text-tt-cyan cursor-pointer hover:underline">+ add SKU line</button>
-                          <button
-                            onClick={() => bindOne(asUnbound(it))}
-                            disabled={pickedCount === 0 || bindingId === it.order_id}
-                            className="px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
-                          >{bindingId === it.order_id ? 'Binding…' : `Bind ${pickedCount} SKU${pickedCount === 1 ? '' : 's'}`}</button>
+                          {isEditing ? (
+                            // Edit: save via unbind→rebind. Enabled even at 0 lines (0 = remove bind).
+                            <button
+                              onClick={() => saveEdit(it)}
+                              disabled={bindingId === it.order_id}
+                              className="px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                            >{bindingId === it.order_id ? 'Saving…' : (pickedCount === 0 ? 'Save (removes bind)' : `Save ${pickedCount} SKU${pickedCount === 1 ? '' : 's'}`)}</button>
+                          ) : (
+                            <button
+                              onClick={() => bindOne(asUnbound(it))}
+                              disabled={pickedCount === 0 || bindingId === it.order_id}
+                              className="px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                            >{bindingId === it.order_id ? 'Binding…' : `Bind ${pickedCount} SKU${pickedCount === 1 ? '' : 's'}`}</button>
+                          )}
                         </div>
                       </td>
                     </tr>
