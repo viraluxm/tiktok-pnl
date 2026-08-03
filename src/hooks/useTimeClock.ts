@@ -25,6 +25,9 @@ export interface PunchResult {
 // Maps each kiosk action to its server RPC (defined in migration 071). These RPCs are the
 // ONLY write path: the browser sends just the employee id — never a user_id, timestamp,
 // source, or confirmation state (those are all server-generated).
+// rpc-grants: lensed_clock_in, lensed_start_break, lensed_end_break, lensed_clock_out
+// (dynamic .rpc(RPC_BY_ACTION[action]) below — this annotation lets check-rpc-grants.mjs
+//  verify EXECUTE grants for every function this map can dispatch to.)
 const RPC_BY_ACTION: Record<TimeClockAction, string> = {
   clock_in: 'lensed_clock_in',
   start_break: 'lensed_start_break',
