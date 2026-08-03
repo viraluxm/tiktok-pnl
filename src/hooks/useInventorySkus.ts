@@ -8,6 +8,10 @@ export interface SkuBatch {
   sequence: number;
   qty_remaining: number; // may be negative (oversell)
   unit_cost_cents: number | null;
+  // Original inserted qty. NULL for legacy layers whose original qty was never
+  // recorded. Used ONLY to decide whether Delete is offered (untouched ⇔
+  // qty_remaining === qty_added); the server RPC enforces the rule regardless.
+  qty_added: number | null;
 }
 
 export interface InventorySku {
@@ -197,6 +201,41 @@ export function useSettleBatch() {
     mutationFn: async ({ skuId, batchId }: { skuId: string; batchId: string }) => {
       const res = await fetch(`/api/inventory/skus/${skuId}/batches/${batchId}/settle`, { method: 'POST' });
       if (!res.ok) throw new Error(await readError(res, 'Failed to settle batch'));
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+// Edit ONE cost layer's remaining qty and/or unit cost (current-inventory
+// correction). The server keeps qty_on_hand in lockstep and never rewrites recorded
+// sale COGS — a cost change affects future sales only. Send both current values.
+export function useEditBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ skuId, batchId, qty_remaining, unit_cost_cents }: {
+      skuId: string; batchId: string; qty_remaining: number; unit_cost_cents: number | null;
+    }) => {
+      const res = await fetch(`/api/inventory/skus/${skuId}/batches/${batchId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ qty_remaining, unit_cost_cents }),
+      });
+      if (!res.ok) throw new Error(await readError(res, 'Failed to edit batch'));
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+// Physically delete ONE untouched cost layer. The server refuses legacy/consumed
+// layers and the SKU's last layer, and subtracts the removed qty from qty_on_hand.
+export function useDeleteBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ skuId, batchId }: { skuId: string; batchId: string }) => {
+      const res = await fetch(`/api/inventory/skus/${skuId}/batches/${batchId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(await readError(res, 'Failed to delete batch'));
       return res.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
