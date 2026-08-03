@@ -26,8 +26,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const { data, error } = await supabase.rpc('lensed_unbind', { p_order_id: orderId });
   if (error) {
+    // Surface the real reason (internal tool) — a generic "Failed to unbind" hid a multi-SKU
+    // constraint 500 for days. Callers render this message.
     console.error('[live/unbind] rpc error:', error.code, error.message);
-    return NextResponse.json({ error: 'Failed to unbind' }, { status: 500 });
+    return NextResponse.json({ error: `Unbind failed: ${error.message}`, code: error.code }, { status: 500 });
   }
   const row = Array.isArray(data) ? data[0] : data;
   return NextResponse.json({
