@@ -343,11 +343,9 @@ function RankedSkuPicker({
   );
 }
 
-// The order ID is the ground-truth bridge to TikTok Seller Center, where every order carries a
-// VIDEO RECEIPT of the item being auctioned — 100% certain vs a neighbour hint. A per-order deep
-// link isn't publicly constructible (Seller Center is a SPA with no documented order URL), so we
-// give the reliable path: copy the ID and open the orders list to paste it. If TikTok's per-order
-// URL is ever confirmed, swap the anchor's href for a true one-click deep link.
+// The order ID is the ground-truth bridge to TikTok Seller Center's order search. We surface a
+// copy button so an operator can paste it there directly. (The generic "Seller Center" link was
+// removed — it only opened the orders list, which wasn't worth the width; copy is the useful part.)
 function OrderReceiptLink({ orderId }: { orderId: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -360,13 +358,6 @@ function OrderReceiptLink({ orderId }: { orderId: string }) {
         className="text-tt-cyan hover:underline cursor-pointer"
         title="Copy the order ID to paste into Seller Center's order search"
       >{copied ? 'copied!' : 'copy'}</button>
-      <a
-        href="https://seller-us.tiktok.com/order"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-tt-cyan hover:underline"
-        title="Opens TikTok Seller Center orders — paste the copied ID to open the order and its video receipt"
-      >Seller Center ↗</a>
     </span>
   );
 }
@@ -1209,9 +1200,9 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                         {isUnbound ? (
                           <>
                             <span className="text-xs text-tt-yellow">Captured · no SKU bound</span>
-                            {/* Order ID for lookup (lot # in the # column is for sequence). Copy +
-                                Seller Center link mirror the red panel — no view-switch to look one up.
-                                Kept text-xs so the already-wide table doesn't wrap on the pack screen. */}
+                            {/* Order ID for lookup (lot # in the # column is for sequence), with a
+                                copy button — no view-switch to look one up. Kept text-xs so the
+                                already-wide table doesn't wrap on the pack screen. */}
                             {it.order_id ? (
                               <span className="text-xs"><OrderReceiptLink orderId={it.order_id} /></span>
                             ) : null}
