@@ -64,7 +64,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
 
   const { data: session } = await supabase
     .from('live_sessions')
-    .select('id, started_at, ended_at, store_id')
+    .select('id, started_at, ended_at, store_id, tiktok_live_id')
     .eq('id', id).eq('user_id', user.id).maybeSingle();
   if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
 
@@ -110,10 +110,13 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     }
   }
 
-  // Capture prices for the whole session window (one fetch; powers revenue + buyer).
+  // Capture prices for the whole session window (one fetch; powers revenue + buyer). Kept
+  // time-scoped so a bound-sold order's price ALWAYS resolves for the revenue sum (a capture
+  // with a null/odd room_id must never zero out this show's own revenue). room_id is selected
+  // here and applied ONLY to the unbound derivation (Part B) below.
   let capQ = supabase
     .from('capture_events')
-    .select('order_id, buyer_username, selling_price_cents')
+    .select('order_id, buyer_username, selling_price_cents, room_id')
     .eq('user_id', user.id)
     .gte('created_at', session.started_at);
   if (session.ended_at) capQ = capQ.lte('created_at', session.ended_at);
@@ -126,11 +129,20 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
 
   // ── PART B: unbound captured orders (excl junk '0'), confirmed real + PAID.
   // Flag = orders that have revenue but no cost (need inventory). Unpaid/cancelled excluded.
+  // ROOM-SCOPED (mirrors the board route): a capture belongs to THIS show only when its
+  // room_id = the session's tiktok_live_id. Without this, concurrent same-user lives (even on
+  // OTHER stores) leak into this list — measured 451 of 452 rows were other shows, and binding
+  // them misattributes COGS/revenue and risks a cross-session double-decrement. room_id uniquely
+  // identifies the show (and its store), so no separate capture_events.store_id filter is needed
+  // (that column is ~5% NULL and would drop legit captures). A roomless session (no
+  // tiktok_live_id) can't be attributed → no unbound rows surfaced (fail closed, not contaminated).
+  const thisRoom = session.tiktok_live_id ?? null;
   const boundSet = new Set(boundIds);
   const seen = new Set<string>();
   const unboundCaps = (caps ?? []).filter((c) => {
     const o = String(c.order_id);
     if (o === '0' || boundSet.has(o) || seen.has(o)) return false;
+    if (!thisRoom || String(c.room_id) !== thisRoom) return false; // only THIS show's captures
     seen.add(o); return true;
   });
   const ub = await fetchStatuses(token, cipher, unboundCaps.map((c) => String(c.order_id)), onExpired);
