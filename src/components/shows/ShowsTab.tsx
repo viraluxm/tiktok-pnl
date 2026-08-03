@@ -694,17 +694,24 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // action, which keeps FIFO exact (unbind restocks every current line; rebind draws the new
   // set). Guards: (3) unchanged → no-op; (4) zero lines → full unbind; (2) a rebind failure
   // leaves the row UNBOUND and says so — never a silent half-state.
-  async function saveEdit(it: AuctionItem) {
+  async function saveEdit(it: AuctionItem, editedLines: { sku_id: string; qty: number }[]) {
     const oid = it.order_id ?? '';
     if (!oid) return;
-    const next = collapseLines(lines[oid] ?? []);
-    const current = collapseLines(it.skus.map((s) => ({ sku_id: String(s.inventory_sku_id), qty: s.qty })));
-    const unchanged = next.length === current.length && next.every((n, i) => n.sku_id === current[i].sku_id && n.qty === current[i].qty);
-    if (unchanged) { setExpandedOrder(null); return; } // (3) nothing to do
     const dropLines = (o: string) => setLines((l) => { const n = { ...l }; delete n[o]; return n; });
-    setBindingId(oid);
     setBindNotice(null);
+    setBindingId(oid);
     try {
+      // Use the lines passed straight from the OPEN editor's own render — never a stale closure of
+      // `lines` (the #126 silent-no-op: the async guard could read pre-edit lines and wrongly
+      // conclude "unchanged"). Compute inside try so ANY error surfaces instead of a dead click.
+      const next = collapseLines(editedLines ?? []);
+      const current = collapseLines((it.skus ?? []).map((s) => ({ sku_id: String(s.inventory_sku_id), qty: s.qty })));
+      const unchanged = next.length === current.length && next.every((n, i) => n.sku_id === current[i].sku_id && n.qty === current[i].qty);
+      if (unchanged) { // (3) no-op — but SAY so; never silently close
+        setExpandedOrder(null);
+        setBindNotice({ type: 'error', msg: `No changes to save for order ${oid} — the lines already match the current bind.` });
+        return;
+      }
       await unbind.mutateAsync(oid); // restock ALL current lines first
       if (next.length === 0) {
         // (4) zero lines = full unbind, not a rebind-with-nothing.
@@ -1410,7 +1417,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                           {isEditing ? (
                             // Edit: save via unbind→rebind. Enabled even at 0 lines (0 = remove bind).
                             <button
-                              onClick={() => saveEdit(it)}
+                              onClick={() => saveEdit(it, orderLines)}
                               disabled={bindingId === it.order_id}
                               className="px-3 py-1.5 rounded-lg bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
                             >{bindingId === it.order_id ? 'Saving…' : (pickedCount === 0 ? 'Save (removes bind)' : `Save ${pickedCount} SKU${pickedCount === 1 ? '' : 's'}`)}</button>
