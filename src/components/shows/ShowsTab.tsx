@@ -1207,7 +1207,15 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                           <span className="min-w-0 truncate text-tt-text">{it.tiktok_title}</span>
                         ) : null}
                         {isUnbound ? (
-                          <span className="text-xs text-tt-yellow">Captured · no SKU bound</span>
+                          <>
+                            <span className="text-xs text-tt-yellow">Captured · no SKU bound</span>
+                            {/* Order ID for lookup (lot # in the # column is for sequence). Copy +
+                                Seller Center link mirror the red panel — no view-switch to look one up.
+                                Kept text-xs so the already-wide table doesn't wrap on the pack screen. */}
+                            {it.order_id ? (
+                              <span className="text-xs"><OrderReceiptLink orderId={it.order_id} /></span>
+                            ) : null}
+                          </>
                         ) : it.skus.length === 0 ? (
                           !it.tiktok_title ? <span className="text-tt-muted">—</span> : null
                         ) : (
