@@ -1,6 +1,7 @@
 'use client';
 
-import { Fragment, useMemo, useState, type KeyboardEvent } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLiveSessions, useShowCoverage, type LiveSession, type SessionStatus } from '@/hooks/useLiveSessions';
@@ -11,6 +12,7 @@ import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useIn
 import { useUser } from '@/hooks/useUser';
 import { useStores } from '@/hooks/useStores';
 import MobileDataCard from '@/components/ui/MobileDataCard';
+import SkuThumb from '@/components/common/SkuThumb';
 
 interface UnboundOrder {
   order_id: string;
@@ -246,7 +248,7 @@ function lotNeighbours(target: AuctionItem, items: AuctionItem[]): {
 // the same CATEGORY as those neighbour lots, and the full catalogue only once the operator
 // searches (fallback). Scanning a barcode (or typing it + Enter) selects the exact SKU.
 function RankedSkuPicker({
-  value, onChange, allSkus, primaryIds, nearbyIds, reasonById, categoryIds, disabled,
+  value, onChange, allSkus, primaryIds, nearbyIds, reasonById, categoryIds, disabled, onEnlarge,
 }: {
   value: string;
   onChange: (id: string) => void;
@@ -256,11 +258,19 @@ function RankedSkuPicker({
   reasonById?: Map<string, string>;
   categoryIds?: Set<string>;
   disabled?: boolean;
+  // Opens the shared bind-editor lightbox. `restore` is called on close so focus returns to THIS
+  // picker's search input (barcode scans land where they should after enlarging a photo).
+  onEnlarge?: (url: string, label: string | undefined, restore?: () => void) => void;
 }) {
   const [q, setQ] = useState('');
   const [scanMsg, setScanMsg] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const byId = useMemo(() => new Map(allSkus.map((s) => [s.id, s])), [allSkus]);
   const selected = value ? byId.get(value) ?? null : null;
+  // Bridge SkuThumb's (url, label) signature to the lifted lightbox, injecting the focus-restore.
+  const enlarge = onEnlarge
+    ? (url: string, label?: string) => onEnlarge(url, label, () => inputRef.current?.focus())
+    : undefined;
 
   const query = q.trim().toLowerCase();
   const match = (s: InventorySku) =>
@@ -299,11 +309,13 @@ function RankedSkuPicker({
     <div className="min-w-[15rem]">
       {selected && (
         <div className="flex items-center gap-2 mb-1 text-xs">
+          <SkuThumb url={selected.thumbnail_url} onEnlarge={enlarge} enlargeLabel={`#${selected.sku_number} ${selected.title || 'Untitled'}`} />
           <span><span className="font-mono text-tt-cyan">#{selected.sku_number}</span> {selected.title || 'Untitled'}</span>
           <button onClick={() => onChange('')} disabled={disabled} className="text-tt-muted hover:text-tt-red cursor-pointer">change</button>
         </div>
       )}
       <input
+        ref={inputRef}
         value={q}
         onChange={(e) => { setQ(e.target.value); setScanMsg(null); }}
         onKeyDown={onKeyDown}
@@ -319,20 +331,28 @@ function RankedSkuPicker({
               <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-tt-muted bg-tt-card sticky top-0">{g.label}</div>
               {g.skus.map((s) => {
                 const reason = g.key === 'nearby' ? reasonById?.get(s.id) : undefined;
+                // Row is a plain div so the thumbnail (its own <button>) is a SIBLING of the
+                // select button, never nested inside it. The select button covers only the
+                // text + qty — clicking the photo enlarges, it does not bind.
                 return (
-                  <button
+                  <div
                     key={s.id}
-                    onClick={() => { onChange(s.id); setQ(''); }}
-                    disabled={disabled}
-                    className={`flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-xs cursor-pointer hover:bg-tt-card-hover ${s.id === value ? 'bg-tt-card-hover' : ''}`}
+                    className={`flex w-full items-center gap-2 px-2 py-1 text-xs hover:bg-tt-card-hover ${s.id === value ? 'bg-tt-card-hover' : ''}`}
                   >
-                    <span className="min-w-0 truncate">
-                      <span className="truncate"><span className="font-mono text-tt-cyan">#{s.sku_number}</span> {s.title || 'Untitled'}</span>
-                      {/* Why this SKU is suggested — reminds the host of the neighbouring lot. */}
-                      {reason ? <span className="block text-[10px] text-tt-muted truncate">{reason}</span> : null}
-                    </span>
-                    <span className="shrink-0 text-tt-muted">{s.category ? `${s.category} · ` : ''}{s.qty_on_hand}</span>
-                  </button>
+                    <SkuThumb url={s.thumbnail_url} onEnlarge={enlarge} enlargeLabel={`#${s.sku_number} ${s.title || 'Untitled'}`} />
+                    <button
+                      onClick={() => { onChange(s.id); setQ(''); }}
+                      disabled={disabled}
+                      className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left cursor-pointer"
+                    >
+                      <span className="min-w-0 truncate">
+                        <span className="truncate"><span className="font-mono text-tt-cyan">#{s.sku_number}</span> {s.title || 'Untitled'}</span>
+                        {/* Why this SKU is suggested — reminds the host of the neighbouring lot. */}
+                        {reason ? <span className="block text-[10px] text-tt-muted truncate">{reason}</span> : null}
+                      </span>
+                      <span className="shrink-0 text-tt-muted">{s.category ? `${s.category} · ` : ''}{s.qty_on_hand}</span>
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -544,6 +564,29 @@ function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id
 }
 
 function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => void }) {
+  // ONE bind-editor lightbox for the whole show. State is lifted here (not inside each
+  // RankedSkuPicker) so multiple SKU-line pickers share a single portalled overlay. `restore`
+  // is the picker's focus-restore callback, run on close so the next barcode scan lands back in
+  // its search input.
+  const [lightbox, setLightbox] = useState<{ url: string; label?: string } | null>(null);
+  const restoreFocusRef = useRef<(() => void) | null>(null);
+  const openLightbox = useCallback((url: string, label: string | undefined, restore?: () => void) => {
+    restoreFocusRef.current = restore ?? null;
+    setLightbox({ url, label });
+  }, []);
+  const closeLightbox = useCallback(() => {
+    setLightbox(null);
+    const restore = restoreFocusRef.current;
+    restoreFocusRef.current = null;
+    if (restore) restore();
+  }, []);
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: globalThis.KeyboardEvent) => { if (e.key === 'Escape') closeLightbox(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightbox, closeLightbox]);
+
   const { data: boardData, isLoading } = useAuctionBoard(session.id);
   const items = useMemo(() => boardData?.items ?? [], [boardData]);
   const sessionSkus = useMemo(() => boardData?.session_skus ?? [], [boardData]);
@@ -1387,6 +1430,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
                                 nearbyIds={nearby}
                                 reasonById={nb?.reasonById}
                                 categoryIds={categoryIds}
+                                onEnlarge={openLightbox}
                               />
                               <input
                                 type="number" min={1} value={ln.qty}
@@ -1571,6 +1615,28 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
             </div>
           </div>
         </div>
+      )}
+
+      {/* Click-to-enlarge SKU photo — ONE instance for the whole show. Portalled to <body> so it
+          clears the dropdown's stacking context. Backdrop (or Escape) closes; clicking the image
+          itself does not. Constrained to 80vw/80vh and never upscaled past natural size. */}
+      {lightbox && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+          onClick={closeLightbox}
+          role="dialog"
+          aria-modal="true"
+          aria-label={lightbox.label ? `Photo for ${lightbox.label}` : 'SKU photo'}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={lightbox.url}
+            alt={lightbox.label ?? ''}
+            onClick={(e) => e.stopPropagation()}
+            className="w-auto h-auto max-w-[80vw] max-h-[80vh] object-contain rounded-lg shadow-2xl"
+          />
+        </div>,
+        document.body,
       )}
     </div>
   );
