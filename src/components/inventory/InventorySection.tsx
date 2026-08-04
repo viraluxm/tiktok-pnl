@@ -17,6 +17,7 @@ import {
 } from '@/hooks/useInventorySkus';
 import { code128ToSvg } from '@/lib/barcode/code128';
 import MobileDataCard from '@/components/ui/MobileDataCard';
+import SkuThumb from '@/components/common/SkuThumb';
 import {
   deriveVisibleInventorySkus,
   type InventoryStatusFilter,
@@ -1138,7 +1139,7 @@ export default function InventorySection() {
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-3 min-w-0">
-                      <Thumb url={s.thumbnail_url} />
+                      <SkuThumb url={s.thumbnail_url} />
                       <span className="min-w-0 truncate">
                         {s.title || <span className="text-tt-muted">Untitled</span>}
                       </span>
@@ -1231,7 +1232,7 @@ export default function InventorySection() {
                       aria-label={`Select SKU ${s.sku_number}`}
                       className="accent-tt-cyan w-5 h-5 cursor-pointer"
                     />
-                    <Thumb url={s.thumbnail_url} />
+                    <SkuThumb url={s.thumbnail_url} />
                   </div>
                 }
                 title={
@@ -1343,26 +1344,5 @@ function Field({ label, children, className = '' }: { label: string; children: R
       <span className="block text-xs text-tt-muted mb-1.5">{label}</span>
       {children}
     </label>
-  );
-}
-
-// Small fixed-size thumbnail with a clean empty/placeholder state.
-function Thumb({ url }: { url: string | null }) {
-  return (
-    <div className="w-9 h-9 shrink-0 rounded-md border border-tt-border bg-tt-input-bg overflow-hidden flex items-center justify-center">
-      {url ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={url}
-          alt=""
-          className="w-full h-full object-cover"
-          onError={(e) => {
-            e.currentTarget.style.display = 'none';
-          }}
-        />
-      ) : (
-        <span className="text-tt-muted text-[10px]">—</span>
-      )}
-    </div>
   );
 }
