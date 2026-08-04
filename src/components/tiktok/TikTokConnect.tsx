@@ -142,8 +142,10 @@ export default function TikTokConnect() {
                         )}
                         <div className="min-w-0 flex-1">
                           <span className="text-sm font-semibold text-tt-text truncate block">{s.name}</span>
-                          {s.connected ? (
+                          {s.connected && !s.needsReconnect ? (
                             <span className="text-[10px] font-semibold text-[#00c853] uppercase tracking-wider">Connected</span>
+                          ) : s.needsReconnect ? (
+                            <span className="text-[10px] font-semibold text-tt-yellow uppercase tracking-wider">Reconnect needed</span>
                           ) : (
                             <span className="text-[10px] font-semibold text-tt-muted uppercase tracking-wider">Not connected</span>
                           )}
@@ -151,14 +153,15 @@ export default function TikTokConnect() {
                         {isActive && <Check />}
                       </button>
 
-                      {/* Not connected → Connect this store (passes store_id, Phase C) */}
-                      {!s.connected && (
+                      {/* Not connected → Connect; expired/near-expiry token → Reconnect. Both use the
+                          same in-place OAuth (store_id) — NO data loss, unlike Disconnect. */}
+                      {(!s.connected || s.needsReconnect) && (
                         <a
                           href={connectHref(s.id)}
                           className="mx-3 mb-2 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r from-[#69C9D0] to-[#EE1D52] text-white text-xs font-semibold hover:opacity-90 transition-opacity"
                         >
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
-                          Connect
+                          {s.needsReconnect ? 'Reconnect' : 'Connect'}
                         </a>
                       )}
 
@@ -213,7 +216,7 @@ export default function TikTokConnect() {
           <div className="bg-[#1a1a1a] border border-tt-border rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl">
             <h3 className="text-sm font-semibold text-tt-text mb-2">Disconnect {activeEntry?.name ?? 'this store'}?</h3>
             <p className="text-xs text-tt-muted mb-5 leading-relaxed">
-              This disconnects the shop and removes this store&apos;s synced orders. Your shared product catalog and other stores are not affected. This cannot be undone.
+              This permanently <span className="text-tt-red font-semibold">deletes all of this store&apos;s synced orders</span> — its P&amp;L, pack-ready boxes, and bind history all depend on them — and removes the connection. Other stores and the shared catalog are unaffected. <span className="text-tt-text font-semibold">This cannot be undone.</span> If you just need to fix an expired login, use <span className="text-tt-text font-semibold">Reconnect</span> instead — it refreshes the token and keeps every order.
             </p>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setShowDisconnectModal(false)} className="px-4 py-2 rounded-lg border border-tt-border text-tt-muted text-[12px] font-medium hover:border-tt-text hover:text-tt-text transition-all cursor-pointer">
