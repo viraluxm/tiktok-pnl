@@ -138,9 +138,21 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     if (distinctPtDays >= 2 && maxGapHours > MULTI_LIVE_GAP_HOURS) {
       multiLive.push({ ...base, last_seen_at: s.last_seen_at, reason: `internal gap ${maxGapHours}h across ${distinctPtDays} days — needs manual split` });
     } else if (hasHeartbeat) {
-      // Primary signal: trust the heartbeat. ended_at = last_seen_at (last known alive).
-      if ((hbIdleMin as number) > AUTO_END_MINUTES) {
-        wouldClose.push({ ...base, signal: 'heartbeat', idle_minutes: hbIdleMin, last_seen_at: s.last_seen_at, proposed_ended_at: s.last_seen_at, duration_hours: +((hbLastMs - new Date(s.started_at).getTime()) / 3_600_000).toFixed(2) });
+      // Primary signal: the heartbeat. BUT a stalled heartbeat with ONGOING captures is a spurious
+      // gap (service-worker restart — observed 302 in one session), NOT a dead show. Closing it
+      // would end a live SELLING session and, because the extension's live auto-bind never sets
+      // p_manual, refuse every subsequent bind with SESSION_ENDED (the 177-orphan failure by another
+      // route). CAPTURE-FRESHNESS GUARD (mirrors migration 078's tab_closed rule): only auto-close
+      // when captures are ALSO stale (> IDLE_THRESHOLD_MIN). ended_at = the later of last heartbeat
+      // and last capture (true last-known-alive).
+      const heartbeatStale = (hbIdleMin as number) > AUTO_END_MINUTES;
+      const capturesStale = idleMin > IDLE_THRESHOLD_MIN;
+      if (heartbeatStale && capturesStale) {
+        const endMs = Math.max(hbLastMs, lastMs);
+        wouldClose.push({ ...base, signal: 'heartbeat+capture', idle_minutes: hbIdleMin, capture_idle_minutes: idleMin, last_seen_at: s.last_seen_at, proposed_ended_at: new Date(endMs).toISOString(), duration_hours: +((endMs - new Date(s.started_at).getTime()) / 3_600_000).toFixed(2) });
+      } else if (heartbeatStale) {
+        // Heartbeat stale but captures fresh ⇒ spurious gap; the show is selling — keep it live.
+        stillActive.push({ ...base, signal: 'capture_fresh_override', idle_minutes: hbIdleMin, capture_idle_minutes: idleMin, note: `heartbeat ${hbIdleMin}m stale but last capture ${idleMin}m ago (< ${IDLE_THRESHOLD_MIN}m) — still selling, kept live` });
       } else {
         stillActive.push({ ...base, signal: 'heartbeat', idle_minutes: hbIdleMin, note: `heartbeat ${hbIdleMin}m ago (< ${AUTO_END_MINUTES}m) — still live` });
       }
