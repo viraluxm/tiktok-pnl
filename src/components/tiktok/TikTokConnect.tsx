@@ -145,7 +145,9 @@ export default function TikTokConnect() {
                           {s.connected && !s.needsReconnect ? (
                             <span className="text-[10px] font-semibold text-[#00c853] uppercase tracking-wider">Connected</span>
                           ) : s.needsReconnect ? (
-                            <span className="text-[10px] font-semibold text-tt-yellow uppercase tracking-wider">Reconnect needed</span>
+                            <span className="text-[10px] font-semibold text-tt-yellow uppercase tracking-wider">
+                              {s.reconnectBy ? `Reconnect by ${new Date(s.reconnectBy).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : 'Reconnect needed'}
+                            </span>
                           ) : (
                             <span className="text-[10px] font-semibold text-tt-muted uppercase tracking-wider">Not connected</span>
                           )}
