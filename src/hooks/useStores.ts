@@ -6,9 +6,9 @@ import { useUser } from './useUser';
 export interface StoreEntry {
   id: string;
   name: string;
-  connected: boolean;          // has a tiktok_connections row (may be token-expired)
-  needsReconnect: boolean;     // row exists but access token is dead / within 24h of expiry
-  tokenExpiresAt: string | null;
+  connected: boolean;          // has a tiktok_connections row
+  needsReconnect: boolean;     // within 5 days of (or past) the 28-day re-auth deadline
+  reconnectBy: string | null;  // the re-auth deadline (issuance + 28d) — drives "Reconnect by <date>"
   shopName: string | null;
   shopLogo: string | null;
 }

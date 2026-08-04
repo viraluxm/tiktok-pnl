@@ -24,23 +24,31 @@ export async function GET() {
 
   const [{ data: storeRows }, { data: conns }] = await Promise.all([
     supabase.from('stores').select('id, name').in('id', storeIds),
-    supabase.from('tiktok_connections').select('store_id, shop_name, shop_logo, token_expires_at').eq('user_id', user.id),
+    supabase.from('tiktok_connections').select('store_id, shop_name, shop_logo, connected_at, refresh_token_expires_at').eq('user_id', user.id),
   ]);
 
-  // needsReconnect = has a connection row but the access token is dead or within 24h of expiry.
-  // Surfaced so the UI offers a NON-destructive Reconnect (in-place OAuth) instead of leaving
-  // Disconnect (which DELETES all synced orders) as the only action on an expired store.
-  const RECONNECT_LEAD_MS = 24 * 3600 * 1000;
+  // Re-auth deadline = the refresh token's operational lifetime (issuance + 28d — see
+  // expiriesFromToken; TikTok's own refresh expiry is a useless ~2125). Warn WARN_MS before it,
+  // surfaced via needsReconnect + reconnectBy so the UI shows "Reconnect by <date>" and offers the
+  // non-destructive in-place OAuth (never leaving Disconnect — which DELETES all synced orders — as
+  // the only action). Deadline source: the stored refresh_token_expires_at when it's a real value;
+  // else (null or the year-2125 unit-bug value) fall back to connected_at + 28d (connected_at is
+  // reliable and moves on every reconnect).
+  const WARN_MS = 5 * 86_400_000;
+  const TTL_MS = 28 * 86_400_000;
+  const BUG_FAR_FUTURE_MS = Date.now() + 366 * 86_400_000;
   const connByStore = new Map((conns ?? []).map((c) => [c.store_id as string, c]));
   const stores = (storeRows ?? []).map((s) => {
     const conn = connByStore.get(s.id as string);
-    const expMs = conn?.token_expires_at ? new Date(conn.token_expires_at as string).getTime() : 0;
+    const stored = conn?.refresh_token_expires_at ? new Date(conn.refresh_token_expires_at as string).getTime() : 0;
+    const connMs = conn?.connected_at ? new Date(conn.connected_at as string).getTime() : 0;
+    const deadlineMs = stored && stored < BUG_FAR_FUTURE_MS ? stored : (connMs ? connMs + TTL_MS : 0);
     return {
       id: s.id as string,
       name: (s.name as string) ?? 'Store',
       connected: !!conn,
-      needsReconnect: !!conn && (!expMs || expMs - Date.now() < RECONNECT_LEAD_MS),
-      tokenExpiresAt: (conn?.token_expires_at as string) ?? null,
+      needsReconnect: !!conn && (!deadlineMs || deadlineMs - Date.now() < WARN_MS),
+      reconnectBy: deadlineMs ? new Date(deadlineMs).toISOString() : null,
       shopName: (conn?.shop_name as string) ?? null,
       shopLogo: (conn?.shop_logo as string) ?? null,
     };

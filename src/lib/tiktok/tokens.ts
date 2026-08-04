@@ -11,17 +11,22 @@ import { refreshAccessToken, type TikTokShopTokenResponse } from '@/lib/tiktok/c
 // The stored 2081/2083 then made every "is it near expiry?" check read "valid forever",
 // so nothing ever refreshed and tokens silently died at TikTok's real ~7-day limit.
 //
-// FIX: token expires at new Date(access_token_expire_in * 1000). Never add Date.now().
+// ACCESS: token expires at new Date(access_token_expire_in * 1000). Never add Date.now().
+//
+// REFRESH DEADLINE — deliberately NOT from refresh_token_expire_in. TikTok returns that as a
+// truthful but useless absolute epoch ~year 2125 (~99 years out), yet the refresh token
+// operationally dies ~28 days after issuance (observed: two stores connected 07-06 died 08-03).
+// So the usable re-auth deadline is issuance + 28d. Whether a rotation resets that clock is
+// unconfirmed (see the ~09-01 observation); until then we treat it as a hard cap from issuance —
+// the SAFE default (warns to re-auth) rather than the optimistic "far future" that hid the death.
+export const REFRESH_TOKEN_TTL_DAYS = 28;
 export function expiriesFromToken(t: TikTokShopTokenResponse): {
   token_expires_at: string;
   refresh_token_expires_at: string | null;
 } {
   return {
     token_expires_at: new Date(t.access_token_expire_in * 1000).toISOString(),
-    refresh_token_expires_at:
-      typeof t.refresh_token_expire_in === 'number'
-        ? new Date(t.refresh_token_expire_in * 1000).toISOString()
-        : null,
+    refresh_token_expires_at: new Date(Date.now() + REFRESH_TOKEN_TTL_DAYS * 86_400_000).toISOString(),
   };
 }
 
@@ -80,11 +85,16 @@ export async function refreshConnection(
         access_token: encrypt(tokenData.access_token),
         refresh_token: encrypt(tokenData.refresh_token), // ROTATION: store the new refresh token
         token_expires_at: exp.token_expires_at,
-        refresh_token_expires_at: exp.refresh_token_expires_at,
+        // NOTE: intentionally do NOT touch refresh_token_expires_at here. The re-auth deadline is
+        // issuance + 28d, stamped at connect; a refresh must not silently extend it (that would be
+        // the unproven "rolling" assumption). If the ~09-01 observation shows rotation resets the
+        // clock, extend it here then.
         token_refresh_lock_at: null, // release
       })
       .eq('id', conn.id);
     if (upErr) throw new Error(`persist failed after refresh: ${upErr.message}`);
+    // Rotation telemetry (instrument the 09-01 observation): each success rotates the refresh token.
+    console.log(`[token-rotate] store=${(conn as { store_id?: string }).store_id ?? conn.id} rotated refresh_token; access exp ${exp.token_expires_at}`);
 
     return { accessToken: tokenData.access_token, shopCipher: conn.shop_cipher, ...exp };
   } catch (e) {
