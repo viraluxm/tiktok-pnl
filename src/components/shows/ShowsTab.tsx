@@ -478,12 +478,31 @@ function PracticeModeCard() {
   );
 }
 
+// Small secondary amber number: how many captured orders on this show still have no SKU bound.
+// Rendered only when count > 0. The count comes from the ALREADY-loaded board data (no extra
+// request) and uses the SAME definition as the show-detail banner: items.filter(i => i.unbound).
+function UnboundCountBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className="text-[11px] font-semibold text-tt-yellow/80 tabular-nums"
+      title={`${count} order${count === 1 ? '' : 's'} still need${count === 1 ? 's' : ''} SKU binding`}
+    >
+      {count}
+    </span>
+  );
+}
+
 // One list row; fetches its own board (cached, reused by the detail view) to
 // compute the show's summary totals.
 function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: string) => void }) {
   const { data: boardData, isLoading } = useAuctionBoard(session.id);
   const items = boardData?.items ?? [];
   const sum = useMemo(() => summarize(items), [items]);
+  // Captured-but-unbound rows on THIS show (the same union the detail banner counts). Reuses the
+  // board already fetched above for the summary totals — no additional network request per row.
+  // Cheap O(n) count on an in-memory array; computed inline (no useMemo) to add no new deps.
+  const unboundCount = items.filter((i) => i.unbound).length;
 
   return (
     <tr
@@ -493,8 +512,9 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
       <td className="px-4 py-3">
         {/* Channel handle IS the identity now (large). Falls back to "TikTok Live" when the
             channel hasn't been attributed yet, so the row is never blank. */}
-        <div className="font-medium text-tt-text">
-          {session.channel_handle || 'TikTok Live'}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-medium text-tt-text">{session.channel_handle || 'TikTok Live'}</span>
+          <UnboundCountBadge count={unboundCount} />
         </div>
         {/* host · store · date. Host omitted when none selected; store shows red "Unmapped
             store" when null (the Part-D flag, now inline); date always present. */}
@@ -528,6 +548,8 @@ function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id
   const { data: boardData, isLoading } = useAuctionBoard(session.id);
   const items = boardData?.items ?? [];
   const sum = useMemo(() => summarize(items), [items]);
+  // Same already-loaded board reused for the count — no per-row request added (see ShowRow).
+  const unboundCount = items.filter((i) => i.unbound).length;
 
   // host · store · date — identical wording/tone to the desktop row.
   const subtitle = [
@@ -541,7 +563,12 @@ function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id
   return (
     <MobileDataCard
       onClick={() => onOpen(session.id)}
-      title={session.channel_handle || 'TikTok Live'}
+      title={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          {session.channel_handle || 'TikTok Live'}
+          <UnboundCountBadge count={unboundCount} />
+        </span>
+      }
       subtitle={subtitle}
       badge={<StatusBadge status={session.status} />}
       stats={[
