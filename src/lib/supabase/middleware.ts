@@ -88,6 +88,71 @@ export async function updateSession(request: NextRequest) {
     return redirect;
   };
 
+  // ---------------------------------------------------------------------------
+  // Role confinement (station / VA). These roles are set in Supabase via
+  // app_metadata.role and are hard-confined to a tiny allowlist: they can reach
+  // ONLY their own pages + API namespace, nothing else. Owner/admin sessions
+  // (role undefined or 'admin') are NOT confined and retain full access,
+  // including /packers and /va.
+  //
+  // This branch runs BEFORE the OAuth-callback whitelist and the auth-page
+  // bounce below, so a confined session cannot slip through either: e.g. a
+  // station user hitting /auth/tiktok/callback or /login is bounced to its role
+  // home rather than reaching the callback handler or the /dashboard bounce.
+  //
+  // Transient-auth fallback: if Supabase Auth briefly returns no user but a
+  // `lensed_station` cookie is present, treat the session as station and apply
+  // the station allowlist — otherwise a token-refresh blip would drop a station
+  // out of confinement (and the /login redirect below would log it out).
+  const CONFINEMENT: Record<string, { home: string; allow: string[] }> = {
+    station: { home: '/packers', allow: ['/packers', '/api/station'] },
+    va: { home: '/va', allow: ['/va', '/api/va'] },
+  };
+  // `lensed_station` is a confinement HINT only — never an authentication
+  // signal, and it must never gate data access. We honour it solely to keep an
+  // already-authenticated station confined while Supabase Auth briefly cannot
+  // return the user object, so it is ANDed with transientAuthFailure (sb-* auth
+  // cookie present + retryable/timeout error) — our evidence that a real
+  // session exists. A lensed_station cookie WITHOUT that session evidence is
+  // ignored: it grants nothing and never widens or unlocks access.
+  const hasStationCookie = request.cookies
+    .getAll()
+    .some((c) => c.name === 'lensed_station');
+  const role =
+    (user?.app_metadata?.role as string | undefined) ??
+    (transientAuthFailure && hasStationCookie ? 'station' : undefined);
+  const roleHome =
+    role === 'station' ? '/packers' : role === 'va' ? '/va' : '/dashboard';
+
+  // Fail closed: only an unset role or 'admin' is unconfined. ANY other value —
+  // including a typo like 'statoin' — is treated as a confined role with an
+  // EMPTY allowlist (everything 403s / redirects to /login), never as full
+  // access. A new role must be added to CONFINEMENT to gain any reach.
+  const confinement =
+    role === undefined || role === 'admin'
+      ? undefined
+      : CONFINEMENT[role] ?? { home: '/login', allow: [] as string[] };
+  if (confinement) {
+    const path = request.nextUrl.pathname;
+    // A confined role can always reach its own home, so the page redirect below
+    // never loops when the home path isn't otherwise in the allowlist.
+    const allowed =
+      path === confinement.home ||
+      confinement.allow.some((p) => path === p || path.startsWith(p + '/'));
+    if (allowed) {
+      // Confined session on one of its own paths — nothing else to enforce.
+      // Return here so the !user /login redirect below never fires for a
+      // station riding out a transient auth failure on an allowed path.
+      return supabaseResponse;
+    }
+    // Non-allowlisted: hard 403 for API, bounce to role home for pages. This
+    // also covers root '/' (not in any allowlist → redirect to role home).
+    if (path.startsWith('/api/')) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+    return redirectTo(confinement.home);
+  }
+
   // OAuth callbacks under /auth must reach their route handlers
   const isOAuthCallback = request.nextUrl.pathname.startsWith('/auth/tiktok/callback');
 
@@ -104,9 +169,11 @@ export async function updateSession(request: NextRequest) {
     return redirectTo('/login');
   }
 
-  // Logged in and trying to access auth pages
+  // Logged in and trying to access auth pages. Confined roles are already
+  // handled above (station/va never reach here), so roleHome is /dashboard for
+  // owner/admin — but keep it role-aware for correctness.
   if (user && isAuthPage) {
-    return redirectTo('/dashboard');
+    return redirectTo(roleHome);
   }
 
   // Root path shows landing page for everyone (no redirect)
