@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { refreshConnection, type ConnRow } from '@/lib/tiktok/tokens';
+import { refreshConnection, RefreshLockedError, RefreshRequestError, type ConnRow } from '@/lib/tiktok/tokens';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -55,13 +55,27 @@ export async function GET(req: Request) {
       const r = await refreshConnection(admin, c);
       results.push({ store_id: c.store_id, action: 'refreshed', reason: bugFarFuture ? 'bug_far_future_expiry' : 'near_or_past_expiry', new_token_expires_at: r.token_expires_at });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      results.push({ store_id: c.store_id, action: msg === 'REFRESH_LOCKED' ? 'locked' : 'failed', error: msg });
+      // Four DISTINCT outcomes — a request-level DB error must never masquerade as 'locked'.
+      if (e instanceof RefreshLockedError) {
+        results.push({ store_id: c.store_id, action: 'locked' });
+      } else if (e instanceof RefreshRequestError) {
+        console.error(`[refresh-tiktok-tokens] REQUEST ERROR store=${c.store_id} code=${e.code} msg=${e.message}`);
+        results.push({ store_id: c.store_id, action: 'error', code: e.code, error: e.message });
+      } else {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[refresh-tiktok-tokens] REFRESH FAILED store=${c.store_id} msg=${msg}`);
+        results.push({ store_id: c.store_id, action: 'failed', error: msg });
+      }
     }
   }
 
   const refreshed = results.filter((r) => r.action === 'refreshed').length;
+  const locked = results.filter((r) => r.action === 'locked').length;
   const failed = results.filter((r) => r.action === 'failed').length;
-  console.log(`[refresh-tiktok-tokens] refreshed=${refreshed} failed=${failed} total=${(conns ?? []).length}`);
-  return NextResponse.json({ ok: true, refreshed, failed, total: (conns ?? []).length, results });
+  const errored = results.filter((r) => r.action === 'error').length;
+  const skipped = results.filter((r) => r.action === 'skip').length;
+  // A total failure (errored>0 or failed>0) now reads visibly different from a clean no-op
+  // (all skipped, everything else 0) — no outcome is uncountable.
+  console.log(`[refresh-tiktok-tokens] refreshed=${refreshed} locked=${locked} failed=${failed} error=${errored} skipped=${skipped} total=${(conns ?? []).length}`);
+  return NextResponse.json({ ok: true, refreshed, locked, failed, error: errored, skipped, total: (conns ?? []).length, results });
 }

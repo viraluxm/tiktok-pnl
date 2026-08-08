@@ -86,7 +86,7 @@ export async function syncConnection(
         if (!refreshedOnce && isExpiredCredsError(e)) {
           refreshedOnce = true;
           try { accessToken = (await refreshConnection(admin, connRow)).accessToken; continue; }
-          catch { /* refresh failed — fall through */ }
+          catch (re) { console.warn(`[Sync] on-105002 refresh failed store=${storeId}: ${(re as Error).message} — retrying with stale token`); }
         }
         if (attempt < 3) await new Promise((r) => setTimeout(r, 700 * attempt));
       }
