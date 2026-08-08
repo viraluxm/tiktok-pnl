@@ -1,0 +1,329 @@
+'use client';
+
+import { useMemo, useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useStores } from '@/hooks/useStores';
+
+// The two roles this page can create. Labels are what the admin sees; the value
+// is the exact string written to app_metadata.role — never anything else.
+const ROLE_OPTIONS = [
+  { value: 'va', label: 'Virtual assistant' },
+  { value: 'station', label: 'Fulfillment station' },
+] as const;
+type ManagedRole = (typeof ROLE_OPTIONS)[number]['value'];
+
+const ROLE_LABEL: Record<string, string> = {
+  va: 'Virtual assistant',
+  station: 'Fulfillment station',
+};
+
+interface TeamMember {
+  id: string;
+  email: string | null;
+  role: ManagedRole;
+  store_id: string | null;   // station: single assigned store
+  stores: string[] | null;   // va: multiple assigned stores
+  last_sign_in_at: string | null;
+  banned_until: string | null;
+}
+
+function isDisabled(bannedUntil: string | null): boolean {
+  if (!bannedUntil) return false;
+  const t = Date.parse(bannedUntil);
+  return Number.isFinite(t) && t > Date.now();
+}
+
+function fmtDate(iso: string | null): string {
+  if (!iso) return 'Never';
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '—';
+  return new Date(t).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function useTeam() {
+  return useQuery<{ members: TeamMember[] }>({
+    queryKey: ['admin-team'],
+    retry: false,
+    staleTime: 15_000,
+    queryFn: async () => {
+      const res = await fetch('/api/admin/team');
+      if (!res.ok) throw new Error(res.status === 403 ? 'forbidden' : 'Failed to load team');
+      return res.json();
+    },
+  });
+}
+
+export default function TeamPage() {
+  const qc = useQueryClient();
+  const { data, isLoading, isError } = useTeam();
+  const { data: storesData } = useStores();
+
+  const stores = useMemo(() => storesData?.stores ?? [], [storesData]);
+  const storeName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of stores) m.set(s.id, s.name);
+    return (id: string | null) => (id ? m.get(id) ?? id : '—');
+  }, [stores]);
+
+  // Create form. Station is not store-scoped (warehouse handles all stores);
+  // va is assigned one or more stores.
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState<ManagedRole>('va');
+  const [storeIds, setStoreIds] = useState<string[]>([]); // va (multiple)
+  const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
+  const [newPassword, setNewPassword] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const create = useMutation({
+    mutationFn: async () => {
+      // Branch the payload on role: a station is not store-scoped (warehouse
+      // handles all stores) so it sends NO store field; va sends stores[].
+      const body =
+        role === 'station'
+          ? { email, role }
+          : { email, role, stores: storeIds };
+      const res = await fetch('/api/admin/team', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to create user');
+      return json as { password: string; user: { email: string } };
+    },
+    onSuccess: (json) => {
+      setNewPassword(json.password);
+      setCopied(false);
+      setBanner({ kind: 'success', text: `Created ${json.user.email}` });
+      setEmail('');
+      setStoreIds([]);
+      setRole('va');
+      qc.invalidateQueries({ queryKey: ['admin-team'] });
+    },
+    onError: (e: Error) => {
+      setNewPassword(null);
+      setBanner({ kind: 'error', text: e.message });
+    },
+  });
+
+  const toggle = useMutation({
+    mutationFn: async (vars: { id: string; action: 'disable' | 'enable' }) => {
+      const res = await fetch(`/api/admin/team/${vars.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: vars.action }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to update user');
+      return json;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-team'] }),
+    onError: (e: Error) => setBanner({ kind: 'error', text: e.message }),
+  });
+
+  async function copyPassword() {
+    if (!newPassword) return;
+    try {
+      await navigator.clipboard.writeText(newPassword);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  const members = data?.members ?? [];
+
+  return (
+    <div className="mx-auto max-w-4xl p-6 space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold text-tt-text">Team</h1>
+        <p className="text-xs text-tt-muted mt-1 max-w-2xl">
+          Virtual assistants and fulfillment stations. Each sub-user is confined to
+          their own area and the store you assign here.
+        </p>
+      </div>
+
+      {banner && (
+        <div
+          className={`rounded-lg px-4 py-2 text-sm ${
+            banner.kind === 'error' ? 'bg-tt-red/10 text-tt-red' : 'bg-tt-green/10 text-tt-green'
+          }`}
+        >
+          {banner.text}
+        </div>
+      )}
+
+      {/* One-time password reveal */}
+      {newPassword && (
+        <div className="rounded-[14px] border border-tt-cyan/30 bg-tt-cyan/5 p-5 space-y-3">
+          <p className="text-sm font-semibold text-tt-text">Temporary password</p>
+          <p className="text-xs text-tt-muted">
+            Copy this now — it is shown only once and cannot be retrieved again. Share it
+            with the new user; they can change it after signing in.
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 rounded-lg border border-tt-border bg-black/30 px-3 py-2 text-sm text-tt-text break-all">
+              {newPassword}
+            </code>
+            <button
+              onClick={copyPassword}
+              className="rounded-lg bg-tt-cyan px-4 py-2 text-sm font-semibold text-black hover:opacity-90 whitespace-nowrap"
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+            <button
+              onClick={() => setNewPassword(null)}
+              className="rounded-lg border border-tt-border px-3 py-2 text-sm text-tt-muted hover:text-tt-text"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* LIST */}
+      <section className="rounded-[14px] border border-tt-border bg-tt-card overflow-hidden">
+        <div className="px-5 py-4 border-b border-tt-border">
+          <h2 className="text-base font-semibold text-tt-text">Sub-users</h2>
+        </div>
+        <div className="p-5">
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="border-b border-tt-border">
+                  <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Email</th>
+                  <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Role</th>
+                  <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Store</th>
+                  <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Last sign-in</th>
+                  <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Status</th>
+                  <th className="text-right px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {isLoading && (
+                  <tr><td colSpan={6} className="px-3 py-6 text-center text-sm text-tt-muted">Loading…</td></tr>
+                )}
+                {isError && !isLoading && (
+                  <tr><td colSpan={6} className="px-3 py-6 text-center text-sm text-tt-red">Failed to load team.</td></tr>
+                )}
+                {!isLoading && !isError && members.length === 0 && (
+                  <tr><td colSpan={6} className="px-3 py-6 text-center text-sm text-tt-muted">No sub-users yet.</td></tr>
+                )}
+                {members.map((m) => {
+                  const disabled = isDisabled(m.banned_until);
+                  const busy = toggle.isPending && toggle.variables?.id === m.id;
+                  return (
+                    <tr key={m.id} className="border-b border-[rgba(255,255,255,0.04)]">
+                      <td className="px-3 py-2 text-[13px] text-tt-text">{m.email ?? '—'}</td>
+                      <td className="px-3 py-2 text-[13px] text-tt-text">{ROLE_LABEL[m.role] ?? m.role}</td>
+                      <td className="px-3 py-2 text-[13px] text-tt-text">
+                        {m.role === 'station'
+                          ? 'All stores'
+                          : m.stores?.length
+                            ? m.stores.map((id) => storeName(id)).join(', ')
+                            : storeName(m.store_id)}
+                      </td>
+                      <td className="px-3 py-2 text-[13px] text-tt-muted tabular-nums">{fmtDate(m.last_sign_in_at)}</td>
+                      <td className="px-3 py-2 text-[13px]">
+                        <span className={disabled ? 'text-tt-red' : 'text-tt-green'}>
+                          {disabled ? 'Disabled' : 'Active'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button
+                          onClick={() => toggle.mutate({ id: m.id, action: disabled ? 'enable' : 'disable' })}
+                          disabled={busy}
+                          className={`px-3 py-1 rounded-lg text-[11px] font-semibold disabled:opacity-40 ${
+                            disabled
+                              ? 'bg-tt-green/15 text-tt-green hover:bg-tt-green/25'
+                              : 'bg-tt-red/15 text-tt-red hover:bg-tt-red/25'
+                          }`}
+                        >
+                          {busy ? '…' : disabled ? 'Enable' : 'Disable'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      {/* CREATE */}
+      <section className="rounded-[14px] border border-tt-border bg-tt-card overflow-hidden">
+        <div className="px-5 py-4 border-b border-tt-border">
+          <h2 className="text-base font-semibold text-tt-text">Add sub-user</h2>
+        </div>
+        <div className="p-5 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <label className="block">
+              <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">Email</span>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="person@example.com"
+                className="w-full rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">Role</span>
+              <select
+                value={role}
+                onChange={(e) => {
+                  // Switching role clears any va store selection so a stale
+                  // stores[] can never ride along with a station submit.
+                  setRole(e.target.value as ManagedRole);
+                  setStoreIds([]);
+                }}
+                className="w-full rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
+              >
+                {ROLE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value} className="bg-tt-card">{o.label}</option>
+                ))}
+              </select>
+            </label>
+            {/* Station is not store-scoped (all stores), so it has no store
+                control. VA must pick one or more stores. */}
+            {role === 'va' && (
+              <label className="block">
+                <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">
+                  Stores <span className="normal-case text-tt-muted/70">(select one or more)</span>
+                </span>
+                <select
+                  multiple
+                  value={storeIds}
+                  onChange={(e) =>
+                    setStoreIds(Array.from(e.target.selectedOptions, (o) => o.value))
+                  }
+                  className="w-full h-28 rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50"
+                >
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id} className="bg-tt-card">{s.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+          <button
+            onClick={() => { setBanner(null); create.mutate(); }}
+            disabled={
+              create.isPending ||
+              !email ||
+              (role === 'va' && storeIds.length === 0)
+            }
+            className="rounded-lg bg-tt-cyan px-4 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-40"
+          >
+            {create.isPending ? 'Creating…' : 'Create sub-user'}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}

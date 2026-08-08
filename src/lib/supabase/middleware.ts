@@ -93,7 +93,7 @@ export async function updateSession(request: NextRequest) {
   // app_metadata.role and are hard-confined to a tiny allowlist: they can reach
   // ONLY their own pages + API namespace, nothing else. Owner/admin sessions
   // (role undefined or 'admin') are NOT confined and retain full access,
-  // including /packers and /va.
+  // including /fulfillment and /va.
   //
   // This branch runs BEFORE the OAuth-callback whitelist and the auth-page
   // bounce below, so a confined session cannot slip through either: e.g. a
@@ -105,7 +105,7 @@ export async function updateSession(request: NextRequest) {
   // the station allowlist — otherwise a token-refresh blip would drop a station
   // out of confinement (and the /login redirect below would log it out).
   const CONFINEMENT: Record<string, { home: string; allow: string[] }> = {
-    station: { home: '/packers', allow: ['/packers', '/api/station'] },
+    station: { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] },
     va: { home: '/va', allow: ['/va', '/api/va'] },
   };
   // `lensed_station` is a confinement HINT only — never an authentication
@@ -122,7 +122,7 @@ export async function updateSession(request: NextRequest) {
     (user?.app_metadata?.role as string | undefined) ??
     (transientAuthFailure && hasStationCookie ? 'station' : undefined);
   const roleHome =
-    role === 'station' ? '/packers' : role === 'va' ? '/va' : '/dashboard';
+    role === 'station' ? '/fulfillment' : role === 'va' ? '/va' : '/dashboard';
 
   // Fail closed: only an unset role or 'admin' is unconfined. ANY other value —
   // including a typo like 'statoin' — is treated as a confined role with an

@@ -1,6 +1,6 @@
 import { createClient } from '@/lib/supabase/server';
 
-// Stub only. Mirror of the packers stub — renders the signed-in email and the
+// Stub only. Mirror of the fulfillment stub — renders the signed-in email and the
 // resolved role so we can verify va confinement end-to-end. Exists so a va
 // session landing on its role home (/va) has a page to render instead of
 // redirecting into a 404 loop. No real VA UI yet.
