@@ -42,6 +42,19 @@ export interface ConnRow {
 
 const LOCK_STALE_MS = 2 * 60 * 1000; // a refresh lock older than this is considered abandoned
 
+// Three DISTINCT refresh outcomes must stay distinguishable to callers (a request-level DB error
+// must NOT collapse into "locked" — that is exactly the bug that hid a broken lock claim for weeks):
+//   • RefreshLockedError    — another refresher genuinely holds a fresh lock (benign; skip this run)
+//   • RefreshRequestError   — a Supabase/PostgREST request failed; carries the PostgREST code+message
+//   • any other thrown error — the TikTok refresh call itself failed (expired/rejected token, etc.)
+export class RefreshLockedError extends Error {
+  constructor() { super('REFRESH_LOCKED'); this.name = 'RefreshLockedError'; }
+}
+export class RefreshRequestError extends Error {
+  code: string | null;
+  constructor(message: string, code: string | null) { super(message); this.name = 'RefreshRequestError'; this.code = code; }
+}
+
 export interface RefreshResult {
   accessToken: string;
   shopCipher: string | null;
@@ -64,14 +77,40 @@ export async function refreshConnection(
   if (!conn.refresh_token) throw new Error('NO_REFRESH_TOKEN');
 
   // Claim the lock: set lock=now only where it's null or older than LOCK_STALE_MS.
-  const staleCutoff = new Date(Date.now() - LOCK_STALE_MS).toISOString();
-  const { data: claimed } = await admin
+  // NOTE: a SINGLE filter per PATCH. A logical `.or(...)` on a supabase-js `.update()` produces a
+  // PostgREST mutation Postgres rejects with 42703/400 (verified by isolation: PATCH+or→400,
+  // PATCH+single-filter→200, GET+or→200). So we read the current lock first, then issue ONE
+  // compare-and-swap PATCH with a single filter matching exactly the precondition we observed.
+  const staleCutoffMs = Date.now() - LOCK_STALE_MS;
+  const staleCutoffIso = new Date(staleCutoffMs).toISOString();
+
+  const { data: lockRows, error: lockReadErr } = await admin
+    .from('tiktok_connections')
+    .select('token_refresh_lock_at')
+    .eq('id', conn.id)
+    .limit(1);
+  if (lockReadErr) throw new RefreshRequestError(`lock read failed: ${lockReadErr.message}`, lockReadErr.code ?? null);
+  if (!lockRows || lockRows.length === 0) throw new RefreshRequestError(`connection ${conn.id} not found for lock claim`, null);
+
+  const lockRaw = lockRows[0].token_refresh_lock_at as string | null;
+  const lockMs = lockRaw ? new Date(lockRaw).getTime() : null;
+  const isStale = lockMs !== null && lockMs < staleCutoffMs;
+  // Held by another refresher and NOT stale → genuinely locked; do not attempt.
+  if (lockMs !== null && !isStale) throw new RefreshLockedError();
+
+  // Compare-and-swap with a single filter matching the precondition we just observed. If another
+  // process claimed the lock between our read and this PATCH, the filter matches ZERO rows
+  // (null → no longer null; stale → lock refreshed above the cutoff) → RefreshLockedError. Atomic.
+  const claimBase = admin
     .from('tiktok_connections')
     .update({ token_refresh_lock_at: new Date().toISOString() })
-    .eq('id', conn.id)
-    .or(`token_refresh_lock_at.is.null,token_refresh_lock_at.lt.${staleCutoff}`)
-    .select('id');
-  if (!claimed || claimed.length === 0) throw new Error('REFRESH_LOCKED'); // another refresher holds it
+    .eq('id', conn.id);
+  const claimQuery = lockMs === null
+    ? claimBase.is('token_refresh_lock_at', null)
+    : claimBase.lt('token_refresh_lock_at', staleCutoffIso);
+  const { data: claimed, error: claimErr } = await claimQuery.select('id');
+  if (claimErr) throw new RefreshRequestError(`lock claim failed: ${claimErr.message}`, claimErr.code ?? null);
+  if (!claimed || claimed.length === 0) throw new RefreshLockedError(); // another refresher won the race
 
   try {
     const refreshTokenPlain = decryptOrFallback(conn.refresh_token, 'refresh_token');
@@ -92,14 +131,16 @@ export async function refreshConnection(
         token_refresh_lock_at: null, // release
       })
       .eq('id', conn.id);
-    if (upErr) throw new Error(`persist failed after refresh: ${upErr.message}`);
+    if (upErr) throw new RefreshRequestError(`persist failed after refresh: ${upErr.message}`, upErr.code ?? null);
     // Rotation telemetry (instrument the 09-01 observation): each success rotates the refresh token.
     console.log(`[token-rotate] store=${(conn as { store_id?: string }).store_id ?? conn.id} rotated refresh_token; access exp ${exp.token_expires_at}`);
 
     return { accessToken: tokenData.access_token, shopCipher: conn.shop_cipher, ...exp };
   } catch (e) {
     // Release the lock; persist nothing else (the stored refresh token stays as-is on failure).
-    await admin.from('tiktok_connections').update({ token_refresh_lock_at: null }).eq('id', conn.id);
+    // Log a release failure but never let it mask the original error.
+    const { error: relErr } = await admin.from('tiktok_connections').update({ token_refresh_lock_at: null }).eq('id', conn.id);
+    if (relErr) console.error(`[refreshConnection] lock release failed for ${(conn as { store_id?: string }).store_id ?? conn.id}: ${relErr.message}`);
     throw e;
   }
 }
@@ -119,8 +160,14 @@ export async function getFreshToken(
     try {
       const r = await refreshConnection(admin, conn);
       return { accessToken: r.accessToken, shopCipher: r.shopCipher };
-    } catch {
-      /* fall through — use the current token; a 105002 retry will refresh if truly expired */
+    } catch (e) {
+      // Fall through — use the current token; a 105002 retry will refresh if truly expired. A
+      // genuine lock (another refresher) is expected/benign; anything else is logged with its
+      // reason so a broken refresh path can never again fail silently here.
+      if (!(e instanceof RefreshLockedError)) {
+        const code = e instanceof RefreshRequestError ? ` code=${e.code}` : '';
+        console.warn(`[getFreshToken] proactive refresh failed for ${(conn as { store_id?: string }).store_id ?? conn.id}: ${(e as Error).message}${code} — falling back to stored token`);
+      }
     }
   }
   return { accessToken: decryptOrFallback(conn.access_token, 'access_token'), shopCipher: conn.shop_cipher };
