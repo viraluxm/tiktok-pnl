@@ -31,8 +31,7 @@ function fmtDate(iso: string): string {
 
 export default function MemberBindingPage() {
   const [rows, setRows] = useState<UnboundRow[]>([]);
-  const [total, setTotal] = useState(0);
-  const [truncated, setTruncated] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [skus, setSkus] = useState<Sku[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -53,8 +52,7 @@ export default function MemberBindingPage() {
         const c = cRes.ok ? await cRes.json() : { skus: [] };
         if (cancelled) return;
         setRows((u.unbound ?? []) as UnboundRow[]);
-        setTotal(u.total ?? 0);
-        setTruncated(!!u.truncated);
+        setHasMore(!!u.has_more);
         setSkus((c.skus ?? []) as Sku[]);
       } catch (e) {
         if (!cancelled) setErr((e as Error).message);
@@ -84,11 +82,8 @@ export default function MemberBindingPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold">Binding queue</h1>
         <p className="mt-1 text-sm text-tt-muted">
-          Captured sales with no SKU bound. Pick the right item for each — {total.toLocaleString()} unbound.
+          Captured sales with no SKU bound. Pick the right item for each — {rows.length.toLocaleString()} loaded{hasMore ? ', more available' : ''}.
         </p>
-        {truncated && (
-          <p className="mt-2 text-xs text-tt-yellow">Showing a partial scan — more may exist beyond the current window.</p>
-        )}
       </div>
 
       {loading && <div className="text-lg text-tt-muted">Loading queue…</div>}

@@ -128,6 +128,27 @@ export default function TeamPage() {
     onError: (e: Error) => setBanner({ kind: 'error', text: e.message }),
   });
 
+  // Reset a sub-user's password. The server generates it and returns it ONCE — reuse the same
+  // temporary-password card the create flow shows.
+  const reset = useMutation({
+    mutationFn: async (vars: { id: string; email: string }) => {
+      const res = await fetch(`/api/admin/team/${vars.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset_password' }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to reset password');
+      return json as { password: string };
+    },
+    onSuccess: (json, vars) => {
+      setNewPassword(json.password);
+      setCopied(false);
+      setBanner({ kind: 'success', text: `New password for ${vars.email || 'user'} — copy it below.` });
+    },
+    onError: (e: Error) => setBanner({ kind: 'error', text: e.message }),
+  });
+
   async function copyPassword() {
     if (!newPassword) return;
     try {
@@ -219,12 +240,13 @@ export default function TeamPage() {
                 {members.map((m) => {
                   const disabled = isDisabled(m.banned_until);
                   const busy = toggle.isPending && toggle.variables?.id === m.id;
+                  const resetBusy = reset.isPending && reset.variables?.id === m.id;
                   return (
                     <tr key={m.id} className="border-b border-[rgba(255,255,255,0.04)]">
                       <td className="px-3 py-2 text-[13px] text-tt-text">{m.email ?? '—'}</td>
                       <td className="px-3 py-2 text-[13px] text-tt-text">{ROLE_LABEL[m.role] ?? m.role}</td>
                       <td className="px-3 py-2 text-[13px] text-tt-text">
-                        {m.role === 'station'
+                        {m.role === 'station' || m.stores?.includes('*')
                           ? 'All stores'
                           : m.stores?.length
                             ? m.stores.map((id) => storeName(id)).join(', ')
@@ -237,17 +259,26 @@ export default function TeamPage() {
                         </span>
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <button
-                          onClick={() => toggle.mutate({ id: m.id, action: disabled ? 'enable' : 'disable' })}
-                          disabled={busy}
-                          className={`px-3 py-1 rounded-lg text-[11px] font-semibold disabled:opacity-40 ${
-                            disabled
-                              ? 'bg-tt-green/15 text-tt-green hover:bg-tt-green/25'
-                              : 'bg-tt-red/15 text-tt-red hover:bg-tt-red/25'
-                          }`}
-                        >
-                          {busy ? '…' : disabled ? 'Enable' : 'Disable'}
-                        </button>
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            onClick={() => reset.mutate({ id: m.id, email: m.email ?? '' })}
+                            disabled={resetBusy}
+                            className="px-3 py-1 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 disabled:opacity-40"
+                          >
+                            {resetBusy ? '…' : 'Reset password'}
+                          </button>
+                          <button
+                            onClick={() => toggle.mutate({ id: m.id, action: disabled ? 'enable' : 'disable' })}
+                            disabled={busy}
+                            className={`px-3 py-1 rounded-lg text-[11px] font-semibold disabled:opacity-40 ${
+                              disabled
+                                ? 'bg-tt-green/15 text-tt-green hover:bg-tt-green/25'
+                                : 'bg-tt-red/15 text-tt-red hover:bg-tt-red/25'
+                            }`}
+                          >
+                            {busy ? '…' : disabled ? 'Enable' : 'Disable'}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

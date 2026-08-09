@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { randomBytes } from 'crypto';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 
@@ -9,7 +10,7 @@ const MANAGED_ROLES = ['member', 'station'];
 // ~100 years — effectively a permanent disable. 'none' lifts the ban.
 const BAN_FOREVER = '876000h';
 
-// PATCH /api/admin/team/[id] — disable or enable a station/member sub-user.
+// PATCH /api/admin/team/[id] — disable / enable / reset-password a station/member sub-user.
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -25,8 +26,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 });
   }
   const action = body.action;
-  if (action !== 'disable' && action !== 'enable') {
-    return NextResponse.json({ error: "action must be 'disable' or 'enable'" }, { status: 400 });
+  if (action !== 'disable' && action !== 'enable' && action !== 'reset_password') {
+    return NextResponse.json({ error: "action must be 'disable', 'enable', or 'reset_password'" }, { status: 400 });
   }
 
   const admin = createAdminClient();
@@ -44,6 +45,15 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       { error: 'Only station/member users can be managed here' },
       { status: 403 },
     );
+  }
+
+  // Reset password: server-generated, returned ONCE (same as the create flow). The managed-role
+  // guard above already refuses admin / role-less targets, matching the disable guard.
+  if (action === 'reset_password') {
+    const password = randomBytes(18).toString('base64url');
+    const { error: pwErr } = await admin.auth.admin.updateUserById(id, { password });
+    if (pwErr) return NextResponse.json({ error: pwErr.message }, { status: 500 });
+    return NextResponse.json({ ok: true, password });
   }
 
   const { error: updErr } = await admin.auth.admin.updateUserById(id, {
