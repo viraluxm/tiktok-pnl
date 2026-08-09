@@ -134,6 +134,31 @@ export function payPeriodFor(paydayISO: string): PayPeriod {
   return { start: toISODateUTC(start), end: toISODateUTC(end) };
 }
 
+// The pay period CONTAINING `dateISO`, as a {start,end} window — and payPeriodStartFor for
+// just the Monday start. COMPOSES the helpers above; it does NOT reimplement the window math.
+//
+// Why the +5-day shift: payPeriodFor(nextPayday(D)) does NOT return the window containing D for
+// the first ~5 days of each window. A period CLOSES the Sunday BEFORE its payday (end = payday−5),
+// so nextPayday(D) can land on a payday whose period already closed. The window containing D is
+// the one whose payday P satisfies end = P−5 ≥ D, i.e. P ≥ D+5, i.e. P = nextPayday(D+5).
+// (Verified across window boundaries incl. the first five days — see employees.payperiod.test.mjs.)
+//
+// Used to bucket attendance_events / drop counts by the period an ACTION fell in (Deploy B keys
+// on the event's own timestamp, not the shift date). This is DISTINCT from PayView's
+// payPeriodFor(paydayAtOffset(0)) — that intentionally means "the period you're next paid for".
+export function payPeriodContaining(dateISO: string): PayPeriod {
+  const [y, m, d] = dateISO.slice(0, 10).split('-').map(Number);
+  // Probe = D + 5 days built with LOCAL components, because nextPayday() reads its argument's
+  // LOCAL calendar date (getFullYear/Month/Date). A LOCAL-constructed probe is correct on both a
+  // UTC server (Vercel) and an LA dev machine — identical to how nextPayday(new Date()) behaves.
+  const probe = new Date(y, m - 1, d + 5);
+  return payPeriodFor(nextPayday(probe));
+}
+
+export function payPeriodStartFor(dateISO: string): string {
+  return payPeriodContaining(dateISO).start;
+}
+
 // Display helpers (UTC so the calendar date never drifts by timezone).
 // fmtPayDate('2026-07-17') → 'Fri, Jul 17';  fmtMonthDay('2026-06-29') → 'Jun 29'.
 export function fmtPayDate(iso: string): string {
