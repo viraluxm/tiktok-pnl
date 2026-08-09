@@ -231,6 +231,10 @@ export default function PackStationOverlay({
     () => pickLines.length > 0 && pickLines.every((l) => (counts[l.key] ?? 0) >= l.required_qty),
     [pickLines, counts],
   );
+  // Pack-mode (sm+) grid column CAP by line count so a 2-item box gets 2 large cards, not 2
+  // small ones in a wide grid: <=4 → 2, 5–9 → 3, 10+ → 4. Combined with auto-fit/minmax below,
+  // columns still collapse on narrower viewports and never shrink cards below a readable floor.
+  const packCols = pickLines.length <= 4 ? 2 : pickLines.length <= 9 ? 3 : 4;
 
   // ── scan → box resolution (endpoint-driven, unchanged shape) ──
   async function loadBox(scan: string) {
@@ -581,11 +585,14 @@ export default function PackStationOverlay({
             line satisfied (toggleLine); catalog lines are visually distinct. No per-unit counting,
             and finishPack writes NO verification. mode === 'pack' only. */}
         {screen === 'pick' && box && mode === 'pack' && (
-          <div className="flex-1 min-h-0 w-full max-w-2xl flex flex-col gap-3">
+          <div className="flex-1 min-h-0 w-full flex flex-col gap-3">
             <div className="shrink-0 text-center text-base text-tt-muted break-words">
               {box.order_count} order{box.order_count === 1 ? '' : 's'} · tap each item as you pack it
             </div>
-            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 pr-1">
+
+            {/* MOBILE (< sm): the existing compact row list — unchanged, so the handheld view
+                never regresses. Hidden at sm+ where the card grid takes over. */}
+            <div className="sm:hidden w-full max-w-2xl mx-auto flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 pr-1">
               {pickLines.map((l) => {
                 const done = (counts[l.key] ?? 0) >= l.required_qty;
                 return (
@@ -620,6 +627,75 @@ export default function PackStationOverlay({
                       )}
                     </div>
                     <span className="shrink-0 rounded-xl bg-tt-bg border border-tt-border px-3 py-2 text-2xl font-black tabular-nums text-tt-text">×{l.required_qty}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* DESKTOP (sm+): responsive card grid — image-dominant square cards that fill the
+                viewport. auto-fit/minmax collapses columns on narrower widths; packCols caps the
+                max so few items become few LARGE cards (not many small ones). Cards never shrink
+                below a ~220px readable floor; overflow scrolls. Sizing is in fractions/viewport
+                units so a 15" laptop and a 27" monitor both fill. */}
+            <div
+              className="hidden sm:grid flex-1 min-h-0 overflow-y-auto gap-4 pr-1"
+              style={{
+                gridTemplateColumns: `repeat(auto-fit, minmax(max(220px, calc((100% - ${packCols - 1} * 1rem) / ${packCols})), 1fr))`,
+                // Rows share the container's height (1fr) so few items fill BOTH axes without
+                // scrolling — the common 2–4 item case never scrolls. The 15rem floor is the
+                // readable minimum; only when the rows' floors exceed the height (many items /
+                // short viewport) does the grid overflow and scroll.
+                gridAutoRows: 'minmax(15rem, 1fr)',
+              }}
+            >
+              {pickLines.map((l) => {
+                const done = (counts[l.key] ?? 0) >= l.required_qty;
+                return (
+                  <button
+                    key={l.key}
+                    onClick={() => toggleLine(l)}
+                    className={`relative flex h-full flex-col overflow-hidden rounded-2xl border-4 text-left transition-colors ${done ? 'border-tt-green bg-tt-green/10' : (l.kind === 'catalog' ? 'border-tt-cyan/60 bg-tt-card' : 'border-tt-border bg-tt-card')}`}
+                  >
+                    {/* image-dominant area — the FLEXIBLE part of the card (flex-1) so it takes the
+                        cell height left after the text footer; object-contain preserves aspect
+                        without overflowing, so the card fills its cell in both axes. */}
+                    <div className="relative w-full flex-1 min-h-0 flex items-center justify-center overflow-hidden bg-tt-bg">
+                      {l.kind === 'sku' ? (
+                        l.thumbnail_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={l.thumbnail_url} alt="" className="max-w-full max-h-full object-contain p-2" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                        ) : (
+                          <span className="font-mono font-black text-tt-text leading-none" style={{ fontSize: 'clamp(2.5rem, 9vw, 8rem)' }}>#{l.sku_number ?? '?'}</span>
+                        )
+                      ) : (
+                        <span className="inline-block rounded-lg border-2 border-tt-cyan text-tt-cyan font-extrabold tracking-wide" style={{ fontSize: 'clamp(1rem, 3vw, 2rem)', padding: '0.2em 0.6em' }}>CATALOG</span>
+                      )}
+                      {/* done → the WHOLE card reads as packed across the room: green wash + big ✓ */}
+                      {done && (
+                        <div className="absolute inset-0 bg-tt-green/50 flex items-center justify-center">
+                          <span className="text-black font-black leading-none" style={{ fontSize: 'clamp(4rem, 16vw, 12rem)' }}>✓</span>
+                        </div>
+                      )}
+                    </div>
+                    {/* below the image: a FIXED footer (shrink-0) — #number + title (or catalog
+                        listing) and ×qty. Its height stays constant so the image area flexes. */}
+                    <div className="shrink-0 flex items-start justify-between gap-2 p-3">
+                      <div className="min-w-0 flex-1">
+                        {l.kind === 'sku' ? (
+                          <>
+                            <div className="font-mono font-extrabold text-tt-text leading-tight" style={{ fontSize: 'clamp(1.1rem, 1.8vw, 1.8rem)' }}>#{l.sku_number ?? '?'}</div>
+                            <div className="text-tt-muted break-words leading-tight line-clamp-2" style={{ fontSize: 'clamp(0.8rem, 1vw, 1.1rem)' }}>{l.title}</div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="inline-block rounded border border-tt-cyan text-tt-cyan text-[10px] font-extrabold px-1 leading-tight">CATALOG</div>
+                            <div className="font-semibold text-tt-text break-words leading-tight line-clamp-2" style={{ fontSize: 'clamp(0.85rem, 1vw, 1.15rem)' }}>{l.listing_name}</div>
+                            <div className="text-tt-muted break-all" style={{ fontSize: 'clamp(0.7rem, 0.8vw, 0.9rem)' }}>Seller SKU {l.seller_sku || '—'}</div>
+                          </>
+                        )}
+                      </div>
+                      <span className="shrink-0 rounded-xl bg-tt-bg border border-tt-border font-black tabular-nums text-tt-text leading-none" style={{ fontSize: 'clamp(1.3rem, 2vw, 2.4rem)', padding: 'clamp(0.35rem,0.8vw,0.7rem) clamp(0.5rem,1vw,0.9rem)' }}>×{l.required_qty}</span>
+                    </div>
                   </button>
                 );
               })}
