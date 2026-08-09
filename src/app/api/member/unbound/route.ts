@@ -1,29 +1,41 @@
 import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
+import { CAP_SELECT, filterUnboundChunk, type Cap, type UnboundRow } from '@/lib/member/unbound';
 
 export const dynamic = 'force-dynamic';
 
-// GET /api/member/unbound — the cross-session binding queue for a member.
+// Opaque keyset cursor: the (ordered_at, order_id) of the last row of the previous page.
+type Cursor = { o: string | null; i: string };
+function encodeCursor(c: Cursor): string {
+  return Buffer.from(JSON.stringify(c)).toString('base64url');
+}
+function decodeCursor(raw: string | null): Cursor | null {
+  if (!raw) return null;
+  try {
+    const c = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (c && typeof c.i === 'string' && (c.o === null || typeof c.o === 'string')) return { o: c.o, i: c.i };
+  } catch { /* bad cursor → start from the beginning */ }
+  return null;
+}
+
+// Keyset .or() clause that resumes the (ordered_at asc nullsFirst, order_id asc) scan strictly
+// AFTER the cursor row:
+//   • cursor.o === null → still in the leading NULL-ordered_at group: (ordered_at null AND
+//     order_id > i) OR any non-null ordered_at.
+//   • cursor.o !== null → the null group is consumed: ordered_at > o, OR (ordered_at = o AND
+//     order_id > i). Timestamps are double-quoted so ':'/'.'/'+' are literal in the filter string.
+function keysetClause(cursor: Cursor): string {
+  return cursor.o === null
+    ? `and(ordered_at.is.null,order_id.gt.${cursor.i}),ordered_at.not.is.null`
+    : `ordered_at.gt."${cursor.o}",and(ordered_at.eq."${cursor.o}",order_id.gt.${cursor.i})`;
+}
+
+// GET /api/member/unbound — cross-session binding queue, KEYSET-paginated.
 //
-// "Unbound" = a capture_events row whose order_id has NO matching live_auction_items
-// (client_idempotency_key = order_id) for the owners. Field mapping + the status/payment filters
-// mirror the per-session unbound synthesis in
-//   src/app/api/live/sessions/[id]/board/route.ts:239-281
-// EXACTLY:
-//   • order_id must be non-empty and !== '0'
-//   • is_payment_successful !== false   (drop failed payments)
-//   • CANCELLED dropped via synced_order_ids.status
-//   • store_id taken from synced_order_ids (reliable) — capture_events.store_id is often NULL
-// Cross-session vs board's single-session scope: an order is unbound only if it is bound in NO
-// session (board excludes just that session's bound set).
-//
-// PAGINATION (no cap, no in-memory anti-join over the whole table): stream capture_events
-// oldest-first in bounded chunks; for each chunk resolve bound status with a single IN query
-// against live_auction_items, and CANCELLED/store via one IN against synced_order_ids. Accumulate
-// matched (unbound) rows only until the requested page (offset+limit, plus one to learn has_more)
-// is filled, then stop. Correct pagination over ~43k captures without scanning them all per page.
-//
-// Owner-scoped (service_role), gated on requireMemberScope('binding'). Read-only.
+// Keyset (not offset): pass ?cursor=<next_cursor from the previous page> to resume after its last
+// row, so deep pages cost the same as the first (offset re-scanned from the start). ?limit default
+// 50. Returns { unbound, next_cursor, has_more }. Filter logic is shared with the count route via
+// @/lib/member/unbound (no duplication). Owner-scoped (service_role), requireMemberScope('binding').
 export async function GET(req: Request) {
   const scope = await requireMemberScope('binding');
   if (!scope.ok) return scope.response;
@@ -31,109 +43,48 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
   const limit = Math.min(200, Math.max(1, Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50));
-  const offset = Math.max(0, Number.parseInt(url.searchParams.get('offset') ?? '0', 10) || 0);
-  const wanted = offset + limit; // matched rows needed to fill the page; +1 more tells us has_more
+  const cursor = decodeCursor(url.searchParams.get('cursor'));
 
-  const storeSet = new Set(storeIds);
-  const CHUNK = 300; // capture rows per scan; also the .in() batch size (single IN per chunk)
-
-  type Cap = {
-    order_id: string; selling_price_cents: number | null; product_name: string | null;
-    platform_sku_ref: string | null; buyer_username: string | null; is_payment_successful: boolean | null;
-    ordered_at: string | null; created_at: string | null; store_id: string | null;
-  };
-  type Row = {
-    order_id: string; tiktok_title: string | null; seller_sku_hint: string | null;
-    won_price_cents: number | null; buyer_handle: string | null; logged_at: string; store_id: string | null;
-  };
-
-  const matched: Row[] = [];
+  const CHUNK = 300;
+  const collected: UnboundRow[] = [];
   const seen = new Set<string>();
+  let scanCursor: Cursor | null = cursor; // where the capture scan resumes
   let exhausted = false;
 
-  for (let from = 0; matched.length <= wanted && !exhausted; from += CHUNK) {
-    // Deterministic oldest-first order: (ordered_at, order_id) so .range() paging is stable.
-    const { data: caps, error: capErr } = await admin
-      .from('capture_events')
-      .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at, store_id')
-      .in('user_id', ownerIds)
-      .order('ordered_at', { ascending: true, nullsFirst: true })
-      .order('order_id', { ascending: true })
-      .range(from, from + CHUNK - 1);
-    if (capErr) return NextResponse.json({ error: capErr.message }, { status: 500 });
-    const chunk = (caps ?? []) as Cap[];
-    if (chunk.length < CHUNK) exhausted = true;
-    if (!chunk.length) break;
+  try {
+    // Collect until we have limit+1 matched rows (to learn has_more) or run out of captures.
+    while (collected.length <= limit && !exhausted) {
+      // Filters (.in, .or) must precede transforms (.order, .limit) in the builder chain.
+      let filter = admin.from('capture_events').select(CAP_SELECT).in('user_id', ownerIds);
+      if (scanCursor) filter = filter.or(keysetClause(scanCursor));
+      const { data: caps, error } = await filter
+        .order('ordered_at', { ascending: true, nullsFirst: true })
+        .order('order_id', { ascending: true })
+        .limit(CHUNK);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      const chunk = (caps ?? []) as Cap[];
+      if (chunk.length < CHUNK) exhausted = true;
+      if (!chunk.length) break;
 
-    // Candidate order_ids in this chunk (cheap filters first): valid, not '0'.
-    const chunkOids = [...new Set(chunk.map((c) => String(c.order_id ?? '')).filter((oid) => oid && oid !== '0'))];
-    if (!chunkOids.length) continue;
+      const rows = await filterUnboundChunk(admin, { ownerIds, allStores, storeIds }, chunk, seen);
+      collected.push(...rows);
 
-    // Bound status for exactly this chunk (one IN query) — the anti-join, chunked.
-    const bound = new Set<string>();
-    {
-      const { data: b, error: bErr } = await admin
-        .from('live_auction_items')
-        .select('client_idempotency_key')
-        .in('user_id', ownerIds)
-        .in('client_idempotency_key', chunkOids);
-      if (bErr) return NextResponse.json({ error: bErr.message }, { status: 500 });
-      for (const r of b ?? []) { const k = r.client_idempotency_key; if (k) bound.add(String(k)); }
+      // Advance the scan cursor to the LAST capture of the chunk (bound or not) so the next chunk
+      // resumes after everything already examined.
+      const last = chunk[chunk.length - 1];
+      scanCursor = { o: (last.ordered_at as string | null) ?? null, i: String(last.order_id) };
     }
-
-    // CANCELLED + reliable store_id for this chunk (one IN query).
-    const cancelled = new Set<string>();
-    const syncedStore = new Map<string, string | null>();
-    {
-      const { data: so, error: sErr } = await admin
-        .from('synced_order_ids')
-        .select('order_id, status, store_id')
-        .in('user_id', ownerIds)
-        .in('order_id', chunkOids);
-      if (sErr) return NextResponse.json({ error: sErr.message }, { status: 500 });
-      for (const r of so ?? []) {
-        const oid = String(r.order_id);
-        if (String(r.status) === 'CANCELLED') cancelled.add(oid);
-        syncedStore.set(oid, (r.store_id as string | null) ?? null);
-      }
-    }
-
-    for (const c of chunk) {
-      if (matched.length > wanted) break; // enough to fill the page and know has_more
-      const oid = String(c.order_id ?? '');
-      if (!oid || oid === '0' || seen.has(oid)) continue;
-      if (c.is_payment_successful === false) continue; // board: keep unless explicitly false
-      if (bound.has(oid)) continue;                    // bound in some session → not in the queue
-      if (cancelled.has(oid)) continue;                // authoritative CANCELLED
-      if (!allStores) {
-        // Store-restricted member: require a synced row confirming one of their stores.
-        const st = syncedStore.get(oid);
-        if (!st || !storeSet.has(st)) continue;
-      }
-      seen.add(oid);
-      matched.push({
-        order_id: oid,
-        tiktok_title: (c.product_name as string | null) ?? null,
-        seller_sku_hint: (c.platform_sku_ref as string | null) ?? null, // lot #
-        won_price_cents: (c.selling_price_cents as number | null) ?? null,
-        buyer_handle: (c.buyer_username as string | null) ?? null,
-        logged_at: (c.ordered_at as string | null) ?? (c.created_at as string | null) ?? '',
-        store_id: syncedStore.get(oid) ?? (c.store_id as string | null) ?? null, // synced (reliable) first
-      });
-    }
+  } catch (e) {
+    return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }
 
-  // NOTE: session_id is deliberately NOT returned. A capture only carries room_id
-  // (= live_sessions.tiktok_live_id); a room hosts many sessions over time and open-ended
-  // sessions (ended_at NULL) overlap every later timestamp, so a timestamp routinely matches more
-  // than one session and any pick would be a guess. The bind write will key on session, so a wrong
-  // guess would mis-attribute revenue/host metrics — better to omit it than to guess.
+  const page = collected.slice(0, limit);
+  const has_more = collected.length > limit;
+  const lastRow = page[page.length - 1];
+  const next_cursor = has_more && lastRow ? encodeCursor({ o: lastRow.ordered_at, i: lastRow.order_id }) : null;
 
-  const page = matched.slice(offset, offset + limit);
-  return NextResponse.json({
-    unbound: page,
-    limit,
-    offset,
-    has_more: matched.length > offset + limit,
-  });
+  // Strip the internal ordered_at (kept only for the cursor) from the response rows.
+  const unbound = page.map(({ ordered_at: _ordered_at, ...r }) => r);
+
+  return NextResponse.json({ unbound, limit, next_cursor, has_more });
 }
