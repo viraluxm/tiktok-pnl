@@ -58,7 +58,7 @@ export async function requireStationScope(): Promise<StationScope> {
 // listed store ids. Returns the resolved owner ids + store ids, plus `allStores` so routes can
 // tell a full-scope member from a store-restricted one (store filtering needs that distinction).
 export type MemberScope =
-  | { ok: true; admin: SupabaseClient; ownerIds: string[]; storeIds: string[]; allStores: boolean }
+  | { ok: true; admin: SupabaseClient; ownerIds: string[]; storeIds: string[]; allStores: boolean; actorId: string }
   | { ok: false; response: NextResponse };
 
 export async function requireMemberScope(scope: string): Promise<MemberScope> {
@@ -81,5 +81,5 @@ export async function requireMemberScope(scope: string): Promise<MemberScope> {
     console.error('[member] member scope unresolved: no owner stores');
     return { ok: false, response: NextResponse.json({ error: 'member scope unresolved' }, { status: 500 }) };
   }
-  return { ok: true, admin, ownerIds: resolved.ownerIds, storeIds: resolved.storeIds, allStores };
+  return { ok: true, admin, ownerIds: resolved.ownerIds, storeIds: resolved.storeIds, allStores, actorId: user.id };
 }
