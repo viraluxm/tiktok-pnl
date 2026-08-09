@@ -89,11 +89,11 @@ export async function updateSession(request: NextRequest) {
   };
 
   // ---------------------------------------------------------------------------
-  // Role confinement (station / VA). These roles are set in Supabase via
+  // Role confinement (station / member). These roles are set in Supabase via
   // app_metadata.role and are hard-confined to a tiny allowlist: they can reach
   // ONLY their own pages + API namespace, nothing else. Owner/admin sessions
   // (role undefined or 'admin') are NOT confined and retain full access,
-  // including /fulfillment and /va.
+  // including /fulfillment and /team.
   //
   // This branch runs BEFORE the OAuth-callback whitelist and the auth-page
   // bounce below, so a confined session cannot slip through either: e.g. a
@@ -106,7 +106,9 @@ export async function updateSession(request: NextRequest) {
   // out of confinement (and the /login redirect below would log it out).
   const CONFINEMENT: Record<string, { home: string; allow: string[] }> = {
     station: { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] },
-    va: { home: '/va', allow: ['/va', '/api/va'] },
+    // NOTE: '/api/team' (self-scoped fulfillment-performance) is deliberately NOT in the
+    // allowlist — a member's data comes only from the owner-scoped '/api/member/*' routes.
+    member: { home: '/team/binding', allow: ['/team', '/api/member'] },
   };
   // `lensed_station` is a confinement HINT only — never an authentication
   // signal, and it must never gate data access. We honour it solely to keep an
@@ -122,7 +124,7 @@ export async function updateSession(request: NextRequest) {
     (user?.app_metadata?.role as string | undefined) ??
     (transientAuthFailure && hasStationCookie ? 'station' : undefined);
   const roleHome =
-    role === 'station' ? '/fulfillment' : role === 'va' ? '/va' : '/dashboard';
+    role === 'station' ? '/fulfillment' : role === 'member' ? '/team/binding' : '/dashboard';
 
   // Fail closed: only an unset role or 'admin' is unconfined. ANY other value —
   // including a typo like 'statoin' — is treated as a confined role with an
@@ -170,7 +172,7 @@ export async function updateSession(request: NextRequest) {
   }
 
   // Logged in and trying to access auth pages. Confined roles are already
-  // handled above (station/va never reach here), so roleHome is /dashboard for
+  // handled above (station/member never reach here), so roleHome is /dashboard for
   // owner/admin — but keep it role-aware for correctness.
   if (user && isAuthPage) {
     return redirectTo(roleHome);

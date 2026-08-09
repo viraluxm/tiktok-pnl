@@ -7,13 +7,13 @@ import { useStores } from '@/hooks/useStores';
 // The two roles this page can create. Labels are what the admin sees; the value
 // is the exact string written to app_metadata.role — never anything else.
 const ROLE_OPTIONS = [
-  { value: 'va', label: 'Virtual assistant' },
+  { value: 'member', label: 'Virtual assistant' },
   { value: 'station', label: 'Fulfillment station' },
 ] as const;
 type ManagedRole = (typeof ROLE_OPTIONS)[number]['value'];
 
 const ROLE_LABEL: Record<string, string> = {
-  va: 'Virtual assistant',
+  member: 'Virtual assistant',
   station: 'Fulfillment station',
 };
 
@@ -22,7 +22,7 @@ interface TeamMember {
   email: string | null;
   role: ManagedRole;
   store_id: string | null;   // station: single assigned store
-  stores: string[] | null;   // va: multiple assigned stores
+  stores: string[] | null;   // member: multiple assigned stores
   last_sign_in_at: string | null;
   banned_until: string | null;
 }
@@ -70,10 +70,10 @@ export default function TeamPage() {
   }, [stores]);
 
   // Create form. Station is not store-scoped (warehouse handles all stores);
-  // va is assigned one or more stores.
+  // a member is assigned one or more stores.
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<ManagedRole>('va');
-  const [storeIds, setStoreIds] = useState<string[]>([]); // va (multiple)
+  const [role, setRole] = useState<ManagedRole>('member');
+  const [storeIds, setStoreIds] = useState<string[]>([]); // member (multiple)
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const [newPassword, setNewPassword] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -81,11 +81,13 @@ export default function TeamPage() {
   const create = useMutation({
     mutationFn: async () => {
       // Branch the payload on role: a station is not store-scoped (warehouse
-      // handles all stores) so it sends NO store field; va sends stores[].
+      // handles all stores) so it sends NO store field; a member sends stores[],
+      // collapsed to the '*' sentinel when every store is selected.
+      const allSelected = stores.length > 0 && storeIds.length === stores.length;
       const body =
         role === 'station'
           ? { email, role }
-          : { email, role, stores: storeIds };
+          : { email, role, stores: allSelected ? ['*'] : storeIds };
       const res = await fetch('/api/admin/team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -101,7 +103,7 @@ export default function TeamPage() {
       setBanner({ kind: 'success', text: `Created ${json.user.email}` });
       setEmail('');
       setStoreIds([]);
-      setRole('va');
+      setRole('member');
       qc.invalidateQueries({ queryKey: ['admin-team'] });
     },
     onError: (e: Error) => {
@@ -277,7 +279,7 @@ export default function TeamPage() {
               <select
                 value={role}
                 onChange={(e) => {
-                  // Switching role clears any va store selection so a stale
+                  // Switching role clears any member store selection so a stale
                   // stores[] can never ride along with a station submit.
                   setRole(e.target.value as ManagedRole);
                   setStoreIds([]);
@@ -290,11 +292,11 @@ export default function TeamPage() {
               </select>
             </label>
             {/* Station is not store-scoped (all stores), so it has no store
-                control. VA must pick one or more stores. */}
-            {role === 'va' && (
+                control. A member must pick one or more stores (all selected → '*'). */}
+            {role === 'member' && (
               <label className="block">
                 <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">
-                  Stores <span className="normal-case text-tt-muted/70">(select one or more)</span>
+                  Stores <span className="normal-case text-tt-muted/70">(select one or more; all = every store)</span>
                 </span>
                 <select
                   multiple
@@ -316,7 +318,7 @@ export default function TeamPage() {
             disabled={
               create.isPending ||
               !email ||
-              (role === 'va' && storeIds.length === 0)
+              (role === 'member' && storeIds.length === 0)
             }
             className="rounded-lg bg-tt-cyan px-4 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-40"
           >

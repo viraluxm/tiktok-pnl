@@ -4,12 +4,12 @@ import { createAdminClient } from '@/lib/supabase/admin';
 
 export const dynamic = 'force-dynamic';
 
-const MANAGED_ROLES = ['va', 'station'];
+const MANAGED_ROLES = ['member', 'station'];
 
 // ~100 years — effectively a permanent disable. 'none' lifts the ban.
 const BAN_FOREVER = '876000h';
 
-// PATCH /api/admin/team/[id] — disable or enable a station/va sub-user.
+// PATCH /api/admin/team/[id] — disable or enable a station/member sub-user.
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -31,7 +31,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
   const admin = createAdminClient();
 
-  // Confirm the target is actually a managed (station/va) sub-user. Refuse to
+  // Confirm the target is actually a managed (station/member) sub-user. Refuse to
   // touch an admin or a role-less user — this endpoint must never disable an
   // owner/admin account.
   const { data: target, error: getErr } = await admin.auth.admin.getUserById(id);
@@ -41,7 +41,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const targetRole = target.user.app_metadata?.role;
   if (!targetRole || !MANAGED_ROLES.includes(targetRole)) {
     return NextResponse.json(
-      { error: 'Only station/VA users can be managed here' },
+      { error: 'Only station/member users can be managed here' },
       { status: 403 },
     );
   }
