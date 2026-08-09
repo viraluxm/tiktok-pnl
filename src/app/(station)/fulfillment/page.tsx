@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import PackStationOverlay from '@/components/shipping/PackStationOverlay';
 
@@ -10,8 +10,9 @@ import PackStationOverlay from '@/components/shipping/PackStationOverlay';
 // the /api/station/* routes (service_role, owner-scoped).
 //
 // Device mode ('pick' | 'pack') is remembered per device in the `lensed_station_mode` cookie. If
-// absent, a one-time full-screen picker chooses it; the current mode shows small in a corner with
-// a "change" affordance that re-opens the picker.
+// absent, a one-time full-screen picker chooses it; the current mode shows small in a corner as
+// plain text. Changing it needs a ~900ms press-and-hold on the chip (matching the overlay's
+// hold-to-exit gesture) so a mistap can't drop a packer into pick mode mid-box.
 
 type Mode = 'pick' | 'pack';
 const MODE_COOKIE = 'lensed_station_mode';
@@ -31,6 +32,8 @@ export default function FulfillmentPage() {
   const [pickers, setPickers] = useState<{ id: string; name: string }[]>([]);
   const [pickerId, setPickerId] = useState('');
   const [pickedCount, setPickedCount] = useState(0);
+  const [holding, setHolding] = useState(false);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Read the saved device mode once on mount (cookie → avoids SSR hydration mismatch).
   useEffect(() => {
@@ -79,6 +82,18 @@ export default function FulfillmentPage() {
     );
   }
 
+  // Changing device mode requires a deliberate ~900ms press-and-hold on the chip, mirroring the
+  // overlay's hold-to-exit, so a single mistap can't switch modes mid-box. Completion re-opens the
+  // one-time picker (setMode(null)); releasing early cancels and resets the progress fill.
+  const beginHoldChange = () => {
+    setHolding(true);
+    holdTimer.current = setTimeout(() => { setHolding(false); setMode(null); }, 900);
+  };
+  const cancelHoldChange = () => {
+    setHolding(false);
+    if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
+  };
+
   return (
     <>
       <PackStationOverlay
@@ -92,16 +107,29 @@ export default function FulfillmentPage() {
         onBoxPicked={() => setPickedCount((n) => n + 1)}
         onExit={() => { /* always-on: exit returns to scan-ready in the overlay; nothing to unmount */ }}
       />
-      {/* Current-mode chip, portalled above the overlay (z-[205] > overlay z-[200]); "change"
-          re-opens the picker. Top-LEFT so it never overlaps the overlay's top-right hold-to-exit. */}
+      {/* Current-mode chip, portalled above the overlay (z-[205] > overlay z-[200]). Plain text,
+          no tap target: changing mode requires a press-and-hold (same gesture as the overlay's
+          hold-to-exit). Top-LEFT so it never overlaps the overlay's top-right hold-to-exit. */}
       {typeof document !== 'undefined' && createPortal(
-        <div
-          className="fixed z-[205] flex items-center gap-2 rounded-lg bg-tt-card/90 border border-tt-border px-3 py-1.5 text-xs text-tt-muted backdrop-blur"
+        <button
+          onPointerDown={beginHoldChange}
+          onPointerUp={cancelHoldChange}
+          onPointerLeave={cancelHoldChange}
+          onPointerCancel={cancelHoldChange}
+          aria-label={`Mode: ${mode}. Press and hold to change.`}
+          className="fixed z-[205] flex items-center gap-2 overflow-hidden rounded-lg border border-tt-border bg-tt-card/90 px-3 py-1.5 text-xs backdrop-blur cursor-pointer select-none touch-none"
           style={{ top: 'calc(env(safe-area-inset-top) + 0.75rem)', left: 'calc(env(safe-area-inset-left) + 0.75rem)' }}
         >
-          <span className="font-bold uppercase tracking-wide text-tt-text">{mode}</span>
-          <button onClick={() => setMode(null)} className="underline cursor-pointer">change</button>
-        </div>,
+          {/* hold-to-change progress fill — same feedback as the overlay's hold-to-exit: a tinted
+              fill that grows over 0.9s linear while held and snaps back on release. */}
+          <span
+            aria-hidden
+            className="absolute inset-0 origin-left bg-tt-cyan/30"
+            style={{ transform: holding ? 'scaleX(1)' : 'scaleX(0)', transition: holding ? 'transform 0.9s linear' : 'transform 0s' }}
+          />
+          <span className="relative font-bold uppercase tracking-wide text-tt-text">{mode}</span>
+          <span className="relative text-[10px] normal-case text-tt-muted">hold to change</span>
+        </button>,
         document.body,
       )}
     </>
