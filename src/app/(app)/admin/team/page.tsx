@@ -7,13 +7,13 @@ import { useStores } from '@/hooks/useStores';
 // The two roles this page can create. Labels are what the admin sees; the value
 // is the exact string written to app_metadata.role — never anything else.
 const ROLE_OPTIONS = [
-  { value: 'member', label: 'Virtual assistant' },
+  { value: 'member', label: 'Team member' },
   { value: 'station', label: 'Fulfillment station' },
 ] as const;
 type ManagedRole = (typeof ROLE_OPTIONS)[number]['value'];
 
 const ROLE_LABEL: Record<string, string> = {
-  member: 'Virtual assistant',
+  member: 'Team member',
   station: 'Fulfillment station',
 };
 
@@ -74,6 +74,7 @@ export default function TeamPage() {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<ManagedRole>('member');
   const [storeIds, setStoreIds] = useState<string[]>([]); // member (multiple)
+  const [allStores, setAllStores] = useState(true);       // member: "All stores" toggle (default on)
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const [newPassword, setNewPassword] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -81,13 +82,12 @@ export default function TeamPage() {
   const create = useMutation({
     mutationFn: async () => {
       // Branch the payload on role: a station is not store-scoped (warehouse
-      // handles all stores) so it sends NO store field; a member sends stores[],
-      // collapsed to the '*' sentinel when every store is selected.
-      const allSelected = stores.length > 0 && storeIds.length === stores.length;
+      // handles all stores) so it sends NO store field; a member sends the '*'
+      // sentinel when "All stores" is checked, else the selected store ids.
       const body =
         role === 'station'
           ? { email, role }
-          : { email, role, stores: allSelected ? ['*'] : storeIds };
+          : { email, role, stores: allStores ? ['*'] : storeIds };
       const res = await fetch('/api/admin/team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -103,6 +103,7 @@ export default function TeamPage() {
       setBanner({ kind: 'success', text: `Created ${json.user.email}` });
       setEmail('');
       setStoreIds([]);
+      setAllStores(true);
       setRole('member');
       qc.invalidateQueries({ queryKey: ['admin-team'] });
     },
@@ -144,7 +145,7 @@ export default function TeamPage() {
       <div>
         <h1 className="text-xl font-semibold text-tt-text">Team</h1>
         <p className="text-xs text-tt-muted mt-1 max-w-2xl">
-          Virtual assistants and fulfillment stations. Each sub-user is confined to
+          Team members and fulfillment stations. Each sub-user is confined to
           their own area and the store you assign here.
         </p>
       </div>
@@ -280,9 +281,11 @@ export default function TeamPage() {
                 value={role}
                 onChange={(e) => {
                   // Switching role clears any member store selection so a stale
-                  // stores[] can never ride along with a station submit.
+                  // stores[] can never ride along with a station submit, and resets
+                  // "All stores" to its default (on).
                   setRole(e.target.value as ManagedRole);
                   setStoreIds([]);
+                  setAllStores(true);
                 }}
                 className="w-full rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
               >
@@ -291,26 +294,37 @@ export default function TeamPage() {
                 ))}
               </select>
             </label>
-            {/* Station is not store-scoped (all stores), so it has no store
-                control. A member must pick one or more stores (all selected → '*'). */}
+            {/* Station is not store-scoped (all stores), so it has no store control.
+                A member is "All stores" ('*') by default, or a specific set. */}
             {role === 'member' && (
-              <label className="block">
-                <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">
-                  Stores <span className="normal-case text-tt-muted/70">(select one or more; all = every store)</span>
-                </span>
+              <div className="block">
+                <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">Stores</span>
+                <label className="flex items-center gap-2 mb-2 text-sm text-tt-text cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={allStores}
+                    onChange={(e) => setAllStores(e.target.checked)}
+                    className="h-4 w-4 accent-tt-cyan"
+                  />
+                  All stores
+                </label>
                 <select
                   multiple
                   value={storeIds}
                   onChange={(e) =>
                     setStoreIds(Array.from(e.target.selectedOptions, (o) => o.value))
                   }
-                  className="w-full h-28 rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50"
+                  disabled={allStores}
+                  className={`w-full h-24 rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50 ${allStores ? 'opacity-40 pointer-events-none' : ''}`}
                 >
                   {stores.map((s) => (
                     <option key={s.id} value={s.id} className="bg-tt-card">{s.name}</option>
                   ))}
                 </select>
-              </label>
+                {!allStores && (
+                  <span className="mt-1 block text-[11px] text-tt-muted">Pick one or more stores</span>
+                )}
+              </div>
             )}
           </div>
           <button
@@ -318,7 +332,7 @@ export default function TeamPage() {
             disabled={
               create.isPending ||
               !email ||
-              (role === 'member' && storeIds.length === 0)
+              (role === 'member' && !allStores && storeIds.length === 0)
             }
             className="rounded-lg bg-tt-cyan px-4 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-40"
           >
