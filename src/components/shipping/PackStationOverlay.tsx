@@ -178,6 +178,9 @@ export interface PackStationOverlayProps {
   // storeLabel is part of the interface (station passes "All stores") but is intentionally not
   // rendered here — surfacing it would change ShippingTab's existing overlay output.
   storeLabel: string;
+  // 'pick' (default) = the one-SKU-at-a-time grab flow (unchanged). 'pack' = a scrollable
+  // all-lines checklist that ticks whole lines and does NOT write a verification (see finishPack).
+  mode?: 'pick' | 'pack';
   pickerId: string;
   onPickerChange: (id: string) => void;
   pickedCount: number;
@@ -188,6 +191,7 @@ export interface PackStationOverlayProps {
 export default function PackStationOverlay({
   endpoints,
   pickers,
+  mode = 'pick',
   pickerId,
   onPickerChange,
   pickedCount,
@@ -302,6 +306,21 @@ export default function PackStationOverlay({
         }),
       }).catch(() => {});
     }
+  }
+
+  // ── pack-mode actions (mode === 'pack' only) ──
+  // Tapping a row toggles the WHOLE line satisfied ↔ not (no per-unit counting): satisfied sets
+  // counts[key] = required_qty, untick sets 0. allComplete then works unchanged.
+  const toggleLine = (l: PickLine) => {
+    setCounts((c) => ({ ...c, [l.key]: (c[l.key] ?? 0) >= l.required_qty ? 0 : l.required_qty }));
+  };
+  // Pack finish is a second-pass VERIFY, not the source of record. It must NOT call
+  // endpoints.confirm: shipment_verifications upserts on (user_id, group_key) with
+  // ignoreDuplicates, so a pack confirm after a pick confirm is silently dropped. Show the
+  // verified screen and count the box locally, with NO write.
+  function finishPack() {
+    setScreen('finish');
+    if (!confirmedRef.current) { confirmedRef.current = true; onBoxPicked(); }
   }
 
   const backToReady = () => { setBox(null); setCounts({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
@@ -467,8 +486,9 @@ export default function PackStationOverlay({
 
         {/* PICK — one SKU per screen, sized to the device with dvh + flex + clamp:
             [progress dots] · [HERO photo/number — flex-1, takes only leftover space, object-contain]
-            · [PINNED controls — number, count, Grab, nav; always visible, never scrolls]. */}
-        {screen === 'pick' && box && line && (
+            · [PINNED controls — number, count, Grab, nav; always visible, never scrolls].
+            mode === 'pick' only; pack mode renders the checklist block below instead. */}
+        {screen === 'pick' && box && mode === 'pick' && line && (
           <div className="flex-1 min-h-0 w-full max-w-2xl flex flex-col gap-[clamp(0.35rem,1.4vh,0.9rem)]">
             {/* progress dots (tappable) — compact, top. Catalog lines get a square dot so a picker
                 can see at a glance that the box mixes internal-SKU and catalog items. */}
@@ -557,12 +577,69 @@ export default function PackStationOverlay({
           </div>
         )}
 
+        {/* PACK — all lines at once as a scrollable checklist. Tapping a row toggles the WHOLE
+            line satisfied (toggleLine); catalog lines are visually distinct. No per-unit counting,
+            and finishPack writes NO verification. mode === 'pack' only. */}
+        {screen === 'pick' && box && mode === 'pack' && (
+          <div className="flex-1 min-h-0 w-full max-w-2xl flex flex-col gap-3">
+            <div className="shrink-0 text-center text-base text-tt-muted break-words">
+              {box.order_count} order{box.order_count === 1 ? '' : 's'} · tap each item as you pack it
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 pr-1">
+              {pickLines.map((l) => {
+                const done = (counts[l.key] ?? 0) >= l.required_qty;
+                return (
+                  <button
+                    key={l.key}
+                    onClick={() => toggleLine(l)}
+                    className={`shrink-0 w-full flex items-center gap-3 rounded-2xl border-2 p-3 text-left transition-opacity ${done ? 'border-tt-green bg-tt-green/10 opacity-60' : (l.kind === 'catalog' ? 'border-tt-cyan/60 bg-tt-card' : 'border-tt-border bg-tt-card')}`}
+                  >
+                    <span className={`shrink-0 w-10 h-10 rounded-lg border-2 flex items-center justify-center text-2xl font-black ${done ? 'border-tt-green bg-tt-green text-black' : 'border-tt-border text-transparent'}`} aria-hidden>✓</span>
+                    {l.kind === 'sku' ? (
+                      l.thumbnail_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={l.thumbnail_url} alt="" className="shrink-0 w-16 h-16 rounded-lg object-cover border border-tt-border" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+                      ) : (
+                        <span className="shrink-0 w-16 h-16 rounded-lg border border-tt-border flex items-center justify-center font-mono font-extrabold text-tt-text text-lg">#{l.sku_number ?? '?'}</span>
+                      )
+                    ) : (
+                      <span className="shrink-0 w-16 h-16 rounded-lg border-2 border-tt-cyan text-tt-cyan flex items-center justify-center text-xs font-extrabold">CAT</span>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      {l.kind === 'sku' ? (
+                        <>
+                          <div className="font-mono font-extrabold text-tt-text text-xl leading-tight">#{l.sku_number ?? '?'}</div>
+                          <div className="text-sm text-tt-muted break-words leading-tight">{l.title}</div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="inline-block rounded border border-tt-cyan text-tt-cyan text-[10px] font-extrabold px-1 leading-tight">CATALOG</div>
+                          <div className="font-semibold text-tt-text break-words leading-tight">{l.listing_name}</div>
+                          <div className="text-xs text-tt-muted break-all">Seller SKU {l.seller_sku || '—'}</div>
+                        </>
+                      )}
+                    </div>
+                    <span className="shrink-0 rounded-xl bg-tt-bg border border-tt-border px-3 py-2 text-2xl font-black tabular-nums text-tt-text">×{l.required_qty}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="shrink-0 flex items-center justify-between gap-3">
+              <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="shrink-0 inline-flex items-center min-h-[44px] px-2 text-sm text-tt-muted underline cursor-pointer">New label</button>
+              <span className="flex-1 min-w-0 truncate text-center text-sm text-tt-muted">{pickLines.filter((l) => (counts[l.key] ?? 0) >= l.required_qty).length}/{pickLines.length} items</span>
+              {allComplete && (
+                <button onClick={finishPack} className="flex-1 min-h-[52px] px-6 py-3 rounded-xl bg-tt-cyan text-black text-lg font-extrabold cursor-pointer hover:opacity-90 shadow-lg">Box complete — verify ›</button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* FINISH */}
         {screen === 'finish' && (
           <div className="w-full max-w-sm mx-auto px-5 text-center">
             <div className="text-tt-green text-7xl mb-3">✓</div>
-            <div className="text-3xl font-extrabold break-words">Box picked</div>
-            <div className="mt-2 text-lg text-tt-muted break-words">Put all items on the rack with the shipping label.</div>
+            <div className="text-3xl font-extrabold break-words">{mode === 'pack' ? 'Box verified' : 'Box picked'}</div>
+            <div className="mt-2 text-lg text-tt-muted break-words">{mode === 'pack' ? 'All items checked off — set the box with its label.' : 'Put all items on the rack with the shipping label.'}</div>
             <button onClick={backToReady} className="mt-8 w-full min-h-[56px] py-5 rounded-2xl bg-tt-green text-black text-xl font-extrabold cursor-pointer hover:opacity-90 shadow-lg">
               Scan next label
             </button>
