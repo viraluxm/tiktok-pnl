@@ -17,7 +17,7 @@ function isManagedRole(v: unknown): v is ManagedRole {
 
 // The only capability scopes a 'member' may hold. Each maps 1:1 to a /team page + its owner-scoped
 // /api/member/* routes in the middleware allowlist — adding a scope means adding it BOTH places.
-export const KNOWN_MEMBER_SCOPES = ['binding', 'inventory', 'pnl'] as const;
+export const KNOWN_MEMBER_SCOPES = ['binding', 'inventory', 'pnl', 'shows'] as const;
 
 // A non-empty, de-duplicated subset of KNOWN_MEMBER_SCOPES, or null if invalid. Fail closed: an
 // unknown scope would confine the member to nothing, so we reject it at write time.

@@ -12,7 +12,7 @@ const BAN_FOREVER = '876000h';
 
 // The only capability scopes a 'member' may hold — kept in lockstep with the create route and the
 // middleware allowlist. Fail closed: an unknown scope would confine the member to nothing.
-const KNOWN_MEMBER_SCOPES = ['binding', 'inventory', 'pnl'] as const;
+const KNOWN_MEMBER_SCOPES = ['binding', 'inventory', 'pnl', 'shows'] as const;
 function validMemberScopes(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null;
   const set = [...new Set(raw.filter((s): s is string => typeof s === 'string').map((s) => s.trim()))];
