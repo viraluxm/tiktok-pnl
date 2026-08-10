@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
+import { writeGateStatus } from '@/lib/live/captureActivity';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -47,7 +48,6 @@ export const maxDuration = 300;
 // Open/non-terminal statuses whose stored value may be a stale snapshot of a live-packable order.
 // Matches PR #74's CORE_OPEN so both passes reason about the same frozen-status set.
 const TARGET_STATUSES = ['AWAITING_COLLECTION', 'AWAITING_SHIPMENT', 'ON_HOLD', 'PARTIALLY_SHIPPING'];
-const ACTIVITY_WINDOW_MIN = 15;  // informational readout only (gate no longer enforced)
 const CALL_BUDGET = 80;          // secondary cap: ≤80 × 50-id calls per invocation
 // Per-invocation TIME budget, kept BELOW a conservative 60s platform floor so a pass always RETURNS
 // cleanly (with a resumable next_after) instead of being killed mid-flight — maxDuration=300 is the
@@ -61,25 +61,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // error path stopping the sweep. 105005 = "Request is too frequent" (the common one). Widen once
 // the exact prod code is confirmed from the Vercel logs.
 const isRateLimit = (msg: string) => /429|rate ?-?limit|too many|too frequent|frequent|105005/i.test(msg);
-
-// Most-recent auction write across capture_events + live_auction_items → the deploy/write gate.
-async function writeGateStatus(admin: ReturnType<typeof createAdminClient>) {
-  const latest = async (table: string): Promise<number | null> => {
-    const { data } = await admin.from(table).select('created_at').order('created_at', { ascending: false }).limit(1);
-    const ts = data?.[0]?.created_at as string | undefined;
-    return ts ? new Date(ts).getTime() : null;
-  };
-  const [capTs, itemTs] = await Promise.all([latest('capture_events'), latest('live_auction_items')]);
-  const lastMs = Math.max(capTs ?? 0, itemTs ?? 0) || null;
-  const minutesSince = lastMs ? (Date.now() - lastMs) / 60_000 : null;
-  const blocked = minutesSince != null && minutesSince < ACTIVITY_WINDOW_MIN;
-  return {
-    checked: true, window_minutes: ACTIVITY_WINDOW_MIN,
-    last_activity_at: lastMs ? new Date(lastMs).toISOString() : null,
-    minutes_since: minutesSince != null ? Math.round(minutesSince * 10) / 10 : null,
-    blocked, reason: blocked ? 'recent auction write — live likely active; writes refused' : 'quiet — safe to write',
-  };
-}
 
 // Caller must be a member of the store (the app's existing store-access gate). Returns the store's
 // connection (owner + creds) via the service role — the store's data owner may not be the caller.
