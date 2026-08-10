@@ -56,7 +56,21 @@ check result for the record).
 Any table **not** on the exempt list stays gated. **Adding a table to the exempt list
 requires the user's explicit approval** — do not extend it on your own judgment.
 
-## The `extension/` directory
+### Deploy risk classes (the silence gate is about DATA writes, not all deploys)
+
+The write-silence gate above governs **database writes** — migrations and writes to
+capture / order-sync-path tables. Vercel **deploys** are governed separately, by what the
+change can reach:
+
+- **Additive application code** (new routes/components/logic that nothing live reaches yet):
+  **not gated.** Deploy, then smoke-test in prod, with a rollback ready (revert the merge
+  commit, or promote the previous Vercel deployment).
+- **Auth middleware, session handling, or the extension token path** (app-wide blast radius —
+  a wrong `middleware.ts` matcher bounces users to `/login`; session changes can clobber the
+  capture extension's JWT): the **diff must be reviewed by the user first.** Once reviewed and
+  approved, these do **not** need a write-silence window — the extension's capture path does
+  not route through Next.js, so a reviewed deploy is safe during a show. Smoke-test immediately
+  after, rollback ready.
 
 Do **not** modify `extension/` unless the task is explicitly about the capture
 extension. It is a separate deploy surface with its own auth/session handling.
