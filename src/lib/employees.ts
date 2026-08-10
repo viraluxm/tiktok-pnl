@@ -33,15 +33,21 @@ export interface EmployeePay {
 // recurring `GeneratedShift`s satisfy it. The time-clock fields are optional so generated
 // recurring instances (which never carry them) are treated as plain, always-payable shifts.
 export type ShiftLike = Pick<Shift, 'employee_id' | 'start_time' | 'end_time'> &
-  Partial<Pick<Shift, 'source' | 'confirmed_at' | 'break_minutes' | 'clock_in_at' | 'clock_out_at'>>;
+  Partial<Pick<Shift, 'source' | 'source_rule_id' | 'confirmed_at' | 'break_minutes' | 'clock_in_at' | 'clock_out_at'>>;
 
-// A shift counts toward pay when it is COMPLETED and not an UNCONFIRMED time-clock shift.
-// Manual/recurring shifts (source 'manual' or absent) are payable as soon as they close —
-// identical to behaviour before the time clock. Only a 'time_clock' shift is held back
-// until a manager sets confirmed_at; that gate is what keeps kiosk punches out of pay until
-// they are reviewed (see migration 070 + the kiosk RPCs in 071).
+// A shift counts toward pay when it is COMPLETED, not a materialized-from-schedule row, and not
+// an UNCONFIRMED time-clock shift.
+//
+// PUNCHES ARE TRUTH, SCHEDULE IS PLAN (Deploy C): a materialized recurring shift — any row with
+// source_rule_id set, written by the past-materializer cron OR by freezeRulePast on rule
+// delete/deactivate — is the frozen PLAN, never a pay input. Gating on source_rule_id here is the
+// single choke point that neutralizes BOTH writers at once (a flag would leave freezeRulePast
+// ungated). Manual CORRECTIONS (source_rule_id NULL — hand-added / edited one-offs, incl. a fixed
+// forgotten-clock-out) stay payable. Only a 'time_clock' shift is additionally held back until a
+// manager sets confirmed_at (migration 070 + the kiosk RPCs in 071).
 export function isPayableShift(s: ShiftLike): boolean {
   if (isOpenShift(s)) return false; // open shift → indeterminate hours
+  if (s.source_rule_id != null) return false; // materialized from a schedule rule = plan, never pay
   if (s.source === 'time_clock' && s.confirmed_at == null) return false; // awaiting manager confirmation
   return true;
 }

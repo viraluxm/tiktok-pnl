@@ -51,6 +51,24 @@ console.log('\nisPayableShift');
   check('CONFIRMED time_clock payable', isPayableShift({ employee_id: 'e1', start_time: '09:00', end_time: '17:00', source: 'time_clock', confirmed_at: CONFIRMED }) === true);
 }
 
+// ── isPayableShift: PUNCHES ARE TRUTH — materialized-from-schedule rows never pay (Deploy C) ──
+console.log('\nisPayableShift — source_rule_id guard (schedule is plan, not pay)');
+{
+  check('manual + source_rule_id SET + end_time → NOT payable (materialized plan row)',
+    isPayableShift({ employee_id: 'e1', start_time: '16:00', end_time: '02:00', source: 'manual', source_rule_id: 'rule-1' }) === false);
+  check('manual + source_rule_id NULL + end_time → payable (hand-entered correction)',
+    isPayableShift({ employee_id: 'e1', start_time: '09:00', end_time: '17:00', source: 'manual', source_rule_id: null }) === true);
+  check('time_clock CONFIRMED (no rule) → payable',
+    isPayableShift({ employee_id: 'e1', start_time: '09:00', end_time: '17:00', source: 'time_clock', confirmed_at: CONFIRMED, source_rule_id: null }) === true);
+  check('time_clock UNCONFIRMED → NOT payable',
+    isPayableShift({ employee_id: 'e1', start_time: '09:00', end_time: '17:00', source: 'time_clock', confirmed_at: null }) === false);
+  // computePay integration: a materialized recurring row contributes 0 even mixed with a payable manual row.
+  const manualPay = { employee_id: 'e1', start_time: '09:00', end_time: '17:00', source: 'manual' }; // 8h
+  const materializedPlan = { employee_id: 'e1', start_time: '16:00', end_time: '02:00', source: 'manual', source_rule_id: 'rule-1' }; // 10h plan, must NOT pay
+  check('computePay: materialized plan row adds 0h (only the 8h manual counts)',
+    hoursFor([manualPay, materializedPlan]) === 8, `got ${hoursFor([manualPay, materializedPlan])}`);
+}
+
 // ── computePay: the end-to-end pay behaviour the spec requires ──
 console.log('\ncomputePay — unconfirmed stays out, confirmed counts once');
 {

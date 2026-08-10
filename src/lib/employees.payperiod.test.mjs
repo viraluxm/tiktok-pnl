@@ -68,8 +68,12 @@ console.log('\npaydayAtOffset (nav)');
   check('offset +1 → Jul 31', paydayAtOffset(1, t) === '2026-07-31');
 }
 
-// ── Materialized recurring day is NOT double-counted within a period window
-console.log('\nperiod window: materialized day counted once');
+// ── Deploy C (punches are truth): a MATERIALIZED recurring day does NOT pay.
+// Pre-Deploy-C this block asserted a materialized recurring row still paid ("counted once = 80h").
+// That is now wrong: shifts with source_rule_id set are the frozen PLAN, excluded by isPayableShift.
+// In the app, PayView passes ONLY real shifts to computePay (no projections), so the sole recurring
+// input is the materialized row — which pays 0. Recurring never reaches pay.
+console.log('\nperiod window (Deploy C): materialized recurring day pays 0, generator still excludes it');
 {
   const EMP = { id: 'e', hourly_rate: 10 };
   const rule = {
@@ -80,19 +84,26 @@ console.log('\nperiod window: materialized day counted once');
   const { start, end } = payPeriodFor('2026-07-17'); // Jun 29 – Jul 12
   const TODAY = d(2026, 7, 12); // Sunday, so the whole window is past
 
-  // Projection-only baseline for the window (10 workdays Jun 29–Jul 10 × 8h = 80h).
+  // computePay is a pure summer: raw projections passed in still sum (10 workdays × 8h = 80h).
+  // Keeping projections OUT of pay is PayView's job (it no longer passes periodGenerated) — not
+  // computePay's. Documented here so the boundary is explicit.
   const projOnly = generateRecurringShifts([rule], [], start, end, new Set(), TODAY);
-  const before = computePay([EMP], projOnly.filter((g) => !g.skipped))[0].hours;
+  check('computePay sums raw projections (10 workdays = 80h) — PayView is what withholds them',
+    computePay([EMP], projOnly.filter((g) => !g.skipped))[0].hours === 80);
 
-  // Materialize ONE day (Jul 6) as a real row; generator must exclude it.
+  // Generator still excludes a materialized (rule,date) from projection (unchanged).
   const materialized = new Set(['r|2026-07-06']);
-  const realRow = { employee_id: 'e', date: '2026-07-06', start_time: '09:00', end_time: '17:00', source_rule_id: 'r' };
+  const realRow = { employee_id: 'e', date: '2026-07-06', start_time: '09:00', end_time: '17:00', source: 'manual', source_rule_id: 'r' };
   const gen = generateRecurringShifts([rule], [], start, end, materialized, TODAY);
-  const after = computePay([EMP], [realRow, ...gen.filter((g) => !g.skipped)])[0].hours;
-
-  check('window projects 10 workdays = 80h', before === 80, `got ${before}`);
   check('generator excludes the materialized day (9 projected)', gen.length === 9, `got ${gen.length}`);
-  check('EXACTLY-ONCE in period: total unchanged 80h (not 88)', after === before, `before=${before} after=${after}`);
+
+  // NEW invariant: the materialized recurring row pays 0 (source_rule_id guard).
+  check('materialized recurring row pays 0h', computePay([EMP], [realRow])[0].hours === 0,
+    `got ${computePay([EMP], [realRow])[0].hours}`);
+
+  // App model: PayView passes real shifts only. With just the materialized row as the recurring
+  // input, recurring pay for the period = 0.
+  check('app model (real shifts only): recurring pay = 0h', computePay([EMP], [realRow])[0].hours === 0);
 }
 
 // ── payPeriodContaining / payPeriodStartFor: the returned window must CONTAIN the date,
