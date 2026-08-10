@@ -56,6 +56,20 @@ check result for the record).
 Any table **not** on the exempt list stays gated. **Adding a table to the exempt list
 requires the user's explicit approval** — do not extend it on your own judgment.
 
+### `shift_rules` is a PAYROLL surface, not only a scheduling one
+
+`shift_rules` is on the exempt list above (no live-show reader), but **exempt from the
+write-silence gate does NOT mean low-stakes — it moves money.** PayView projects **active**
+recurring rules into pay at read time (`generateRecurringShifts` → `computePay` in
+`src/lib/employees.ts` / `PayView.tsx`), so scheduled hours become **pay owed** the moment a
+rule exists — independent of the past-materializer and of `SHIFT_MATERIALIZE_WRITE_ENABLED`.
+A recurring day with no punch pays full scheduled hours (manual/recurring shifts have no
+`confirmed_at` gate; the only no-show handling is a manual `shift_exceptions` `'skip'`), and
+it does **not** dedup against time-clock punches (the suppression set keys on `source_rule_id`,
+which punches lack) → double-pay where both exist. **Any write to `shift_rules`
+(insert / activate / edit times/days) requires checking the pay path (PayView / computePay),
+not just the scheduling path.** (This is why the Aug-2026 rule seed had to be deactivated.)
+
 ### Deploy risk classes (the silence gate is about DATA writes, not all deploys)
 
 The write-silence gate above governs **database writes** — migrations and writes to
