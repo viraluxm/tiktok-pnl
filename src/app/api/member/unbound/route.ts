@@ -45,6 +45,15 @@ export async function GET(req: Request) {
   const limit = Math.min(200, Math.max(1, Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50));
   const cursor = decodeCursor(url.searchParams.get('cursor'));
 
+  // Optional single-store filter (the binding page's pill). Must be one of the member's assigned
+  // stores (storeIds = their scope; all owner stores for an all-stores member) — else 403, so a
+  // restricted member can't pass a store_id outside their scope. The client resets the keyset cursor
+  // to page 1 when the filter changes; the cursor itself is filter-agnostic (order_id/ordered_at).
+  const storeFilter = url.searchParams.get('store_id')?.trim() || null;
+  if (storeFilter && !storeIds.includes(storeFilter)) {
+    return NextResponse.json({ error: 'store_id not in scope' }, { status: 403 });
+  }
+
   const CHUNK = 300;
   const collected: UnboundRow[] = [];
   const seen = new Set<string>();
@@ -66,7 +75,7 @@ export async function GET(req: Request) {
       if (chunk.length < CHUNK) exhausted = true;
       if (!chunk.length) break;
 
-      const rows = await filterUnboundChunk(admin, { ownerIds, allStores, storeIds }, chunk, seen);
+      const rows = await filterUnboundChunk(admin, { ownerIds, allStores, storeIds, storeFilter }, chunk, seen);
       collected.push(...rows);
 
       // Advance the scan cursor to the LAST capture of the chunk (bound or not) so the next chunk

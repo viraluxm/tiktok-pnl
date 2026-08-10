@@ -113,8 +113,8 @@ export async function updateSession(request: NextRequest) {
   // reachable — member data comes only from owner-scoped /api/member/*.
   const STATION_CONFINEMENT = { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] };
   const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
-    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog'],
-    inventory: ['/team/inventory', '/api/member/inventory'],
+    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores'],
+    inventory: ['/team/inventory', '/api/member/inventory', '/api/member/stores'],
   };
   const memberConfinement = (rawScopes: unknown): { home: string; allow: string[] } => {
     const scopes = Array.isArray(rawScopes) ? rawScopes.map(String) : [];

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 
@@ -61,18 +61,12 @@ export type MemberScope =
   | { ok: true; admin: SupabaseClient; ownerIds: string[]; storeIds: string[]; allStores: boolean; actorId: string }
   | { ok: false; response: NextResponse };
 
-export async function requireMemberScope(scope: string): Promise<MemberScope> {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { ok: false, response: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) };
-
-  const meta = (user.app_metadata ?? {}) as { role?: string; scopes?: unknown; stores?: unknown };
-  const scopes = Array.isArray(meta.scopes) ? meta.scopes.map(String) : [];
-  if (meta.role !== 'member' || !scopes.includes(scope)) {
-    return { ok: false, response: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) };
-  }
-
+// Resolve the owner ids + assigned stores for an authenticated member. Owner resolution lives in
+// ONE place (resolveOwnerIds); this wraps it with the member's store assignment. Shared by
+// requireMemberScope (gated on a specific scope) and requireMember (any member scope).
+async function buildMemberScope(user: User): Promise<MemberScope> {
   const admin = createAdminClient();
+  const meta = (user.app_metadata ?? {}) as { stores?: unknown };
   const declared = Array.isArray(meta.stores) ? meta.stores.map(String) : [];
   const allStores = declared.length === 0 || declared.includes('*'); // '*' or unset → all owner stores
   const resolved = await resolveOwnerIds(admin, allStores ? undefined : { storeIds: declared });
@@ -82,4 +76,32 @@ export async function requireMemberScope(scope: string): Promise<MemberScope> {
     return { ok: false, response: NextResponse.json({ error: 'member scope unresolved' }, { status: 500 }) };
   }
   return { ok: true, admin, ownerIds: resolved.ownerIds, storeIds: resolved.storeIds, allStores, actorId: user.id };
+}
+
+export async function requireMemberScope(scope: string): Promise<MemberScope> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { ok: false, response: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) };
+
+  const meta = (user.app_metadata ?? {}) as { role?: string; scopes?: unknown };
+  const scopes = Array.isArray(meta.scopes) ? meta.scopes.map(String) : [];
+  if (meta.role !== 'member' || !scopes.includes(scope)) {
+    return { ok: false, response: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) };
+  }
+  return buildMemberScope(user);
+}
+
+// Any authenticated member, regardless of WHICH scope(s) they hold — for endpoints shared across
+// scopes (e.g. /api/member/stores). The middleware already gates the PATH to scopes whose allowlist
+// includes it, so reaching here means the member holds a scope granting the route; this only
+// re-checks role === 'member'. Same resolved shape as requireMemberScope (owner ids + assigned
+// stores), so a store-restricted member still only ever sees their own stores.
+export async function requireMember(): Promise<MemberScope> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { ok: false, response: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) };
+  if ((user.app_metadata as { role?: string } | undefined)?.role !== 'member') {
+    return { ok: false, response: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) };
+  }
+  return buildMemberScope(user);
 }

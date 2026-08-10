@@ -54,6 +54,12 @@ export default function MemberBindingPage() {
   const activeOrderRef = useRef<string | null>(null);            // guards against out-of-order session fetches
   const [query, setQuery] = useState('');
 
+  // Store filter (pills). null = All stores. The ref lets the stable loadPage read the current
+  // filter without re-creating; selectStore keeps them in sync and resets the keyset to page 1.
+  const [stores, setStores] = useState<{ id: string; name: string | null }[]>([]);
+  const [selectedStore, setSelectedStore] = useState<string | null>(null);
+  const selectedStoreRef = useRef<string | null>(null);
+
   // ── Working state for the single expanded row ──
   const [sessions, setSessions] = useState<SessionCandidate[]>([]);
   const [sessLoading, setSessLoading] = useState(false);
@@ -75,6 +81,7 @@ export default function MemberBindingPage() {
       const cursor = cursorsRef.current[idx] ?? null;
       const qs = new URLSearchParams({ limit: '50' });
       if (cursor) qs.set('cursor', cursor);
+      if (selectedStoreRef.current) qs.set('store_id', selectedStoreRef.current);
       const res = await fetch(`/api/member/unbound?${qs.toString()}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Failed to load queue (${res.status})`);
       const u = await res.json();
@@ -91,12 +98,26 @@ export default function MemberBindingPage() {
     }
   }, []);
 
+  // Switch the store filter: keyset can't resume across a different filter, so reset to page 1.
+  const selectStore = useCallback((storeId: string | null) => {
+    if (selectedStoreRef.current === storeId) return;
+    selectedStoreRef.current = storeId;
+    setSelectedStore(storeId);
+    cursorsRef.current = [null]; // drop all page cursors — new filter starts fresh
+    setNextCursor(null);
+    loadPage(0);
+  }, [loadPage]);
+
   useEffect(() => {
     loadPage(0);
     fetch('/api/member/catalog')
       .then((r) => (r.ok ? r.json() : { skus: [] }))
       .then((d) => setSkus((d.skus ?? []) as Sku[]))
       .catch(() => { /* catalog is best-effort; the picker just shows no SKUs */ });
+    fetch('/api/member/stores')
+      .then((r) => (r.ok ? r.json() : { stores: [] }))
+      .then((d) => setStores((d.stores ?? []) as { id: string; name: string | null }[]))
+      .catch(() => { /* best-effort; no pills if it fails */ });
   }, [loadPage]);
 
   const loadSessions = useCallback(async (orderId: string) => {
@@ -189,6 +210,36 @@ export default function MemberBindingPage() {
           Page {pageIdx + 1} · {rows.length.toLocaleString()} loaded{hasMore ? ' · more available' : ''}
         </div>
       </div>
+
+      {/* Store filter pills — rendered whenever the member has any store, so the scope is always
+          visible. A single-store member sees just their one store as a label pill (no redundant
+          "All stores"); a multi-store member gets "All stores" + one per store. Selecting refetches
+          from page 1. Rows with no synced store_id appear only under "All stores". */}
+      {stores.length > 0 && (
+        <div className="mb-4 flex flex-wrap gap-1">
+          {stores.length > 1 && (
+            <button
+              onClick={() => selectStore(null)}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${selectedStore === null ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'}`}
+            >
+              All stores
+            </button>
+          )}
+          {stores.map((s) => {
+            // The lone pill of a single-store member reads as an active label even before any click.
+            const active = selectedStore === s.id || (stores.length === 1 && selectedStore === null);
+            return (
+              <button
+                key={s.id}
+                onClick={() => selectStore(s.id)}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${active ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'}`}
+              >
+                {s.name ?? s.id}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {loading && rows.length === 0 && <div className="text-lg text-tt-muted">Loading queue…</div>}
       {err && <div className="rounded-xl border-2 border-tt-red/50 bg-tt-red/10 px-4 py-3 text-tt-red font-semibold">{err}</div>}

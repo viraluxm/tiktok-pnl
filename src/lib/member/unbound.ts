@@ -28,7 +28,11 @@ export type UnboundRow = {
   store_id: string | null; ordered_at: string | null;
 };
 
-export interface UnboundScope { ownerIds: string[]; allStores: boolean; storeIds: string[] }
+// storeFilter (optional): a SINGLE store_id to narrow to — the binding page's store pill. It uses
+// the synced_order_ids store_id, so a row with no synced match (null store_id) is excluded from any
+// specific store and shows only under "All stores" (storeFilter absent). Independent of the
+// restricted-member `storeIds`/`allStores` scope, which still applies.
+export interface UnboundScope { ownerIds: string[]; allStores: boolean; storeIds: string[]; storeFilter?: string | null }
 
 // Filter one chunk of capture rows to the UNBOUND ones. Two IN queries per chunk: the bound
 // anti-join (live_auction_items) and CANCELLED/store (synced_order_ids). `seen` dedups by order_id
@@ -39,7 +43,7 @@ export async function filterUnboundChunk(
   caps: Cap[],
   seen: Set<string>,
 ): Promise<UnboundRow[]> {
-  const { ownerIds, allStores, storeIds } = scope;
+  const { ownerIds, allStores, storeIds, storeFilter } = scope;
   const storeSet = new Set(storeIds);
 
   const chunkOids = [...new Set(caps.map((c) => String(c.order_id ?? '')).filter((oid) => oid && oid !== '0'))];
@@ -81,10 +85,9 @@ export async function filterUnboundChunk(
     if (c.is_payment_successful === false) continue;
     if (bound.has(oid)) continue;
     if (cancelled.has(oid)) continue;
-    if (!allStores) {
-      const st = syncedStore.get(oid);
-      if (!st || !storeSet.has(st)) continue;
-    }
+    const st = syncedStore.get(oid) ?? null;
+    if (!allStores && (!st || !storeSet.has(st))) continue;      // restricted-member scope
+    if (storeFilter && st !== storeFilter) continue;              // specific-store pill (null st excluded)
     seen.add(oid);
     out.push({
       order_id: oid,
