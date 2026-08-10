@@ -5,6 +5,7 @@ import { fmt } from '@/lib/calculations';
 import {
   computePay,
   generateRecurringShifts,
+  shiftHours,
   payPeriodFor,
   paydayAtOffset,
   fmtPayDate,
@@ -45,10 +46,23 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     () => generateRecurringShifts(rules, exceptions, period.start, period.end, periodMaterialized),
     [rules, exceptions, period.start, period.end, periodMaterialized],
   );
-  const pay = useMemo(
-    () => computePay(employees, [...periodShifts, ...periodGenerated.filter((g) => !g.skipped)]),
-    [employees, periodShifts, periodGenerated],
-  );
+  // PUNCHES ARE TRUTH (Deploy C): pay is computed from real shifts ONLY (punch-derived +
+  // manual corrections). Recurring PROJECTIONS are NOT a pay input — they're the plan, shown
+  // separately below as "Scheduled". (Materialized recurring rows that happen to sit in
+  // periodShifts are also excluded from pay by isPayableShift's source_rule_id guard.)
+  const pay = useMemo(() => computePay(employees, periodShifts), [employees, periodShifts]);
+
+  // Planned (scheduled) hours per employee from the recurring projection — DISPLAY ONLY, never
+  // summed into pay. Lets the table show "Scheduled Xh · Paid Yh" so a gap (e.g. a forgotten
+  // clock-out) is visible instead of silently paying the plan.
+  const plannedHoursByEmployee = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of periodGenerated) {
+      if (g.skipped) continue;
+      m.set(g.employee_id, (m.get(g.employee_id) ?? 0) + shiftHours(g.start_time, g.end_time));
+    }
+    return m;
+  }, [periodGenerated]);
   // Role filter applied on the already-computed pay rows (no recompute — just narrows which
   // rows show). The period selector still drives the numbers.
   const filteredPay = useMemo(
@@ -56,8 +70,16 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     [pay, payRole],
   );
   const totals = useMemo(
-    () => filteredPay.reduce((acc, p) => ({ hours: acc.hours + p.hours, pay: acc.pay + p.pay }), { hours: 0, pay: 0 }),
-    [filteredPay],
+    () =>
+      filteredPay.reduce(
+        (acc, p) => ({
+          hours: acc.hours + p.hours,
+          scheduled: acc.scheduled + (plannedHoursByEmployee.get(p.employee.id) ?? 0),
+          pay: acc.pay + p.pay,
+        }),
+        { hours: 0, scheduled: 0, pay: 0 },
+      ),
+    [filteredPay, plannedHoursByEmployee],
   );
 
   return (
@@ -124,23 +146,28 @@ export default function PayView({ employees }: { employees: Employee[] }) {
               <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Employee</th>
               <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Role</th>
               <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hourly Rate</th>
-              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hours (period)</th>
+              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Scheduled (period)</th>
+              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Paid Hours (period)</th>
               <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Pay Owed (period)</th>
             </tr>
           </thead>
           <tbody>
-            {filteredPay.map(({ employee, hours, pay: owed }) => (
+            {filteredPay.map(({ employee, hours, pay: owed }) => {
+              const sched = plannedHoursByEmployee.get(employee.id) ?? 0;
+              return (
               <tr key={employee.id} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
                 <td className="px-5 py-3 text-[13px] text-tt-text">{employee.name}</td>
                 <td className="px-5 py-3 text-xs text-tt-muted">{titleCase(employee.role)}</td>
                 <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(employee.hourly_rate)}</td>
+                <td className="px-5 py-3 text-[13px] text-tt-muted text-right tabular-nums">{sched > 0 ? fmtHours(sched) : '—'}</td>
                 <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmtHours(hours)}</td>
                 <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(owed)}</td>
               </tr>
-            ))}
+              );
+            })}
             {filteredPay.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-5 py-12 text-center text-tt-muted text-sm">
+                <td colSpan={6} className="px-5 py-12 text-center text-tt-muted text-sm">
                   {pay.length === 0
                     ? 'No employees yet'
                     : payRole === 'all'
@@ -154,6 +181,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
             <tfoot>
               <tr className="border-t border-tt-border">
                 <td className="px-5 py-3 text-[13px] font-semibold text-tt-text" colSpan={3}>Total{payRole !== 'all' ? ` · ${titleCase(payRole)}` : ''} for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}</td>
+                <td className="px-5 py-3 text-[13px] font-semibold text-tt-muted text-right tabular-nums">{fmtHours(totals.scheduled)}</td>
                 <td className="px-5 py-3 text-[13px] font-semibold text-tt-text text-right tabular-nums">{fmtHours(totals.hours)}</td>
                 <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(totals.pay)}</td>
               </tr>
@@ -164,14 +192,17 @@ export default function PayView({ employees }: { employees: Employee[] }) {
 
       {/* Mobile card list — same rows + values as the desktop table above */}
       <div className="md:hidden p-4 flex flex-col gap-3">
-        {filteredPay.map(({ employee, hours, pay: owed }) => (
+        {filteredPay.map(({ employee, hours, pay: owed }) => {
+          const sched = plannedHoursByEmployee.get(employee.id) ?? 0;
+          return (
           <MobileDataCard
             key={employee.id}
             title={employee.name}
             subtitle={titleCase(employee.role)}
             stats={[
               { label: 'Hourly Rate', value: fmt(employee.hourly_rate) },
-              { label: 'Hours (period)', value: fmtHours(hours) },
+              { label: 'Scheduled (period)', value: sched > 0 ? fmtHours(sched) : '—' },
+              { label: 'Paid Hours (period)', value: fmtHours(hours) },
               {
                 label: 'Pay Owed (period)',
                 value: <span className="text-tt-green font-semibold">{fmt(owed)}</span>,
@@ -179,7 +210,8 @@ export default function PayView({ employees }: { employees: Employee[] }) {
               },
             ]}
           />
-        ))}
+          );
+        })}
         {filteredPay.length === 0 && (
           <div className="px-1 py-12 text-center text-tt-muted text-sm">
             {pay.length === 0
