@@ -21,8 +21,11 @@ interface UnboundRow {
   store_id: string | null;
 }
 interface Sku { id: string; sku_number: number | null; title: string | null; thumbnail_url: string | null }
-interface SessionCandidate { id: string; started_at: string | null; ended_at: string | null; host_name: string | null; store_id: string | null }
+interface SessionCandidate { id: string; started_at: string | null; ended_at: string | null; host_name: string | null; store_id: string | null; store_name: string | null; channel_handle: string | null }
 interface Line { sku_id: string; qty: number }
+
+type DateFilter = 'today' | '7d' | '30d' | 'all';
+const DATE_PILLS: Array<[DateFilter, string]> = [['today', 'Today'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All']];
 
 function money(cents: number | null): string {
   if (cents == null) return '—';
@@ -57,8 +60,14 @@ export default function MemberBindingPage() {
   // Store filter (pills). null = All stores. The ref lets the stable loadPage read the current
   // filter without re-creating; selectStore keeps them in sync and resets the keyset to page 1.
   const [stores, setStores] = useState<{ id: string; name: string | null }[]>([]);
-  const [selectedStore, setSelectedStore] = useState<string | null>(null);
+  const [selectedStore, setSelectedStore] = useState<string | null>(null); // store uuid | 'unmapped' | null(all)
   const selectedStoreRef = useRef<string | null>(null);
+
+  // Date filter (pills). Default 7 days. Ref mirrors it for the stable loadPage.
+  const [dateFilter, setDateFilter] = useState<DateFilter>('7d');
+  const dateFilterRef = useRef<DateFilter>('7d');
+  const [hasUnmapped, setHasUnmapped] = useState(false); // any null-store rows in the current date range
+  const [copiedOrder, setCopiedOrder] = useState<string | null>(null);
 
   // ── Working state for the single expanded row ──
   const [sessions, setSessions] = useState<SessionCandidate[]>([]);
@@ -79,7 +88,7 @@ export default function MemberBindingPage() {
     setLoading(true); setErr(null); setExpanded(null); activeOrderRef.current = null;
     try {
       const cursor = cursorsRef.current[idx] ?? null;
-      const qs = new URLSearchParams({ limit: '50' });
+      const qs = new URLSearchParams({ limit: '50', date: dateFilterRef.current });
       if (cursor) qs.set('cursor', cursor);
       if (selectedStoreRef.current) qs.set('store_id', selectedStoreRef.current);
       const res = await fetch(`/api/member/unbound?${qs.toString()}`);
@@ -108,6 +117,32 @@ export default function MemberBindingPage() {
     loadPage(0);
   }, [loadPage]);
 
+  // Probe whether any null-store ("unmapped") rows exist in the given date range → drives the
+  // Unmapped pill. Bounded to the range (cheap for Today/7d/30d; a wider scan for All).
+  const probeUnmapped = useCallback((d: DateFilter) => {
+    fetch(`/api/member/unbound?store_id=unmapped&date=${d}&limit=1`)
+      .then((r) => (r.ok ? r.json() : { unbound: [], has_more: false }))
+      .then((j) => setHasUnmapped(((j.unbound ?? []).length > 0) || !!j.has_more))
+      .catch(() => setHasUnmapped(false));
+  }, []);
+
+  // Switch the date filter: reset the keyset to page 1 and re-probe the unmapped bucket.
+  const selectDate = useCallback((d: DateFilter) => {
+    if (dateFilterRef.current === d) return;
+    dateFilterRef.current = d;
+    setDateFilter(d);
+    cursorsRef.current = [null];
+    setNextCursor(null);
+    loadPage(0);
+    probeUnmapped(d);
+  }, [loadPage, probeUnmapped]);
+
+  const copyOrder = (oid: string) => {
+    navigator.clipboard?.writeText(oid)
+      .then(() => { setCopiedOrder(oid); setTimeout(() => setCopiedOrder((c) => (c === oid ? null : c)), 1500); })
+      .catch(() => { /* clipboard blocked — no-op */ });
+  };
+
   useEffect(() => {
     loadPage(0);
     fetch('/api/member/catalog')
@@ -118,7 +153,8 @@ export default function MemberBindingPage() {
       .then((r) => (r.ok ? r.json() : { stores: [] }))
       .then((d) => setStores((d.stores ?? []) as { id: string; name: string | null }[]))
       .catch(() => { /* best-effort; no pills if it fails */ });
-  }, [loadPage]);
+    probeUnmapped('7d');
+  }, [loadPage, probeUnmapped]);
 
   const loadSessions = useCallback(async (orderId: string) => {
     setSessLoading(true); setSessErr(null); setSessions([]); setSelectedSessionId(null);
@@ -200,6 +236,15 @@ export default function MemberBindingPage() {
     }
   };
 
+  const showUnmapped = hasUnmapped || selectedStore === 'unmapped';
+  const storeButtons: { value: string; label: string }[] = [
+    ...stores.map((s) => ({ value: s.id, label: s.name ?? s.id })),
+    ...(showUnmapped ? [{ value: 'unmapped', label: 'Unmapped' }] : []),
+  ];
+  const showAllPill = storeButtons.length > 1; // "All stores" only meaningful with >1 bucket
+  const pillCls = (active: boolean) =>
+    `px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${active ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'}`;
+
   return (
     <main className="min-h-screen bg-tt-bg text-tt-text p-6 max-w-3xl mx-auto">
       <MemberNav active="binding" />
@@ -211,31 +256,26 @@ export default function MemberBindingPage() {
         </div>
       </div>
 
-      {/* Store filter pills — rendered whenever the member has any store, so the scope is always
-          visible. A single-store member sees just their one store as a label pill (no redundant
-          "All stores"); a multi-store member gets "All stores" + one per store. Selecting refetches
-          from page 1. Rows with no synced store_id appear only under "All stores". */}
-      {stores.length > 0 && (
+      {/* Date filter pills (default 7 days). Today/7d/30d scan newest-first, bounded at the PT
+          day-start so the scan seeds at the bound; All is the oldest-first backlog. */}
+      <div className="mb-2 flex flex-wrap gap-1">
+        {DATE_PILLS.map(([v, label]) => (
+          <button key={v} onClick={() => selectDate(v)} className={pillCls(dateFilter === v)}>{label}</button>
+        ))}
+      </div>
+
+      {/* Store filter pills + an "Unmapped" pill when null-store rows exist in this range. Both
+          filters compose (store + date); selecting refetches from page 1. A single-store member with
+          nothing unmapped sees just their store as a label pill. */}
+      {storeButtons.length > 0 && (
         <div className="mb-4 flex flex-wrap gap-1">
-          {stores.length > 1 && (
-            <button
-              onClick={() => selectStore(null)}
-              className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${selectedStore === null ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'}`}
-            >
-              All stores
-            </button>
+          {showAllPill && (
+            <button onClick={() => selectStore(null)} className={pillCls(selectedStore === null)}>All stores</button>
           )}
-          {stores.map((s) => {
-            // The lone pill of a single-store member reads as an active label even before any click.
-            const active = selectedStore === s.id || (stores.length === 1 && selectedStore === null);
+          {storeButtons.map((b) => {
+            const active = selectedStore === b.value || (!showAllPill && selectedStore === null);
             return (
-              <button
-                key={s.id}
-                onClick={() => selectStore(s.id)}
-                className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${active ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'}`}
-              >
-                {s.name ?? s.id}
-              </button>
+              <button key={b.value} onClick={() => selectStore(b.value)} className={pillCls(active)}>{b.label}</button>
             );
           })}
         </div>
@@ -265,6 +305,18 @@ export default function MemberBindingPage() {
                   <div className="mt-0.5 text-xs text-tt-yellow">Captured · no SKU bound</div>
                   <div className="mt-1 text-xs text-tt-muted break-all">
                     {r.seller_sku_hint ? `Lot ${r.seller_sku_hint} · ` : ''}Order #{r.order_id}
+                    {/* Copy the order number. A span (not a nested button) with stopPropagation so it
+                        doesn't toggle the row open. */}
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => { e.stopPropagation(); copyOrder(r.order_id); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); copyOrder(r.order_id); } }}
+                      className="ml-1 inline-flex items-center rounded px-1 py-0.5 text-[10px] font-semibold text-tt-cyan hover:bg-tt-cyan/10 cursor-pointer align-middle select-none"
+                      title="Copy order number"
+                    >
+                      {copiedOrder === r.order_id ? 'Copied' : 'Copy'}
+                    </span>
                     {r.buyer_handle ? ` · @${r.buyer_handle}` : ''} · {fmtDate(r.logged_at)}
                   </div>
                 </div>
@@ -297,9 +349,15 @@ export default function MemberBindingPage() {
                               className={`flex items-center gap-3 rounded-xl border-2 px-3 py-2 text-left ${sel ? 'border-tt-cyan bg-tt-cyan/10' : 'border-tt-border bg-tt-bg hover:bg-tt-card-hover'}`}
                             >
                               <span className={`shrink-0 w-4 h-4 rounded-full border-2 ${sel ? 'border-tt-cyan bg-tt-cyan' : 'border-tt-border'}`} />
+                              {/* Mirror the Shows tab: channel_handle primary, then store_name
+                                  (red "Unmapped store" fallback), then host when present, then time range. */}
                               <div className="min-w-0 text-sm">
-                                <div className="text-tt-text">{fmtDateTime(s.started_at)} → {s.ended_at ? fmtDateTime(s.ended_at) : 'ongoing'}</div>
-                                <div className="text-xs text-tt-muted">{s.host_name ? `Host: ${s.host_name}` : 'Host: —'}</div>
+                                <div className="font-medium text-tt-text truncate">{s.channel_handle || 'TikTok Live'}</div>
+                                <div className="text-xs text-tt-muted">
+                                  {s.store_name ?? <span className="font-semibold text-tt-red">Unmapped store</span>}
+                                  {s.host_name ? <> · Host: {s.host_name}</> : null}
+                                </div>
+                                <div className="text-xs text-tt-muted">{fmtDateTime(s.started_at)} → {s.ended_at ? fmtDateTime(s.ended_at) : 'ongoing'}</div>
                               </div>
                             </button>
                           );

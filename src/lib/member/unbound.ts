@@ -32,7 +32,10 @@ export type UnboundRow = {
 // the synced_order_ids store_id, so a row with no synced match (null store_id) is excluded from any
 // specific store and shows only under "All stores" (storeFilter absent). Independent of the
 // restricted-member `storeIds`/`allStores` scope, which still applies.
-export interface UnboundScope { ownerIds: string[]; allStores: boolean; storeIds: string[]; storeFilter?: string | null }
+// storeUnmapped: keep ONLY rows with a null synced store_id (the "Unmapped" pill) — mutually
+// exclusive with storeFilter (both come from the same store_id param; the route sets one or the
+// other). These are the orders whose store never resolved from synced_order_ids.
+export interface UnboundScope { ownerIds: string[]; allStores: boolean; storeIds: string[]; storeFilter?: string | null; storeUnmapped?: boolean }
 
 // Filter one chunk of capture rows to the UNBOUND ones. Two IN queries per chunk: the bound
 // anti-join (live_auction_items) and CANCELLED/store (synced_order_ids). `seen` dedups by order_id
@@ -43,7 +46,7 @@ export async function filterUnboundChunk(
   caps: Cap[],
   seen: Set<string>,
 ): Promise<UnboundRow[]> {
-  const { ownerIds, allStores, storeIds, storeFilter } = scope;
+  const { ownerIds, allStores, storeIds, storeFilter, storeUnmapped } = scope;
   const storeSet = new Set(storeIds);
 
   const chunkOids = [...new Set(caps.map((c) => String(c.order_id ?? '')).filter((oid) => oid && oid !== '0'))];
@@ -87,7 +90,8 @@ export async function filterUnboundChunk(
     if (cancelled.has(oid)) continue;
     const st = syncedStore.get(oid) ?? null;
     if (!allStores && (!st || !storeSet.has(st))) continue;      // restricted-member scope
-    if (storeFilter && st !== storeFilter) continue;              // specific-store pill (null st excluded)
+    if (storeUnmapped) { if (st !== null) continue; }            // "Unmapped" pill: only null-store rows
+    else if (storeFilter && st !== storeFilter) continue;         // specific-store pill (null st excluded)
     seen.add(oid);
     out.push({
       order_id: oid,
