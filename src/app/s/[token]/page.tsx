@@ -9,10 +9,9 @@ import {
   getCurrentPeriodDrops,
   hasActiveRules,
   isReleasable,
-  type BoardRow,
 } from '@/lib/schedule/board';
 import { DROP_CAP } from '@/lib/schedule/drops';
-import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate } from '@/lib/schedule/format';
+import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate, isOvernight } from '@/lib/schedule/format';
 import { ReleaseButton, ClaimButton } from './parts';
 
 export const dynamic = 'force-dynamic';
@@ -52,6 +51,62 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
   const periodEndLabel = fmtCalendarDate(period.end);
   const atCap = drops.drops >= DROP_CAP;
 
+  const yourShifts = (
+    <Section key="yours" title="Your shifts" subtitle="Next 14 days">
+      {myShifts.length === 0 ? (
+        <Empty>No shifts scheduled in the next two weeks.</Empty>
+      ) : (
+        myShifts.map((s) => {
+          const releasableNow = s.status === 'scheduled' && isReleasable(s);
+          const within24 = s.status === 'scheduled' && !releasableNow;
+          return (
+            <Card key={s.id}>
+              <div className="flex items-center justify-between gap-3">
+                <ShiftFacts inst={s} />
+                <div className="shrink-0">
+                  {s.status === 'released' ? (
+                    <span className="text-xs text-tt-yellow">Released · waiting for pickup</span>
+                  ) : s.status === 'claimed' ? (
+                    <span className="text-xs text-tt-green">Picked up</span>
+                  ) : releasableNow ? (
+                    <ReleaseButton token={token} instanceId={s.id} periodEnd={periodEndLabel} atCap={atCap} />
+                  ) : null}
+                </div>
+              </div>
+              {within24 && (
+                // Its own line below the time so it never splits the time row (fix #3).
+                <p className="mt-1.5 text-xs text-tt-muted">Within 24h — contact a manager</p>
+              )}
+            </Card>
+          );
+        })
+      )}
+    </Section>
+  );
+
+  const openShifts = (
+    <Section
+      key="open"
+      title={board.length > 0 ? `Open shifts · ${board.length} available` : 'Open shifts'}
+      subtitle="Released by teammates — claim one you can work"
+    >
+      {board.length === 0 ? (
+        <Empty>Nothing on the board right now.</Empty>
+      ) : (
+        board.map((b) => (
+          <Card key={b.id}>
+            <div className="flex items-center justify-between gap-3">
+              <ShiftFacts inst={b} releasedBy={b.releaser_name} />
+              <div className="shrink-0">
+                <ClaimButton token={token} instanceId={b.id} />
+              </div>
+            </div>
+          </Card>
+        ))
+      )}
+    </Section>
+  );
+
   return (
     <Shell>
       <header className="mb-6">
@@ -63,62 +118,29 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
         </p>
       </header>
 
-      <Section title="Your shifts" subtitle="Next 14 days">
-        {myShifts.length === 0 ? (
-          <Empty>No shifts scheduled in the next two weeks.</Empty>
-        ) : (
-          myShifts.map((s) => (
-            <Row key={s.id}>
-              <ShiftFacts inst={s} role={employee.role} />
-              <div className="shrink-0">
-                {s.status === 'released' ? (
-                  <span className="text-xs text-tt-yellow">Released · waiting for pickup</span>
-                ) : s.status === 'claimed' ? (
-                  <span className="text-xs text-tt-green">Picked up</span>
-                ) : isReleasable(s) ? (
-                  <ReleaseButton token={token} instanceId={s.id} periodEnd={periodEndLabel} atCap={atCap} />
-                ) : (
-                  <span className="text-xs text-tt-muted">Within 24h — contact a manager</span>
-                )}
-              </div>
-            </Row>
-          ))
-        )}
-      </Section>
-
-      <Section title="Open shifts" subtitle="Released by teammates — claim one you can work">
-        {board.length === 0 ? (
-          <Empty>Nothing on the board right now.</Empty>
-        ) : (
-          board.map((b) => (
-            <Row key={b.id}>
-              <ShiftFacts inst={b} role={b.releaser_role} releasedBy={b.releaser_name} />
-              <div className="shrink-0">
-                <ClaimButton token={token} instanceId={b.id} />
-              </div>
-            </Row>
-          ))
-        )}
-      </Section>
+      {/* Whatever changed goes on top: a non-empty board (time-sensitive, usually arrived-from-SMS)
+          leads; an empty board sinks below the actual schedule (fix #1). */}
+      {board.length > 0 ? [openShifts, yourShifts] : [yourShifts, openShifts]}
     </Shell>
   );
 }
 
+// Date + time; overnight shifts get the same 🌙 +1d marker the team-tab calendar uses (fix #2).
+// Role is intentionally NOT shown — every row is the viewer's own role class (fix #4).
 function ShiftFacts({
   inst,
-  role,
   releasedBy,
 }: {
-  inst: Pick<ShiftInstance, 'starts_at' | 'ends_at'> | BoardRow;
-  role: string | null;
+  inst: Pick<ShiftInstance, 'starts_at' | 'ends_at'>;
   releasedBy?: string | null;
 }) {
+  const overnight = isOvernight(inst.starts_at, inst.ends_at);
   return (
     <div className="min-w-0">
       <p className="text-sm font-medium text-tt-text">{fmtDateLA(inst.starts_at)}</p>
       <p className="text-xs text-tt-muted">
         {fmtTimeRangeLA(inst.starts_at, inst.ends_at)}
-        {role ? ` · ${role}` : ''}
+        {overnight && <span className="ml-1.5 text-tt-muted">🌙 +1d</span>}
       </p>
       {releasedBy && <p className="mt-0.5 text-[11px] text-tt-muted">Released by {releasedBy}</p>}
     </div>
@@ -139,12 +161,8 @@ function Section({ title, subtitle, children }: { title: string; subtitle?: stri
     </section>
   );
 }
-function Row({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border border-tt-border bg-tt-card px-4 py-3">
-      {children}
-    </div>
-  );
+function Card({ children }: { children: React.ReactNode }) {
+  return <div className="rounded-lg border border-tt-border bg-tt-card px-4 py-3">{children}</div>;
 }
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="rounded-lg border border-dashed border-tt-border px-4 py-6 text-center text-sm text-tt-muted">{children}</p>;

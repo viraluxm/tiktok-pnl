@@ -11,6 +11,8 @@ import ShiftsView from './ShiftsView';
 import PayView from './PayView';
 import { Field, StatusBadge, titleCase, ROLE_PRESETS, STATUSES } from './shared';
 import MobileDataCard from '@/components/ui/MobileDataCard';
+import { useScheduleLinks, scheduleLinkUrl, type ScheduleLink } from '@/hooks/useScheduleLinks';
+import { ScheduleLinkButton, ScheduleLinkSection, LINK_WARNING, copyText } from './ScheduleLinkButton';
 
 interface EmployeesTabProps {
   // The selected period, driven by the dashboard's global FiltersBar. Nulls = all time.
@@ -49,6 +51,9 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   const { employees, isLoading, addEmployee, updateEmployee, deleteEmployee } = useEmployees();
   // Per-host auction badges (Roster). Read-only; empty until 056 attribution accrues.
   const { data: hostPerf } = useHostPerformance();
+  // Schedule-link tokens (roster Create/Copy + Edit-modal Revoke/Regenerate).
+  const { byEmployee: links, mint: mintLink, revoke: revokeLink } = useScheduleLinks();
+  const [linkWarn, setLinkWarn] = useState(false); // shows LINK_WARNING after a link is created
 
   // Employee add/edit modal
   const [modalOpen, setModalOpen] = useState(false);
@@ -121,6 +126,16 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
     }
   }
 
+  // Optional convenience: name + URL pairs for every active employee that has a link, for sending
+  // one-to-one. (The SMS path supersedes this once phone numbers are live.)
+  async function copyAllLinks(): Promise<boolean> {
+    const lines = employees
+      .filter((e) => e.status === 'active' && links[e.id])
+      .map((e) => `${e.name}: ${scheduleLinkUrl(links[e.id].token)}`);
+    if (lines.length === 0) return false;
+    return copyText(lines.join('\n'));
+  }
+
   const periodLabel = dateFrom || dateTo ? `${dateFrom || '…'} → ${dateTo || '…'}` : 'All time';
 
   return (
@@ -154,6 +169,12 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
           employees={employees}
           isLoading={isLoading}
           hostPerf={hostPerf?.hosts ?? {}}
+          links={links}
+          onMintLink={(id) => mintLink.mutateAsync(id)}
+          onLinkCreated={() => setLinkWarn(true)}
+          onCopyAll={copyAllLinks}
+          linkWarn={linkWarn}
+          onDismissWarn={() => setLinkWarn(false)}
           onAdd={openAdd}
           onEdit={openEdit}
           onDelete={handleDelete}
@@ -246,6 +267,16 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                 </Field>
               </div>
 
+              {/* Schedule link — only for an existing employee (needs an id). Rare rotate/revoke. */}
+              {editing && (
+                <ScheduleLinkSection
+                  link={links[editing.id] ?? null}
+                  onMint={() => mintLink.mutateAsync(editing.id)}
+                  onRevoke={(id) => revokeLink.mutateAsync(id)}
+                  onCreated={() => setLinkWarn(true)}
+                />
+              )}
+
               {formError && (
                 <div className="p-3 bg-tt-red/10 rounded-xl">
                   <p className="text-xs text-tt-red">{formError}</p>
@@ -280,6 +311,12 @@ function RosterView({
   employees,
   isLoading,
   hostPerf,
+  links,
+  onMintLink,
+  onLinkCreated,
+  onCopyAll,
+  linkWarn,
+  onDismissWarn,
   onAdd,
   onEdit,
   onDelete,
@@ -287,21 +324,55 @@ function RosterView({
   employees: Employee[];
   isLoading: boolean;
   hostPerf: Record<string, HostAgg>;
+  links: Record<string, ScheduleLink>;
+  onMintLink: (employeeId: string) => Promise<{ url: string }>;
+  onLinkCreated: () => void;
+  onCopyAll: () => Promise<boolean>;
+  linkWarn: boolean;
+  onDismissWarn: () => void;
   onAdd: () => void;
   onEdit: (e: Employee) => void;
   onDelete: (e: Employee) => void;
 }) {
+  const [copiedAll, setCopiedAll] = useState(false);
+  const anyLinks = employees.some((e) => e.status === 'active' && links[e.id]);
+
+  async function handleCopyAll() {
+    if (await onCopyAll()) {
+      setCopiedAll(true);
+      setTimeout(() => setCopiedAll(false), 1800);
+    }
+  }
+
   return (
     <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
-      <div className="px-6 py-5 border-b border-tt-border flex items-center justify-between">
+      <div className="px-6 py-5 border-b border-tt-border flex items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-tt-text">Team Roster</h2>
-        <button
-          onClick={onAdd}
-          className="px-4 py-2 rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] text-black text-[13px] font-semibold hover:opacity-90 transition-opacity"
-        >
-          + Add Employee
-        </button>
+        <div className="flex items-center gap-2">
+          {anyLinks && (
+            <button
+              onClick={handleCopyAll}
+              className="px-3 py-2 rounded-lg text-[13px] font-semibold bg-white/5 text-tt-text hover:bg-white/10 transition-colors"
+            >
+              {copiedAll ? 'Copied ✓' : 'Copy all links'}
+            </button>
+          )}
+          <button
+            onClick={onAdd}
+            className="px-4 py-2 rounded-lg bg-gradient-to-r from-tt-cyan to-[#4db8c0] text-black text-[13px] font-semibold hover:opacity-90 transition-opacity"
+          >
+            + Add Employee
+          </button>
+        </div>
       </div>
+
+      {/* Personal-link warning — surfaced when a link is created (a real property of the token). */}
+      {linkWarn && (
+        <div className="px-6 py-3 border-b border-tt-border bg-tt-yellow/10 flex items-start justify-between gap-3">
+          <p className="text-xs text-tt-yellow">{LINK_WARNING}</p>
+          <button onClick={onDismissWarn} className="shrink-0 text-tt-yellow/70 hover:text-tt-yellow text-xs">Dismiss</button>
+        </div>
+      )}
       <div className="hidden md:block overflow-x-auto">
         <table className="w-full border-collapse">
           <thead>
@@ -333,9 +404,15 @@ function RosterView({
                   {e.role?.toLowerCase() === 'host' ? <BelowBreakEvenBadge agg={hostPerf[e.id]} /> : null}
                 </td>
                 <td className="px-5 py-3 text-center whitespace-nowrap">
+                  <ScheduleLinkButton
+                    employeeId={e.id}
+                    token={links[e.id]?.token ?? null}
+                    onMint={onMintLink}
+                    onCreated={onLinkCreated}
+                  />
                   <button
                     onClick={() => onEdit(e)}
-                    className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
+                    className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
                   >
                     Edit
                   </button>
@@ -382,6 +459,12 @@ function RosterView({
               ]}
               actions={
                 <>
+                  <ScheduleLinkButton
+                    employeeId={e.id}
+                    token={links[e.id]?.token ?? null}
+                    onMint={onMintLink}
+                    onCreated={onLinkCreated}
+                  />
                   <button
                     onClick={() => onEdit(e)}
                     className="flex items-center justify-center rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"

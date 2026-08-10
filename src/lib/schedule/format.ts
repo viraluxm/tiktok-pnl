@@ -15,6 +15,16 @@ export function fmtTimeRangeLA(startISO: string, endISO: string): string {
   return `${f(startISO)}–${f(endISO)}`;
 }
 
+// True when the shift's end lands on a LATER LA calendar day than its start (e.g. 4pm–2am,
+// 5pm–1am). Drives the "🌙 +1d" overnight marker — the same convention the team-tab weekly
+// calendar uses (ShiftCard.tsx). Compares LA-local calendar dates of the two instants.
+export function isOvernight(startsISO: string, endsISO: string): boolean {
+  const laDate = (iso: string) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+      .format(new Date(iso));
+  return laDate(endsISO) > laDate(startsISO);
+}
+
 // A plain calendar date label, e.g. period end 'Mon, Aug 24'.
 export function fmtCalendarDate(dateISO: string): string {
   const [y, m, d] = dateISO.slice(0, 10).split('-').map(Number);

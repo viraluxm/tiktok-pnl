@@ -42,18 +42,26 @@ export async function POST(req: Request) {
   if (eErr) return NextResponse.json({ error: eErr.message }, { status: 500 });
   if (!emp) return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
 
+  // One active token per employee: revoke any existing active token first, so mint doubles as
+  // "regenerate" and the roster's Create/Copy model stays unambiguous. Idempotent if none exist.
+  await admin
+    .from('employee_access_tokens')
+    .update({ active: false, revoked_at: new Date().toISOString() })
+    .eq('employee_id', emp.id)
+    .eq('active', true);
+
   const token = generateAccessToken();
   const { data: row, error } = await admin
     .from('employee_access_tokens')
     .insert({ user_id: emp.user_id, employee_id: emp.id, token, active: true })
-    .select('id')
+    .select('id, created_at')
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   const link = tokenLink(token);
   if (emp.phone) await sendSms(emp.phone, onboardingMessage(link), 'onboarding');
 
-  return NextResponse.json({ ok: true, tokenId: row.id, token, link });
+  return NextResponse.json({ ok: true, tokenId: row.id, token, link, created_at: row.created_at });
 }
 
 // DELETE { tokenId }  → revoke a token (active=false, revoked_at=now). Idempotent.
