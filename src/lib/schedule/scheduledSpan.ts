@@ -46,3 +46,19 @@ export function resolveScheduledSpan(args: {
 export function employeeHasActiveRules(employeeId: string, rules: ShiftRule[]): boolean {
   return rules.some((r) => r.employee_id === employeeId && r.active);
 }
+
+// The employee's earliest active-rule start_date ('YYYY-MM-DD'), or null if they have no active
+// rule. Used to gate schedule-relative confirm flags: a punch dated before this is pre-schedule
+// (not an anomaly), so over/under/unscheduled flags are suppressed for it.
+export function earliestActiveRuleStart(employeeId: string, rules: ShiftRule[]): string | null {
+  const starts = rules.filter((r) => r.employee_id === employeeId && r.active).map((r) => r.start_date);
+  return starts.length ? starts.reduce((min, d) => (d < min ? d : min)) : null;
+}
+
+// Does the schedule apply to this date for this employee? True when they have an active rule whose
+// start_date is on/before the date (or, trivially, when a resolved span exists). Pre-schedule dates
+// return false → schedule-relative flags are suppressed.
+export function scheduleAppliesToDate(employeeId: string, date: string, rules: ShiftRule[]): boolean {
+  const earliest = earliestActiveRuleStart(employeeId, rules);
+  return earliest != null && date >= earliest;
+}

@@ -9,7 +9,7 @@ import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
 import { useHostLiveHours } from '@/hooks/useHostLiveHours';
-import { resolveScheduledSpan, employeeHasActiveRules } from '@/lib/schedule/scheduledSpan';
+import { resolveScheduledSpan, employeeHasActiveRules, scheduleAppliesToDate } from '@/lib/schedule/scheduledSpan';
 import { computeConfirmFlags } from '@/lib/schedule/confirmFlags';
 import { liveHoursForHostDate, formatLiveHours } from '@/lib/schedule/liveHours';
 import type { Employee, Shift, ShiftRule, ShiftSource } from '@/types';
@@ -390,6 +390,7 @@ export default function ShiftsView({
           breakMinutes: row.break_minutes ?? 0,
           scheduled,
           employeeHasRules: employeeHasActiveRules(row.employee_id, rules),
+          scheduleAppliesToDate: scheduleAppliesToDate(row.employee_id, row.date, rules),
         });
         for (const f of flags) warnings.push(`${f.severity === 'warn' ? '⚠' : '•'} ${f.message}`);
       }
