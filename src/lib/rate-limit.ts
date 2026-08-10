@@ -61,3 +61,12 @@ export const syncLimiter = createRateLimiter({
   limit: 120,
   windowMs: 60 * 1000,
 });
+
+// Public scheduling token routes (/s/[token]/*). Two independent limiters — by token and by IP —
+// so a single leaked token can't hammer, and a single IP can't spray many tokens. In-memory /
+// per-process (see the file header): weak at multi-instance scale, but 32 bytes of token entropy
+// carries the real abuse protection here; this just caps accidental / casual hammering.
+// Page loads are chattier than mutations, so the read limiter is looser than the write one.
+export const scheduleTokenLimiter = createRateLimiter({ limit: 60, windowMs: 60 * 1000 });
+export const scheduleIpLimiter = createRateLimiter({ limit: 120, windowMs: 60 * 1000 });
+export const scheduleWriteLimiter = createRateLimiter({ limit: 15, windowMs: 60 * 1000 });

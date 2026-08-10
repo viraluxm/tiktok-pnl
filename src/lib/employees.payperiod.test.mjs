@@ -18,8 +18,11 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'pp-')), 'employees.mjs');
 writeFileSync(outFile, outputText);
-const { PAY_ANCHOR, nextPayday, paydayAtOffset, payPeriodFor, generateRecurringShifts, computePay } =
-  await import(pathToFileURL(outFile).href);
+const {
+  PAY_ANCHOR, nextPayday, paydayAtOffset, payPeriodFor,
+  payPeriodContaining, payPeriodStartFor,
+  generateRecurringShifts, computePay,
+} = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -90,6 +93,39 @@ console.log('\nperiod window: materialized day counted once');
   check('window projects 10 workdays = 80h', before === 80, `got ${before}`);
   check('generator excludes the materialized day (9 projected)', gen.length === 9, `got ${gen.length}`);
   check('EXACTLY-ONCE in period: total unchanged 80h (not 88)', after === before, `before=${before} after=${after}`);
+}
+
+// ── payPeriodContaining / payPeriodStartFor: the returned window must CONTAIN the date,
+//    including the first five days of each window where payPeriodFor(nextPayday(D)) does NOT.
+//    This is the guard against a silently-wrong +5 offset if the anchor/cadence ever moves.
+console.log('\npayPeriodContaining: containment across boundaries');
+{
+  const iso = (dt) => dt.toISOString().slice(0, 10);
+  // Walk every day across ~5 windows (Jun 15 → Aug 23) and assert start <= D <= end.
+  let allContained = true;
+  let firstFail = '';
+  for (let t = Date.UTC(2026, 5, 15); t <= Date.UTC(2026, 7, 23); t += 86400000) {
+    const D = iso(new Date(t));
+    const w = payPeriodContaining(D);
+    if (!(w.start <= D && D <= w.end)) { allContained = false; firstFail = `${D} → ${w.start}..${w.end}`; break; }
+  }
+  check('every date Jun 15–Aug 23 lands inside its own window', allContained, firstFail);
+
+  // The exact lag-gap the naive composition gets wrong: first 5 days of {Jul 13 … Jul 26}.
+  for (const D of ['2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16', '2026-07-17']) {
+    const w = payPeriodContaining(D);
+    check(`${D} → {Jul 13, Jul 26}`, w.start === '2026-07-13' && w.end === '2026-07-26', `got ${w.start}..${w.end}`);
+  }
+
+  // payPeriodStartFor is just the start; and it DIFFERS from the naive lag-bearing composition,
+  // which is the whole point (naive would return 2026-06-29 for Jul 15).
+  check("payPeriodStartFor('2026-07-15') = 2026-07-13", payPeriodStartFor('2026-07-15') === '2026-07-13');
+  check('naive payPeriodFor(nextPayday(D)) WOULD mis-bucket Jul 15 to Jun 29 (documents the lag)',
+    payPeriodFor(nextPayday(d(2026, 7, 15))).start === '2026-06-29');
+
+  // Window-boundary dates (Sunday end, Monday start) resolve to the right side.
+  check("period end (Sun Jul 26) stays in {Jul 13, Jul 26}", payPeriodStartFor('2026-07-26') === '2026-07-13');
+  check("next start (Mon Jul 27) moves to {Jul 27, Aug 09}", payPeriodStartFor('2026-07-27') === '2026-07-27');
 }
 
 console.log(`\nALL PASSED (${passed} assertions)`);

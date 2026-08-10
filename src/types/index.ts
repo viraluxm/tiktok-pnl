@@ -99,6 +99,7 @@ export interface Employee {
   hire_date: string | null;
   probation_end_date: string | null;
   store_id?: string | null;
+  phone?: string | null; // migration 085 — contact number for scheduling SMS (Deploy B, Part 6)
   created_at: string;
   updated_at: string;
 }
@@ -202,4 +203,82 @@ export interface EmployeeTimeBreak {
   ended_at: string | null; // null = break in progress
   created_at: string;
   updated_at: string;
+}
+
+// ─── Scheduling v1 (migrations 085, 086) ────────────────────────────────────
+// The two pay-role classes. employees.role is free text, but scheduling treats these two.
+export type ScheduleRole = 'host' | 'fulfillment';
+
+// A materialized, dated occurrence of ONE person's recurring shift_rule. Written FORWARD
+// (shift_date > today) by the forward materializer; NEVER by the payroll past-materializer,
+// and never read by payroll (isPayableShift/shifts stay the pay path). shift_rule_id links back
+// to the rule that spawned it (migration 086; ON DELETE SET NULL — the instance outlives its rule).
+export type ShiftInstanceStatus =
+  | 'scheduled'
+  | 'released'
+  | 'claimed'
+  | 'worked'
+  | 'missed'
+  | 'cancelled';
+export type ShiftInstanceSource = 'pattern' | 'claim';
+
+export interface ShiftInstance {
+  id: string;
+  user_id: string;
+  shift_rule_id: string | null; // rule that spawned it (migration 086); null once the rule is deleted
+  employee_id: string | null; // NULL while unclaimed after release
+  store_id?: string | null;
+  shift_date: string; // 'YYYY-MM-DD' (LA-local calendar date)
+  starts_at: string; // timestamptz — computed in America/Los_Angeles
+  ends_at: string; // timestamptz
+  status: ShiftInstanceStatus;
+  source: ShiftInstanceSource;
+  released_at: string | null;
+  released_by: string | null; // employees.id of the releaser
+  excused: boolean;
+  excused_by: string | null; // auth.users id (manager action)
+  excused_note: string | null;
+  created_at: string;
+}
+
+export type ShiftClaimStatus = 'auto_approved' | 'pending' | 'approved' | 'rejected';
+
+export interface ShiftClaim {
+  id: string;
+  user_id: string;
+  shift_instance_id: string;
+  claimed_by: string; // employees.id
+  claimed_at: string;
+  status: ShiftClaimStatus;
+  projected_week_hours: number | null; // snapshot at claim time
+  approved_by: string | null; // auth.users id (manager action)
+  approved_at: string | null;
+}
+
+export interface EmployeeAccessToken {
+  id: string;
+  user_id: string;
+  employee_id: string;
+  token: string; // 32 random bytes, base64url — generated in app code
+  active: boolean;
+  created_at: string;
+  revoked_at: string | null;
+}
+
+// Append-only trail; drop counts are DERIVED from it per pay period (no stored ledger).
+// shift_date is denormalized so the row is self-sufficient after its instance is deleted
+// (shift_instance_id is ON DELETE SET NULL). The guard/drops key on (employee_id, shift_date)
+// (migration 086). pay_period_start is the period containing the event's action time (created_at)
+// — see payPeriodStartFor.
+export type AttendanceEventType = 'released' | 'claimed' | 'missed_unfilled' | 'excused';
+
+export interface AttendanceEvent {
+  id: string;
+  user_id: string;
+  employee_id: string;
+  shift_instance_id: string | null;
+  shift_date: string;
+  event_type: AttendanceEventType;
+  pay_period_start: string; // 'YYYY-MM-DD' Monday
+  created_at: string;
 }
