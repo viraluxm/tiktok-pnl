@@ -7,6 +7,11 @@ import { confirmErrorMessage, clockErrorToken } from '@/lib/timeclock';
 import { enterFullscreen } from '@/lib/fullscreen';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
+import { useShiftInstances } from '@/hooks/useShiftInstances';
+import { useHostLiveHours } from '@/hooks/useHostLiveHours';
+import { resolveScheduledSpan, employeeHasActiveRules } from '@/lib/schedule/scheduledSpan';
+import { computeConfirmFlags } from '@/lib/schedule/confirmFlags';
+import { liveHoursForHostDate, formatLiveHours } from '@/lib/schedule/liveHours';
 import type { Employee, Shift, ShiftRule, ShiftSource } from '@/types';
 import CalendarView from './weekly/CalendarView';
 import { Field, WEEKDAYS, daysLabel, inputCls } from './shared';
@@ -33,6 +38,11 @@ type DisplayRow =
       source: ShiftSource;
       confirmed_at: string | null;
       break_minutes: number;
+      // Real punch instants (migration 072) — carried so paidShiftHours uses the TRUE span, not the
+      // 24h-wrapping wall clock. Load-bearing for the over-span confirm flag (a 34h forgotten
+      // clock-out must read as 34h, not a wrapped 10h). NULL on manual/recurring shifts.
+      clock_in_at: string | null;
+      clock_out_at: string | null;
       // migration 072: reconciler stamped a capped clock-out on a forgotten/over-long punch.
       // The hours shown are a POLICY DEFAULT, not measured — surface loudly + gate confirm.
       auto_closed: boolean;
@@ -90,6 +100,19 @@ export default function ShiftsView({
     [shifts],
   );
 
+  // Confirm-time validation inputs (display/review only — never pay): schedule instances for span
+  // precedence #1, and live-session intervals for the host live-hours column.
+  const { instances } = useShiftInstances(dateFrom, dateTo);
+  const { sessions: liveSessions } = useHostLiveHours();
+
+  // Data-completeness (NOT a per-shift flag): employees who have punches but NO active rule at all.
+  // Per the refinement, these are surfaced ONCE here rather than flagging every shift they work.
+  const unscheduledPunchers = useMemo(() => {
+    const punchers = new Set(shifts.filter((s) => s.source === 'time_clock').map((s) => s.employee_id));
+    const nameById = new Map(employees.map((e) => [e.id, e.name]));
+    return [...punchers].filter((id) => !employeeHasActiveRules(id, rules)).map((id) => nameById.get(id) || 'Unknown');
+  }, [shifts, rules, employees]);
+
   const [mode, setMode] = useState<'oneoff' | 'recurring'>('oneoff');
   // Default to the Calendar view (the new interactive weekly grid). List remains a toggle.
   const [view, setView] = useState<'list' | 'calendar'>('calendar');
@@ -130,6 +153,15 @@ export default function ShiftsView({
     for (const e of employees) m.set(e.id, e.name);
     return m;
   }, [employees]);
+  const roleById = useMemo(() => new Map(employees.map((e) => [e.id, e.role])), [employees]);
+
+  // Host live-session hours beside clocked hours (host time-clock rows only). Four data states —
+  // known / insufficient / not-attributed / zero — so an attribution gap never reads as 0 worked.
+  function hostLiveLabel(row: DisplayRow): string | null {
+    if (row.kind !== 'oneoff' || row.source !== 'time_clock') return null;
+    if ((roleById.get(row.employee_id) ?? '').toLowerCase() !== 'host') return null;
+    return formatLiveHours(liveHoursForHostDate(liveSessions, row.employee_id, row.date));
+  }
 
   // Only non-former employees can be picked for new shifts / rules.
   const selectable = useMemo(() => employees.filter((e) => e.status !== 'former'), [employees]);
@@ -155,6 +187,8 @@ export default function ShiftsView({
           source: s.source,
           confirmed_at: s.confirmed_at,
           break_minutes: s.break_minutes,
+          clock_in_at: s.clock_in_at ?? null,
+          clock_out_at: s.clock_out_at ?? null,
           auto_closed: s.auto_closed ?? false,
         }),
       ),
@@ -326,28 +360,47 @@ export default function ShiftsView({
     router.push('/dashboard/time-clock');
   }
 
-  async function handleConfirmShift(
-    id: string,
-    confirmed: boolean,
-    opts?: { autoClosed?: boolean; hours?: number },
-  ) {
-    // Auto-closed shifts carry a policy-default number of hours, not measured ones. Don't let a
-    // manager confirm one with a single click — force an explicit acknowledgement first so the
-    // flag actually changes behaviour. (Editing the real finish time on the raw punch is the
-    // right fix; this gate exists to stop a guess being rubber-stamped as truth.)
-    if (confirmed && opts?.autoClosed) {
-      const hrs = typeof opts.hours === 'number' ? opts.hours.toFixed(2) : '—';
-      const ok = window.confirm(
-        `⚠ Auto-closed at the cap — verify hours before confirming.\n\n` +
-          `This shift was auto-closed by the reconciler because the punch was left open past the cap. ` +
-          `The ${hrs}h shown is a POLICY DEFAULT, not what was actually worked.\n\n` +
-          `Correct the real finish time on the time entry first if it's wrong. ` +
-          `Confirm these hours as-is anyway?`,
-      );
-      if (!ok) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function handleConfirmShift(row: any, confirmed: boolean) {
+    // On CONFIRM, surface review flags in the existing acknowledgement — flag, never block. This
+    // reuses the auto-closed window.confirm pattern; nothing here changes pay (confirmation only
+    // gates a time_clock shift into Pay; the flags are validation/review).
+    if (confirmed) {
+      const warnings: string[] = [];
+
+      // Auto-closed: hours are a policy default, not measured (existing behaviour, kept).
+      if (row.auto_closed) {
+        const hrs = typeof paidShiftHours(row) === 'number' ? paidShiftHours(row).toFixed(2) : '—';
+        warnings.push(
+          `⚠ Auto-closed at the cap — the ${hrs}h shown is a POLICY DEFAULT, not measured. Correct the finish time on the time entry first if it's wrong.`,
+        );
+      }
+
+      // Confirm-time validation flags (time-clock shifts only).
+      if (row.source === 'time_clock') {
+        const scheduled = resolveScheduledSpan({
+          employeeId: row.employee_id,
+          date: row.date,
+          instances,
+          rules,
+          exceptions,
+        });
+        const flags = computeConfirmFlags({
+          clockedHours: paidShiftHours(row),
+          breakMinutes: row.break_minutes ?? 0,
+          scheduled,
+          employeeHasRules: employeeHasActiveRules(row.employee_id, rules),
+        });
+        for (const f of flags) warnings.push(`${f.severity === 'warn' ? '⚠' : '•'} ${f.message}`);
+      }
+
+      if (warnings.length > 0) {
+        const ok = window.confirm(`Review before confirming:\n\n${warnings.join('\n')}\n\nConfirm anyway?`);
+        if (!ok) return;
+      }
     }
     try {
-      await confirmShift.mutateAsync({ id, confirmed });
+      await confirmShift.mutateAsync({ id: row.id, confirmed });
     } catch (err) {
       alert(confirmErrorMessage(clockErrorToken(err)));
     }
@@ -413,6 +466,15 @@ export default function ShiftsView({
           >
             Review in list
           </button>
+        </div>
+      )}
+
+      {/* Data-completeness (not a per-shift flag): employees who punch but have no schedule set. */}
+      {unscheduledPunchers.length > 0 && (
+        <div className="rounded-[14px] border border-tt-border bg-tt-card/60 px-5 py-3 text-sm text-tt-muted">
+          <span className="font-semibold text-tt-text">{unscheduledPunchers.length}</span> employee
+          {unscheduledPunchers.length === 1 ? '' : 's'} punch but have no schedule set:{' '}
+          <span className="text-tt-text">{unscheduledPunchers.join(', ')}</span>. Add rules so their shifts can be validated.
         </div>
       )}
 
@@ -697,6 +759,9 @@ export default function ShiftsView({
                         <td className="px-5 py-3 text-xs text-tt-muted tabular-nums">{isOpen ? '—' : (row.end_time ?? '').slice(0, 5)}</td>
                         <td className={`px-5 py-3 text-[13px] text-right tabular-nums ${skipped ? 'text-tt-muted line-through' : isOpen ? 'text-tt-green' : 'text-tt-text'}`}>
                           {isOpen ? elapsedLabel(row.date, row.start_time) : paidShiftHours(row).toFixed(2)}
+                          {hostLiveLabel(row) && (
+                            <div className="mt-0.5 text-[10px] font-normal text-tt-muted whitespace-nowrap">{hostLiveLabel(row)}</div>
+                          )}
                         </td>
                         <td className="px-5 py-3 text-center whitespace-nowrap">
                           {row.kind === 'oneoff' ? (
@@ -720,14 +785,14 @@ export default function ShiftsView({
                               {!isOpen && row.source === 'time_clock' && (
                                 row.confirmed_at == null ? (
                                   <button
-                                    onClick={() => handleConfirmShift(row.id, true, { autoClosed: row.auto_closed, hours: paidShiftHours(row) })}
+                                    onClick={() => handleConfirmShift(row, true)}
                                     className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
                                   >
                                     Confirm
                                   </button>
                                 ) : (
                                   <button
-                                    onClick={() => handleConfirmShift(row.id, false)}
+                                    onClick={() => handleConfirmShift(row, false)}
                                     className="mr-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
                                   >
                                     Unconfirm
@@ -847,6 +912,7 @@ export default function ShiftsView({
                           </span>
                         ),
                       },
+                      ...(hostLiveLabel(row) ? [{ label: 'Live', value: <span className="text-tt-muted">{hostLiveLabel(row)}</span> }] : []),
                     ]}
                     actions={
                       row.kind === 'oneoff' ? (
@@ -870,14 +936,14 @@ export default function ShiftsView({
                           {!isOpen && row.source === 'time_clock' && (
                             row.confirmed_at == null ? (
                               <button
-                                onClick={() => handleConfirmShift(row.id, true, { autoClosed: row.auto_closed, hours: paidShiftHours(row) })}
+                                onClick={() => handleConfirmShift(row, true)}
                                 className="rounded-lg text-[11px] font-semibold bg-tt-green/15 text-tt-green hover:bg-tt-green/25 transition-colors"
                               >
                                 Confirm
                               </button>
                             ) : (
                               <button
-                                onClick={() => handleConfirmShift(row.id, false)}
+                                onClick={() => handleConfirmShift(row, false)}
                                 className="rounded-lg text-[11px] font-semibold bg-white/5 text-tt-muted hover:text-tt-text transition-colors"
                               >
                                 Unconfirm
