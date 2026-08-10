@@ -14,6 +14,8 @@ import { computeConfirmFlags } from '@/lib/schedule/confirmFlags';
 import { liveHoursForHostDate, formatLiveHours } from '@/lib/schedule/liveHours';
 import type { Employee, Shift, ShiftRule, ShiftSource } from '@/types';
 import CalendarView from './weekly/CalendarView';
+import AdminOpenShiftForm from './AdminOpenShiftForm';
+import PendingClaimsPanel from './PendingClaimsPanel';
 import { Field, WEEKDAYS, daysLabel, inputCls } from './shared';
 import MobileDataCard from '@/components/ui/MobileDataCard';
 
@@ -470,6 +472,9 @@ export default function ShiftsView({
         </div>
       )}
 
+      {/* Pending OT claims awaiting approval — count badge sits with the confirmation banner. */}
+      <PendingClaimsPanel />
+
       {/* Data-completeness (not a per-shift flag): employees who punch but have no schedule set. */}
       {unscheduledPunchers.length > 0 && (
         <div className="rounded-[14px] border border-tt-border bg-tt-card/60 px-5 py-3 text-sm text-tt-muted">
@@ -478,6 +483,9 @@ export default function ShiftsView({
           <span className="text-tt-text">{unscheduledPunchers.join(', ')}</span>. Add rules so their shifts can be validated.
         </div>
       )}
+
+      {/* Post a one-time scheduled shift (shift_instances) — distinct from the payable Add Shift. */}
+      <AdminOpenShiftForm employees={employees} />
 
       {view === 'calendar' ? (
         <CalendarView employees={employees} />

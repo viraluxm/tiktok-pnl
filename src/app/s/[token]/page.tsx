@@ -6,6 +6,7 @@ import { guardPublicReadAllowed } from '@/lib/schedule/publicRoute';
 import {
   getMyShifts,
   getBoard,
+  getMyPendingClaims,
   getCurrentPeriodDrops,
   hasActiveRules,
   isReleasable,
@@ -42,14 +43,32 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
     );
   }
 
-  const [myShifts, board, { period, drops }] = await Promise.all([
+  const [myShifts, board, pendingClaims, { period, drops }] = await Promise.all([
     getMyShifts(employee),
     getBoard(employee),
+    getMyPendingClaims(employee),
     getCurrentPeriodDrops(employee),
   ]);
 
   const periodEndLabel = fmtCalendarDate(period.end);
   const atCap = drops.drops >= DROP_CAP;
+
+  const pending = pendingClaims.length > 0 && (
+    <Section
+      key="pending"
+      title={`Pending approval · ${pendingClaims.length}`}
+      subtitle="Over 40 hours — a manager is reviewing. Not yours yet."
+    >
+      {pendingClaims.map((p) => (
+        <Card key={p.claim_id}>
+          <div className="flex items-center justify-between gap-3">
+            <ShiftFacts inst={p} />
+            <span className="shrink-0 text-xs text-tt-yellow">⏳ Awaiting approval</span>
+          </div>
+        </Card>
+      ))}
+    </Section>
+  );
 
   const yourShifts = (
     <Section key="yours" title="Your shifts" subtitle="Next 14 days">
@@ -118,8 +137,10 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
         </p>
       </header>
 
-      {/* Whatever changed goes on top: a non-empty board (time-sensitive, usually arrived-from-SMS)
-          leads; an empty board sinks below the actual schedule (fix #1). */}
+      {/* An in-flight OT claim leads (the viewer just filed it and wants to see it landed), then:
+          a non-empty board (time-sensitive, usually arrived-from-SMS) leads; an empty board sinks
+          below the actual schedule (fix #1). */}
+      {pending}
       {board.length > 0 ? [openShifts, yourShifts] : [yourShifts, openShifts]}
     </Shell>
   );

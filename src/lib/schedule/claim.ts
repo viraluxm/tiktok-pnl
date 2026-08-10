@@ -7,6 +7,7 @@ import { NOTICE_MS } from './board';
 import { weekBoundsMonSun, instanceHours } from './hours';
 import { ScheduleError } from './release';
 import { claimAutoApproves, OT_THRESHOLD_HOURS } from './otGate';
+import { effectiveShiftRole } from './eligibility';
 
 export { OT_THRESHOLD_HOURS };
 
@@ -33,23 +34,29 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
 
   const { data: inst, error } = await admin
     .from('shift_instances')
-    .select('id, status, starts_at, ends_at, shift_date, user_id, released_by')
+    .select('id, status, starts_at, ends_at, shift_date, user_id, released_by, source, role')
     .eq('id', instanceId)
     .maybeSingle();
   if (error) throw new ScheduleError('READ_FAILED', error.message);
   if (!inst) throw new ScheduleError('NOT_FOUND');
   if (inst.status !== 'released') throw new ScheduleError('ALREADY_CLAIMED');
-  if (!inst.released_by) throw new ScheduleError('NOT_FOUND'); // released row must carry its releaser
 
-  // Eligibility re-verify. Role now comes from the RELEASER's employees.role (no template, 086).
+  // Eligibility re-verify. Role comes from the RELEASER's employees.role for a released shift; for
+  // an admin-posted open shift (released_by NULL, source 'admin_open') it comes from the row's own
+  // `role` column (migration 090) — there's no releaser to derive it from.
   if (inst.released_by === employee.id) throw new ScheduleError('OWN_RELEASE');
-  const { data: releaser, error: relErr } = await admin
-    .from('employees')
-    .select('role')
-    .eq('id', inst.released_by)
-    .maybeSingle();
-  if (relErr) throw new ScheduleError('READ_FAILED', relErr.message);
-  if (!releaser || releaser.role !== employee.role) throw new ScheduleError('WRONG_ROLE');
+  let releaserRole: string | null = null;
+  if (inst.released_by) {
+    const { data: releaser, error: relErr } = await admin
+      .from('employees').select('role').eq('id', inst.released_by).maybeSingle();
+    if (relErr) throw new ScheduleError('READ_FAILED', relErr.message);
+    releaserRole = releaser?.role ?? null;
+  }
+  // Same role kernel the board uses (eligibility.ts): released → releaser's role; admin_open → the
+  // row's own role; anything else → null (malformed released row, reject).
+  const shiftRole = effectiveShiftRole(inst, releaserRole);
+  if (shiftRole === null) throw new ScheduleError('NOT_FOUND');
+  if (shiftRole !== employee.role) throw new ScheduleError('WRONG_ROLE');
   if (new Date(inst.starts_at).getTime() <= Date.now() + NOTICE_MS) {
     throw new ScheduleError('TOO_LATE', 'This shift starts within 24 hours — contact a manager directly.');
   }
@@ -138,5 +145,35 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
   });
   if (pErr) throw new ScheduleError('CLAIM_RECORD_FAILED', pErr.message);
 
+  // Alert the manager that an OT claim needs a decision — the queue is otherwise invisible.
+  // Best-effort: never fail the claim on SMS trouble.
+  try {
+    await alertPendingClaim({ claimerName: employee.name, rate: employee.hourly_rate, projected, starts_at: inst.starts_at, ends_at: inst.ends_at, shift_date: inst.shift_date });
+  } catch (e) {
+    console.error('[schedule] pending-claim alert failed (claim still filed):', (e as Error).message);
+  }
+
   return { result: 'pending_approval', projected_week_hours: projected };
+}
+
+// Manager SMS when an OT claim files as pending. Reuses the capture-health Twilio sender
+// (src/lib/live/alertSms.ts). Goes to the manager (ALERT_SMS_TO), NOT employees — independent of
+// employee phone numbers. Gated behind SMS_SEND_ENABLED (log-only until on), per the scheduling
+// SMS convention. OT cost ≈ excess-over-40 × rate × 0.5 (base hours are already paid).
+async function alertPendingClaim(a: {
+  claimerName: string; rate: number; projected: number; starts_at: string; ends_at: string; shift_date: string;
+}): Promise<void> {
+  const { sendAlertSms } = await import('@/lib/live/alertSms');
+  const { fmtDateLA, fmtTimeRangeLA } = await import('./format');
+  const otHours = Math.max(0, a.projected - OT_THRESHOLD_HOURS);
+  const otCost = otHours * a.rate * 0.5;
+  const body =
+    `OT claim needs approval: ${a.claimerName} — ${fmtDateLA(a.starts_at)}, ${fmtTimeRangeLA(a.starts_at, a.ends_at)}. ` +
+    `Projected ${Math.round(a.projected * 10) / 10}h this week; ~$${otCost.toFixed(2)} OT premium. Approve/reject in the team tab.`;
+  const recipient = process.env.ALERT_SMS_TO?.trim() || '';
+  if (process.env.SMS_SEND_ENABLED === 'true' && recipient) {
+    await sendAlertSms(recipient, body, 'pending_claim');
+  } else {
+    console.log(`[schedule] pending-claim alert LOG_ONLY to=${recipient || '(ALERT_SMS_TO unset)'} body=${JSON.stringify(body)}`);
+  }
 }

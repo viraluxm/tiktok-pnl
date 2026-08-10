@@ -73,12 +73,13 @@ export function ClaimButton({ token, instanceId }: { token: string; instanceId: 
     if (ok && data.result === 'claimed') {
       router.refresh();
     } else if (ok && data.result === 'pending_approval') {
-      // NOT a success — the shift is NOT theirs yet. The instance stays on the board and no
-      // approval path exists until Phase 7, so the copy must not imply it's done.
+      // NOT a success — the shift is NOT theirs yet. Refresh so it moves out of the board and into
+      // the "Pending approval" section (the live state of the request). Show a brief note first.
       setMsg({
         kind: 'pending',
-        text: 'This shift would put you over 40 hours, so it needs a manager to approve it. It is NOT yours yet — a manager will follow up.',
+        text: 'Over 40 hours — sent to a manager to approve. Not yours yet.',
       });
+      router.refresh();
     } else {
       setMsg({ kind: 'err', text: String(data.error ?? 'Could not claim') });
     }
