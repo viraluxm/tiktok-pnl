@@ -104,12 +104,30 @@ export async function updateSession(request: NextRequest) {
   // `lensed_station` cookie is present, treat the session as station and apply
   // the station allowlist — otherwise a token-refresh blip would drop a station
   // out of confinement (and the /login redirect below would log it out).
-  const CONFINEMENT: Record<string, { home: string; allow: string[] }> = {
-    station: { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] },
-    // NOTE: '/api/team' (self-scoped fulfillment-performance) is deliberately NOT in the
-    // allowlist — a member's data comes only from the owner-scoped '/api/member/*' routes.
-    member: { home: '/team/binding', allow: ['/team', '/api/member'] },
+  // Station reach is a fixed allowlist. Member reach is SCOPE-DERIVED from app_metadata.scopes:
+  // each scope maps 1:1 to its /team page + the owner-scoped /api/member/* routes THAT page uses,
+  // and a member's allowlist is the UNION over the scopes it holds. The shared binding-flow routes
+  // (catalog/sessions/unbound/bind) live under the 'binding' scope that uses them; 'inventory' adds
+  // only its own page + /api/member/inventory. A scope this map doesn't know contributes nothing
+  // (fail closed). NOTE: '/api/team' (self-scoped fulfillment-performance) is deliberately NOT
+  // reachable — member data comes only from owner-scoped /api/member/*.
+  const STATION_CONFINEMENT = { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] };
+  const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
+    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog'],
+    inventory: ['/team/inventory', '/api/member/inventory'],
   };
+  const memberConfinement = (rawScopes: unknown): { home: string; allow: string[] } => {
+    const scopes = Array.isArray(rawScopes) ? rawScopes.map(String) : [];
+    const allow = [...new Set(scopes.flatMap((s) => MEMBER_SCOPE_PATHS[s] ?? []))];
+    const first = scopes.find((s) => MEMBER_SCOPE_PATHS[s]); // home = first RECOGNIZED scope's page
+    // A member with no recognized scope gets an EMPTY allowlist and is sent to the static
+    // "no areas assigned" page. Home is ALWAYS reachable (the `path === confinement.home` check
+    // below), so this page renders even with an empty allowlist and never loops — unlike '/login',
+    // which would bounce them straight back into the sign-in they just completed. It makes no data
+    // reads and no API calls.
+    return { home: first ? MEMBER_SCOPE_PATHS[first][0] : '/team/no-access', allow };
+  };
+
   // `lensed_station` is a confinement HINT only — never an authentication
   // signal, and it must never gate data access. We honour it solely to keep an
   // already-authenticated station confined while Supabase Auth briefly cannot
@@ -124,16 +142,22 @@ export async function updateSession(request: NextRequest) {
     (user?.app_metadata?.role as string | undefined) ??
     (transientAuthFailure && hasStationCookie ? 'station' : undefined);
   const roleHome =
-    role === 'station' ? '/fulfillment' : role === 'member' ? '/team/binding' : '/dashboard';
+    role === 'station' ? '/fulfillment'
+      : role === 'member' ? memberConfinement(user?.app_metadata?.scopes).home
+      : '/dashboard';
 
   // Fail closed: only an unset role or 'admin' is unconfined. ANY other value —
-  // including a typo like 'statoin' — is treated as a confined role with an
-  // EMPTY allowlist (everything 403s / redirects to /login), never as full
-  // access. A new role must be added to CONFINEMENT to gain any reach.
-  const confinement =
+  // including a typo like 'statoin', or a member holding no recognized scope — is
+  // a confined role with an EMPTY (or scope-limited) allowlist, never full access.
+  // A new role/scope must be added above to gain any reach.
+  const confinement: { home: string; allow: string[] } | undefined =
     role === undefined || role === 'admin'
       ? undefined
-      : CONFINEMENT[role] ?? { home: '/login', allow: [] as string[] };
+      : role === 'station'
+        ? STATION_CONFINEMENT
+        : role === 'member'
+          ? memberConfinement(user?.app_metadata?.scopes)
+          : { home: '/login', allow: [] as string[] };
   if (confinement) {
     const path = request.nextUrl.pathname;
     // A confined role can always reach its own home, so the page redirect below

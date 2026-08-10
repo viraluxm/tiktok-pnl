@@ -17,12 +17,21 @@ const ROLE_LABEL: Record<string, string> = {
   station: 'Fulfillment station',
 };
 
+// Member capability scopes — must match KNOWN_MEMBER_SCOPES on the server and the middleware
+// allowlist. Each is a /team page + its owner-scoped /api/member/* routes.
+const SCOPE_OPTIONS = [
+  { value: 'binding', label: 'Binding' },
+  { value: 'inventory', label: 'Inventory' },
+] as const;
+const SCOPE_LABEL: Record<string, string> = { binding: 'Binding', inventory: 'Inventory' };
+
 interface TeamMember {
   id: string;
   email: string | null;
   role: ManagedRole;
   store_id: string | null;   // station: single assigned store
   stores: string[] | null;   // member: multiple assigned stores
+  scopes: string[] | null;   // member: capability scopes
   last_sign_in_at: string | null;
   banned_until: string | null;
 }
@@ -75,6 +84,9 @@ export default function TeamPage() {
   const [role, setRole] = useState<ManagedRole>('member');
   const [storeIds, setStoreIds] = useState<string[]>([]); // member (multiple)
   const [allStores, setAllStores] = useState(true);       // member: "All stores" toggle (default on)
+  const [scopeSel, setScopeSel] = useState<string[]>(['binding']); // member: capability scopes
+  const [editScopesId, setEditScopesId] = useState<string | null>(null); // row whose scopes are being edited
+  const [editScopeSel, setEditScopeSel] = useState<string[]>([]);
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   const [newPassword, setNewPassword] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -87,7 +99,7 @@ export default function TeamPage() {
       const body =
         role === 'station'
           ? { email, role }
-          : { email, role, stores: allStores ? ['*'] : storeIds };
+          : { email, role, stores: allStores ? ['*'] : storeIds, scopes: scopeSel };
       const res = await fetch('/api/admin/team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -104,6 +116,7 @@ export default function TeamPage() {
       setEmail('');
       setStoreIds([]);
       setAllStores(true);
+      setScopeSel(['binding']);
       setRole('member');
       qc.invalidateQueries({ queryKey: ['admin-team'] });
     },
@@ -145,6 +158,26 @@ export default function TeamPage() {
       setNewPassword(json.password);
       setCopied(false);
       setBanner({ kind: 'success', text: `New password for ${vars.email || 'user'} — copy it below.` });
+    },
+    onError: (e: Error) => setBanner({ kind: 'error', text: e.message }),
+  });
+
+  // Change an existing member's capability scopes in place (PATCH set_scopes). Without this the
+  // only way to grant a new scope to an existing member is delete-and-recreate.
+  const setScopes = useMutation({
+    mutationFn: async (vars: { id: string; scopes: string[] }) => {
+      const res = await fetch(`/api/admin/team/${vars.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_scopes', scopes: vars.scopes }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to update scopes');
+      return json;
+    },
+    onSuccess: () => {
+      setEditScopesId(null);
+      qc.invalidateQueries({ queryKey: ['admin-team'] });
     },
     onError: (e: Error) => setBanner({ kind: 'error', text: e.message }),
   });
@@ -222,6 +255,7 @@ export default function TeamPage() {
                   <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Email</th>
                   <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Role</th>
                   <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Store</th>
+                  <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Scopes</th>
                   <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Last sign-in</th>
                   <th className="text-left px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Status</th>
                   <th className="text-right px-3 py-2 text-[11px] text-tt-muted uppercase tracking-wide">Actions</th>
@@ -229,13 +263,13 @@ export default function TeamPage() {
               </thead>
               <tbody>
                 {isLoading && (
-                  <tr><td colSpan={6} className="px-3 py-6 text-center text-sm text-tt-muted">Loading…</td></tr>
+                  <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-tt-muted">Loading…</td></tr>
                 )}
                 {isError && !isLoading && (
-                  <tr><td colSpan={6} className="px-3 py-6 text-center text-sm text-tt-red">Failed to load team.</td></tr>
+                  <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-tt-red">Failed to load team.</td></tr>
                 )}
                 {!isLoading && !isError && members.length === 0 && (
-                  <tr><td colSpan={6} className="px-3 py-6 text-center text-sm text-tt-muted">No sub-users yet.</td></tr>
+                  <tr><td colSpan={7} className="px-3 py-6 text-center text-sm text-tt-muted">No sub-users yet.</td></tr>
                 )}
                 {members.map((m) => {
                   const disabled = isDisabled(m.banned_until);
@@ -251,6 +285,64 @@ export default function TeamPage() {
                           : m.stores?.length
                             ? m.stores.map((id) => storeName(id)).join(', ')
                             : storeName(m.store_id)}
+                      </td>
+                      <td className="px-3 py-2 text-[13px]">
+                        {m.role !== 'member' ? (
+                          <span className="text-tt-muted">—</span>
+                        ) : editScopesId === m.id ? (
+                          <div className="flex flex-col gap-1">
+                            {SCOPE_OPTIONS.map((s) => (
+                              <label key={s.value} className="flex items-center gap-1.5 text-[12px] text-tt-text cursor-pointer select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={editScopeSel.includes(s.value)}
+                                  onChange={(e) =>
+                                    setEditScopeSel((prev) =>
+                                      e.target.checked
+                                        ? [...new Set([...prev, s.value])]
+                                        : prev.filter((v) => v !== s.value),
+                                    )
+                                  }
+                                  className="h-3.5 w-3.5 accent-tt-cyan"
+                                />
+                                {s.label}
+                              </label>
+                            ))}
+                            <div className="flex gap-1 mt-1">
+                              <button
+                                onClick={() => setScopes.mutate({ id: m.id, scopes: editScopeSel })}
+                                disabled={editScopeSel.length === 0 || (setScopes.isPending && setScopes.variables?.id === m.id)}
+                                className="px-2 py-0.5 rounded text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 disabled:opacity-40"
+                              >
+                                {setScopes.isPending && setScopes.variables?.id === m.id ? '…' : 'Save'}
+                              </button>
+                              <button
+                                onClick={() => setEditScopesId(null)}
+                                className="px-2 py-0.5 rounded text-[11px] text-tt-muted hover:text-tt-text"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <span className="flex flex-wrap gap-1">
+                              {m.scopes?.length
+                                ? m.scopes.map((s) => (
+                                    <span key={s} className="rounded-full bg-tt-card-hover px-2 py-0.5 text-[11px] text-tt-text">
+                                      {SCOPE_LABEL[s] ?? s}
+                                    </span>
+                                  ))
+                                : <span className="text-tt-muted">none</span>}
+                            </span>
+                            <button
+                              onClick={() => { setEditScopesId(m.id); setEditScopeSel(m.scopes ?? []); }}
+                              className="text-[11px] text-tt-cyan hover:underline"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-[13px] text-tt-muted tabular-nums">{fmtDate(m.last_sign_in_at)}</td>
                       <td className="px-3 py-2 text-[13px]">
@@ -317,6 +409,7 @@ export default function TeamPage() {
                   setRole(e.target.value as ManagedRole);
                   setStoreIds([]);
                   setAllStores(true);
+                  setScopeSel(['binding']);
                 }}
                 className="w-full rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
               >
@@ -357,13 +450,42 @@ export default function TeamPage() {
                 )}
               </div>
             )}
+            {/* Member capability scopes — at least one required. */}
+            {role === 'member' && (
+              <div className="block">
+                <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">Scopes</span>
+                <div className="flex flex-col gap-2">
+                  {SCOPE_OPTIONS.map((s) => (
+                    <label key={s.value} className="flex items-center gap-2 text-sm text-tt-text cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={scopeSel.includes(s.value)}
+                        onChange={(e) =>
+                          setScopeSel((prev) =>
+                            e.target.checked
+                              ? [...new Set([...prev, s.value])]
+                              : prev.filter((v) => v !== s.value),
+                          )
+                        }
+                        className="h-4 w-4 accent-tt-cyan"
+                      />
+                      {s.label}
+                    </label>
+                  ))}
+                </div>
+                {scopeSel.length === 0 && (
+                  <span className="mt-1 block text-[11px] text-tt-red">Pick at least one scope</span>
+                )}
+              </div>
+            )}
           </div>
           <button
             onClick={() => { setBanner(null); create.mutate(); }}
             disabled={
               create.isPending ||
               !email ||
-              (role === 'member' && !allStores && storeIds.length === 0)
+              (role === 'member' && !allStores && storeIds.length === 0) ||
+              (role === 'member' && scopeSel.length === 0)
             }
             className="rounded-lg bg-tt-cyan px-4 py-2 text-sm font-semibold text-black hover:opacity-90 disabled:opacity-40"
           >

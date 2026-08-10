@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import MemberNav from '@/components/member/MemberNav';
 
 // Member binding queue — the first 'member' scope, rendered under the bare (station) route group
 // (server layout, no app chrome). Lists the cross-session unbound queue; expanding a row lets the
@@ -180,6 +181,7 @@ export default function MemberBindingPage() {
 
   return (
     <main className="min-h-screen bg-tt-bg text-tt-text p-6 max-w-3xl mx-auto">
+      <MemberNav active="binding" />
       <div className="mb-6">
         <h1 className="text-2xl font-bold">Binding queue</h1>
         <p className="mt-1 text-sm text-tt-muted">Captured sales with no SKU bound. Pick the session and item for each.</p>

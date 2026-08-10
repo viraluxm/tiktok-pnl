@@ -10,6 +10,17 @@ const MANAGED_ROLES = ['member', 'station'];
 // ~100 years — effectively a permanent disable. 'none' lifts the ban.
 const BAN_FOREVER = '876000h';
 
+// The only capability scopes a 'member' may hold — kept in lockstep with the create route and the
+// middleware allowlist. Fail closed: an unknown scope would confine the member to nothing.
+const KNOWN_MEMBER_SCOPES = ['binding', 'inventory'] as const;
+function validMemberScopes(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const set = [...new Set(raw.filter((s): s is string => typeof s === 'string').map((s) => s.trim()))];
+  if (set.length === 0) return null;
+  if (set.some((s) => !(KNOWN_MEMBER_SCOPES as readonly string[]).includes(s))) return null;
+  return set;
+}
+
 // PATCH /api/admin/team/[id] — disable / enable / reset-password a station/member sub-user.
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const supabase = await createClient();
@@ -19,15 +30,15 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
   const { id } = await params;
 
-  let body: { action?: unknown };
+  let body: { action?: unknown; scopes?: unknown };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 });
   }
   const action = body.action;
-  if (action !== 'disable' && action !== 'enable' && action !== 'reset_password') {
-    return NextResponse.json({ error: "action must be 'disable', 'enable', or 'reset_password'" }, { status: 400 });
+  if (action !== 'disable' && action !== 'enable' && action !== 'reset_password' && action !== 'set_scopes') {
+    return NextResponse.json({ error: "action must be 'disable', 'enable', 'reset_password', or 'set_scopes'" }, { status: 400 });
   }
 
   const admin = createAdminClient();
@@ -45,6 +56,25 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       { error: 'Only station/member users can be managed here' },
       { status: 403 },
     );
+  }
+
+  // Change capability scopes (member only). Validate against the known set and merge onto the
+  // existing app_metadata so role + stores are preserved. Station has no scopes → refuse.
+  if (action === 'set_scopes') {
+    if (targetRole !== 'member') {
+      return NextResponse.json({ error: 'scopes apply to members only' }, { status: 400 });
+    }
+    const scopes = validMemberScopes(body.scopes);
+    if (!scopes) {
+      return NextResponse.json(
+        { error: `scopes must be a non-empty subset of: ${KNOWN_MEMBER_SCOPES.join(', ')}` },
+        { status: 400 },
+      );
+    }
+    const nextMeta = { ...(target.user.app_metadata ?? {}), scopes };
+    const { error: scErr } = await admin.auth.admin.updateUserById(id, { app_metadata: nextMeta });
+    if (scErr) return NextResponse.json({ error: scErr.message }, { status: 500 });
+    return NextResponse.json({ ok: true, scopes });
   }
 
   // Reset password: server-generated, returned ONCE (same as the create flow). The managed-role
