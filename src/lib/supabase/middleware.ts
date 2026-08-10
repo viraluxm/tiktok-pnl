@@ -115,6 +115,7 @@ export async function updateSession(request: NextRequest) {
   const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
     binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores'],
     inventory: ['/team/inventory', '/api/member/inventory', '/api/member/stores'],
+    pnl: ['/team/pnl', '/api/member/pnl', '/api/member/stores'],
   };
   const memberConfinement = (rawScopes: unknown): { home: string; allow: string[] } => {
     const scopes = Array.isArray(rawScopes) ? rawScopes.map(String) : [];

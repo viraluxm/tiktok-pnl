@@ -22,8 +22,9 @@ const ROLE_LABEL: Record<string, string> = {
 const SCOPE_OPTIONS = [
   { value: 'binding', label: 'Binding' },
   { value: 'inventory', label: 'Inventory' },
+  { value: 'pnl', label: 'P&L' },
 ] as const;
-const SCOPE_LABEL: Record<string, string> = { binding: 'Binding', inventory: 'Inventory' };
+const SCOPE_LABEL: Record<string, string> = { binding: 'Binding', inventory: 'Inventory', pnl: 'P&L' };
 
 interface TeamMember {
   id: string;

@@ -10,9 +10,10 @@ import { createClient } from '@/lib/supabase/client';
 const NAV_ITEMS: Array<{ scope: string; href: string; label: string }> = [
   { scope: 'binding', href: '/team/binding', label: 'Binding' },
   { scope: 'inventory', href: '/team/inventory', label: 'Inventory' },
+  { scope: 'pnl', href: '/team/pnl', label: 'P&L' },
 ];
 
-export default function MemberNav({ active }: { active: 'binding' | 'inventory' }) {
+export default function MemberNav({ active }: { active: 'binding' | 'inventory' | 'pnl' }) {
   const [scopes, setScopes] = useState<string[] | null>(null);
 
   useEffect(() => {
