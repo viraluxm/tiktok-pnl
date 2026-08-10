@@ -117,6 +117,7 @@ export async function updateSession(request: NextRequest) {
     inventory: ['/team/inventory', '/api/member/inventory', '/api/member/stores'],
     pnl: ['/team/pnl', '/api/member/pnl', '/api/member/stores'],
     shows: ['/team/shows', '/api/member/shows', '/api/member/stores'],
+    team: ['/team/staff', '/api/member/team', '/api/member/stores'],
   };
   const memberConfinement = (rawScopes: unknown): { home: string; allow: string[] } => {
     const scopes = Array.isArray(rawScopes) ? rawScopes.map(String) : [];

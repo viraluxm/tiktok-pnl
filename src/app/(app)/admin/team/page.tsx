@@ -24,8 +24,9 @@ const SCOPE_OPTIONS = [
   { value: 'inventory', label: 'Inventory' },
   { value: 'pnl', label: 'P&L' },
   { value: 'shows', label: 'Shows' },
+  { value: 'team', label: 'Team' },
 ] as const;
-const SCOPE_LABEL: Record<string, string> = { binding: 'Binding', inventory: 'Inventory', pnl: 'P&L', shows: 'Shows' };
+const SCOPE_LABEL: Record<string, string> = { binding: 'Binding', inventory: 'Inventory', pnl: 'P&L', shows: 'Shows', team: 'Team' };
 
 interface TeamMember {
   id: string;

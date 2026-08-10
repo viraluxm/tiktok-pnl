@@ -12,9 +12,10 @@ const NAV_ITEMS: Array<{ scope: string; href: string; label: string }> = [
   { scope: 'inventory', href: '/team/inventory', label: 'Inventory' },
   { scope: 'pnl', href: '/team/pnl', label: 'P&L' },
   { scope: 'shows', href: '/team/shows', label: 'Shows' },
+  { scope: 'team', href: '/team/staff', label: 'Team' },
 ];
 
-export default function MemberNav({ active }: { active: 'binding' | 'inventory' | 'pnl' | 'shows' }) {
+export default function MemberNav({ active }: { active: 'binding' | 'inventory' | 'pnl' | 'shows' | 'team' }) {
   const [scopes, setScopes] = useState<string[] | null>(null);
 
   useEffect(() => {
