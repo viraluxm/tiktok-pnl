@@ -10,7 +10,6 @@ import { notSoldBadge, paidNeedsFlip } from '@/lib/paymentStatus';
 import { ASP_GOAL_MULTIPLIER, aspGoalCents } from '@/lib/asp';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
-import { useStores } from '@/hooks/useStores';
 import MobileDataCard from '@/components/ui/MobileDataCard';
 import SkuThumb from '@/components/common/SkuThumb';
 
@@ -383,20 +382,15 @@ function OrderIdWithCopy({ orderId }: { orderId: string }) {
 }
 
 export default function ShowsTab() {
-  const { data: sessions = [], isLoading } = useLiveSessions();
+  // Store scoping + keyset pagination are now SERVER-SIDE (store filtered before the limit; NULL
+  // store_id sessions always included). The old client-side activeStore filter is gone — one
+  // implementation of the null-always-show rule, in the route.
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useLiveSessions();
   const { user } = useUser();
-  const { data: storesData } = useStores();
   const isAdmin = user?.app_metadata?.role === 'admin';
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Respect the active-store filter (previously only metrics did; the Shows list showed
-  // all). Unmapped sessions (store_id null) ALWAYS show, under every filter — an
-  // unattributed stream must never hide behind a store selection (Part D flag).
-  const activeStore = storesData?.activeStore ?? 'all';
-  const visibleSessions = useMemo(
-    () => sessions.filter((s) => activeStore === 'all' || s.store_id === activeStore || !s.store_id),
-    [sessions, activeStore],
-  );
+  const sessions = useMemo(() => data?.pages.flatMap((p) => p.sessions) ?? [], [data]);
 
   const selected = useMemo(
     () => sessions.find((s) => s.id === selectedId) ?? null,
@@ -417,7 +411,7 @@ export default function ShowsTab() {
           <div className="w-5 h-5 border-2 border-tt-muted border-t-transparent rounded-full animate-spin mr-3" />
           Loading shows…
         </div>
-      ) : visibleSessions.length === 0 ? (
+      ) : sessions.length === 0 ? (
         <div className="rounded-2xl border border-tt-border bg-tt-card py-16 text-center">
           <div className="text-tt-text font-medium">No shows yet</div>
           <p className="text-sm text-tt-muted mt-2 max-w-sm mx-auto">
@@ -441,7 +435,7 @@ export default function ShowsTab() {
                 </tr>
               </thead>
               <tbody>
-                {visibleSessions.map((s) => (
+                {sessions.map((s) => (
                   <ShowRow key={s.id} session={s} onOpen={setSelectedId} />
                 ))}
               </tbody>
@@ -450,10 +444,23 @@ export default function ShowsTab() {
 
           {/* Mobile card list (<md) — same sessions, same open handler. */}
           <div className="md:hidden space-y-3">
-            {visibleSessions.map((s) => (
+            {sessions.map((s) => (
               <ShowCardMobile key={s.id} session={s} onOpen={setSelectedId} />
             ))}
           </div>
+
+          {/* Keyset pagination: reach history beyond the first page. No date window, no offset. */}
+          {hasNextPage && (
+            <div className="flex justify-center pt-1">
+              <button
+                onClick={() => fetchNextPage()}
+                disabled={isFetchingNextPage}
+                className="min-h-[40px] rounded-lg border border-tt-border px-5 text-sm font-medium text-tt-muted hover:text-tt-cyan hover:border-tt-cyan transition-colors disabled:opacity-60 disabled:cursor-default"
+              >
+                {isFetchingNextPage ? 'Loading…' : 'Load more shows'}
+              </button>
+            </div>
+          )}
         </>
       )}
     </div>

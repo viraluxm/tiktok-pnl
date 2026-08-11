@@ -1,7 +1,8 @@
 'use client';
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useUser } from './useUser';
+import { useStores } from './useStores';
 
 export type SessionStatus = 'draft' | 'live' | 'ended' | 'reconciled';
 
@@ -81,18 +82,35 @@ export function useShowCoverage(id: string | null) {
   });
 }
 
+interface SessionsPage {
+  sessions: LiveSession[];
+  nextCursor: string | null;
+}
+
+// Keyset-paginated, store-scoped session list. The active store is BOTH part of the query key (so a
+// store switch is a distinct cache entry — no stale cross-store rows) AND sent as an explicit
+// `store` param (the server filters before the limit; getActiveStore() is its fallback authority).
 export function useLiveSessions() {
   const { user } = useUser();
+  const { data: storesData } = useStores();
+  const activeStore = storesData?.activeStore ?? 'all';
 
-  return useQuery<LiveSession[]>({
-    queryKey: [KEY, user?.id],
-    enabled: !!user,
-    queryFn: async () => {
-      const res = await fetch('/api/live/sessions');
+  return useInfiniteQuery<SessionsPage>({
+    queryKey: [KEY, user?.id, activeStore],
+    // Gate until the active store has resolved — otherwise the first paint keys on 'all' and briefly
+    // shows all-stores sessions before refetching for the selected store.
+    enabled: !!user && !!storesData,
+    initialPageParam: null as string | null,
+    queryFn: async ({ pageParam }) => {
+      const params = new URLSearchParams();
+      if (activeStore && activeStore !== 'all') params.set('store', activeStore);
+      if (pageParam) params.set('cursor', pageParam as string);
+      const qs = params.toString();
+      const res = await fetch(`/api/live/sessions${qs ? `?${qs}` : ''}`);
       if (!res.ok) throw new Error('Failed to load sessions');
-      const json = await res.json();
-      return json.sessions ?? [];
+      return res.json();
     },
+    getNextPageParam: (last) => last.nextCursor,
     staleTime: 15_000,
   });
 }
