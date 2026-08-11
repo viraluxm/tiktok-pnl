@@ -1,4 +1,9 @@
--- 078_guard_fresh_tab_closed_end.sql   ⚠️ NOT YET APPLIED — dry-run reported first.
+-- 078_guard_fresh_tab_closed_end.sql
+-- APPLIED TO LIVE via the Supabase Management API before 2026-08-10. Exact apply date is NOT
+-- recorded and is not recoverable — Management API DDL does not appear in postgres_logs. Verified
+-- byte-for-byte against live on 2026-08-10 (function body + trigger definition match exactly).
+-- DO NOT REPLAY — the trigger already exists on live; this file records applied state.
+-- (An earlier draft of this header read "NOT YET APPLIED — dry-run reported first"; that was stale.)
 --
 -- Defends against a stale / second-MACHINE tab-close ending a LIVE show. Sessions are room-scoped
 -- and SHARED across clients, and each client keeps its own in-memory liveTabId, so ANY machine
