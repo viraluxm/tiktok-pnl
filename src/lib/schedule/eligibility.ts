@@ -47,3 +47,12 @@ function toMins(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return (h || 0) * 60 + (m || 0);
 }
+
+// The /s page shows its empty state ONLY when the employee has nothing in ANY section — it is a
+// FALLBACK, not a gate. Crucially it does NOT depend on whether the employee has recurring rules: a
+// no-rules employee with a one-time assigned shift, a claimable board shift, or a pending claim must
+// still see it. Content decides; rules never do. (The original bug gated the whole page on
+// hasActiveRules, hiding one-time shifts and the board from exactly the roster they're meant for.)
+export function scheduleIsEmpty(counts: { myShifts: number; board: number; pending: number }): boolean {
+  return counts.myShifts === 0 && counts.board === 0 && counts.pending === 0;
+}
