@@ -220,7 +220,7 @@ export type ShiftInstanceStatus =
   | 'worked'
   | 'missed'
   | 'cancelled';
-export type ShiftInstanceSource = 'pattern' | 'claim';
+export type ShiftInstanceSource = 'pattern' | 'claim' | 'admin_open';
 
 export interface ShiftInstance {
   id: string;
@@ -228,6 +228,10 @@ export interface ShiftInstance {
   shift_rule_id: string | null; // rule that spawned it (migration 086); null once the rule is deleted
   employee_id: string | null; // NULL while unclaimed after release
   store_id?: string | null;
+  // migration 090 — admin one-time shifts. role is set on admin_open rows (pattern/claim derive it
+  // from the employee); note is optional free text. NULL on pattern/claim.
+  role?: string | null;
+  note?: string | null;
   shift_date: string; // 'YYYY-MM-DD' (LA-local calendar date)
   starts_at: string; // timestamptz — computed in America/Los_Angeles
   ends_at: string; // timestamptz

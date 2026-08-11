@@ -4,6 +4,7 @@ import { payPeriodContaining } from '@/lib/employees';
 import type { Employee, ShiftInstance } from '@/types';
 import { laTodayISO } from './timezone';
 import { computeDrops, type DropSummary } from './drops';
+import { effectiveShiftRole } from './eligibility';
 
 // 24h notice window — a shift may only be released/claimed while it starts MORE than 24h out.
 export const NOTICE_MS = 24 * 60 * 60 * 1000;
@@ -50,6 +51,52 @@ export async function getMyShifts(employee: Employee): Promise<ShiftInstance[]> 
   return rows.sort((a, b) => (a.starts_at < b.starts_at ? -1 : a.starts_at > b.starts_at ? 1 : 0));
 }
 
+// This viewer's PENDING claims (OT gate — awaiting a manager). Shown as its own "Pending approval"
+// section on /s so the claimer sees the request is in-flight and NOT yet theirs. Once the manager
+// acts, the claim leaves 'pending' (approved → the instance flips to claimed and shows under Your
+// shifts; rejected → it drops off here and the instance returns to the board), so this list is the
+// live state of anything awaiting a decision.
+export interface PendingClaimView {
+  claim_id: string;
+  starts_at: string;
+  ends_at: string;
+  shift_date: string;
+  projected_week_hours: number | null;
+}
+export async function getMyPendingClaims(employee: Employee): Promise<PendingClaimView[]> {
+  const admin = createAdminClient();
+  const { data: claims, error } = await admin
+    .from('shift_claims')
+    .select('id, shift_instance_id, projected_week_hours')
+    .eq('claimed_by', employee.id)
+    .eq('status', 'pending')
+    .order('claimed_at', { ascending: true });
+  if (error) throw new Error(`getMyPendingClaims: ${error.message}`);
+  const rows = claims ?? [];
+  if (rows.length === 0) return [];
+
+  const instIds = [...new Set(rows.map((r) => r.shift_instance_id))];
+  const { data: insts, error: iErr } = await admin
+    .from('shift_instances')
+    .select('id, starts_at, ends_at, shift_date')
+    .in('id', instIds);
+  if (iErr) throw new Error(`getMyPendingClaims instances: ${iErr.message}`);
+  const byId = new Map((insts ?? []).map((i) => [i.id, i]));
+  return rows
+    .map((r) => {
+      const i = byId.get(r.shift_instance_id);
+      if (!i) return null;
+      return {
+        claim_id: r.id,
+        starts_at: i.starts_at,
+        ends_at: i.ends_at,
+        shift_date: i.shift_date,
+        projected_week_hours: r.projected_week_hours,
+      };
+    })
+    .filter((x): x is PendingClaimView => x !== null);
+}
+
 // Does this employee have any active recurring rule? Drives the "no schedule set yet" empty state
 // on /s (a token with no rules is valid — it just has nothing scheduled).
 export async function hasActiveRules(employee: Employee): Promise<boolean> {
@@ -84,19 +131,40 @@ export async function getBoard(employee: Employee, now = new Date()): Promise<Bo
   if (error) throw new Error(`getBoard released: ${error.message}`);
   let candidates = (data ?? []) as ShiftInstance[];
 
-  // Not-my-own-release.
-  candidates = candidates.filter((c) => c.released_by && c.released_by !== employee.id);
+  // Not-my-own-release. Admin-posted open shifts have released_by NULL — keep them (null !== me).
+  candidates = candidates.filter((c) => c.released_by !== employee.id);
   if (candidates.length === 0) return [];
 
-  // Resolve releaser role + name; keep only shifts whose (releaser's) role matches the viewer.
-  const releaserIds = [...new Set(candidates.map((c) => c.released_by as string))];
-  const { data: releasers, error: relErr } = await admin
-    .from('employees')
-    .select('id, name, role')
-    .in('id', releaserIds);
-  if (relErr) throw new Error(`getBoard releasers: ${relErr.message}`);
-  const relById = new Map((releasers ?? []).map((r) => [r.id, r]));
-  candidates = candidates.filter((c) => relById.get(c.released_by as string)?.role === employee.role);
+  // Hide shifts this viewer already has a PENDING claim on — the instance is still 'released' (so
+  // it stays on the board for everyone else), but for the claimer it now lives in their "Pending
+  // approval" section, not back on the board. Prevents a double-claim on the same instance.
+  const { data: myPending, error: mpErr } = await admin
+    .from('shift_claims')
+    .select('shift_instance_id')
+    .eq('claimed_by', employee.id)
+    .eq('status', 'pending');
+  if (mpErr) throw new Error(`getBoard myPending: ${mpErr.message}`);
+  const pendingIds = new Set((myPending ?? []).map((r) => r.shift_instance_id as string));
+  if (pendingIds.size) candidates = candidates.filter((c) => !pendingIds.has(c.id));
+  if (candidates.length === 0) return [];
+
+  // Resolve the releaser's name/role for released shifts. Role for an admin_open shift (no
+  // releaser) comes from the row's own `role` column (migration 090).
+  const releaserIds = [...new Set(candidates.map((c) => c.released_by).filter(Boolean) as string[])];
+  const relById = new Map<string, { id: string; name: string; role: string }>();
+  if (releaserIds.length) {
+    const { data: releasers, error: relErr } = await admin
+      .from('employees')
+      .select('id, name, role')
+      .in('id', releaserIds);
+    if (relErr) throw new Error(`getBoard releasers: ${relErr.message}`);
+    for (const r of releasers ?? []) relById.set(r.id, r);
+  }
+  const effectiveRole = (c: ShiftInstance) =>
+    effectiveShiftRole(c, c.released_by ? relById.get(c.released_by)?.role ?? null : null);
+
+  // Keep only shifts whose role matches the viewer.
+  candidates = candidates.filter((c) => effectiveRole(c) === employee.role);
   if (candidates.length === 0) return [];
 
   // Viewer already has an active instance that day → not eligible (no double-booking).
@@ -110,10 +178,11 @@ export async function getBoard(employee: Employee, now = new Date()): Promise<Bo
 
   return candidates
     .filter((c) => !myDates.has(c.shift_date))
-    .map((c) => {
-      const rel = relById.get(c.released_by as string);
-      return { ...c, releaser_name: rel?.name ?? null, releaser_role: rel?.role ?? null };
-    });
+    .map((c) => ({
+      ...c,
+      releaser_name: c.released_by ? relById.get(c.released_by)?.name ?? null : null,
+      releaser_role: effectiveRole(c),
+    }));
 }
 
 // Current pay period (containing today) + this employee's drop summary for it. The employee-facing
