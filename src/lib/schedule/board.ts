@@ -97,18 +97,6 @@ export async function getMyPendingClaims(employee: Employee): Promise<PendingCla
     .filter((x): x is PendingClaimView => x !== null);
 }
 
-// Does this employee have any active recurring rule? Drives the "no schedule set yet" empty state
-// on /s (a token with no rules is valid — it just has nothing scheduled).
-export async function hasActiveRules(employee: Employee): Promise<boolean> {
-  const { count, error } = await createAdminClient()
-    .from('shift_rules')
-    .select('id', { count: 'exact', head: true })
-    .eq('employee_id', employee.id)
-    .eq('active', true);
-  if (error) throw new Error(`hasActiveRules: ${error.message}`);
-  return (count ?? 0) > 0;
-}
-
 // Whether a given instance is releasable by its owner right now (scheduled + >24h out).
 export function isReleasable(inst: Pick<ShiftInstance, 'status' | 'starts_at'>, now = new Date()): boolean {
   return inst.status === 'scheduled' && new Date(inst.starts_at).getTime() > now.getTime() + NOTICE_MS;
