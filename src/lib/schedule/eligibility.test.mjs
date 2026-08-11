@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'elig-')), 'eligibility.mjs');
 writeFileSync(outFile, outputText);
-const { effectiveShiftRole, planAdminShift, crossesMidnight } = await import(pathToFileURL(outFile).href);
+const { effectiveShiftRole, planAdminShift, crossesMidnight, scheduleIsEmpty } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -60,5 +60,19 @@ check('22:00→02:00 overnight', crossesMidnight('22:00', '02:00') === true);
 check('20:00→08:00 overnight', crossesMidnight('20:00', '08:00') === true);
 // end == start is caller-rejected before this runs, but the predicate treats it as overnight (<=).
 check('equal times → treated as overnight by <= (caller rejects first)', crossesMidnight('10:00', '10:00') === true);
+
+console.log('\nscheduleIsEmpty — /s empty state is a fallback, NOT a rules gate');
+// The bug: /s gated on hasActiveRules, so these no-rules employees saw nothing. scheduleIsEmpty
+// takes ONLY content counts — rules are not an input, so they can no longer hide anything.
+// Case 1: no rules + one assigned one-time shift → NOT empty (renders under Your shifts).
+check('no rules + assigned one-time shift → renders', scheduleIsEmpty({ myShifts: 1, board: 0, pending: 0 }) === false);
+// Case 2: no rules + a matching-role board shift → NOT empty (board renders with Claim).
+check('no rules + board shift → renders', scheduleIsEmpty({ myShifts: 0, board: 1, pending: 0 }) === false);
+// Case 3: no rules + nothing at all → empty state.
+check('no rules + nothing → empty state', scheduleIsEmpty({ myShifts: 0, board: 0, pending: 0 }) === true);
+// Case 4: has rules → unchanged: a materialized shift means myShifts>0 → renders exactly as before.
+check('has rules (materialized shift present) → renders', scheduleIsEmpty({ myShifts: 3, board: 0, pending: 0 }) === false);
+// A pending OT claim alone is also enough to render (the claimer must see it in-flight).
+check('pending claim only → renders', scheduleIsEmpty({ myShifts: 0, board: 0, pending: 1 }) === false);
 
 console.log(`\nALL PASSED (${passed} assertions)`);
