@@ -21,7 +21,13 @@ interface UnboundRow {
   store_id: string | null;
 }
 interface Sku { id: string; sku_number: number | null; title: string | null; thumbnail_url: string | null }
-interface SessionCandidate { id: string; started_at: string | null; ended_at: string | null; host_name: string | null; store_id: string | null; store_name: string | null; channel_handle: string | null }
+interface SessionCandidate {
+  id: string; started_at: string | null; ended_at: string | null; host_name: string | null;
+  store_id: string | null; store_name: string | null; channel_handle: string | null;
+  // Room-only fallback: in_window is false when no session's window contained the order and the
+  // member is picking by room. seq_min/seq_max/bound_count help match the order's lot #.
+  in_window: boolean; seq_min: number | null; seq_max: number | null; bound_count: number;
+}
 interface Line { sku_id: string; qty: number }
 
 type DateFilter = 'today' | '7d' | '30d' | 'all';
@@ -165,7 +171,9 @@ export default function MemberBindingPage() {
       if (!res.ok) { setSessErr(json.error || `Failed to load sessions (${res.status})`); return; }
       const cands = (json.sessions ?? []) as SessionCandidate[];
       setSessions(cands);
-      if (cands.length === 1) setSelectedSessionId(cands[0].id); // exactly one → preselect; multiple → no default
+      // Auto-select a lone candidate ONLY when it is in-window — an out-of-window (room-only)
+      // session mis-attributes show totals, so it always requires an explicit pick.
+      if (cands.length === 1 && cands[0].in_window) setSelectedSessionId(cands[0].id);
     } catch (e) {
       if (activeOrderRef.current === orderId) setSessErr((e as Error).message);
     } finally {
@@ -202,6 +210,12 @@ export default function MemberBindingPage() {
   const removeLine = (sku_id: string) => setLines((ls) => ls.filter((l) => l.sku_id !== sku_id));
 
   const canBind = !!expanded && !!selectedSessionId && lines.length > 0 && !binding;
+
+  // Room-only fallback state for the expanded row. `fallbackMode` = candidates exist but none is
+  // in-window (the member is picking by room); `selectedOutOfWindow` gates the bind-time caution.
+  const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+  const fallbackMode = sessions.length > 0 && sessions.every((s) => !s.in_window);
+  const selectedOutOfWindow = !!selectedSession && !selectedSession.in_window;
 
   const doBind = async (allowNegative: boolean) => {
     if (!expanded || !selectedSessionId || lines.length === 0) return;
@@ -330,18 +344,37 @@ export default function MemberBindingPage() {
                 <div className="border-t border-tt-border p-4 space-y-4">
                   {/* ── Session picker ── */}
                   <div>
-                    <div className="text-[11px] uppercase tracking-wide text-tt-muted mb-1">Live session</div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-[11px] uppercase tracking-wide text-tt-muted">Live session</div>
+                      {/* Order's lot # — prominent so the member can match it to a session's auction
+                          range (esp. in the room-only fallback where the time window is no help). */}
+                      {r.seller_sku_hint && (
+                        <div className="rounded-md bg-tt-cyan/15 px-2 py-0.5 text-xs font-bold text-tt-cyan tabular-nums">
+                          This order · Lot #{r.seller_sku_hint}
+                        </div>
+                      )}
+                    </div>
                     {sessLoading && <div className="text-sm text-tt-muted">Loading sessions…</div>}
                     {sessErr && <div className="text-sm text-tt-red">{sessErr}</div>}
                     {noSessions && (
                       <div className="rounded-lg border-2 border-tt-yellow/40 bg-tt-yellow/10 px-3 py-2 text-sm text-tt-yellow">
-                        No matching live session for this order — nothing to bind into.
+                        No live session carries this order&apos;s room — nothing to bind into.
+                      </div>
+                    )}
+                    {/* Room-only fallback: no session's time window contains this order, so the member
+                        picks by room. Say so plainly and point them at the lot #/auction-range match. */}
+                    {!sessLoading && !sessErr && fallbackMode && (
+                      <div className="mb-2 rounded-lg border-2 border-tt-yellow/40 bg-tt-yellow/10 px-3 py-2 text-sm text-tt-yellow">
+                        No session&apos;s time window contains this order. Picking by room — match Lot #{r.seller_sku_hint ?? '—'} to a session&apos;s auction range below.
                       </div>
                     )}
                     {!sessLoading && !sessErr && sessions.length > 0 && (
                       <div className="flex flex-col gap-2">
                         {sessions.map((s) => {
                           const sel = selectedSessionId === s.id;
+                          const seqRange = s.seq_min != null && s.seq_max != null
+                            ? (s.seq_min === s.seq_max ? `#${s.seq_min}` : `#${s.seq_min}–#${s.seq_max}`)
+                            : null;
                           return (
                             <button
                               key={s.id}
@@ -350,7 +383,8 @@ export default function MemberBindingPage() {
                             >
                               <span className={`shrink-0 w-4 h-4 rounded-full border-2 ${sel ? 'border-tt-cyan bg-tt-cyan' : 'border-tt-border'}`} />
                               {/* Mirror the Shows tab: channel_handle primary, then store_name
-                                  (red "Unmapped store" fallback), then host when present, then time range. */}
+                                  (red "Unmapped store" fallback), then host, time range, and the
+                                  auction spread + bound count for lot-range disambiguation. */}
                               <div className="min-w-0 text-sm">
                                 <div className="font-medium text-tt-text truncate">{s.channel_handle || 'TikTok Live'}</div>
                                 <div className="text-xs text-tt-muted">
@@ -358,12 +392,19 @@ export default function MemberBindingPage() {
                                   {s.host_name ? <> · Host: {s.host_name}</> : null}
                                 </div>
                                 <div className="text-xs text-tt-muted">{fmtDateTime(s.started_at)} → {s.ended_at ? fmtDateTime(s.ended_at) : 'ongoing'}</div>
+                                <div className="text-xs text-tt-muted">
+                                  {seqRange ? `Auctions ${seqRange}` : 'No auctions'} · {s.bound_count} bound
+                                </div>
                               </div>
                             </button>
                           );
                         })}
                         {sessions.length > 1 && !selectedSessionId && (
-                          <div className="text-xs text-tt-yellow">Multiple sessions match — choose the one this order was sold in.</div>
+                          <div className="text-xs text-tt-yellow">
+                            {fallbackMode
+                              ? 'Multiple sessions in this room — match the lot # to an auction range.'
+                              : 'Multiple sessions match — choose the one this order was sold in.'}
+                          </div>
                         )}
                       </div>
                     )}
@@ -440,6 +481,14 @@ export default function MemberBindingPage() {
                   {/* ── errors + bind ── */}
                   {bindErr && (
                     <div className="rounded-lg border-2 border-tt-red/50 bg-tt-red/10 px-3 py-2 text-sm text-tt-red">{bindErr}</div>
+                  )}
+                  {/* Out-of-window caution: binding into a session whose window doesn't contain this
+                      order will fold it into that session's show-level totals. Shown only once such a
+                      session is selected, right at the point of action. */}
+                  {selectedOutOfWindow && (
+                    <div className="rounded-lg border-2 border-tt-yellow/50 bg-tt-yellow/10 px-3 py-2 text-sm text-tt-yellow">
+                      ⚠ This order is outside the selected session&apos;s time window. Binding here will include it in that session&apos;s show-level totals (revenue, units/hr, payouts).
+                    </div>
                   )}
                   <div className="flex items-center justify-end gap-2 pt-1">
                     {/* Primary bind (allow_negative:false) — the ONLY first action. */}

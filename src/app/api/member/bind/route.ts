@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
+import { captureInWindow } from '@/lib/member/sessionWindow';
 
 export const dynamic = 'force-dynamic';
 
@@ -43,7 +44,7 @@ export async function POST(req: Request) {
   //    will bind as (the RPC keys the idem row + session on this same user_id).
   const { data: cap, error: capErr } = await admin
     .from('capture_events')
-    .select('user_id')
+    .select('user_id, ordered_at, created_at')
     .eq('order_id', orderId)
     .in('user_id', ownerIds)
     .limit(1)
@@ -58,7 +59,7 @@ export async function POST(req: Request) {
   //    succeeds) AND to a store the member holds (skipped for an all-stores member).
   const { data: sess, error: sessErr } = await admin
     .from('live_sessions')
-    .select('id, user_id, store_id')
+    .select('id, user_id, store_id, started_at, ended_at, created_at')
     .eq('id', sessionId)
     .maybeSingle();
   if (sessErr) return NextResponse.json({ error: sessErr.message }, { status: 500 });
@@ -131,6 +132,16 @@ export async function POST(req: Request) {
   // stays 'bind' (the check constraint is unchanged).
   const replayed = row?.replayed ?? false;
 
+  // Did the chosen session's window actually contain this capture? A room-only (out-of-window) bind
+  // mis-attributes the session's show-level totals, so record it in the trail. Uses the SAME rule as
+  // /api/member/sessions (captureInWindow), so the audit agrees with what the picker showed.
+  const capMs = Date.parse((cap?.ordered_at as string | null) ?? (cap?.created_at as string | null) ?? '');
+  const outOfWindow = !captureInWindow(capMs, {
+    started_at: (sess.started_at as string | null) ?? null,
+    ended_at: (sess.ended_at as string | null) ?? null,
+    created_at: (sess.created_at as string | null) ?? null,
+  });
+
   // ── Audit (append-only). The bind already committed; a failure here must NOT be swallowed —
   //    log loudly and flag it, but still report the bind result. ──
   const { error: auditErr } = await admin.from('bind_audit').insert({
@@ -139,7 +150,7 @@ export async function POST(req: Request) {
     actor_user_id: actorId,   // the member's auth id
     action: 'bind',
     session_id: sessionId,
-    skus: { lines: pSkus, replayed },
+    skus: { lines: pSkus, replayed, out_of_window: outOfWindow },
   });
   if (auditErr) {
     console.error('[member/bind] AUDIT INSERT FAILED (bind DID commit) order=%s actor=%s: %s', orderId, actorId, auditErr.message);
