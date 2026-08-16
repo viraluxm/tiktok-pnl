@@ -8,17 +8,18 @@ export const dynamic = 'force-dynamic';
 // ~100 years — effectively a permanent disable. 'none' lifts the ban.
 const BAN_FOREVER = '876000h';
 
-// Kill / rotate / unban the KIOSK (timeclock) session, in-app — so runbook lever 2 ("the tablet
-// walked, kill the session") no longer requires Supabase Studio. Disabling the kiosk token
-// (/api/admin/kiosk-tokens PATCH) stops PUNCHING but does NOT end the session; this ends it:
+// Kill / rotate / unban a KIOSK (timeclock) session in-app — so runbook lever 2 no longer needs
+// Supabase Studio. Each kiosk is ONE tablet = ONE account = ONE store, and actions target a SINGLE
+// account (by id), so a second kiosk that walks can be killed WITHOUT touching the first. (Disabling
+// the kiosk token — /api/admin/kiosk-tokens PATCH — is the owner-wide "stop ALL punching" nuke; this
+// is the per-tablet session control.)
 //   kill   = ban (revokes refresh tokens) + rotate password (blocks re-login). Password returned ONCE.
-//   rotate = rotate password only (recover a missed reveal; also brings a banned kiosk back with unban).
+//   rotate = rotate password only (recover a missed reveal; with unban, brings a killed kiosk back).
 //   unban  = lift the ban.
-// Rotate + unban are always available, so a missed one-time reveal can never brick the kiosk.
 //
-// Owner-gated (unconfined session: role undefined or 'admin'). Resolves the owner's timeclock
-// account(s) — role='timeclock' whose app_metadata.stores intersect the owner's store_members
-// (role='owner') stores — never any other account.
+// Owner-gated (unconfined: role undefined or 'admin'). Only accounts that are role='timeclock' AND
+// whose app_metadata.stores intersect the owner's store_members(role='owner') stores are visible or
+// actionable — never any other account.
 async function requireOwner(): Promise<{ ok: true; ownerId: string } | { ok: false; response: NextResponse }> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -30,7 +31,12 @@ async function requireOwner(): Promise<{ ok: true; ownerId: string } | { ok: fal
   return { ok: true, ownerId: user.id };
 }
 
-type AuthUser = { id: string; email?: string; app_metadata?: { role?: string; stores?: unknown } | null };
+type AuthUser = {
+  id: string;
+  email?: string;
+  banned_until?: string | null;
+  app_metadata?: { role?: string; stores?: unknown } | null;
+};
 
 async function findKioskAccounts(admin: ReturnType<typeof createAdminClient>, ownerId: string): Promise<AuthUser[]> {
   const { data: sm } = await admin.from('store_members').select('store_id').eq('user_id', ownerId).eq('role', 'owner');
@@ -50,42 +56,57 @@ async function findKioskAccounts(admin: ReturnType<typeof createAdminClient>, ow
   return out;
 }
 
+function isBanned(u: AuthUser): boolean {
+  return !!(u.banned_until && new Date(u.banned_until).getTime() > Date.now());
+}
+
+// GET — list the owner's kiosk accounts (one per tablet) so each can be managed independently.
+export async function GET() {
+  const gate = await requireOwner();
+  if (!gate.ok) return gate.response;
+  const admin = createAdminClient();
+  let accounts: AuthUser[];
+  try { accounts = await findKioskAccounts(admin, gate.ownerId); } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 500 }); }
+  return NextResponse.json({
+    accounts: accounts.map((u) => ({
+      id: u.id,
+      email: u.email ?? null,
+      stores: Array.isArray(u.app_metadata?.stores) ? u.app_metadata!.stores!.map(String) : [],
+      banned: isBanned(u),
+    })),
+  });
+}
+
+// POST { action, account_id } — act on ONE kiosk account.
 export async function POST(req: Request) {
   const gate = await requireOwner();
   if (!gate.ok) return gate.response;
 
-  let body: { action?: unknown };
+  let body: { action?: unknown; account_id?: unknown };
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
   const action = body.action;
+  const accountId = typeof body.account_id === 'string' ? body.account_id.trim() : '';
   if (action !== 'kill' && action !== 'rotate' && action !== 'unban') {
     return NextResponse.json({ error: "action must be 'kill', 'rotate', or 'unban'" }, { status: 400 });
   }
+  if (!accountId) return NextResponse.json({ error: 'account_id required' }, { status: 400 });
 
   const admin = createAdminClient();
   let accounts: AuthUser[];
-  try {
-    accounts = await findKioskAccounts(admin, gate.ownerId);
-  } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 500 });
-  }
-  if (!accounts.length) {
-    return NextResponse.json({ error: 'No kiosk (timeclock) account found for your stores' }, { status: 404 });
+  try { accounts = await findKioskAccounts(admin, gate.ownerId); } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 500 }); }
+  const target = accounts.find((u) => u.id === accountId);
+  if (!target) return NextResponse.json({ error: 'Not one of your kiosk accounts' }, { status: 404 });
+
+  if (action === 'unban') {
+    const { error } = await admin.auth.admin.updateUserById(target.id, { ban_duration: 'none' });
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true, action, email: target.email ?? null });
   }
 
-  const results: { email: string | null; ok: boolean; password?: string; error?: string }[] = [];
-  for (const u of accounts) {
-    if (action === 'unban') {
-      const { error } = await admin.auth.admin.updateUserById(u.id, { ban_duration: 'none' });
-      results.push({ email: u.email ?? null, ok: !error, error: error?.message });
-    } else {
-      // kill = ban + rotate; rotate = rotate only. A fresh password is returned once so the tablet
-      // can be brought back; discard-and-rotate-again is always possible.
-      const password = randomBytes(18).toString('base64url');
-      const patch = action === 'kill' ? { password, ban_duration: BAN_FOREVER } : { password };
-      const { error } = await admin.auth.admin.updateUserById(u.id, patch);
-      results.push({ email: u.email ?? null, ok: !error, password: error ? undefined : password, error: error?.message });
-    }
-  }
-
-  return NextResponse.json({ ok: results.every((r) => r.ok), action, accounts: results });
+  // kill = ban + rotate; rotate = rotate only. Fresh password returned once; rotate-again is always OK.
+  const password = randomBytes(18).toString('base64url');
+  const patch = action === 'kill' ? { password, ban_duration: BAN_FOREVER } : { password };
+  const { error } = await admin.auth.admin.updateUserById(target.id, patch);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ ok: true, action, email: target.email ?? null, password });
 }
