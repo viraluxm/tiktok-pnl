@@ -215,6 +215,11 @@ export default function PackStationOverlay({
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The 550ms "line complete" flash timer. Held in a ref (like holdTimer) because its callback
+  // finishes the box — it calls enterFinish, which fires the verification write. Left dangling,
+  // it survives the transition that cancelled the pick and confirms a box the picker abandoned.
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelDoneTimer = () => { if (doneTimer.current) { clearTimeout(doneTimer.current); doneTimer.current = null; } };
   const confirmedRef = useRef(false); // fire /confirm + count once per box
   const pickStartedAtRef = useRef<string | null>(null);
 
@@ -222,6 +227,9 @@ export default function PackStationOverlay({
   // Keep the scanner aimed at the hidden input — but NOT while the picker gate is open (the modal
   // owns focus then). When the gate closes this re-runs and re-arms the scanner.
   useEffect(() => { if (!pickerModalOpen) focusInput(); }, [screen, box, pickerModalOpen, focusInput]);
+  // Unmount cleanup — the Shipping tab unmounts the overlay on exit, and a surviving flash timer
+  // would confirm the box after the picker walked away.
+  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current); }, []);
 
   const pickLines = useMemo(() => (box ? buildPickLines(box) : []), [box]);
   const anyPicked = useMemo(() => Object.values(counts).some((v) => v > 0), [counts]);
@@ -238,6 +246,9 @@ export default function PackStationOverlay({
 
   // ── scan → box resolution (endpoint-driven, unchanged shape) ──
   async function loadBox(scan: string) {
+    // Drop any pending flash timer from the OUTGOING box before its state is replaced — it would
+    // otherwise fire against the new box and confirm the previous one's group_key.
+    cancelDoneTimer(); setJustDone(false);
     setLoading(true); setErr(null);
     try {
       const res = await fetch(endpoints.scan, {
@@ -284,7 +295,9 @@ export default function PackStationOverlay({
     setCounts(nc);
     if (next >= line.required_qty) {
       setJustDone(true);
-      window.setTimeout(() => {
+      cancelDoneTimer();
+      doneTimer.current = setTimeout(() => {
+        doneTimer.current = null;
         setJustDone(false);
         const complete = pickLines.every((l) => (nc[l.key] ?? 0) >= l.required_qty);
         if (complete) enterFinish(box);
@@ -327,7 +340,7 @@ export default function PackStationOverlay({
     if (!confirmedRef.current) { confirmedRef.current = true; onBoxPicked(); }
   }
 
-  const backToReady = () => { setBox(null); setCounts({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
+  const backToReady = () => { cancelDoneTimer(); setJustDone(false); setBox(null); setCounts({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
 
   // ── hold-to-exit (tap-and-hold ~0.9s) → reset to scan-ready, then hand off to the caller. For
   // the Shipping tab onExit exits fullscreen + unmounts; for the station page it's a no-op so the
