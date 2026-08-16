@@ -70,6 +70,65 @@ leaks, the remedy is **reissue**: revoke the badge in `/admin/badges` and issue 
 one (the old code is never reused — the global-unique constraint bars it). A revoked
 code is provably dead — scanning it returns `BADGE_NOT_FOUND` with no write.
 
+## Two ways to clock in — and what each one checks (read this at 2am)
+
+There are **two independent clock-in paths**, and they gate differently. Confusing
+them is the single most likely 2am mistake, so:
+
+### Badge scan is schedule-blind — it does NOT check the shift window
+A badge scan (`/api/kiosk/scan` → `lensed_kiosk_scan`, migration 091) checks only:
+the **kiosk is unlocked** (an active kiosk token) and the **badge is active for an
+active employee**. It then acts purely on the worker's *punch state* (clocked-out →
+clock in, on-break → end break, etc.) with a 60s rescan guard. It **never** looks at
+`shift_instances`, `starts_at`/`ends_at`, or any schedule window.
+
+Consequences a supervisor must know:
+- **An early arrival scans normally.** Being 45m (or 3h) before start is irrelevant —
+  badge doesn't read the schedule.
+- **An UNSCHEDULED worker with an active badge also punches in normally.** No shift
+  needs to exist; no password is needed per punch. The badge path does not know or
+  care whether the worker is on today's schedule. (The schedule only matters *later*,
+  when payroll reconciles punches against it — never at the moment of the punch.)
+- The **owner/supervisor password** gates **unlocking the kiosk** (lever 3 above) and
+  killing/rotating the session — **not** individual clock-ins. Once the kiosk is
+  unlocked, every active badge works without further approval.
+
+So the rule "an unscheduled worker needs the shift added or a password" is **only true
+of the QR self-service path below** — it is **not** true of badge scan.
+
+### QR self-service (the `/s/[token]` phone path) IS schedule-bound
+The rotating-QR button on the worker's phone page only exists for **their own
+`shift_instance`**, and only when now is within **[start − 45m, end + 60m]**. The issue
+endpoint (`POST /s/[token]/clock`) re-validates that window **fresh against the DB on
+every call** (`out_of_window` → 409; not-their-shift → 403). An **unscheduled** worker
+has no `shift_instance`, so there is **no QR button and no way to mint a code** — for
+them the remedy is **add the shift** (or fall back to the **badge**, which doesn't
+care). There is **no owner-password override on the QR path.**
+
+## Papercut: a shift added mid-day does NOT self-appear on an already-open phone page
+
+The worker's `/s/[token]` page is a **server-rendered snapshot taken at page load**
+(`getMyShifts` + `now()` resolved once on the server; `export const dynamic =
+'force-dynamic'`). The page's background poll (every 3s) only refreshes *clock state*
+for a control that is **already on screen**; it does **not** re-fetch the shift list or
+re-evaluate the clock window for **newly added** shifts. A `router.refresh()` fires only
+**after a punch confirms** — never proactively.
+
+Therefore, if a supervisor adds a `shift_instance` **after** the worker already opened
+`/s/[token]`, the clock button will **not appear on its own**. The worker must **manually
+reload the page** (pull-to-refresh / reopen the link). **Nobody is prompted to do this** —
+it's a real papercut. The good news: once reloaded, there is **zero further lag** — if now
+is inside the window the button renders immediately, because the issue endpoint re-derives
+the window fresh from the DB.
+
+Fast mitigations at 2am, in order:
+1. **Have the worker reload `/s/[token]`** (fixes it instantly once the shift exists).
+2. Or just **badge them in** — the badge path is schedule-blind and needs no reload,
+   no shift, and no per-punch password.
+
+(The station kiosk's own ~1/min window-state poll self-heals on the *kiosk* side; this
+papercut is specifically the *worker's phone page*, which does not poll the shift list.)
+
 ## Known follow-ups (not in the foundation)
 - Idle auto-lock on the kiosk (a separate PR).
 - Rotating-QR clock-in (single-use, window-scoped) becomes the default path;
