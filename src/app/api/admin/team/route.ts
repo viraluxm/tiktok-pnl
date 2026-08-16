@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 // Only these two roles are ever created or listed here. The middleware confines
 // any unrecognized role to nothing, so we NEVER write a role outside this set —
 // a typo would create a locked-out user.
-const MANAGED_ROLES = ['member', 'station'] as const;
+const MANAGED_ROLES = ['member', 'station', 'timeclock'] as const;
 type ManagedRole = (typeof MANAGED_ROLES)[number];
 
 function isManagedRole(v: unknown): v is ManagedRole {
@@ -17,7 +17,7 @@ function isManagedRole(v: unknown): v is ManagedRole {
 
 // The only capability scopes a 'member' may hold. Each maps 1:1 to a /team page + its owner-scoped
 // /api/member/* routes in the middleware allowlist — adding a scope means adding it BOTH places.
-export const KNOWN_MEMBER_SCOPES = ['binding', 'inventory', 'pnl', 'shows', 'team'] as const;
+export const KNOWN_MEMBER_SCOPES = ['binding', 'inventory'] as const;
 
 // A non-empty, de-duplicated subset of KNOWN_MEMBER_SCOPES, or null if invalid. Fail closed: an
 // unknown scope would confine the member to nothing, so we reject it at write time.
@@ -112,10 +112,31 @@ export async function POST(req: Request) {
   //             scopes it may use (>=1 of KNOWN_MEMBER_SCOPES). Non-'*' ids validated.
   let appMetadata:
     | { role: ManagedRole }
+    | { role: ManagedRole; stores: string[] }
     | { role: ManagedRole; scopes: string[]; stores: string[] };
 
   if (role === 'station') {
     appMetadata = { role };
+  } else if (role === 'timeclock') {
+    // Kiosk account: scoped to exactly the store(s) it punches for. NO capability scopes, and NO
+    // store_members row is created — the owner is resolved from store_members(role='owner') for these
+    // stores by requireTimeclockScope. A concrete store id is required ('*' rejected: a kiosk is one
+    // physical location).
+    const raw: unknown[] = Array.isArray(body.stores) ? body.stores : [];
+    const stores = [
+      ...new Set(raw.filter((s): s is string => typeof s === 'string' && s.trim() !== '').map((s) => s.trim())),
+    ];
+    if (stores.length === 0 || stores.includes('*')) {
+      return NextResponse.json({ error: 'stores must be a non-empty array of concrete store ids' }, { status: 400 });
+    }
+    const { data: found, error: storesErr } = await admin.from('stores').select('id').in('id', stores);
+    if (storesErr) return NextResponse.json({ error: storesErr.message }, { status: 500 });
+    const foundIds = new Set((found ?? []).map((r) => r.id as string));
+    const missing = stores.filter((s) => !foundIds.has(s));
+    if (missing.length) {
+      return NextResponse.json({ error: `unknown store id(s): ${missing.join(', ')}` }, { status: 400 });
+    }
+    appMetadata = { role, stores };
   } else {
     const scopes = validMemberScopes(body.scopes);
     if (!scopes) {

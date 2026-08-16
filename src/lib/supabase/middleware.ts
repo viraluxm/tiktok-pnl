@@ -112,12 +112,15 @@ export async function updateSession(request: NextRequest) {
   // (fail closed). NOTE: '/api/team' (self-scoped fulfillment-performance) is deliberately NOT
   // reachable — member data comes only from owner-scoped /api/member/*.
   const STATION_CONFINEMENT = { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] };
+  // The badge time-clock kiosk account (app_metadata.role='timeclock'). THIS is the security
+  // boundary for the kiosk login: it is confined to the kiosk page and its API namespace ONLY —
+  // '/kiosk' plus '/api/kiosk/*' and nothing else. It can never reach the dashboard, employees data,
+  // or any other owner surface. Each /api/kiosk/* route additionally re-checks the role via
+  // requireTimeclockScope and runs service-role, owner-from-app_metadata (never client input).
+  const TIMECLOCK_CONFINEMENT = { home: '/kiosk', allow: ['/kiosk', '/api/kiosk'] };
   const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
-    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores'],
-    inventory: ['/team/inventory', '/api/member/inventory', '/api/member/stores'],
-    pnl: ['/team/pnl', '/api/member/pnl', '/api/member/stores'],
-    shows: ['/team/shows', '/api/member/shows', '/api/member/stores'],
-    team: ['/team/staff', '/api/member/team', '/api/member/stores'],
+    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog'],
+    inventory: ['/team/inventory', '/api/member/inventory'],
   };
   const memberConfinement = (rawScopes: unknown): { home: string; allow: string[] } => {
     const scopes = Array.isArray(rawScopes) ? rawScopes.map(String) : [];
@@ -147,6 +150,7 @@ export async function updateSession(request: NextRequest) {
   const roleHome =
     role === 'station' ? '/fulfillment'
       : role === 'member' ? memberConfinement(user?.app_metadata?.scopes).home
+      : role === 'timeclock' ? '/kiosk'
       : '/dashboard';
 
   // Fail closed: only an unset role or 'admin' is unconfined. ANY other value —
@@ -160,7 +164,9 @@ export async function updateSession(request: NextRequest) {
         ? STATION_CONFINEMENT
         : role === 'member'
           ? memberConfinement(user?.app_metadata?.scopes)
-          : { home: '/login', allow: [] as string[] };
+          : role === 'timeclock'
+            ? TIMECLOCK_CONFINEMENT
+            : { home: '/login', allow: [] as string[] };
   if (confinement) {
     const path = request.nextUrl.pathname;
     // A confined role can always reach its own home, so the page redirect below
