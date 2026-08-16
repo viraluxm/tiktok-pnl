@@ -33,15 +33,8 @@ Revoke the owner's active kiosk token — every `/api/kiosk/*` scan then returns
 "This kiosk is not configured" (`resolveKioskToken` → `null`). The session may
 stay alive but can no longer punch.
 
-There is currently **no in-app disable toggle** (the `/admin/badges` "Enable
-kiosk" button only *creates* a token). Disable via SQL with the service role:
-
-```sql
-update public.kiosk_tokens set active = false
- where user_id = '<owner_user_id>' and active;
-```
-
-Re-enable later with the "Enable kiosk" button (or set `active = true`).
+In **`/admin/badges`**, click **Disable kiosk**. Re-enable with **Enable kiosk**,
+which mints a FRESH token (rotate-on-re-enable — any previously cached token is dead).
 
 ### 2. Kill the tablet's SESSION (walked and unreachable)
 The kiosk account's session auto-refreshes and does **not** expire on its own, so
@@ -49,12 +42,13 @@ disabling the token (lever 1) does not end the session. To revoke it
 server-side, **ban the timeclock auth user** — this invalidates its refresh
 tokens:
 
-- Supabase Studio → Authentication → Users → the kiosk account → **Ban user**, or
-- Admin API: `supabase.auth.admin.updateUserById(id, { ban_duration: '876000h' })`
+In **`/admin/badges`** → **Kill session (ban + rotate)**: bans the timeclock account
+(revokes its refresh tokens) and rotates its password, shown once. **Rotate password**
+and **Unban** are always available there, so a missed reveal can never brick the kiosk.
+(Studio equivalent: Authentication → Users → the kiosk account → Ban, then reset password.)
 
-Then **rotate its password** so it cannot log back in. Access tokens are
-short-lived (~1h) and expire on their own; the ban is the immediate kill of the
-refresh loop. Unban + reset the password to bring the kiosk back.
+Access tokens are short-lived (~1h) and expire on their own; the ban is the immediate
+kill of the refresh loop. **Unban** + **Rotate password** to bring the kiosk back.
 
 ### 3. Lock the tablet in-hand (routine)
 On the kiosk screen: **Lock** → a supervisor (the store owner) enters their
@@ -68,9 +62,16 @@ end-of-use lock and requires the physical tablet — not an emergency revoke.
   photographed and reprinted — entropy stops guessing, not copying). Spot-check
   punches during the incident window against the schedule and the camera.
 
+## Badge codes are secrets — never paste them into chat, logs, or tickets
+A badge code is a bearer credential: anyone who has the string can print it and
+punch as that employee (entropy stops guessing, not copy-and-reprint). So a code
+must **never** be pasted into a chat, log line, ticket, screenshot, or email. If one
+leaks, the remedy is **reissue**: revoke the badge in `/admin/badges` and issue a new
+one (the old code is never reused — the global-unique constraint bars it). A revoked
+code is provably dead — scanning it returns `BADGE_NOT_FOUND` with no write.
+
 ## Known follow-ups (not in the foundation)
 - Idle auto-lock on the kiosk (a separate PR).
-- An in-app "disable kiosk" toggle so lever 1 doesn't require SQL.
 - Rotating-QR clock-in (single-use, window-scoped) becomes the default path;
   the badge stays permanently as the logged fallback. Scanner confirmed
   compatible (see "Station scanner" above) — QR path is GO.

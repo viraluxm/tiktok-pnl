@@ -29,6 +29,7 @@ export default function BadgeAdmin() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kioskActive, setKioskActive] = useState<boolean | null>(null);
+  const [kioskPassword, setKioskPassword] = useState<string | null>(null);
 
   const loadBadges = useCallback(async () => {
     setError(null);
@@ -114,6 +115,46 @@ export default function BadgeAdmin() {
     await loadKiosk();
   };
 
+  // Disable the kiosk — stops punching immediately (revokes the active token). Does NOT end the
+  // tablet session; that's Kill session.
+  const disableKiosk = async () => {
+    setBusy(true);
+    setError(null);
+    const res = await fetch('/api/admin/kiosk-tokens', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: false }),
+    });
+    const j = (await res.json().catch(() => ({}))) as { error?: string };
+    setBusy(false);
+    if (!res.ok) {
+      setError(j.error ?? 'Could not disable kiosk.');
+      return;
+    }
+    await loadKiosk();
+  };
+
+  // Kill (ban + rotate) / Rotate password / Unban the kiosk (timeclock) account. A new password
+  // comes back once for kill/rotate; Rotate stays available so a missed reveal can't brick it.
+  const kioskSession = async (action: 'kill' | 'rotate' | 'unban') => {
+    setBusy(true);
+    setError(null);
+    setKioskPassword(null);
+    const res = await fetch('/api/admin/kiosk-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    const j = (await res.json().catch(() => ({}))) as { error?: string; accounts?: { password?: string }[] };
+    setBusy(false);
+    if (!res.ok) {
+      setError(j.error ?? 'Action failed.');
+      return;
+    }
+    const pw = j.accounts?.find((a) => a.password)?.password ?? null;
+    if (pw) setKioskPassword(pw);
+  };
+
   const printSheet = () => {
     const cards = activeEmployees
       .map((emp) => {
@@ -150,19 +191,60 @@ export default function BadgeAdmin() {
         </button>
       </div>
 
-      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm">
-        <span className="font-medium text-gray-700">Kiosk: </span>
-        {kioskActive === null ? (
-          <span className="text-gray-500">checking…</span>
-        ) : kioskActive ? (
-          <span className="text-emerald-700">enabled</span>
-        ) : (
-          <span className="text-gray-600">
-            not enabled{' '}
-            <button onClick={enableKiosk} disabled={busy} className="ml-2 rounded-md bg-gray-900 px-3 py-1 text-white disabled:opacity-50">
-              Enable kiosk
-            </button>
-          </span>
+      <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm">
+        <div className="flex items-center gap-3">
+          <span className="font-medium text-gray-700">Kiosk:</span>
+          {kioskActive === null ? (
+            <span className="text-gray-500">checking…</span>
+          ) : kioskActive ? (
+            <>
+              <span className="font-medium text-emerald-700">enabled</span>
+              <button onClick={disableKiosk} disabled={busy} className="ml-auto rounded-md border border-red-300 px-3 py-1 font-medium text-red-700 disabled:opacity-50">
+                Disable kiosk
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="font-medium text-gray-600">disabled</span>
+              <button onClick={enableKiosk} disabled={busy} className="ml-auto rounded-md bg-gray-900 px-3 py-1 font-medium text-white disabled:opacity-50">
+                Enable kiosk
+              </button>
+            </>
+          )}
+        </div>
+
+        {kioskActive === false && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-amber-800">
+            <p className="font-medium">Punching disabled — but the tablet session is still active.</p>
+            <p className="mt-0.5">
+              Ban and rotate the timeclock user to actually end it (Kill session below).{' '}
+              <a className="underline" target="_blank" rel="noreferrer"
+                href="https://github.com/viraluxm/tiktok-pnl/blob/main/docs/operations/kiosk-time-clock-runbook.md">
+                Revoke runbook
+              </a>
+            </p>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3">
+          <span className="w-full text-xs font-medium uppercase tracking-wide text-gray-400">Session (the tablet)</span>
+          <button onClick={() => kioskSession('kill')} disabled={busy} className="rounded-md bg-red-600 px-3 py-1 font-medium text-white disabled:opacity-50">
+            Kill session (ban + rotate)
+          </button>
+          <button onClick={() => kioskSession('rotate')} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1 font-medium text-gray-700 disabled:opacity-50">
+            Rotate password
+          </button>
+          <button onClick={() => kioskSession('unban')} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1 font-medium text-gray-700 disabled:opacity-50">
+            Unban
+          </button>
+        </div>
+
+        {kioskPassword && (
+          <div className="rounded-md border border-gray-300 bg-white px-3 py-2">
+            <p className="text-xs text-gray-500">New kiosk password — shown once. Use it to sign the tablet back in; Rotate again if you miss it.</p>
+            <code className="mt-1 block break-all font-mono text-gray-900">{kioskPassword}</code>
+            <button onClick={() => setKioskPassword(null)} className="mt-1 text-xs text-gray-500 underline">Dismiss</button>
+          </div>
         )}
       </div>
 
