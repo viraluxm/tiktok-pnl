@@ -2,14 +2,15 @@ import { NextResponse } from 'next/server';
 import { requireTimeclockScope, resolveKioskToken, clientIp } from '@/lib/kiosk/guard';
 import { kioskRpcErrorResponse } from '@/lib/kiosk/rpc';
 import { isValidBadgeCode } from '@/lib/kiosk/badgeCode';
+import { consumeQrClockCode } from '@/lib/kiosk/qrScan';
 import { kioskBadgeLimiter, kioskIpLimiter } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
-// POST /api/kiosk/scan — a single badge scan. Service-role; owner resolved from the kiosk account's
-// app_metadata (never client input). The RPC (091 lensed_kiosk_scan) derives state and acts:
-//   clocked_out → clock IN,  on_break → END break,  working → PROMPT (no write),  rescan<60s → STATUS.
-// A scan NEVER clocks out — that is an explicit button (see ./clock-out).
+// POST /api/kiosk/scan — the ONE station scan handler for both credentials. An LNS1… value is a
+// rotating-QR clock code (case-sensitive) → consumed + punched as 'qr'; anything else is a badge
+// (091 lensed_kiosk_scan): clocked_out → clock IN, on_break → END break, working → PROMPT, rescan<60s
+// → STATUS. A scan NEVER clocks out — that is an explicit button (see ./clock-out).
 // rpc-grants: lensed_kiosk_scan
 export async function POST(req: Request) {
   const ip = clientIp(req);
@@ -19,7 +20,16 @@ export async function POST(req: Request) {
 
   let body: { badge?: unknown };
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
-  const badge = typeof body.badge === 'string' ? body.badge.trim().toUpperCase() : '';
+  const raw = typeof body.badge === 'string' ? body.badge.trim() : '';
+
+  // Rotating-QR clock code branch (case preserved — the nonce is base64url).
+  if (raw.startsWith('LNS1')) {
+    const scope = await requireTimeclockScope();
+    if (!scope.ok) return scope.response;
+    return consumeQrClockCode(scope.admin, scope.ownerId, raw);
+  }
+
+  const badge = raw.toUpperCase();
   // Reject malformed scans up front — but with the SAME generic response as an unknown badge, so a
   // malformed code is indistinguishable from unknown/revoked/inactive.
   if (!isValidBadgeCode(badge)) {
