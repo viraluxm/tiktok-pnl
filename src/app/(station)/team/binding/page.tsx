@@ -37,6 +37,11 @@ interface Line { sku_id: string; qty: number }
 
 type DateFilter = 'today' | '7d' | '30d' | 'all';
 const DATE_PILLS: Array<[DateFilter, string]> = [['today', 'Today'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All']];
+// Sort is independent of the date filter. It matters more since the live-room lockout shipped:
+// newest-first puts the orders of a running show at the top of the queue, and those are exactly
+// the ones that will refuse. Oldest-first works the backlog instead.
+type SortOrder = 'newest' | 'oldest';
+const SORT_PILLS: Array<[SortOrder, string]> = [['newest', 'Newest first'], ['oldest', 'Oldest first']];
 
 // Currency is pinned to en-US/USD, never the browser's locale. Same defect class as the
 // timestamp bug this page had: `toLocaleString(undefined, …)` follows the viewer's machine, so a
@@ -70,6 +75,10 @@ export default function MemberBindingPage() {
   // Date filter (pills). Default 7 days. Ref mirrors it for the stable loadPage.
   const [dateFilter, setDateFilter] = useState<DateFilter>('7d');
   const dateFilterRef = useRef<DateFilter>('7d');
+  // Sort order. Same state+ref shape as the date and store filters: the ref is what the stable
+  // loadPage callback reads, so the choice survives paging without re-toggling. Default unchanged.
+  const [sortOrder, setSortOrder] = useState<SortOrder>('newest');
+  const sortOrderRef = useRef<SortOrder>('newest');
   const [hasUnmapped, setHasUnmapped] = useState(false); // any null-store rows in the current date range
   const [copiedOrder, setCopiedOrder] = useState<string | null>(null);
 
@@ -92,7 +101,7 @@ export default function MemberBindingPage() {
     setLoading(true); setErr(null); setExpanded(null); activeOrderRef.current = null;
     try {
       const cursor = cursorsRef.current[idx] ?? null;
-      const qs = new URLSearchParams({ limit: '50', date: dateFilterRef.current });
+      const qs = new URLSearchParams({ limit: '50', date: dateFilterRef.current, sort: sortOrderRef.current });
       if (cursor) qs.set('cursor', cursor);
       if (selectedStoreRef.current) qs.set('store_id', selectedStoreRef.current);
       const res = await fetch(`/api/member/unbound?${qs.toString()}`);
@@ -129,6 +138,17 @@ export default function MemberBindingPage() {
       .then((j) => setHasUnmapped(((j.unbound ?? []).length > 0) || !!j.has_more))
       .catch(() => setHasUnmapped(false));
   }, []);
+
+  // Flip the sort: a keyset cursor is direction-specific, so reversing MUST restart at page 1 —
+  // resuming a reversed scan from an old cursor would skip and duplicate rows.
+  const selectSort = useCallback((v: SortOrder) => {
+    if (sortOrderRef.current === v) return;
+    sortOrderRef.current = v;
+    setSortOrder(v);
+    cursorsRef.current = [null];
+    setNextCursor(null);
+    loadPage(0);
+  }, [loadPage]);
 
   // Switch the date filter: reset the keyset to page 1 and re-probe the unmapped bucket.
   const selectDate = useCallback((d: DateFilter) => {
@@ -276,11 +296,20 @@ export default function MemberBindingPage() {
         </div>
       </div>
 
-      {/* Date filter pills (default 7 days). Today/7d/30d scan newest-first, bounded at the PT
-          day-start so the scan seeds at the bound; All is the oldest-first backlog. */}
+      {/* Date filter pills (default 7 days). Today/7d/30d are bounded at the PT day-start so the
+          scan seeds at the bound; All is unbounded. Direction is the separate sort toggle below. */}
       <div className="mb-2 flex flex-wrap gap-1">
         {DATE_PILLS.map(([v, label]) => (
           <button key={v} onClick={() => selectDate(v)} className={pillCls(dateFilter === v)}>{label}</button>
+        ))}
+      </div>
+
+      {/* Sort pills (default newest first). Independent of the date filter — oldest-first is how
+          the backlog gets worked, and how you avoid the top of the queue being a running show's
+          orders, which the live-room lockout refuses. */}
+      <div className="mb-2 flex flex-wrap gap-1">
+        {SORT_PILLS.map(([v, label]) => (
+          <button key={v} onClick={() => selectSort(v)} className={pillCls(sortOrder === v)}>{label}</button>
         ))}
       </div>
 

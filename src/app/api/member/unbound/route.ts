@@ -1,40 +1,11 @@
 import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
 import { CAP_SELECT, filterUnboundChunk, type Cap, type UnboundRow } from '@/lib/member/unbound';
+import { encodeCursor, decodeCursor, keysetClause, orderBy, sortToDesc, type Cursor } from '@/lib/member/unboundKeyset';
 
 export const dynamic = 'force-dynamic';
 
 const TZ = 'America/Los_Angeles';
-
-// Opaque keyset cursor: the (ordered_at, order_id) of the last row of the previous page.
-type Cursor = { o: string | null; i: string };
-function encodeCursor(c: Cursor): string {
-  return Buffer.from(JSON.stringify(c)).toString('base64url');
-}
-function decodeCursor(raw: string | null): Cursor | null {
-  if (!raw) return null;
-  try {
-    const c = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
-    if (c && typeof c.i === 'string' && (c.o === null || typeof c.o === 'string')) return { o: c.o, i: c.i };
-  } catch { /* bad cursor → start from the beginning */ }
-  return null;
-}
-
-// Keyset .or() clause resuming strictly AFTER the cursor, in the scan's direction:
-//   • desc (date-filtered, newest-first): ordered_at < o, OR (ordered_at = o AND order_id < i).
-//     ordered_at is never null here (the date lower bound excludes the lone null-ordered_at row),
-//     so no null branch is needed.
-//   • asc (the 'All' view, oldest-first): the original null-aware clause — cursor.o === null means
-//     we're still in the leading NULL-ordered_at group. Timestamps are double-quoted so ':'/'.'/'+'
-//     are literal in the filter string.
-function keysetClause(cursor: Cursor, desc: boolean): string {
-  if (desc) {
-    return `ordered_at.lt."${cursor.o}",and(ordered_at.eq."${cursor.o}",order_id.lt.${cursor.i})`;
-  }
-  return cursor.o === null
-    ? `and(ordered_at.is.null,order_id.gt.${cursor.i}),ordered_at.not.is.null`
-    : `ordered_at.gt."${cursor.o}",and(ordered_at.eq."${cursor.o}",order_id.gt.${cursor.i})`;
-}
 
 // PT start-of-day (midnight) N days ago as an offset-bearing ISO instant. The offset is derived
 // from Intl for THAT date (DST-correct: PDT vs PST) — never a hardcoded UTC offset.
@@ -50,22 +21,26 @@ function ptDayStartISO(daysAgo: number): string {
   return `${targetPT}T00:00:00.000${offset}`;
 }
 
-// date pill → lower bound + scan direction. 'all' keeps the original oldest-first scan with NO
-// bound (backlog view). today/7d/30d scan NEWEST-FIRST and are bounded at the PT day-start, so the
-// scan seeds AT the bound instead of iterating the whole oldest-first prefix and discarding.
-function dateWindow(date: string): { fromTs: string | null; desc: boolean } {
+// date pill → lower bound only. Direction used to be decided here (today/7d/30d newest-first,
+// 'all' oldest-first), which made the sort an invisible side effect of the date filter. It is now
+// an independent ?sort param, so the two are separate concerns and all four combinations are
+// reachable. Each combination still seeds the scan AT one end of its own range — a bounded
+// newest-first scan starts at the newest, an unbounded oldest-first scan starts at the oldest —
+// so decoupling them costs nothing.
+function dateLowerBound(date: string): string | null {
   switch (date) {
-    case 'today': return { fromTs: ptDayStartISO(0), desc: true };
-    case '30d': return { fromTs: ptDayStartISO(29), desc: true };
-    case 'all': return { fromTs: null, desc: false };
+    case 'today': return ptDayStartISO(0);
+    case '30d': return ptDayStartISO(29);
+    case 'all': return null;
     case '7d':
-    default: return { fromTs: ptDayStartISO(6), desc: true };
+    default: return ptDayStartISO(6);
   }
 }
 
 // GET /api/member/unbound — cross-session binding queue, KEYSET-paginated. Owner-scoped
 // (service_role), requireMemberScope('binding'). Query: ?limit (default 50), ?cursor (resume),
-// ?store_id (a store uuid | 'unmapped' | absent), ?date (today | 7d | 30d | all, default 7d).
+// ?store_id (a store uuid | 'unmapped' | absent), ?date (today | 7d | 30d | all, default 7d),
+// ?sort (newest | oldest, default newest — independent of ?date).
 // Filters compose; the client resets the cursor to page 1 when either changes. Returns
 // { unbound, limit, next_cursor, has_more }. Filter logic shared via @/lib/member/unbound.
 export async function GET(req: Request) {
@@ -86,8 +61,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'store_id not in scope' }, { status: 403 });
   }
 
-  // date lower bound + direction (see dateWindow).
-  const { fromTs, desc } = dateWindow(url.searchParams.get('date') ?? '7d');
+  // date lower bound (see dateLowerBound) and, independently, the scan direction.
+  const fromTs = dateLowerBound(url.searchParams.get('date') ?? '7d');
+  const desc = sortToDesc(url.searchParams.get('sort')); // default: newest-first
 
   const CHUNK = 300;
   const collected: UnboundRow[] = [];
@@ -102,9 +78,11 @@ export async function GET(req: Request) {
       let filter = admin.from('capture_events').select(CAP_SELECT).in('user_id', ownerIds);
       if (fromTs) filter = filter.gte('ordered_at', fromTs); // seeds the scan AT the date bound
       if (scanCursor) filter = filter.or(keysetClause(scanCursor, desc));
-      const ordered = desc
-        ? filter.order('ordered_at', { ascending: false, nullsFirst: false }).order('order_id', { ascending: false })
-        : filter.order('ordered_at', { ascending: true, nullsFirst: true }).order('order_id', { ascending: true });
+      // Ordering comes from the same module as the keyset clause so the two cannot drift.
+      let ordered = filter;
+      for (const ob of orderBy(desc)) {
+        ordered = ordered.order(ob.column, { ascending: ob.ascending, nullsFirst: ob.nullsFirst });
+      }
       const { data: caps, error } = await ordered.limit(CHUNK);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       const chunk = (caps ?? []) as Cap[];
