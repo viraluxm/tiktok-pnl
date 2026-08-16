@@ -14,6 +14,7 @@ import { scheduleIsEmpty } from '@/lib/schedule/eligibility';
 import { DROP_CAP } from '@/lib/schedule/drops';
 import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate, isOvernight } from '@/lib/schedule/format';
 import { ReleaseButton, ClaimButton } from './parts';
+import { ClockControls } from './ClockControls';
 
 export const dynamic = 'force-dynamic';
 
@@ -82,6 +83,14 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
       {myShifts.map((s) => {
         const releasableNow = s.status === 'scheduled' && isReleasable(s);
         const within24 = s.status === 'scheduled' && !releasableNow;
+        // ADDITIVE: clock controls for an assigned shift in its clock window [start-45m, end+60m].
+        // Release/within24 above are untouched — a within24 shift shows BOTH "contact a manager"
+        // (for release) and the clock button (the worker can still clock in).
+        const nowMs = Date.now();
+        const inClockWindow =
+          (s.status === 'scheduled' || s.status === 'claimed') &&
+          nowMs >= new Date(s.starts_at).getTime() - 45 * 60_000 &&
+          nowMs <= new Date(s.ends_at).getTime() + 60 * 60_000;
         return (
           <Card key={s.id}>
             <div className="flex items-center justify-between gap-3">
@@ -99,6 +108,9 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
             {within24 && (
               // Its own line below the time so it never splits the time row (fix #3).
               <p className="mt-1.5 text-xs text-tt-muted">Within 24h — contact a manager</p>
+            )}
+            {inClockWindow && (
+              <ClockControls token={token} instanceId={s.id} workerName={employee.name} workerId={employee.id.slice(0, 8)} />
             )}
           </Card>
         );

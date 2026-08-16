@@ -1,10 +1,34 @@
 import { NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
-import { guardPublicWrite } from '@/lib/schedule/publicRoute';
+import { guardPublicWrite, guardPublicReadAllowed, clientIp } from '@/lib/schedule/publicRoute';
+import { resolveEmployeeByToken } from '@/lib/schedule/tokens';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { clockCodeLimiter } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
+
+// GET /s/[token]/clock — the worker's current attendance state, for the sheet's 3s confirm poll.
+// Read-only; rate-limited by the schedule read limiter.
+export async function GET(req: Request, { params }: { params: Promise<{ token: string }> }) {
+  const { token } = await params;
+  if (!guardPublicReadAllowed(token, clientIp(req))) {
+    return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+  }
+  const resolved = await resolveEmployeeByToken(token);
+  if (!resolved) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  const emp = resolved.employee;
+  const admin = createAdminClient();
+  const { data: open } = await admin
+    .from('employee_time_entries').select('id')
+    .eq('employee_id', emp.id).eq('user_id', emp.user_id).is('clocked_out_at', null).maybeSingle();
+  let onBreak = false;
+  if (open) {
+    const { data: br } = await admin
+      .from('employee_time_breaks').select('id').eq('time_entry_id', open.id).is('ended_at', null).maybeSingle();
+    onBreak = !!br;
+  }
+  return NextResponse.json({ state: !open ? 'clocked_out' : onBreak ? 'on_break' : 'working' });
+}
 
 // POST /s/[token]/clock  { shift_instance_id, purpose }  — public schedule-link session (no auth
 // session; under /s/ so it bypasses middleware, like release/claim). Issues a single-use rotating
