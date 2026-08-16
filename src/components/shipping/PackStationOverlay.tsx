@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { shouldRefocusScanSink } from '@/lib/overlay/scanSink';
 
 export interface PackStationEndpoints { boxes: string; scan: string; confirm: string }
 
@@ -231,6 +232,31 @@ export default function PackStationOverlay({
   // Keep the scanner aimed at the hidden input — but NOT while the picker gate is open (the modal
   // owns focus then). When the gate closes this re-runs and re-arms the scanner.
   useEffect(() => { if (!pickerModalOpen) focusInput(); }, [screen, box, pickerModalOpen, focusInput]);
+
+  // Scan-sink reconciler. The effect above only fires on screen/box/gate changes, so focus that
+  // lands on an in-overlay button STAYS there: tapping "Grab one" changes neither screen nor box,
+  // and the scanner's Enter suffix then re-fires that button instead of loading a box. On the
+  // "New label" control the same stray Enter opens the abandon-confirm prompt mid-pick.
+  // A focusin listener catches the common case; the 1s interval is the backstop for focus lost
+  // WITHOUT a focusin — e.g. the focused element being removed from the DOM, which sends focus to
+  // <body> silently. Both routes need this; it is independent of any background containment.
+  useEffect(() => {
+    const reconcile = () => {
+      const ok = shouldRefocusScanSink({
+        documentHasFocus: document.hasFocus(),
+        pickerModalOpen,
+        abandonOpen: abandon !== null,
+        activeElementIsSink: document.activeElement === inputRef.current,
+      });
+      if (ok) focusInput();
+    };
+    document.addEventListener('focusin', reconcile);
+    const tick = window.setInterval(reconcile, 1000);
+    return () => {
+      document.removeEventListener('focusin', reconcile);
+      window.clearInterval(tick);
+    };
+  }, [pickerModalOpen, abandon, focusInput]);
 
   // Report the open box upward (no-op when the caller passes no handler). Read-only mirror of
   // `box` — it never influences the overlay's own behavior.
