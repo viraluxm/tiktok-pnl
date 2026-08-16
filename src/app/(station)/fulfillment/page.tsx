@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import PackStationOverlay from '@/components/shipping/PackStationOverlay';
+import PackStationOverlay, { type OpenBox } from '@/components/shipping/PackStationOverlay';
 import { enterFullscreen, isFullscreen } from '@/lib/fullscreen';
 
 // The station login lands straight into the packing overlay — always-on, no idle tab view. Exit
@@ -64,6 +64,23 @@ export default function FulfillmentPage() {
   // dragging off (pointerleave/cancel) suppresses no click, because the browser does not fire one.
   // Declared with the other hooks, ABOVE the early returns below — hooks must run unconditionally.
   const longPressFired = useRef(false);
+
+  // ─── GUARDING THE MODE CHANGE ───
+  // A completed 900ms hold used to wipe straight to "Set up this device", losing an in-progress
+  // box. Nothing about the gesture required intent: pointerleave cancels, so a finger that simply
+  // rests without moving — a slow, heavy tap on a tablet — completes the hold. Mode is chosen once
+  // per device and effectively never again, so the gesture being hard to fire costs nothing while
+  // an accidental fire costs a pick.
+  // Two guards, because they cover different failure modes:
+  //   • MID-BOX  → refuse outright. This is the case that destroys work, and no confirm dialog is
+  //                worth showing to someone who did not mean to open it. The operator sets the box
+  //                aside first (New label / hold-✕), which is a deliberate act on its own.
+  //   • IDLE     → confirm. Cheap, and converts a stray gesture into an explicit decision.
+  const [openBox, setOpenBox] = useState<OpenBox | null>(null);
+  const [confirmModeChange, setConfirmModeChange] = useState(false);
+  const [blockedMidBox, setBlockedMidBox] = useState(false);
+  const blockedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (blockedTimer.current) clearTimeout(blockedTimer.current); }, []);
   // Fires on release for tap AND long-press; `longPressFired` tells them apart. `click` is used
   // rather than `pointerup` because it is unambiguously an activation-triggering event for the
   // Fullscreen API on Chrome.
@@ -147,9 +164,17 @@ export default function FulfillmentPage() {
     longPressFired.current = false;
     holdTimer.current = setTimeout(() => {
       holdTimer.current = null;
+      // Set regardless of which branch runs: the browser still fires `click` on release, and it
+      // must not be read as a short tap (which would request fullscreen behind the dialog).
       longPressFired.current = true;
       setHolding(false);
-      setMode(null);
+      if (openBox) {
+        setBlockedMidBox(true);
+        if (blockedTimer.current) clearTimeout(blockedTimer.current);
+        blockedTimer.current = setTimeout(() => setBlockedMidBox(false), 3000);
+        return;
+      }
+      setConfirmModeChange(true);
     }, 900);
   };
   const cancelHoldChange = () => {
@@ -169,6 +194,10 @@ export default function FulfillmentPage() {
         pickedCount={pickedCount}
         onBoxPicked={() => setPickedCount((n) => n + 1)}
         onExit={() => { /* always-on: exit returns to scan-ready in the overlay; nothing to unmount */ }}
+        // Read-only mirror of the overlay's loaded box, used ONLY to refuse a mode change while a
+        // pick is in progress. setState from useState is a stable reference, which this prop
+        // requires (it is an effect dependency inside the overlay).
+        onBoxChange={setOpenBox}
       />
       {/* Current-mode chip, portalled above the overlay (z-[205] > overlay z-[200]). Plain text,
           no tap target: changing mode requires a press-and-hold (same gesture as the overlay's
@@ -200,9 +229,45 @@ export default function FulfillmentPage() {
               never seen the device-mode picker (cookie already set) would otherwise have no way
               to know the tap does anything. Once fullscreen, only the hold remains meaningful. */}
           <span className="relative text-[10px] normal-case text-tt-muted">
-            {fullscreen ? 'hold to change' : 'tap = fullscreen · hold = change'}
+            {blockedMidBox
+              ? 'finish or set aside the box first'
+              : fullscreen ? 'hold to change' : 'tap = fullscreen · hold = change'}
           </span>
         </button>,
+        document.body,
+      )}
+      {/* Mode-change confirmation. Only reachable from an IDLE completed hold — mid-box holds are
+          refused before this can open. z-[220] clears both the overlay (200) and the chip (205).
+          Portalled to <body> and marked data-overlay-exempt for the same reason the chip is: the
+          overlay inerts its <body> siblings, and a dialog the operator cannot answer is worse than
+          no dialog. */}
+      {confirmModeChange && typeof document !== 'undefined' && createPortal(
+        <div
+          data-overlay-exempt=""
+          className="fixed inset-0 z-[220] bg-black/70 backdrop-blur-md flex items-center justify-center p-4"
+        >
+          <div className="bg-tt-card border border-tt-border rounded-2xl p-6 max-w-sm w-full">
+            <div className="text-lg font-bold text-tt-text">Change device mode?</div>
+            <div className="mt-2 text-sm text-tt-muted">
+              This device is set to <span className="font-bold uppercase text-tt-text">{mode}</span>.
+              Changing it returns to the setup screen so you can pick again.
+            </div>
+            <div className="mt-5 flex gap-3">
+              <button
+                onClick={() => setConfirmModeChange(false)}
+                className="flex-1 min-h-[44px] py-3 rounded-xl border border-tt-border text-tt-text cursor-pointer"
+              >
+                Keep {mode}
+              </button>
+              <button
+                onClick={() => { setConfirmModeChange(false); setMode(null); }}
+                className="flex-1 min-h-[44px] py-3 rounded-xl bg-tt-cyan text-black font-bold cursor-pointer hover:opacity-90"
+              >
+                Change mode
+              </button>
+            </div>
+          </div>
+        </div>,
         document.body,
       )}
     </>
