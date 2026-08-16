@@ -25,7 +25,16 @@ const SRC = path.join(ROOT, 'src');
 
 // Functions called ONLY via createAdminClient() (service role bypasses grants). They must stay
 // ungranted. Keep this list tiny and reviewed; add here when you add a service-role-only RPC.
-const SERVICE_ROLE_ONLY = new Set(['lensed_add_batch_admin', 'lensed_void_batch']);
+const SERVICE_ROLE_ONLY = new Set([
+  'lensed_add_batch_admin', 'lensed_void_batch',
+  // Service-role-only `_as` variants, invoked ONLY via createAdminClient in member routes (owner
+  // passed explicitly; revoked from authenticated by 084/087). Were unregistered → the check was
+  // already red on main before the kiosk PR.
+  'lensed_log_auction_as', 'pnl_reorder_by_sku_as',
+  // Badge/QR kiosk RPCs — service-role only (091/092/095), called via createAdminClient in
+  // /api/kiosk/* and the QR scan path. Never granted to anon/authenticated.
+  'lensed_kiosk_scan', 'lensed_kiosk_start_break', 'lensed_kiosk_clock_out', 'lensed_kiosk_manual_punch_as',
+]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
 const PAT = process.env.SUPABASE_ACCESS_TOKEN;
