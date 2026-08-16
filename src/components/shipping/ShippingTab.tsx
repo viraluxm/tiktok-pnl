@@ -378,6 +378,10 @@ export default function ShippingTab() {
       pickedCount={pickedToday}
       onBoxPicked={() => setPickedToday((n) => n + 1)}
       onBoxChange={handleBoxChange}
+      // Dashboard-only: this mount sits over live app chrome (header, UserMenu, the 8 tab
+      // buttons). Without containment a scanner Tab suffix walks focus into a tab button and the
+      // next Enter fires setActiveView(), unmounting this tab and the overlay with it mid-pick.
+      containBackground
       // A deliberate exit ends the session — there is nothing to resume.
       onExit={() => { clearResume(); setResume(null); exitFullscreen(); setFocus(false); }}
     />

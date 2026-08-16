@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { shouldRefocusScanSink } from '@/lib/overlay/scanSink';
+import { applyBackgroundInert } from '@/lib/overlay/containment';
 
 export interface PackStationEndpoints { boxes: string; scan: string; confirm: string }
 
@@ -192,6 +193,12 @@ export interface PackStationOverlayProps {
   // The station mount (/fulfillment) does not pass it, so its behavior is unchanged. Must be a
   // STABLE reference (useCallback) — it is an effect dependency below.
   onBoxChange?: (box: OpenBox | null) => void;
+  // OPT-IN, dashboard-only. When true, every <body> child except this overlay's own container (and
+  // anything marked data-overlay-exempt) is made `inert` for the overlay's lifetime, so a scanner
+  // Tab suffix cannot walk focus into the app chrome behind it and an Enter cannot unmount us.
+  // ShippingTab passes it; the station page does NOT — /fulfillment has no chrome to escape into,
+  // so inerting there would protect against nothing. See @/lib/overlay/containment.
+  containBackground?: boolean;
 }
 
 /** The minimum a caller needs to describe the open box to an operator. */
@@ -207,6 +214,7 @@ export default function PackStationOverlay({
   onBoxPicked,
   onExit,
   onBoxChange,
+  containBackground = false,
 }: PackStationOverlayProps) {
   const [screen, setScreen] = useState<Screen>('ready');
   const [box, setBox] = useState<Box | null>(null);
@@ -228,10 +236,33 @@ export default function PackStationOverlay({
   const confirmedRef = useRef(false); // fire /confirm + count once per box
   const pickStartedAtRef = useRef<string | null>(null);
 
+  // The overlay portals into a container it CREATES AND OWNS rather than into <body> directly, so
+  // "my subtree" is unambiguous when deciding what to make inert. The container is always created;
+  // only the inerting is opt-in.
+  const [portalEl, setPortalEl] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = document.createElement('div');
+    el.setAttribute('data-pack-station-overlay', '');
+    document.body.appendChild(el);
+    // Inert FIRST, then expose the container: inerting an ancestor of the focused element blurs it,
+    // so doing this before the input exists avoids a mount-time focus fight.
+    const restore = containBackground ? applyBackgroundInert(el) : () => {};
+    // Belt and braces: nothing above this component is an error boundary, so a throw during render
+    // would skip the cleanup below and strand the app inert.
+    const onPageHide = () => restore();
+    window.addEventListener('pagehide', onPageHide);
+    setPortalEl(el);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      restore();
+      el.remove();
+    };
+  }, [containBackground]);
+
   const focusInput = useCallback(() => { requestAnimationFrame(() => inputRef.current?.focus()); }, []);
   // Keep the scanner aimed at the hidden input — but NOT while the picker gate is open (the modal
   // owns focus then). When the gate closes this re-runs and re-arms the scanner.
-  useEffect(() => { if (!pickerModalOpen) focusInput(); }, [screen, box, pickerModalOpen, focusInput]);
+  useEffect(() => { if (!pickerModalOpen) focusInput(); }, [screen, box, pickerModalOpen, portalEl, focusInput]);
 
   // Scan-sink reconciler. The effect above only fires on screen/box/gate changes, so focus that
   // lands on an in-overlay button STAYS there: tapping "Grab one" changes neither screen nor box,
@@ -418,7 +449,7 @@ export default function PackStationOverlay({
 
   // ── focus-mode overlay — portalled to <body> so it escapes any transformed ancestor and fills
   // the whole dynamic viewport at z-[200], above app chrome. Safe under SSR (mounts client-side). ──
-  if (typeof document === 'undefined') return null;
+  if (typeof document === 'undefined' || !portalEl) return null;
   return createPortal(
     <div
       className="fixed inset-0 z-[200] w-screen h-[100dvh] max-w-full bg-tt-bg text-tt-text flex flex-col select-none overflow-hidden"
@@ -783,6 +814,6 @@ export default function PackStationOverlay({
 
       {pickerModal}
     </div>,
-    document.body,
+    portalEl,
   );
 }
