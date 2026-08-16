@@ -12,6 +12,17 @@ walked tablet **cannot** reach order data, admin, payroll, or `/s/[token]`. The
 blast radius is *punching*, not data. That is why none of the below is a
 five-alarm fire — but do it anyway when a tablet goes missing.
 
+## Station scanner (confirmed 2026-08-16 — do not re-litigate)
+
+**Hardware: Tera 9700 — 2D area imager, hands-free presentation stand. Reads
+both 1D (Code 128 badges) and 2D (phone-screen QR).**
+
+Consequence: the **rotating-QR path (096) is GO** — it works on this scanner with
+no hardware change. All 15 team members clock in on **phone QR as the default**
+path; the printed Code 128 badge stays as the logged **fallback** for a dead
+phone / cracked camera / no wifi / dim screen. (2D imagers read phone screens
+fine; the laser-scanner caveat in the QR spec does not apply to this station.)
+
 ## Levers, fastest first
 
 ### 1. Disable ALL punching immediately (no auth change)
@@ -61,4 +72,5 @@ end-of-use lock and requires the physical tablet — not an emergency revoke.
 - Idle auto-lock on the kiosk (a separate PR).
 - An in-app "disable kiosk" toggle so lever 1 doesn't require SQL.
 - Rotating-QR clock-in (single-use, window-scoped) becomes the default path;
-  the badge stays permanently as the logged fallback.
+  the badge stays permanently as the logged fallback. Scanner confirmed
+  compatible (see "Station scanner" above) — QR path is GO.
