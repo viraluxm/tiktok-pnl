@@ -1,7 +1,130 @@
-import { createServerClient } from '@supabase/ssr';
-import { isAuthRetryableFetchError } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { NextResponse, type NextRequest } from 'next/server';
-import { getUserWithTimeout } from './authTimeout';
+import { JWKS_FETCH_TIMEOUT_MS, withAuthTimeout } from './authTimeout';
+import { headerOf, parsePinnedKeys, pinnedKids, type PinnedJwk } from './jwks';
+import { hasSupabaseAuthCookie, readAccessToken, storageKeyForUrl } from './sessionCookie';
+import {
+  appRoleFromClaims,
+  confinementFor,
+  isExpired,
+  isPathAllowed,
+  memberConfinement,
+  roleHomeFor,
+  type AuthClaims,
+} from './claims';
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE MIDDLEWARE VALIDATES. IT DOES NOT REFRESH.
+//
+// It used to call supabase.auth.getUser(), which loads the session and — when the access token is
+// within 90s of expiry — calls /auth/v1/token to ROTATE it. That made every edge invocation a
+// second token refresher racing the browser's own, on a rotating refresh token with a 60s reuse
+// interval. The loser of that race gets 400 refresh_token_already_used, which auth-js classifies
+// as non-retryable, destroys the session, and emits SIGNED_OUT → the operator is bounced to
+// /login mid-shift for no reason. (Observed in prod: sessions created in a browser whose
+// auth.sessions.user_agent had been overwritten to 'Vercel Edge Functions' — i.e. last refreshed
+// by this file.)
+//
+// Now: read the access token from the cookie, verify its SIGNATURE locally against a pinned JWKS,
+// read the role from the claims. Zero network I/O on the happy path, and nothing is rotated.
+//
+// CONSEQUENCE — REVOCATION IS NOT INSTANT HERE. A locally-verified JWT is accepted until its own
+// `exp`, so a server-side revocation (or an app_metadata role/scope change) takes up to jwt_exp
+// (3600s) to affect ROUTING. That is safe only because this file gates no data: every API route
+// re-checks getUser() over the network and RLS enforces auth.uid(). Do NOT build a middleware
+// decision here that needs real-time revocation. See CLAUDE.md.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+// ─── THE VERIFIER CLIENT IS DELIBERATELY COOKIE-LESS AND STORAGE-LESS ───
+// We pass the access token to getClaims() explicitly, so this client needs no cookie access at
+// all. Giving it none makes "this cannot refresh" ARCHITECTURAL rather than a property of how we
+// happen to call it: with persistSession:false there is no cookie-backed session for it to load,
+// rotate, or clear.
+//
+// It also removes a real failure mode. createServerClient()'s cookie adapter makes the
+// constructor kick off initialize() → _recoverAndRefresh() → storage.getItem(), which on a
+// MALFORMED auth cookie throws asynchronously, outside any try/catch we control, as an
+// UNHANDLED REJECTION (verified: `base64-@@@garbage` in the auth cookie reproduces it by
+// construction alone). That is pre-existing behavior — the previous middleware built the same
+// client — but there is no reason to keep carrying it.
+//
+// Cookie handling for the RESPONSE (the lensed_timeclock hint and the redirect copy loop) stays
+// explicit below; it never needed the Supabase client.
+//
+// Hoisted to module scope: the client is stateless here, so one per isolate rather than one per
+// request. Safe precisely because it holds no session.
+let verifierClient: SupabaseClient | null = null;
+function getVerifier(url: string, key: string): SupabaseClient {
+  if (!verifierClient) {
+    verifierClient = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
+  }
+  return verifierClient;
+}
+
+/** Verified claims plus how much we trust them right now. */
+interface Verified {
+  claims: AuthClaims | null;
+  /** Signature verified AND not past `exp`. */
+  fresh: boolean;
+  /** We could not verify for an INFRASTRUCTURE reason (rotation + unreachable JWKS, timeout). */
+  unverifiable: boolean;
+}
+
+async function verifyAccessToken(
+  supabase: SupabaseClient,
+  token: string,
+  keys: PinnedJwk[],
+): Promise<Verified> {
+  // Log a pinned-key MISS before handing over — that means the signing key rotated and auth-js is
+  // about to go to the network. This is an operational event we want visible in logs, not
+  // absorbed silently.
+  const header = headerOf(token);
+  if (header?.kid && !pinnedKids(keys).includes(header.kid)) {
+    console.warn(
+      `[middleware] JWKS pinned-key MISS: token kid=${header.kid} alg=${header.alg ?? '?'} not in pinned set ` +
+        `[${pinnedKids(keys).join(', ')}] — falling back to a network fetch. Update SUPABASE_JWKS.`,
+    );
+  }
+
+  // Two reasons this call is wrapped rather than awaited directly:
+  //   1. getClaims can THROW rather than return { error } — validateExp raises a plain Error
+  //      ('JWT has expired'), which is not an AuthError and so is rethrown. An unhandled throw
+  //      here would 500 every request. withAuthTimeout normalizes any rejection to
+  //      { data: null, error }. (We also pass allowExpired, so that particular throw cannot fire.)
+  //   2. It bounds the one remaining network leg — a JWKS fetch after a key rotation.
+  //
+  // allowExpired: we verify the SIGNATURE here and decide freshness ourselves (below), so that an
+  // expired-but-authentic token still yields a trustworthy role. Without this, a station whose
+  // token lapsed would present as role-less and fall into the UNCONFINED branch — a confinement
+  // fail-OPEN. Authentic-but-stale claims are strictly better evidence than the hint cookies.
+  const { data, error, timedOut } = await withAuthTimeout<{ claims: AuthClaims }>(
+    async () => {
+      const res = await supabase.auth.getClaims(token, { keys, allowExpired: true });
+      return { data: res.data as { claims: AuthClaims } | null, error: res.error };
+    },
+    {
+      timeoutMs: JWKS_FETCH_TIMEOUT_MS,
+      onTimeout: () =>
+        console.warn('[middleware] JWKS fetch exceeded timeout — treating as transient, NOT a logout'),
+    },
+  );
+
+  if (timedOut) return { claims: null, fresh: false, unverifiable: true };
+
+  if (error || !data?.claims) {
+    // A network/fetch failure while chasing a rotated key is infrastructure; a bad signature is
+    // not. isAuthRetryableFetchError would only cover the former, and getClaims surfaces a JWKS
+    // fetch failure as a thrown/returned request error, so treat a MISSING pinned key as the
+    // infrastructure case and everything else as definitive.
+    const pinnedMiss = !!header?.kid && !pinnedKids(keys).includes(header.kid);
+    return { claims: null, fresh: false, unverifiable: pinnedMiss };
+  }
+
+  const claims = data.claims;
+  return { claims, fresh: !isExpired(claims, Date.now()), unverifiable: false };
+}
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -14,70 +137,53 @@ export async function updateSession(request: NextRequest) {
     return supabaseResponse;
   }
 
-  // Abort the in-flight Supabase auth request if it blows past the hard timeout
-  // applied below, so a hung call is actively cancelled instead of being left to
-  // run against Vercel's 25s Edge-Middleware limit. Wired through the client's
-  // own `fetch` so the AbortController reaches the ACTUAL network request that
-  // supabase-js makes (and every internal retry it makes on the same signal).
-  const authAbort = new AbortController();
+  const supabase = getVerifier(supabaseUrl, supabaseKey);
 
-  const supabase = createServerClient(supabaseUrl, supabaseKey, {
-    cookies: {
-      getAll() {
-        return request.cookies.getAll();
-      },
-      setAll(cookiesToSet) {
-        cookiesToSet.forEach(({ name, value }) =>
-          request.cookies.set(name, value)
-        );
-        supabaseResponse = NextResponse.next({ request });
-        cookiesToSet.forEach(({ name, value, options }) =>
-          supabaseResponse.cookies.set(name, value, options)
-        );
-      },
-    },
-    global: {
-      fetch: (input, init) =>
-        fetch(input, { ...init, signal: authAbort.signal }),
-    },
-  });
+  // Cookie STAGING, kept explicit now that the Supabase client no longer owns a cookie adapter.
+  // This is the `setAll` behavior, preserved: stage onto the request (so downstream sees it) and
+  // rebuild supabaseResponse so the value is emitted. Nothing in this file rotates any more, so
+  // the only current caller is the lensed_timeclock hint below — but a future code path that DOES
+  // write an auth cookie must not silently drop it, which is the same class of bug as the
+  // aborted-refresh discard this change removes.
+  const stageCookie = (
+    name: string,
+    value: string,
+    options: Parameters<typeof supabaseResponse.cookies.set>[2],
+  ) => {
+    request.cookies.set(name, value);
+    supabaseResponse = NextResponse.next({ request });
+    supabaseResponse.cookies.set(name, value, options);
+  };
 
-  // Bound the auth call with a hard timeout (see ./authTimeout). Supabase Auth
-  // intermittently hangs / returns 504 and supabase-js retries internally;
-  // without this cap the middleware runs until Vercel's 25s Edge limit and every
-  // protected route 504s (MIDDLEWARE_INVOCATION_TIMEOUT). A timeout surfaces as
-  // `timedOut` and is treated as a transient failure below — never a forced
-  // logout.
-  const {
-    data: { user },
-    error,
-    timedOut,
-  } = await getUserWithTimeout(() => supabase.auth.getUser(), {
-    onTimeout: () => authAbort.abort(),
-  });
+  const allCookies = request.cookies.getAll();
+  const hasAuthCookie = hasSupabaseAuthCookie(allCookies);
 
-  // A refresh/validation call that fails for a TRANSIENT reason (network blip,
-  // Supabase 5xx, cold edge) returns { user: null, error } even though the
-  // session is still valid. A call that HANGS past our hard timeout (timedOut)
-  // is the same class of event — Supabase Auth is momentarily unavailable — and
-  // is treated identically. Treat both as "still logged in" for the page shell:
-  // redirecting to /login here would log the user out on a temporary glitch.
-  // This does NOT weaken data protection — every API route re-checks getUser()
-  // and RLS enforces auth.uid(), so a briefly-null shell exposes nothing. A
-  // genuinely missing/invalid session (no auth cookie, or a definitive
-  // AuthApiError such as an invalid refresh token) still redirects below.
-  const hasAuthCookie = request.cookies
-    .getAll()
-    .some((c) => c.name.startsWith('sb-') && c.name.includes('-auth-token'));
+  const { keys, malformed } = parsePinnedKeys(process.env.SUPABASE_JWKS);
+  if (malformed) {
+    console.error('[middleware] SUPABASE_JWKS is set but unparseable — using the pinned fallback key set');
+  }
+
+  const storageKey = storageKeyForUrl(supabaseUrl);
+  const accessToken = storageKey ? await readAccessToken(allCookies, storageKey) : null;
+
+  const verified: Verified = accessToken
+    ? await verifyAccessToken(supabase, accessToken, keys)
+    : { claims: null, fresh: false, unverifiable: false };
+
+  // "Authenticated" for routing purposes = signature verified AND not expired.
+  const authenticated = !!verified.claims && verified.fresh;
+
+  // Ride out anything that is not a definitive signed-out:
+  //   • authentic claims that merely EXPIRED — the browser client refreshes on its own timer and
+  //     on visibilitychange; bouncing here would manufacture the logout we are trying to prevent;
+  //   • a JWKS timeout / rotation we could not chase.
+  // A missing cookie, or a token whose SIGNATURE does not verify, is still a definitive redirect.
   const transientAuthFailure =
-    !user && hasAuthCookie && (timedOut || isAuthRetryableFetchError(error));
+    !authenticated && hasAuthCookie && (verified.unverifiable || (!!verified.claims && !verified.fresh));
 
-  // Build a redirect that preserves any refreshed/rotated auth cookies Supabase
-  // wrote onto supabaseResponse. Without this, a token refresh that coincides
-  // with a redirect discards the new cookies (the classic @supabase/ssr footgun)
-  // and strands the browser on a consumed refresh token. Only sb-* cookies are
-  // ever written to supabaseResponse, so this never touches the active-store or
-  // OAuth-verifier cookies (those are set by route handlers via next/headers).
+  // Build a redirect that preserves any cookies staged on supabaseResponse. Auth no longer stages
+  // any — but the lensed_timeclock confinement hint below DOES, and dropping it across a redirect
+  // would silently un-confine an unattended kiosk on the next auth blip. Keep this loop.
   const redirectTo = (pathname: string) => {
     const url = request.nextUrl.clone();
     url.pathname = pathname;
@@ -89,86 +195,38 @@ export async function updateSession(request: NextRequest) {
   };
 
   // ---------------------------------------------------------------------------
-  // Role confinement (station / member). These roles are set in Supabase via
-  // app_metadata.role and are hard-confined to a tiny allowlist: they can reach
-  // ONLY their own pages + API namespace, nothing else. Owner/admin sessions
-  // (role undefined or 'admin') are NOT confined and retain full access,
-  // including /fulfillment and /team.
+  // Role confinement (station / member / timeclock). Roles are set in Supabase via
+  // app_metadata.role and are hard-confined to a tiny allowlist: they can reach ONLY their own
+  // pages + API namespace, nothing else. Owner/admin sessions (role undefined or 'admin') are NOT
+  // confined and retain full access, including /fulfillment and /team.
   //
-  // This branch runs BEFORE the OAuth-callback whitelist and the auth-page
-  // bounce below, so a confined session cannot slip through either: e.g. a
-  // station user hitting /auth/tiktok/callback or /login is bounced to its role
-  // home rather than reaching the callback handler or the /dashboard bounce.
+  // This branch runs BEFORE the OAuth-callback whitelist and the auth-page bounce below, so a
+  // confined session cannot slip through either.
   //
-  // Transient-auth fallback: if Supabase Auth briefly returns no user but a
-  // `lensed_station` cookie is present, treat the session as station and apply
-  // the station allowlist — otherwise a token-refresh blip would drop a station
-  // out of confinement (and the /login redirect below would log it out).
-  // Station reach is a fixed allowlist. Member reach is SCOPE-DERIVED from app_metadata.scopes:
-  // each scope maps 1:1 to its /team page + the owner-scoped /api/member/* routes THAT page uses,
-  // and a member's allowlist is the UNION over the scopes it holds. The shared binding-flow routes
-  // (catalog/sessions/unbound/bind) live under the 'binding' scope that uses them; 'inventory' adds
-  // only its own page + /api/member/inventory. A scope this map doesn't know contributes nothing
-  // (fail closed). NOTE: '/api/team' (self-scoped fulfillment-performance) is deliberately NOT
-  // reachable — member data comes only from owner-scoped /api/member/*.
-  const STATION_CONFINEMENT = { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] };
-  // The badge time-clock kiosk account (app_metadata.role='timeclock'). THIS is the security
-  // boundary for the kiosk login: it is confined to the kiosk page and its API namespace ONLY —
-  // '/kiosk' plus '/api/kiosk/*' and nothing else. It can never reach the dashboard, employees data,
-  // or any other owner surface. Each /api/kiosk/* route additionally re-checks the role via
-  // requireTimeclockScope and runs service-role, owner-from-app_metadata (never client input).
-  const TIMECLOCK_CONFINEMENT = { home: '/kiosk', allow: ['/kiosk', '/api/kiosk'] };
-  const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
-    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog'],
-    inventory: ['/team/inventory', '/api/member/inventory'],
-  };
-  const memberConfinement = (rawScopes: unknown): { home: string; allow: string[] } => {
-    const scopes = Array.isArray(rawScopes) ? rawScopes.map(String) : [];
-    const allow = [...new Set(scopes.flatMap((s) => MEMBER_SCOPE_PATHS[s] ?? []))];
-    const first = scopes.find((s) => MEMBER_SCOPE_PATHS[s]); // home = first RECOGNIZED scope's page
-    // A member with no recognized scope gets an EMPTY allowlist and is sent to the static
-    // "no areas assigned" page. Home is ALWAYS reachable (the `path === confinement.home` check
-    // below), so this page renders even with an empty allowlist and never loops — unlike '/login',
-    // which would bounce them straight back into the sign-in they just completed. It makes no data
-    // reads and no API calls.
-    return { home: first ? MEMBER_SCOPE_PATHS[first][0] : '/team/no-access', allow };
-  };
+  // ROLE SOURCE — read the full note in ./claims: the app role is `claims.app_metadata.role`.
+  // `claims.role` is the POSTGRES role ('authenticated') and reading it here would confine every
+  // user in the app.
+  //
+  // The hint cookies below remain as a last resort for the case where we hold NO claims at all
+  // (unverifiable token). With allowExpired verification they are rarely reached, since an
+  // expired-but-authentic token still carries the real role.
+  const hasStationCookie = allCookies.some((c) => c.name === 'lensed_station');
+  const hasTimeclockCookie = allCookies.some((c) => c.name === 'lensed_timeclock');
 
-  // `lensed_station` is a confinement HINT only — never an authentication
-  // signal, and it must never gate data access. We honour it solely to keep an
-  // already-authenticated station confined while Supabase Auth briefly cannot
-  // return the user object, so it is ANDed with transientAuthFailure (sb-* auth
-  // cookie present + retryable/timeout error) — our evidence that a real
-  // session exists. A lensed_station cookie WITHOUT that session evidence is
-  // ignored: it grants nothing and never widens or unlocks access.
-  const hasStationCookie = request.cookies
-    .getAll()
-    .some((c) => c.name === 'lensed_station');
-  // Mirror of the station hint for the badge/QR kiosk: an unattended wall tablet must stay confined
-  // during a transient auth blip (user momentarily null) instead of resolving to an UNCONFINED
-  // session that can reach /dashboard. Hint only, ANDed with transientAuthFailure — grants nothing
-  // without sb-* session evidence.
-  const hasTimeclockCookie = request.cookies
-    .getAll()
-    .some((c) => c.name === 'lensed_timeclock');
+  const claimsRole = appRoleFromClaims(verified.claims);
   const role =
-    (user?.app_metadata?.role as string | undefined) ??
+    claimsRole ??
     (transientAuthFailure && hasStationCookie ? 'station'
       : transientAuthFailure && hasTimeclockCookie ? 'timeclock'
-      : undefined);
-  const roleHome =
-    role === 'station' ? '/fulfillment'
-      : role === 'member' ? memberConfinement(user?.app_metadata?.scopes).home
-      : role === 'timeclock' ? '/kiosk'
-      : '/dashboard';
+        : undefined);
+  const scopes = verified.claims?.app_metadata?.scopes;
+  const roleHome = roleHomeFor(role, scopes);
 
-  // Set the confinement HINT cookie for a CONFIRMED timeclock session (user present, role from
-  // app_metadata), so a later transient auth blip keeps the kiosk confined via hasTimeclockCookie
-  // above. It grants nothing on its own — the read path ANDs it with transientAuthFailure. (NOTE:
-  // lensed_station has no setter — dormant since #137; this adds one for timeclock. Station should
-  // get the same, tracked separately.)
-  if (user && (user.app_metadata?.role as string | undefined) === 'timeclock') {
-    supabaseResponse.cookies.set('lensed_timeclock', '1', {
+  // Set the confinement HINT cookie for a CONFIRMED timeclock session, so a later blip that
+  // leaves us with no claims at all still keeps the kiosk confined. It grants nothing on its own
+  // — the read path ANDs it with transientAuthFailure.
+  if (authenticated && claimsRole === 'timeclock') {
+    stageCookie('lensed_timeclock', '1', {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
@@ -177,35 +235,16 @@ export async function updateSession(request: NextRequest) {
     });
   }
 
-  // Fail closed: only an unset role or 'admin' is unconfined. ANY other value —
-  // including a typo like 'statoin', or a member holding no recognized scope — is
-  // a confined role with an EMPTY (or scope-limited) allowlist, never full access.
-  // A new role/scope must be added above to gain any reach.
-  const confinement: { home: string; allow: string[] } | undefined =
-    role === undefined || role === 'admin'
-      ? undefined
-      : role === 'station'
-        ? STATION_CONFINEMENT
-        : role === 'member'
-          ? memberConfinement(user?.app_metadata?.scopes)
-          : role === 'timeclock'
-            ? TIMECLOCK_CONFINEMENT
-            : { home: '/login', allow: [] as string[] };
+  const confinement = confinementFor(role, scopes);
   if (confinement) {
     const path = request.nextUrl.pathname;
-    // A confined role can always reach its own home, so the page redirect below
-    // never loops when the home path isn't otherwise in the allowlist.
-    const allowed =
-      path === confinement.home ||
-      confinement.allow.some((p) => path === p || path.startsWith(p + '/'));
-    if (allowed) {
-      // Confined session on one of its own paths — nothing else to enforce.
-      // Return here so the !user /login redirect below never fires for a
-      // station riding out a transient auth failure on an allowed path.
+    if (isPathAllowed(path, confinement)) {
+      // Confined session on one of its own paths — nothing else to enforce. Return here so the
+      // !authenticated /login redirect below never fires for a role riding out a transient
+      // failure on an allowed path.
       return supabaseResponse;
     }
-    // Non-allowlisted: hard 403 for API, bounce to role home for pages. This
-    // also covers root '/' (not in any allowlist → redirect to role home).
+    // Non-allowlisted: hard 403 for API, bounce to role home for pages. This also covers root '/'.
     if (path.startsWith('/api/')) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
@@ -222,16 +261,15 @@ export async function updateSession(request: NextRequest) {
       request.nextUrl.pathname.startsWith('/auth')
     );
 
-  // Not logged in and trying to access protected route — but ride out a
-  // transient auth-endpoint failure instead of manufacturing a logout.
-  if (!user && !transientAuthFailure && !isAuthPage && request.nextUrl.pathname !== '/') {
+  // Not logged in and trying to access a protected route — but ride out a transient failure
+  // instead of manufacturing a logout.
+  if (!authenticated && !transientAuthFailure && !isAuthPage && request.nextUrl.pathname !== '/') {
     return redirectTo('/login');
   }
 
-  // Logged in and trying to access auth pages. Confined roles are already
-  // handled above (station/member never reach here), so roleHome is /dashboard for
-  // owner/admin — but keep it role-aware for correctness.
-  if (user && isAuthPage) {
+  // Logged in and trying to access auth pages. Confined roles are already handled above, so
+  // roleHome is /dashboard for owner/admin — but keep it role-aware for correctness.
+  if (authenticated && isAuthPage) {
     return redirectTo(roleHome);
   }
 
@@ -239,3 +277,6 @@ export async function updateSession(request: NextRequest) {
 
   return supabaseResponse;
 }
+
+// Re-exported so callers/tests can reach the confinement tables from one place.
+export { memberConfinement };

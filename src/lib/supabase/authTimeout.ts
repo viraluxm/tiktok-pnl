@@ -1,93 +1,90 @@
-// Hard timeout wrapper for the Edge-Middleware Supabase auth call.
+// Hard timeout wrapper for the ONE remaining network leg in the Supabase auth path at the edge:
+// the JWKS cold-miss fetch.
 //
-// Why this exists (production incident, 2026-07-31): when Supabase Auth
-// intermittently hangs or returns 504, supabase-js retries the fetch
-// internally. On a protected route the middleware then `await`s getUser() long
-// enough to hit Vercel's 25s Edge-Middleware initial-response limit, so EVERY
-// protected request (e.g. /dashboard) returns MIDDLEWARE_INVOCATION_TIMEOUT /
-// 504. The existing AuthRetryableFetchError fallback only helps when getUser()
-// *returns* an error before that 25s kill — a true hang never returns, so the
-// fallback never runs and the request is killed instead.
+// HISTORY. This file was written for a production incident (2026-07-31) in which Supabase Auth
+// intermittently hung or 504'd; the middleware `await`ed getUser() long enough to hit Vercel's 25s
+// Edge-Middleware limit, so EVERY protected request returned MIDDLEWARE_INVOCATION_TIMEOUT. It
+// bounded that wait at 3.5s and aborted the in-flight request.
 //
-// This bounds the wait with a race against a hard timeout far below the 25s
-// limit. On timeout the caller treats the result exactly like a transient auth
-// failure (ride it out — do NOT sign out and do NOT redirect an existing user).
+// WHY IT CHANGED. The middleware no longer calls getUser() and no longer refreshes: it verifies
+// the access token locally against a pinned JWKS (see ./jwks). Local verification is
+// decodeJWT + crypto.subtle.verify — no network, sub-millisecond — so the old 3.5s budget was
+// guarding nothing on the happy path. The only call that can still touch the network is
+// auth-js's fetchJwk() after a signing-key ROTATION, when the pinned key set misses.
 //
-// Kept import-free on purpose so it can be unit-tested by transpiling this .ts
-// at runtime (see authTimeout.test.mjs) without needing to resolve any package
-// from the temp directory the transpiled module is imported from.
+// TWO DELIBERATE CHANGES FROM THE OLD SHAPE:
+//  1. Budget cut 3500 → 1500ms. A single GET to a CDN-cached well-known endpoint does not need
+//     three and a half seconds, and this now sits in front of a rare path, not every request.
+//  2. NO abort. The old version aborted the in-flight fetch, which was a correctness bug: if that
+//     request was a token REFRESH, GoTrue had already rotated and committed by the time we
+//     cancelled reading the response, stranding the browser on a consumed refresh token. A JWKS
+//     GET is an idempotent read that mutates no state, so letting a late one complete is harmless
+//     — we simply stop waiting for it. The `onTimeout` hook is kept for observability (logging),
+//     NOT for cancellation.
+//
+// Kept import-free on purpose so it can be unit-tested by transpiling this .ts at runtime (see
+// authTimeout.test.mjs) without needing to resolve any package from the temp directory.
 
 /**
- * Hard cap (ms) on how long middleware waits for Supabase auth before giving up
- * and applying the transient-failure fallback. Chosen in the 3–5s band: high
- * enough to ride out a normal (even once-retried) auth call, yet far below
- * Vercel's 25s Edge-Middleware initial-response limit so the invocation is
- * never killed.
+ * Hard cap (ms) on how long the middleware waits for a JWKS fetch before giving up and applying
+ * the transient-failure fallback (render the shell; never redirect to /login because a key
+ * endpoint was slow). Far below Vercel's 25s Edge-Middleware limit, and only ever reached on a
+ * signing-key rotation.
  */
-export const AUTH_GETUSER_TIMEOUT_MS = 3500;
+export const JWKS_FETCH_TIMEOUT_MS = 1500;
 
-/** A Supabase-style getUser() call: resolves with a user (or null) + error. */
-export type GetUserLike<TUser> = () => Promise<{
-  data: { user: TUser | null };
-  error: unknown;
-}>;
+/** A call that resolves with a value and/or an error, Supabase-style. */
+export type TimedCall<T> = () => Promise<{ data: T | null; error: unknown }>;
 
-export interface GetUserTimeoutResult<TUser> {
-  data: { user: TUser | null };
+export interface TimeoutResult<T> {
+  data: T | null;
   error: unknown;
-  /** True iff the call did not settle within timeoutMs (hang / very slow auth). */
+  /** True iff the call did not settle within timeoutMs. */
   timedOut: boolean;
 }
 
 /**
- * Race a Supabase-style getUser() against a hard timeout.
+ * Race a Supabase-style call against a hard timeout.
  *
  * Behavior:
- * - Resolves as soon as getUser() settles, passing its result through unchanged
- *   with `timedOut: false` — success and returned-error paths are untouched.
- * - If getUser() rejects, the rejection is normalized to
- *   `{ data: { user: null }, error, timedOut: false }` so this function never
- *   rejects, and a late settlement (e.g. an aborted fetch that rejects after we
- *   already timed out) can never surface as an unhandled rejection.
- * - If neither happens within `timeoutMs`, resolves
- *   `{ data: { user: null }, error: null, timedOut: true }` and invokes
- *   `onTimeout()` (used by the caller to abort the in-flight fetch).
+ * - Resolves as soon as the call settles, passing its result through unchanged with
+ *   `timedOut: false` — success and returned-error paths are untouched.
+ * - If the call rejects, the rejection is normalized to `{ data: null, error, timedOut: false }`
+ *   so this function never rejects, and a late settlement can never surface as an unhandled
+ *   rejection.
+ * - If neither happens within `timeoutMs`, resolves `{ data: null, error: null, timedOut: true }`
+ *   and invokes `onTimeout()` (observability only — nothing is cancelled).
  */
-export async function getUserWithTimeout<TUser>(
-  getUser: GetUserLike<TUser>,
+export async function withAuthTimeout<T>(
+  call: TimedCall<T>,
   {
-    timeoutMs = AUTH_GETUSER_TIMEOUT_MS,
+    timeoutMs = JWKS_FETCH_TIMEOUT_MS,
     onTimeout,
   }: { timeoutMs?: number; onTimeout?: () => void } = {},
-): Promise<GetUserTimeoutResult<TUser>> {
+): Promise<TimeoutResult<T>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
 
-  const timeout = new Promise<GetUserTimeoutResult<TUser>>((resolve) => {
+  const timeout = new Promise<TimeoutResult<T>>((resolve) => {
     timer = setTimeout(() => {
-      // Best-effort cancel of the in-flight request; must never throw.
+      // Best-effort notification; must never throw.
       try {
         onTimeout?.();
       } catch {
-        /* ignore abort errors */
+        /* ignore */
       }
-      resolve({ data: { user: null }, error: null, timedOut: true });
+      resolve({ data: null, error: null, timedOut: true });
     }, timeoutMs);
   });
 
-  // Normalize so this branch never rejects (see doc comment). Both `.then`
-  // handlers and Promise.race attach handlers, so a late settlement is always
-  // handled and never becomes an unhandled rejection.
-  const call: Promise<GetUserTimeoutResult<TUser>> = getUser().then(
-    (res) => ({
-      data: { user: res?.data?.user ?? null },
-      error: res?.error ?? null,
-      timedOut: false,
-    }),
-    (error) => ({ data: { user: null }, error, timedOut: false }),
+  // Normalize so this branch never rejects (see doc comment). Both `.then` handlers and
+  // Promise.race attach handlers, so a late settlement is always handled.
+  const settled: Promise<TimeoutResult<T>> = call().then(
+    (res) => ({ data: res?.data ?? null, error: res?.error ?? null, timedOut: false }),
+    (error) => ({ data: null, error, timedOut: false }),
   );
 
   try {
-    return await Promise.race([call, timeout]);
+    return await Promise.race([settled, timeout]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }

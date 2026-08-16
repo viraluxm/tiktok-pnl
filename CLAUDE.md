@@ -120,6 +120,36 @@ Consequences, all non-negotiable:
   Refresh-token rotation races cause random logouts. The extension is a passive
   follower of a single refresher.
 
+### Middleware VALIDATES, it does not refresh — and revocation is not instant there
+
+`src/lib/supabase/middleware.ts` reads the access token from the cookie and verifies its
+signature **locally** against a pinned JWKS (`src/lib/supabase/jwks.ts`, ES256). It does **not**
+call `getUser()` and does **not** rotate tokens. It used to, and that made every edge invocation a
+second refresher racing the browser's on a rotating refresh token — the loser gets
+`400 refresh_token_already_used`, which auth-js treats as non-retryable, destroys the session, and
+emits `SIGNED_OUT`, bouncing an operator to `/login` mid-shift.
+
+Consequences, all load-bearing:
+
+- **Revocation is not real-time at the middleware layer.** A locally-verified JWT is accepted until
+  its own `exp`, so a revoked session — or an `app_metadata` **role/scope change** — takes effect
+  for ROUTING only within `jwt_exp` (**3600s**). This is safe **only** because middleware gates no
+  data: every API route re-checks `getUser()` over the network and RLS enforces `auth.uid()`.
+  **Anyone building a middleware decision that needs real-time revocation must not rely on the
+  claims.** Do the check in the route.
+- **Never call `getSession()` or the no-arg `getClaims()` in middleware or any hot server path.**
+  Both refresh when the token is within `EXPIRY_MARGIN_MS` (90s) of expiry, **regardless of
+  `autoRefreshToken: false`** — that flag only governs the background ticker. Pass the token
+  explicitly: `getClaims(token, { keys })`.
+- **The app role is `claims.app_metadata.role`, never `claims.role`.** The latter is the POSTGRES
+  role and is always `'authenticated'`. Reading it confines every user and locks the whole app out
+  (fail-closed, so an outage rather than a breach). Guarded by `src/lib/supabase/claims.test.mjs`.
+- **Any authed route must have a browser Supabase client mounted**, or nothing refreshes its
+  session and it dies at `jwt_exp`. `/fulfillment` has no app chrome, so it mounts
+  `StationSessionRefresher` purely for this. Adding a new bare authed route means adding one too.
+- API routes (`src/lib/supabase/server.ts` → `getUser()`) are **still** server-side refreshers.
+  Reducing that is deliberately deferred; measure before changing it.
+
 ## Business constants
 
 - Single timezone: `America/Los_Angeles` (server-fixed constant in app code, not a
