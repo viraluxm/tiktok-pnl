@@ -15,6 +15,7 @@ import { DROP_CAP } from '@/lib/schedule/drops';
 import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate, isOvernight } from '@/lib/schedule/format';
 import { ReleaseButton, ClaimButton } from './parts';
 import { ClockControls } from './ClockControls';
+import { ScheduleAutoRefresh } from './ScheduleAutoRefresh';
 
 export const dynamic = 'force-dynamic';
 
@@ -181,7 +182,12 @@ function ShiftFacts({
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <main className="mx-auto min-h-screen max-w-md bg-tt-bg px-4 py-8 text-tt-text">{children}</main>
+    <main className="mx-auto min-h-screen max-w-md bg-tt-bg px-4 py-8 text-tt-text">
+      {/* Always mounted (every render path, incl. the empty + rate-limited states) so a shift added
+          after page load self-surfaces its clock button without a manual reload. See the component. */}
+      <ScheduleAutoRefresh />
+      {children}
+    </main>
   );
 }
 function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
