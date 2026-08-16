@@ -38,9 +38,13 @@ interface Line { sku_id: string; qty: number }
 type DateFilter = 'today' | '7d' | '30d' | 'all';
 const DATE_PILLS: Array<[DateFilter, string]> = [['today', 'Today'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All']];
 
+// Currency is pinned to en-US/USD, never the browser's locale. Same defect class as the
+// timestamp bug this page had: `toLocaleString(undefined, …)` follows the viewer's machine, so a
+// station abroad rendered "1.234,56" for a dollar amount. The business trades in one currency.
+const USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 function money(cents: number | null): string {
   if (cents == null) return '—';
-  return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return USD.format(cents / 100);
 }
 
 export default function MemberBindingPage() {
@@ -268,7 +272,7 @@ export default function MemberBindingPage() {
         <h1 className="text-2xl font-bold">Binding queue</h1>
         <p className="mt-1 text-sm text-tt-muted">Captured sales with no SKU bound. Pick the session and item for each.</p>
         <div className="mt-2 text-sm font-semibold text-tt-text">
-          Page {pageIdx + 1} · {rows.length.toLocaleString()} loaded{hasMore ? ' · more available' : ''}
+          Page {pageIdx + 1} · {rows.length.toLocaleString('en-US')} loaded{hasMore ? ' · more available' : ''}
         </div>
       </div>
 
