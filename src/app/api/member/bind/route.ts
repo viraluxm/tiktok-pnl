@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
 import { captureInWindow } from '@/lib/member/sessionWindow';
+import { resolveRoomLocks, pickRoomLock, roomLockMessage } from '@/lib/member/roomLive';
 
 export const dynamic = 'force-dynamic';
 
@@ -44,7 +45,7 @@ export async function POST(req: Request) {
   //    will bind as (the RPC keys the idem row + session on this same user_id).
   const { data: cap, error: capErr } = await admin
     .from('capture_events')
-    .select('user_id, ordered_at, created_at')
+    .select('user_id, ordered_at, created_at, room_id')
     .eq('order_id', orderId)
     .in('user_id', ownerIds)
     .limit(1)
@@ -59,7 +60,7 @@ export async function POST(req: Request) {
   //    succeeds) AND to a store the member holds (skipped for an all-stores member).
   const { data: sess, error: sessErr } = await admin
     .from('live_sessions')
-    .select('id, user_id, store_id, started_at, ended_at, created_at')
+    .select('id, user_id, store_id, started_at, ended_at, created_at, tiktok_live_id')
     .eq('id', sessionId)
     .maybeSingle();
   if (sessErr) return NextResponse.json({ error: sessErr.message }, { status: 500 });
@@ -71,6 +72,43 @@ export async function POST(req: Request) {
     if (!sStore || !storeSet.has(sStore)) {
       return NextResponse.json({ error: 'Session not in your scope' }, { status: 403 });
     }
+  }
+
+  // 2.5) ROOM-LIVE LOCKOUT. Binding into a room that is still selling steals the next real lot's
+  //    sequence number (lensed_log_auction_as takes max(sequence)+1) and silently offsets lot
+  //    ordering for the rest of the show. Refuse BEFORE any write.
+  //    TWO rooms are checked, not one: the room-only fallback lets a member select a QUIET session
+  //    while the order's own room is still live, so the order's room is checked independently of
+  //    the target session's. An order with no resolvable room_id is not blocked (logged below).
+  //    Server-side and evaluated against now() on every request, so a page loaded before the live
+  //    started is still refused — no client-side check is trusted.
+  const targetRoom = (sess.tiktok_live_id as string | null) ?? null;
+  const orderRoom = (cap?.room_id as string | null) ?? null;
+  if (!orderRoom) {
+    console.warn('[member/bind] order has no room_id — room-live guard checked target session only, order=%s', orderId);
+  }
+  try {
+    const locks = await resolveRoomLocks(admin, ownerUserId, [targetRoom, orderRoom]);
+    const hit = pickRoomLock(targetRoom, orderRoom, locks);
+    if (hit) {
+      console.warn('[member/bind] REFUSED room-live order=%s actor=%s room=%s which=%s reason=%s',
+        orderId, actorId, hit.lock.room, hit.which, hit.lock.reason);
+      return NextResponse.json({
+        error: roomLockMessage(hit.lock, hit.which),
+        code: 'ROOM_LIVE',
+        room: hit.lock.room,
+        locked_by: hit.which,
+        reason: hit.lock.reason,
+        clears_at: hit.lock.clears_at,
+      }, { status: 409 });
+    }
+  } catch (e) {
+    // Fail CLOSED: if we cannot establish that the room is quiet, we must not bind through it.
+    console.error('[member/bind] room-live guard failed order=%s: %s', orderId, (e as Error).message);
+    return NextResponse.json({
+      error: 'Could not verify whether this room is live — bind refused. Try again shortly.',
+      code: 'ROOM_LIVE_CHECK_FAILED',
+    }, { status: 503 });
   }
 
   // 3) Every SKU must belong to the owner's org. Resolve the owner's org the same way
