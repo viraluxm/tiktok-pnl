@@ -25,3 +25,12 @@ jobs:
         env:
           SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      # L3b: the binding route enforces authorization, the room-live lockout and the audit in the
+      # ROUTE HANDLER. That is only sufficient while the binding account cannot reach the same
+      # writes through PostgREST. Pin that posture so it cannot erode silently.
+      - name: Verify the binding-guard posture (RLS + grants) still holds
+        run: node scripts/check-binding-guard-posture.mjs
+        env:
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
