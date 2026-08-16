@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { validatePicker } from '@/lib/shipping/pickerPerformance';
 import { buildVerificationRow } from '@/lib/shipping/confirmRow';
+import { clearShelfFlags } from '@/lib/shipping/shelfFlags';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,13 +24,18 @@ export async function POST(req: Request) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  let body: { group_key?: string; order_ids?: string[]; picker_employee_id?: string; pick_started_at?: string };
+  let body: { group_key?: string; order_ids?: string[]; picker_employee_id?: string; pick_started_at?: string; picked_sku_ids?: string[] };
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
 
   const groupKey = typeof body.group_key === 'string' ? body.group_key.trim() : '';
   if (!groupKey) return NextResponse.json({ error: 'Missing group_key' }, { status: 400 });
   const orderIds = Array.isArray(body.order_ids)
     ? body.order_ids.filter((x): x is string => typeof x === 'string')
+    : [];
+  // SKUs the picker actually grabbed — drives the shelf-flag clear below. Optional: an older
+  // client omits it and the verification write is unaffected.
+  const pickedSkuIds = Array.isArray(body.picked_sku_ids)
+    ? [...new Set(body.picked_sku_ids.filter((x): x is string => typeof x === 'string' && !!x.trim()))]
     : [];
 
   // ── Resolve + validate the picker (best-effort attribution). ──
@@ -95,6 +101,17 @@ export async function POST(req: Request) {
   if (error) {
     console.error('[shipping/confirm] insert error:', error);
     return NextResponse.json({ error: 'Failed to save verification' }, { status: 500 });
+  }
+
+  // PRIMARY shelf-flag clear: every SKU actually grabbed in this box is, by definition, on the
+  // shelf — a unit reached a picker's hand, which outranks an earlier "can't find it" report.
+  // Strictly after the verification write and strictly best-effort: a failure here logs and
+  // leaves a stale band on a card, and must never turn a completed box into an error.
+  if (pickedSkuIds.length) {
+    const cleared = await clearShelfFlags(supabase, {
+      ownerUserId: user.id, skuIds: pickedSkuIds, employeeId: pickerEmployeeId, reason: 'grabbed',
+    });
+    if (!cleared.ok) console.warn('[shipping/confirm] shelf-flag clear failed:', cleared.error);
   }
   return NextResponse.json({ ok: true, group_key: groupKey });
 }

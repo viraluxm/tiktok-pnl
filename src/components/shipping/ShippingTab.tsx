@@ -285,7 +285,7 @@ export default function ShippingTab() {
   return (
     <PackStationOverlay
       mode="pick"
-      endpoints={{ boxes: '/api/shipping/pick-tickets', scan: '/api/shipping/pick-list', confirm: '/api/shipping/confirm' }}
+      endpoints={{ boxes: '/api/shipping/pick-tickets', scan: '/api/shipping/pick-list', confirm: '/api/shipping/confirm', shelfFlag: '/api/shipping/shelf-flag' }}
       pickers={pickers}
       storeLabel={storeName}
       pickerId={pickerId}

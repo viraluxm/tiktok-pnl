@@ -17,6 +17,11 @@ export const dynamic = 'force-dynamic';
 //
 // Read-only: no scan_log, no shipment_verifications, no live TikTok status
 // refresh (that would refresh/persist tokens). Status comes from stored values.
+//
+// THIS ROUTE stays read-only, but the station as a whole no longer is: the pick card's
+// "Can't find it" action writes picker-reported shelf flags via /api/station/shelf-flag, and
+// /api/station/confirm clears them. Both are confined to sku_shelf_flags (migration 102) — an
+// additive table nothing in the capture or order-sync path reads or writes.
 export async function POST(req: Request) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
