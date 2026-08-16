@@ -80,3 +80,28 @@ export async function POST(req: Request) {
   console.error('[admin/kiosk-tokens] could not allocate a unique token after retries');
   return NextResponse.json({ error: 'Could not allocate a kiosk token, please retry' }, { status: 500 });
 }
+
+// PATCH /api/admin/kiosk-tokens { active: false } — DISABLE the kiosk: revoke the owner's active
+// token(s) so every /api/kiosk/* scan immediately returns "not configured" (resolveKioskToken → null).
+// This stops PUNCHING but does NOT end the tablet's session — kill that via /api/admin/kiosk-session.
+// Re-enable is POST, which mints a FRESH token (rotate-on-re-enable is deliberate).
+export async function PATCH(req: Request) {
+  const gate = await requireOwner();
+  if (!gate.ok) return gate.response;
+  const { ownerId } = gate;
+
+  let body: { active?: unknown };
+  try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
+  if (body.active !== false) {
+    return NextResponse.json({ error: 'only { active: false } is supported here — re-enable via POST' }, { status: 400 });
+  }
+
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from('kiosk_tokens')
+    .update({ active: false, revoked_at: new Date().toISOString() })
+    .eq('user_id', ownerId)
+    .eq('active', true);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ ok: true, active: false });
+}

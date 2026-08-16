@@ -9,12 +9,14 @@ import { useStores } from '@/hooks/useStores';
 const ROLE_OPTIONS = [
   { value: 'member', label: 'Team member' },
   { value: 'station', label: 'Fulfillment station' },
+  { value: 'timeclock', label: 'Time clock kiosk' },
 ] as const;
 type ManagedRole = (typeof ROLE_OPTIONS)[number]['value'];
 
 const ROLE_LABEL: Record<string, string> = {
   member: 'Team member',
   station: 'Fulfillment station',
+  timeclock: 'Time clock kiosk',
 };
 
 // Member capability scopes — must match KNOWN_MEMBER_SCOPES on the server and the middleware
@@ -102,7 +104,9 @@ export default function TeamPage() {
       const body =
         role === 'station'
           ? { email, role }
-          : { email, role, stores: allStores ? ['*'] : storeIds, scopes: scopeSel };
+          : role === 'timeclock'
+            ? { email, role, stores: storeIds } // kiosk: one concrete store, no capability scopes
+            : { email, role, stores: allStores ? ['*'] : storeIds, scopes: scopeSel };
       const res = await fetch('/api/admin/team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -451,6 +455,24 @@ export default function TeamPage() {
                 {!allStores && (
                   <span className="mt-1 block text-[11px] text-tt-muted">Pick one or more stores</span>
                 )}
+              </div>
+            )}
+            {/* Time-clock kiosk — one physical location → exactly one required store. It carries no
+                capability scopes; the owner is resolved from this store's store_members(role='owner'). */}
+            {role === 'timeclock' && (
+              <div className="block">
+                <span className="block text-[11px] text-tt-muted uppercase tracking-wide mb-1">Store</span>
+                <select
+                  value={storeIds[0] ?? ''}
+                  onChange={(e) => setStoreIds(e.target.value ? [e.target.value] : [])}
+                  className="w-full rounded-lg border border-tt-border bg-white/5 px-3 py-2 text-sm text-tt-text outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
+                >
+                  <option value="" className="bg-tt-card">Select a store…</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id} className="bg-tt-card">{s.name}</option>
+                  ))}
+                </select>
+                <span className="mt-1 block text-[11px] text-tt-muted">The kiosk resolves its owner from this store.</span>
               </div>
             )}
             {/* Member capability scopes — at least one required. */}
