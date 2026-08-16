@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import MemberNav from '@/components/member/MemberNav';
+import { fmtInstantPT, fmtWindowPT, fmtDistance } from '@/lib/member/bindingFormat';
+import type { SessionDistance } from '@/lib/member/sessionDistance';
 
 // Member binding queue — the first 'member' scope, rendered under the bare (station) route group
 // (server layout, no app chrome). Lists the cross-session unbound queue; expanding a row lets the
@@ -27,6 +29,9 @@ interface SessionCandidate {
   // Room-only fallback: in_window is false when no session's window contained the order and the
   // member is picking by room. seq_min/seq_max/bound_count help match the order's lot #.
   in_window: boolean; seq_min: number | null; seq_max: number | null; bound_count: number;
+  // O4 (additive): offset from the RAW window edges, so the row can say how far outside the
+  // order is and in which direction. null when unknowable. `in_window` above is unchanged.
+  distance?: SessionDistance | null;
 }
 interface Line { sku_id: string; qty: number }
 
@@ -36,17 +41,6 @@ const DATE_PILLS: Array<[DateFilter, string]> = [['today', 'Today'], ['7d', '7 d
 function money(cents: number | null): string {
   if (cents == null) return '—';
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-function fmtDate(iso: string): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return '—';
-  return new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-}
-function fmtDateTime(iso: string | null): string {
-  if (!iso) return '—';
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return '—';
-  return new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
 export default function MemberBindingPage() {
@@ -216,6 +210,14 @@ export default function MemberBindingPage() {
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
   const fallbackMode = sessions.length > 0 && sessions.every((s) => !s.in_window);
   const selectedOutOfWindow = !!selectedSession && !selectedSession.in_window;
+  // O4: the smallest offset across the offered candidates, for the fallback banner. Tells the
+  // member whether "no window contains this" means six minutes or six hours before they start
+  // hunting by lot #.
+  const nearest = sessions.reduce<SessionDistance | null>((best, s) => {
+    const d = s.distance;
+    if (!d || d.direction === 'within') return best;
+    return !best || d.seconds < best.seconds ? d : best;
+  }, null);
 
   const doBind = async (allowNegative: boolean) => {
     if (!expanded || !selectedSessionId || lines.length === 0) return;
@@ -331,7 +333,7 @@ export default function MemberBindingPage() {
                     >
                       {copiedOrder === r.order_id ? 'Copied' : 'Copy'}
                     </span>
-                    {r.buyer_handle ? ` · @${r.buyer_handle}` : ''} · {fmtDate(r.logged_at)}
+                    {r.buyer_handle ? ` · @${r.buyer_handle}` : ''} · {fmtInstantPT(r.logged_at)}
                   </div>
                 </div>
                 <div className="shrink-0 text-right">
@@ -365,7 +367,7 @@ export default function MemberBindingPage() {
                         picks by room. Say so plainly and point them at the lot #/auction-range match. */}
                     {!sessLoading && !sessErr && fallbackMode && (
                       <div className="mb-2 rounded-lg border-2 border-tt-yellow/40 bg-tt-yellow/10 px-3 py-2 text-sm text-tt-yellow">
-                        No session&apos;s time window contains this order. Picking by room — match Lot #{r.seller_sku_hint ?? '—'} to a session&apos;s auction range below.
+                        No session&apos;s time window contains this order{nearest ? <> — closest is {fmtDistance(nearest)}</> : null}. Picking by room — match Lot #{r.seller_sku_hint ?? '—'} to a session&apos;s auction range below.
                       </div>
                     )}
                     {!sessLoading && !sessErr && sessions.length > 0 && (
@@ -391,7 +393,14 @@ export default function MemberBindingPage() {
                                   {s.store_name ?? <span className="font-semibold text-tt-red">Unmapped store</span>}
                                   {s.host_name ? <> · Host: {s.host_name}</> : null}
                                 </div>
-                                <div className="text-xs text-tt-muted">{fmtDateTime(s.started_at)} → {s.ended_at ? fmtDateTime(s.ended_at) : 'ongoing'}</div>
+                                <div className="text-xs text-tt-muted">{fmtWindowPT(s.started_at, s.ended_at)}</div>
+                                {(() => {
+                                  const d = fmtDistance(s.distance);
+                                  if (!d || s.distance?.direction === 'within') return null;
+                                  // Explicit direction + magnitude: "6 min before start" beats an
+                                  // unexplained mismatch against a window that looks like it fits.
+                                  return <div className="text-xs font-semibold text-tt-yellow">This order: {d}</div>;
+                                })()}
                                 <div className="text-xs text-tt-muted">
                                   {seqRange ? `Auctions ${seqRange}` : 'No auctions'} · {s.bound_count} bound
                                 </div>
@@ -487,7 +496,7 @@ export default function MemberBindingPage() {
                       session is selected, right at the point of action. */}
                   {selectedOutOfWindow && (
                     <div className="rounded-lg border-2 border-tt-yellow/50 bg-tt-yellow/10 px-3 py-2 text-sm text-tt-yellow">
-                      ⚠ This order is outside the selected session&apos;s time window. Binding here will include it in that session&apos;s show-level totals (revenue, units/hr, payouts).
+                      ⚠ This order is outside the selected session&apos;s time window{selectedSession?.distance && selectedSession.distance.direction !== 'within' ? <> ({fmtDistance(selectedSession.distance)})</> : null}. Binding here will include it in that session&apos;s show-level totals (revenue, units/hr, payouts).
                     </div>
                   )}
                   <div className="flex items-center justify-end gap-2 pt-1">

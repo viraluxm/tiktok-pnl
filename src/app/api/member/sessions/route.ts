@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
 import { captureInWindow } from '@/lib/member/sessionWindow';
+import { sessionDistance } from '@/lib/member/sessionDistance';
 
 export const dynamic = 'force-dynamic';
 
@@ -115,6 +116,14 @@ export async function GET(req: Request) {
       seq_max: seqMax.get(id) ?? null,
       bound_count: boundCount.get(id) ?? 0,
       in_window: !usingFallback, // fallback rows are, by construction, all out-of-window
+      // O4 (ADDITIVE — `in_window` above is unchanged, and so is the containment predicate).
+      // Per-session offset from the RAW window edges, so the picker can say HOW far outside the
+      // order is and in which direction instead of only "not contained". null when unknowable.
+      distance: sessionDistance(t, {
+        started_at: (s.started_at as string | null) ?? null,
+        ended_at: (s.ended_at as string | null) ?? null,
+        created_at: (s.created_at as string | null) ?? null,
+      }),
     };
   });
 
