@@ -34,6 +34,9 @@ const SERVICE_ROLE_ONLY = new Set([
   // Badge/QR kiosk RPCs — service-role only (091/092/095), called via createAdminClient in
   // /api/kiosk/* and the QR scan path. Never granted to anon/authenticated.
   'lensed_kiosk_scan', 'lensed_kiosk_start_break', 'lensed_kiosk_clock_out', 'lensed_kiosk_manual_punch_as',
+  // Reconcile cron RPC — called via admin.rpc() (service_role, CRON_SECRET-gated); app-COLLECTED,
+  // so it must be listed here or the check would demand an `authenticated` grant it must not have.
+  'lensed_reconcile_time_clock',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
@@ -98,6 +101,7 @@ const list = allChecked.map((n) => `'${n}'`).join(',');
 const rows = await sql(`
   select p.proname,
          bool_and(has_function_privilege('authenticated', p.oid, 'EXECUTE')) as auth_exec,
+         bool_or(has_function_privilege('anon', p.oid, 'EXECUTE')) as anon_exec,
          count(*) as overloads
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
   where n.nspname = 'public' and p.proname in (${list})
@@ -112,8 +116,12 @@ for (const name of toVerify) {
 }
 for (const name of SERVICE_ROLE_ONLY) {
   const r = byName.get(name);
-  if (!r) problems.push(`SERVICE_ROLE_ONLY \`${name}\` no longer exists — update SERVICE_ROLE_ONLY`);
-  else if (r.auth_exec === true) problems.push(`SERVICE_ROLE_ONLY \`${name}\` is GRANTED to authenticated — either revoke it, or move it out of SERVICE_ROLE_ONLY if it's now app-callable`);
+  if (!r) { problems.push(`SERVICE_ROLE_ONLY \`${name}\` no longer exists — update SERVICE_ROLE_ONLY`); continue; }
+  // Must stay ungranted to BOTH user-facing roles. `anon` is the unauthenticated path — an anon
+  // EXECUTE grant is an out-of-repo drift (Management API/dashboard) that PRs never see, so assert
+  // it independently of `authenticated`, or it slips through silently (as it did for the batch RPCs).
+  if (r.auth_exec === true) problems.push(`SERVICE_ROLE_ONLY \`${name}\` is GRANTED to authenticated — either revoke it, or move it out of SERVICE_ROLE_ONLY if it's now app-callable`);
+  if (r.anon_exec === true) problems.push(`SERVICE_ROLE_ONLY \`${name}\` is GRANTED to anon (UNAUTHENTICATED) — revoke it: \`revoke execute on function public.${name}(...) from anon;\``);
 }
 
 if (problems.length) {
