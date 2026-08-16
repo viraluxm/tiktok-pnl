@@ -234,6 +234,19 @@ export async function updateSession(request: NextRequest) {
       maxAge: 60 * 60 * 24 * 30,
     });
   }
+  // Same for a CONFIRMED station session. Closes the long-standing dormant-hint gap: lensed_station
+  // was read (above) since #137 but never SET, so the station transient-auth fallback could never
+  // fire. (Rarely reached now that allowExpired verification keeps the real role, but the fallback
+  // should not be dead code.) Grants nothing on its own — read path ANDs it with transientAuthFailure.
+  if (authenticated && claimsRole === 'station') {
+    stageCookie('lensed_station', '1', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 30,
+    });
+  }
 
   const confinement = confinementFor(role, scopes);
   if (confinement) {
