@@ -1,17 +1,23 @@
-// Unit proof for the middleware Supabase-auth hard-timeout wrapper
-// (fix/middleware-getuser-timeout — production 504 incident, 2026-07-31).
+// Unit proof for the middleware auth hard-timeout wrapper.
 //
-// No app test runner exists, so this transpiles authTimeout.ts at runtime via
-// the repo's `typescript` devDep (matching src/lib/inventory/filterSkus.test.mjs
-// and src/lib/training/session.test.mjs) and exercises the REAL
-// getUserWithTimeout / AUTH_GETUSER_TIMEOUT_MS. authTimeout.ts is import-free,
-// so the transpiled module needs nothing resolved from the temp dir.
+// ORIGINALLY (fix/middleware-getuser-timeout, production 504 incident 2026-07-31) this guarded
+// supabase.auth.getUser() in the middleware at 3.5s. Stage 1 made the middleware a VALIDATOR: it
+// verifies the access token locally against a pinned JWKS and never calls getUser(), so the only
+// call that can still touch the network is auth-js's fetchJwk() after a signing-key rotation. The
+// wrapper is repointed at that leg at 1500ms and no longer aborts (a JWKS GET is an idempotent
+// read; aborting a token REFRESH mid-flight was the correctness bug this stage removes).
 //
-// Scope: the timeout MECHANISM (what getUserWithTimeout returns for each auth
-// outcome, and that it fires far below Vercel's 25s Edge-Middleware limit). The
-// downstream redirect DECISION that consumes { user, error, timedOut } — i.e.
-// "a timeout is treated as a transient failure, not a logout" — is proven with
-// the real @supabase error classes in authClassification.test.mjs.
+// Every behavioural case from the original file is preserved; only the names
+// (getUserWithTimeout → withAuthTimeout, AUTH_GETUSER_TIMEOUT_MS → JWKS_FETCH_TIMEOUT_MS), the
+// result shape ({data:{user}} → {data}) and the budget assertion changed.
+//
+// No app test runner exists, so this transpiles authTimeout.ts at runtime via the repo's
+// `typescript` devDep and exercises the REAL withAuthTimeout / JWKS_FETCH_TIMEOUT_MS.
+// authTimeout.ts is import-free, so the transpiled module needs nothing resolved from the temp dir.
+//
+// Scope: the timeout MECHANISM. The downstream redirect DECISION is proven in
+// authClassification.test.mjs; the role/confinement decision in claims.test.mjs; and the
+// no-network/no-session-load guarantee in getClaimsLocal.test.mjs.
 //
 // Run: node --test src/lib/supabase/authTimeout.test.mjs
 
@@ -29,60 +35,60 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'authtimeout-')), 'authTimeout.mjs');
 writeFileSync(outFile, outputText);
-const { getUserWithTimeout, AUTH_GETUSER_TIMEOUT_MS } = await import(
+const { withAuthTimeout, JWKS_FETCH_TIMEOUT_MS } = await import(
   pathToFileURL(outFile).href
 );
 
-// Supabase-shaped getUser() result helpers.
-const ok = (user) => async () => ({ data: { user }, error: null });
-const withError = (error) => async () => ({ data: { user: null }, error });
+// Supabase-shaped result helpers ({ data, error }).
+const ok = (value) => async () => ({ data: value, error: null });
+const withError = (error) => async () => ({ data: null, error });
 const never = () => () => new Promise(() => {}); // resolves/rejects never
 const VERCEL_EDGE_LIMIT_MS = 25_000;
 
-// ── Case 1: Successful authenticated request — user passes through untouched ──
-test('successful getUser: user passes through, timedOut false', async () => {
-  const res = await getUserWithTimeout(ok({ id: 'u1' }), { timeoutMs: 200 });
-  assert.deepEqual(res.data.user, { id: 'u1' });
+// ── Case 1: Successful call — value passes through untouched ──
+test('successful call: value passes through, timedOut false', async () => {
+  const res = await withAuthTimeout(ok({ id: 'u1' }), { timeoutMs: 200 });
+  assert.deepEqual(res.data, { id: 'u1' });
   assert.equal(res.error, null);
   assert.equal(res.timedOut, false);
 });
 
-// ── Case 2: Confirmed unauthenticated request — null user passes through ──
-test('confirmed signed-out getUser (null user, no error): passes through, timedOut false', async () => {
-  const res = await getUserWithTimeout(ok(null), { timeoutMs: 200 });
-  assert.equal(res.data.user, null);
+// ── Case 2: Confirmed empty result — null data passes through ──
+test('null data with no error passes through, timedOut false', async () => {
+  const res = await withAuthTimeout(ok(null), { timeoutMs: 200 });
+  assert.equal(res.data, null);
   assert.equal(res.error, null);
   assert.equal(res.timedOut, false);
 });
 
-// ── Case 3: Retryable Supabase Auth failure — error passes through for the
-//    caller to classify; NOT reported as a timeout. ──
+// ── Case 3: Returned error passes through for the caller to classify; NOT a timeout. ──
 test('returned auth error passes through unchanged, timedOut false', async () => {
   const sentinel = { name: 'AuthRetryableFetchError', __isAuthError: true };
-  const res = await getUserWithTimeout(withError(sentinel), { timeoutMs: 200 });
-  assert.equal(res.data.user, null);
+  const res = await withAuthTimeout(withError(sentinel), { timeoutMs: 200 });
+  assert.equal(res.data, null);
   assert.equal(res.error, sentinel); // same reference — not swallowed
   assert.equal(res.timedOut, false);
 });
 
-// ── Case 3b: getUser that REJECTS (thrown network error) is normalized, never
-//    rejects — so the middleware await can't throw and kill the request. ──
-test('rejecting getUser is normalized to { user:null, error }, never throws', async () => {
+// ── Case 3b: A call that REJECTS (thrown network error) is normalized, never rejects — so the
+//    middleware await can't throw and kill the request. ──
+test('rejecting call is normalized to { user:null, error }, never throws', async () => {
   const boom = new Error('fetch failed');
-  const res = await getUserWithTimeout(async () => {
+  const res = await withAuthTimeout(async () => {
     throw boom;
   }, { timeoutMs: 200 });
-  assert.equal(res.data.user, null);
+  assert.equal(res.data, null);
   assert.equal(res.error, boom);
   assert.equal(res.timedOut, false);
 });
 
-// ── Case 4: Auth call that never resolves — the whole reason this fix exists.
-//    Must resolve via timeout with timedOut:true and fire the abort hook. ──
-test('never-resolving getUser resolves via timeout (timedOut:true) and aborts', async () => {
+// ── Case 4: Call that never resolves — the whole reason this wrapper exists.
+//    Must resolve via timeout with timedOut:true and fire the onTimeout hook (observability
+//    only; nothing is cancelled). ──
+test('never-resolving call resolves via timeout (timedOut:true) and notifies', async () => {
   let aborted = 0;
   const start = performance.now();
-  const res = await getUserWithTimeout(never(), {
+  const res = await withAuthTimeout(never(), {
     timeoutMs: 40,
     onTimeout: () => {
       aborted++;
@@ -90,24 +96,26 @@ test('never-resolving getUser resolves via timeout (timedOut:true) and aborts', 
   });
   const elapsed = performance.now() - start;
   assert.equal(res.timedOut, true);
-  assert.equal(res.data.user, null);
+  assert.equal(res.data, null);
   assert.equal(res.error, null);
-  assert.equal(aborted, 1, 'onTimeout (abort) fired exactly once');
+  assert.equal(aborted, 1, 'onTimeout hook fired exactly once');
   assert.ok(elapsed < 1000, `resolved promptly (${Math.round(elapsed)}ms)`);
 });
 
 // ── Case 5: Timeout completes far below Vercel's 25s Edge-Middleware limit ──
-test('configured timeout is in the 3–5s band and far below Vercel 25s limit', () => {
+test('configured timeout is tight (<=1.5s) and far below Vercel 25s limit', () => {
+  // Cut from 3500ms: this now fronts a rare rotation-only path (one GET to a CDN-cached
+  // well-known endpoint), not every request.
   assert.ok(
-    AUTH_GETUSER_TIMEOUT_MS >= 3000 && AUTH_GETUSER_TIMEOUT_MS <= 5000,
-    `AUTH_GETUSER_TIMEOUT_MS=${AUTH_GETUSER_TIMEOUT_MS} must be 3000–5000ms`,
+    JWKS_FETCH_TIMEOUT_MS > 0 && JWKS_FETCH_TIMEOUT_MS <= 1500,
+    `JWKS_FETCH_TIMEOUT_MS=${JWKS_FETCH_TIMEOUT_MS} must be >0 and <=1500ms`,
   );
-  assert.ok(AUTH_GETUSER_TIMEOUT_MS < VERCEL_EDGE_LIMIT_MS);
+  assert.ok(JWKS_FETCH_TIMEOUT_MS < VERCEL_EDGE_LIMIT_MS);
 });
 
 test('a hang settles via our race well before the 25s Vercel limit', async () => {
   const start = performance.now();
-  const res = await getUserWithTimeout(never(), { timeoutMs: 40 });
+  const res = await withAuthTimeout(never(), { timeoutMs: 40 });
   const elapsed = performance.now() - start;
   assert.equal(res.timedOut, true);
   assert.ok(elapsed < VERCEL_EDGE_LIMIT_MS, `settled in ${Math.round(elapsed)}ms`);
@@ -115,42 +123,42 @@ test('a hang settles via our race well before the 25s Vercel limit', async () =>
 
 // ── Regression guards ──
 
-// A slow-but-in-time call must NOT be spuriously timed out, and the abort hook
-// must not fire (timer cleared) — otherwise we'd cancel healthy auth.
+// A slow-but-in-time call must NOT be spuriously timed out, and the hook must not fire
+// (timer cleared) — otherwise we'd log a phantom timeout on healthy verification.
 test('call that resolves before the timeout is not timed out and does not abort', async () => {
   let aborted = 0;
   const slowOk = () =>
     new Promise((resolve) =>
-      setTimeout(() => resolve({ data: { user: { id: 'u2' } }, error: null }), 10),
+      setTimeout(() => resolve({ data: { id: 'u2' }, error: null }), 10),
     );
-  const res = await getUserWithTimeout(slowOk, {
+  const res = await withAuthTimeout(slowOk, {
     timeoutMs: 200,
     onTimeout: () => {
       aborted++;
     },
   });
-  assert.deepEqual(res.data.user, { id: 'u2' });
+  assert.deepEqual(res.data, { id: 'u2' });
   assert.equal(res.timedOut, false);
-  assert.equal(aborted, 0, 'abort hook not fired for an in-time call');
+  assert.equal(aborted, 0, 'onTimeout hook not fired for an in-time call');
 });
 
-// A getUser that rejects AFTER we already timed out must not surface as an
+// A call that rejects AFTER we already timed out must not surface as an
 // unhandled rejection (node --test fails the run on unhandled rejections).
 test('late rejection after timeout does not cause an unhandled rejection', async () => {
   const lateReject = () =>
     new Promise((_, reject) => setTimeout(() => reject(new Error('late')), 30));
-  const res = await getUserWithTimeout(lateReject, { timeoutMs: 10 });
+  const res = await withAuthTimeout(lateReject, { timeoutMs: 10 });
   assert.equal(res.timedOut, true);
   // Give the late rejection time to fire; if it were unhandled the run fails.
   await new Promise((r) => setTimeout(r, 60));
 });
 
-// onTimeout throwing must not break the timeout path (best-effort abort).
+// onTimeout throwing must not break the timeout path (best-effort notification).
 test('onTimeout throwing is swallowed; still resolves timedOut:true', async () => {
-  const res = await getUserWithTimeout(never(), {
+  const res = await withAuthTimeout(never(), {
     timeoutMs: 20,
     onTimeout: () => {
-      throw new Error('abort blew up');
+      throw new Error('hook blew up');
     },
   });
   assert.equal(res.timedOut, true);
