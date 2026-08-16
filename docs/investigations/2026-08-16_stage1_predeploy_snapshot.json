@@ -1,0 +1,567 @@
+{
+ "snapshot_at": "2026-08-16T17:56:16.672111+00:00",
+ "sessions": [
+  {
+   "id": "03af2912-3bc0-4e3e-bbac-7ce3c48042fc",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-16T09:44:36.936098+00:00",
+   "updated_at": "2026-08-16T16:39:48.506357+00:00"
+  },
+  {
+   "id": "af508887-13a0-42de-b3ef-a82b9adbc7ae",
+   "email": "test@viralux.media",
+   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-15T11:38:39.984541+00:00",
+   "updated_at": "2026-08-16T08:48:04.713453+00:00"
+  },
+  {
+   "id": "96e22bd6-9dd7-4077-855b-12ee5138ee98",
+   "email": "test@viralux.media",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-15T05:22:46.585775+00:00",
+   "updated_at": "2026-08-16T12:58:17.749019+00:00"
+  },
+  {
+   "id": "20b4e419-5760-428d-9747-339364b22740",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-15T04:02:27.411546+00:00",
+   "updated_at": "2026-08-16T16:58:58.983866+00:00"
+  },
+  {
+   "id": "60554f1e-1a62-4179-8b99-ec32017a39db",
+   "email": "test@viralux.media",
+   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-15T04:00:28.921623+00:00",
+   "updated_at": "2026-08-16T12:34:47.779971+00:00"
+  },
+  {
+   "id": "3e803096-8789-47fa-8a5f-1804c7e2d161",
+   "email": "test@viralux.media",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-15T03:07:53.772948+00:00",
+   "updated_at": "2026-08-15T07:58:50.010706+00:00"
+  },
+  {
+   "id": "5b98894b-b65c-4d57-b456-ef97e528c6c0",
+   "email": "fulfillment@viralux.media",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-15T03:05:21.741345+00:00",
+   "updated_at": "2026-08-15T03:05:21.741345+00:00"
+  },
+  {
+   "id": "15a92435-42ca-4379-9f17-2cbd2d67b872",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1",
+   "created_at": "2026-08-15T03:02:24.193596+00:00",
+   "updated_at": "2026-08-15T03:02:24.193596+00:00"
+  },
+  {
+   "id": "a82855a6-f851-43f9-aedb-97ea2778b037",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1",
+   "created_at": "2026-08-15T01:36:59.722016+00:00",
+   "updated_at": "2026-08-15T01:36:59.722016+00:00"
+  },
+  {
+   "id": "6bad99ff-964d-46e7-90f8-fbcb6ad44bcf",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1",
+   "created_at": "2026-08-14T02:36:45.262783+00:00",
+   "updated_at": "2026-08-14T02:36:45.262783+00:00"
+  },
+  {
+   "id": "26985777-bb4d-4d2b-85a8-a19b2d4627e1",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-13T23:26:58.038702+00:00",
+   "updated_at": "2026-08-16T17:30:31.605003+00:00"
+  },
+  {
+   "id": "f5f2841e-2e61-4ff0-bf95-01c27c3150fd",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-13T14:13:31.28608+00:00",
+   "updated_at": "2026-08-15T02:00:54.68764+00:00"
+  },
+  {
+   "id": "6490cfbc-6c2e-40e5-9fbc-89a889a562cb",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-13T13:20:31.213732+00:00",
+   "updated_at": "2026-08-15T00:14:38.791197+00:00"
+  },
+  {
+   "id": "70f21453-1006-4231-932e-2ec5b35e5af4",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
+   "created_at": "2026-08-13T13:20:08.929769+00:00",
+   "updated_at": "2026-08-14T17:41:22.957928+00:00"
+  },
+  {
+   "id": "4817eb27-cd72-421d-8feb-8953b6c44348",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+   "created_at": "2026-08-13T13:19:20.406747+00:00",
+   "updated_at": "2026-08-13T13:19:20.406747+00:00"
+  },
+  {
+   "id": "ad9f6fdb-01f6-4ef7-bdea-99d7f3445581",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-13T13:15:36.677102+00:00",
+   "updated_at": "2026-08-15T07:58:20.086062+00:00"
+  },
+  {
+   "id": "b9554c18-3ca4-46f9-9848-c2e155f48dca",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-13T09:39:12.710567+00:00",
+   "updated_at": "2026-08-16T17:07:01.494563+00:00"
+  },
+  {
+   "id": "e61850c5-4355-40b6-8b99-9cda99f8acfc",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-12T13:09:31.957151+00:00",
+   "updated_at": "2026-08-15T21:31:32.653146+00:00"
+  },
+  {
+   "id": "d8db9265-ac0a-4515-80a3-f61678456d59",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-11T17:46:58.360845+00:00",
+   "updated_at": "2026-08-16T01:55:28.280977+00:00"
+  },
+  {
+   "id": "dc6f0542-e4b8-428d-ba01-e5b96bb06608",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-11T03:00:16.559824+00:00",
+   "updated_at": "2026-08-16T11:00:50.513662+00:00"
+  },
+  {
+   "id": "defc1969-6688-4703-b494-068a7f234718",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-11T02:45:21.74756+00:00",
+   "updated_at": "2026-08-13T23:16:05.063207+00:00"
+  },
+  {
+   "id": "5a1c0c19-7433-40a0-aa83-2a48d7ad4bf4",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-11T02:06:26.043103+00:00",
+   "updated_at": "2026-08-11T02:06:26.043103+00:00"
+  },
+  {
+   "id": "285c9dac-69eb-4a8c-b389-4c073a313acc",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-11T01:16:54.048197+00:00",
+   "updated_at": "2026-08-11T01:16:54.048197+00:00"
+  },
+  {
+   "id": "d4ae120e-7262-4c2a-a829-0434736ccf54",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+   "created_at": "2026-08-11T01:16:01.018767+00:00",
+   "updated_at": "2026-08-14T13:00:43.202134+00:00"
+  },
+  {
+   "id": "e92187f4-3611-4d37-943e-3d639f2c3ad5",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-11T00:53:37.397357+00:00",
+   "updated_at": "2026-08-16T11:04:44.075259+00:00"
+  },
+  {
+   "id": "f9648b1d-41f9-4cac-aaad-f4c1f8eda834",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-11T00:09:57.938196+00:00",
+   "updated_at": "2026-08-16T17:15:45.749284+00:00"
+  },
+  {
+   "id": "c1d56763-9de8-4890-a409-8ddda0a0dac5",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-10T23:58:11.365959+00:00",
+   "updated_at": "2026-08-15T12:42:53.630806+00:00"
+  },
+  {
+   "id": "9890f125-8516-4274-821c-b7a4d8126ce3",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-10T23:46:42.445872+00:00",
+   "updated_at": "2026-08-16T16:41:23.720876+00:00"
+  },
+  {
+   "id": "e9de3ded-ab76-4d24-85e6-79eaf5952078",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-10T23:45:10.888043+00:00",
+   "updated_at": "2026-08-16T08:23:16.392118+00:00"
+  },
+  {
+   "id": "727bbf29-cecd-42cd-a16c-b027d23a6c38",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-10T23:42:47.430665+00:00",
+   "updated_at": "2026-08-16T17:20:19.8034+00:00"
+  },
+  {
+   "id": "19638909-f33d-4bf1-b19f-a4d5faf1dec5",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-10T21:52:58.767787+00:00",
+   "updated_at": "2026-08-16T04:44:57.557165+00:00"
+  },
+  {
+   "id": "299b3e05-ea7f-48a4-9936-a9edbea2491f",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-10T19:50:35.431965+00:00",
+   "updated_at": "2026-08-16T17:25:25.334131+00:00"
+  },
+  {
+   "id": "dfc8cda1-480f-452b-99d7-87f3f135c811",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-10T18:54:39.308242+00:00",
+   "updated_at": "2026-08-15T20:42:58.451107+00:00"
+  },
+  {
+   "id": "b389eafc-512a-4198-802e-0e4f156f1a73",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-10T18:37:06.144218+00:00",
+   "updated_at": "2026-08-11T01:08:50.493083+00:00"
+  },
+  {
+   "id": "1c0b09e2-2c90-4d23-a9e8-820b905e5812",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Vercel Edge Functions",
+   "created_at": "2026-08-10T17:53:24.725254+00:00",
+   "updated_at": "2026-08-13T09:37:42.435831+00:00"
+  },
+  {
+   "id": "3616318a-bbaf-4184-b9f1-8f2b3dbeeeab",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6.6 Safari/605.1.15",
+   "created_at": "2026-08-10T17:37:14.75053+00:00",
+   "updated_at": "2026-08-16T05:00:12.903603+00:00"
+  },
+  {
+   "id": "e9b33426-37cc-4178-ac70-265d3481abc0",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+   "created_at": "2026-08-10T16:12:09.451483+00:00",
+   "updated_at": "2026-08-16T17:04:35.740954+00:00"
+  },
+  {
+   "id": "81d3aa6a-d6c4-41fd-a7e6-cbd5a55699d3",
+   "email": "alvarojr300@gmail.com",
+   "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
+   "created_at": "2026-08-10T15:53:01.553656+00:00",
+   "updated_at": "2026-08-16T07:44:17.436591+00:00"
+  },
+  {
+   "id": "b43b80bd-c8cc-4917-9fe9-e63bb2fad8f7",
+   "email": "girinoy505@aghism.com",
+   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+   "created_at": "2026-08-04T01:21:36.564456+00:00",
+   "updated_at": "2026-08-04T18:57:53.896661+00:00"
+  },
+  {
+   "id": "c3b5894b-ba31-431c-85fe-d355504f8f31",
+   "email": "fulfillment+6deb8558-7cd3-4ff5-8522-63071f9882ff@lensed.internal",
+   "user_agent": "node",
+   "created_at": "2026-07-04T19:11:52.399003+00:00",
+   "updated_at": "2026-07-05T01:01:54.501926+00:00"
+  }
+ ],
+ "rotation": [
+  {
+   "session_id": "e9b33426-37cc-4178-ac70-265d3481abc0",
+   "tokens": 113,
+   "first_tok": "2026-08-10T16:12:09.453141+00:00",
+   "last_tok": "2026-08-16T17:04:35.736663+00:00",
+   "tokens_per_hour": 0.78
+  },
+  {
+   "session_id": "f9648b1d-41f9-4cac-aaad-f4c1f8eda834",
+   "tokens": 106,
+   "first_tok": "2026-08-11T00:09:57.939832+00:00",
+   "last_tok": "2026-08-16T17:15:45.745667+00:00",
+   "tokens_per_hour": 0.77
+  },
+  {
+   "session_id": "03af2912-3bc0-4e3e-bbac-7ce3c48042fc",
+   "tokens": 100,
+   "first_tok": "2026-08-16T09:44:36.947669+00:00",
+   "last_tok": "2026-08-16T16:39:47.644346+00:00",
+   "tokens_per_hour": 14.45
+  },
+  {
+   "session_id": "727bbf29-cecd-42cd-a16c-b027d23a6c38",
+   "tokens": 94,
+   "first_tok": "2026-08-10T23:42:47.432259+00:00",
+   "last_tok": "2026-08-16T17:20:19.799895+00:00",
+   "tokens_per_hour": 0.68
+  },
+  {
+   "session_id": "e92187f4-3611-4d37-943e-3d639f2c3ad5",
+   "tokens": 86,
+   "first_tok": "2026-08-11T00:53:37.399997+00:00",
+   "last_tok": "2026-08-16T11:04:44.071566+00:00",
+   "tokens_per_hour": 0.66
+  },
+  {
+   "session_id": "19638909-f33d-4bf1-b19f-a4d5faf1dec5",
+   "tokens": 83,
+   "first_tok": "2026-08-10T21:52:58.769781+00:00",
+   "last_tok": "2026-08-16T04:44:57.553114+00:00",
+   "tokens_per_hour": 0.65
+  },
+  {
+   "session_id": "9890f125-8516-4274-821c-b7a4d8126ce3",
+   "tokens": 78,
+   "first_tok": "2026-08-10T23:46:42.447256+00:00",
+   "last_tok": "2026-08-16T16:41:23.717589+00:00",
+   "tokens_per_hour": 0.57
+  },
+  {
+   "session_id": "d4ae120e-7262-4c2a-a829-0434736ccf54",
+   "tokens": 71,
+   "first_tok": "2026-08-11T01:16:01.020706+00:00",
+   "last_tok": "2026-08-14T13:00:43.198009+00:00",
+   "tokens_per_hour": 0.85
+  },
+  {
+   "session_id": "b9554c18-3ca4-46f9-9848-c2e155f48dca",
+   "tokens": 50,
+   "first_tok": "2026-08-13T09:39:12.716774+00:00",
+   "last_tok": "2026-08-16T17:07:01.490744+00:00",
+   "tokens_per_hour": 0.63
+  },
+  {
+   "session_id": "3616318a-bbaf-4184-b9f1-8f2b3dbeeeab",
+   "tokens": 45,
+   "first_tok": "2026-08-10T17:37:14.752108+00:00",
+   "last_tok": "2026-08-16T05:00:12.899794+00:00",
+   "tokens_per_hour": 0.34
+  },
+  {
+   "session_id": "299b3e05-ea7f-48a4-9936-a9edbea2491f",
+   "tokens": 43,
+   "first_tok": "2026-08-10T19:50:35.434363+00:00",
+   "last_tok": "2026-08-16T17:25:25.330632+00:00",
+   "tokens_per_hour": 0.3
+  },
+  {
+   "session_id": "e9de3ded-ab76-4d24-85e6-79eaf5952078",
+   "tokens": 41,
+   "first_tok": "2026-08-10T23:45:10.890087+00:00",
+   "last_tok": "2026-08-16T08:23:16.296565+00:00",
+   "tokens_per_hour": 0.32
+  },
+  {
+   "session_id": "26985777-bb4d-4d2b-85a8-a19b2d4627e1",
+   "tokens": 40,
+   "first_tok": "2026-08-13T23:26:58.040824+00:00",
+   "last_tok": "2026-08-16T17:30:31.601257+00:00",
+   "tokens_per_hour": 0.61
+  },
+  {
+   "session_id": "ad9f6fdb-01f6-4ef7-bdea-99d7f3445581",
+   "tokens": 27,
+   "first_tok": "2026-08-13T13:15:36.678518+00:00",
+   "last_tok": "2026-08-15T07:58:13.620735+00:00",
+   "tokens_per_hour": 0.63
+  },
+  {
+   "session_id": "dfc8cda1-480f-452b-99d7-87f3f135c811",
+   "tokens": 27,
+   "first_tok": "2026-08-10T18:54:39.310022+00:00",
+   "last_tok": "2026-08-15T20:42:58.447197+00:00",
+   "tokens_per_hour": 0.22
+  },
+  {
+   "session_id": "c1d56763-9de8-4890-a409-8ddda0a0dac5",
+   "tokens": 26,
+   "first_tok": "2026-08-10T23:58:11.368099+00:00",
+   "last_tok": "2026-08-15T12:42:48.695846+00:00",
+   "tokens_per_hour": 0.24
+  },
+  {
+   "session_id": "1c0b09e2-2c90-4d23-a9e8-820b905e5812",
+   "tokens": 25,
+   "first_tok": "2026-08-10T17:53:24.726803+00:00",
+   "last_tok": "2026-08-13T09:37:41.47057+00:00",
+   "tokens_per_hour": 0.39
+  },
+  {
+   "session_id": "81d3aa6a-d6c4-41fd-a7e6-cbd5a55699d3",
+   "tokens": 25,
+   "first_tok": "2026-08-10T15:53:01.555688+00:00",
+   "last_tok": "2026-08-16T07:44:17.43297+00:00",
+   "tokens_per_hour": 0.18
+  },
+  {
+   "session_id": "defc1969-6688-4703-b494-068a7f234718",
+   "tokens": 20,
+   "first_tok": "2026-08-11T02:45:21.755744+00:00",
+   "last_tok": "2026-08-13T23:16:04.362958+00:00",
+   "tokens_per_hour": 0.29
+  },
+  {
+   "session_id": "70f21453-1006-4231-932e-2ec5b35e5af4",
+   "tokens": 18,
+   "first_tok": "2026-08-13T13:20:08.930797+00:00",
+   "last_tok": "2026-08-14T17:41:22.953196+00:00",
+   "tokens_per_hour": 0.63
+  },
+  {
+   "session_id": "96e22bd6-9dd7-4077-855b-12ee5138ee98",
+   "tokens": 17,
+   "first_tok": "2026-08-15T05:22:46.588072+00:00",
+   "last_tok": "2026-08-16T12:58:17.745433+00:00",
+   "tokens_per_hour": 0.54
+  },
+  {
+   "session_id": "20b4e419-5760-428d-9747-339364b22740",
+   "tokens": 16,
+   "first_tok": "2026-08-15T04:02:27.413668+00:00",
+   "last_tok": "2026-08-16T16:58:58.980315+00:00",
+   "tokens_per_hour": 0.43
+  },
+  {
+   "session_id": "60554f1e-1a62-4179-8b99-ec32017a39db",
+   "tokens": 13,
+   "first_tok": "2026-08-15T04:00:28.923109+00:00",
+   "last_tok": "2026-08-16T12:34:47.777463+00:00",
+   "tokens_per_hour": 0.4
+  },
+  {
+   "session_id": "dc6f0542-e4b8-428d-ba01-e5b96bb06608",
+   "tokens": 12,
+   "first_tok": "2026-08-11T03:00:16.561515+00:00",
+   "last_tok": "2026-08-16T01:11:17.548956+00:00",
+   "tokens_per_hour": 0.1
+  },
+  {
+   "session_id": "e61850c5-4355-40b6-8b99-9cda99f8acfc",
+   "tokens": 9,
+   "first_tok": "2026-08-12T13:09:31.959308+00:00",
+   "last_tok": "2026-08-15T21:31:32.649278+00:00",
+   "tokens_per_hour": 0.11
+  },
+  {
+   "session_id": "b389eafc-512a-4198-802e-0e4f156f1a73",
+   "tokens": 7,
+   "first_tok": "2026-08-10T18:37:06.146307+00:00",
+   "last_tok": "2026-08-11T01:08:50.490785+00:00",
+   "tokens_per_hour": 1.07
+  },
+  {
+   "session_id": "c3b5894b-ba31-431c-85fe-d355504f8f31",
+   "tokens": 7,
+   "first_tok": "2026-07-04T19:11:52.420404+00:00",
+   "last_tok": "2026-07-05T01:01:54.458627+00:00",
+   "tokens_per_hour": 1.2
+  },
+  {
+   "session_id": "af508887-13a0-42de-b3ef-a82b9adbc7ae",
+   "tokens": 7,
+   "first_tok": "2026-08-15T11:38:39.9861+00:00",
+   "last_tok": "2026-08-16T08:48:04.709205+00:00",
+   "tokens_per_hour": 0.33
+  },
+  {
+   "session_id": "b43b80bd-c8cc-4917-9fe9-e63bb2fad8f7",
+   "tokens": 4,
+   "first_tok": "2026-08-04T01:21:36.566038+00:00",
+   "last_tok": "2026-08-04T18:57:53.893012+00:00",
+   "tokens_per_hour": 0.23
+  },
+  {
+   "session_id": "d8db9265-ac0a-4515-80a3-f61678456d59",
+   "tokens": 4,
+   "first_tok": "2026-08-11T17:46:58.363353+00:00",
+   "last_tok": "2026-08-16T01:55:28.276652+00:00",
+   "tokens_per_hour": 0.04
+  },
+  {
+   "session_id": "3e803096-8789-47fa-8a5f-1804c7e2d161",
+   "tokens": 3,
+   "first_tok": "2026-08-15T03:07:53.775027+00:00",
+   "last_tok": "2026-08-15T07:58:50.006642+00:00",
+   "tokens_per_hour": 0.62
+  },
+  {
+   "session_id": "f5f2841e-2e61-4ff0-bf95-01c27c3150fd",
+   "tokens": 2,
+   "first_tok": "2026-08-13T14:13:31.287597+00:00",
+   "last_tok": "2026-08-15T02:00:54.683978+00:00",
+   "tokens_per_hour": 0.06
+  },
+  {
+   "session_id": "6490cfbc-6c2e-40e5-9fbc-89a889a562cb",
+   "tokens": 2,
+   "first_tok": "2026-08-13T13:20:31.216148+00:00",
+   "last_tok": "2026-08-15T00:14:38.788545+00:00",
+   "tokens_per_hour": 0.06
+  },
+  {
+   "session_id": "15a92435-42ca-4379-9f17-2cbd2d67b872",
+   "tokens": 1,
+   "first_tok": "2026-08-15T03:02:24.19631+00:00",
+   "last_tok": "2026-08-15T03:02:24.19631+00:00",
+   "tokens_per_hour": 100
+  },
+  {
+   "session_id": "285c9dac-69eb-4a8c-b389-4c073a313acc",
+   "tokens": 1,
+   "first_tok": "2026-08-11T01:16:54.049105+00:00",
+   "last_tok": "2026-08-11T01:16:54.049105+00:00",
+   "tokens_per_hour": 100
+  },
+  {
+   "session_id": "4817eb27-cd72-421d-8feb-8953b6c44348",
+   "tokens": 1,
+   "first_tok": "2026-08-13T13:19:20.407944+00:00",
+   "last_tok": "2026-08-13T13:19:20.407944+00:00",
+   "tokens_per_hour": 100
+  },
+  {
+   "session_id": "a82855a6-f851-43f9-aedb-97ea2778b037",
+   "tokens": 1,
+   "first_tok": "2026-08-15T01:36:59.732581+00:00",
+   "last_tok": "2026-08-15T01:36:59.732581+00:00",
+   "tokens_per_hour": 100
+  },
+  {
+   "session_id": "6bad99ff-964d-46e7-90f8-fbcb6ad44bcf",
+   "tokens": 1,
+   "first_tok": "2026-08-14T02:36:45.266478+00:00",
+   "last_tok": "2026-08-14T02:36:45.266478+00:00",
+   "tokens_per_hour": 100
+  },
+  {
+   "session_id": "5b98894b-b65c-4d57-b456-ef97e528c6c0",
+   "tokens": 1,
+   "first_tok": "2026-08-15T03:05:21.743375+00:00",
+   "last_tok": "2026-08-15T03:05:21.743375+00:00",
+   "tokens_per_hour": 100
+  },
+  {
+   "session_id": "5a1c0c19-7433-40a0-aa83-2a48d7ad4bf4",
+   "tokens": 1,
+   "first_tok": "2026-08-11T02:06:26.045717+00:00",
+   "last_tok": "2026-08-11T02:06:26.045717+00:00",
+   "tokens_per_hour": 100
+  }
+ ]
+}
