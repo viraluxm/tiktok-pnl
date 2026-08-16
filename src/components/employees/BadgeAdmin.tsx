@@ -29,7 +29,8 @@ export default function BadgeAdmin() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [kioskActive, setKioskActive] = useState<boolean | null>(null);
-  const [kioskPassword, setKioskPassword] = useState<string | null>(null);
+  const [kioskAccounts, setKioskAccounts] = useState<{ id: string; email: string | null; stores: string[]; banned: boolean }[]>([]);
+  const [reveal, setReveal] = useState<{ id: string; password: string } | null>(null);
 
   const loadBadges = useCallback(async () => {
     setError(null);
@@ -48,10 +49,17 @@ export default function BadgeAdmin() {
     setKioskActive(res.ok ? !!j.active : null);
   }, []);
 
+  const loadKioskAccounts = useCallback(async () => {
+    const res = await fetch('/api/admin/kiosk-session', { method: 'GET' });
+    const j = (await res.json().catch(() => ({}))) as { accounts?: { id: string; email: string | null; stores: string[]; banned: boolean }[] };
+    setKioskAccounts(res.ok && Array.isArray(j.accounts) ? j.accounts : []);
+  }, []);
+
   useEffect(() => {
     void loadBadges();
     void loadKiosk();
-  }, [loadBadges, loadKiosk]);
+    void loadKioskAccounts();
+  }, [loadBadges, loadKiosk, loadKioskAccounts]);
 
   const activeByEmployee = useMemo(() => {
     const m = new Map<string, Badge>();
@@ -136,23 +144,23 @@ export default function BadgeAdmin() {
 
   // Kill (ban + rotate) / Rotate password / Unban the kiosk (timeclock) account. A new password
   // comes back once for kill/rotate; Rotate stays available so a missed reveal can't brick it.
-  const kioskSession = async (action: 'kill' | 'rotate' | 'unban') => {
+  const kioskSession = async (action: 'kill' | 'rotate' | 'unban', accountId: string) => {
     setBusy(true);
     setError(null);
-    setKioskPassword(null);
+    setReveal(null);
     const res = await fetch('/api/admin/kiosk-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, account_id: accountId }),
     });
-    const j = (await res.json().catch(() => ({}))) as { error?: string; accounts?: { password?: string }[] };
+    const j = (await res.json().catch(() => ({}))) as { error?: string; password?: string };
     setBusy(false);
     if (!res.ok) {
       setError(j.error ?? 'Action failed.');
       return;
     }
-    const pw = j.accounts?.find((a) => a.password)?.password ?? null;
-    if (pw) setKioskPassword(pw);
+    if (j.password) setReveal({ id: accountId, password: j.password });
+    await loadKioskAccounts();
   };
 
   const printSheet = () => {
@@ -226,26 +234,35 @@ export default function BadgeAdmin() {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3">
-          <span className="w-full text-xs font-medium uppercase tracking-wide text-gray-400">Session (the tablet)</span>
-          <button onClick={() => kioskSession('kill')} disabled={busy} className="rounded-md bg-red-600 px-3 py-1 font-medium text-white disabled:opacity-50">
-            Kill session (ban + rotate)
-          </button>
-          <button onClick={() => kioskSession('rotate')} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1 font-medium text-gray-700 disabled:opacity-50">
-            Rotate password
-          </button>
-          <button onClick={() => kioskSession('unban')} disabled={busy} className="rounded-md border border-gray-300 px-3 py-1 font-medium text-gray-700 disabled:opacity-50">
-            Unban
-          </button>
+        <div className="border-t border-gray-200 pt-3">
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">Kiosk tablets — each killed independently</p>
+          {kioskAccounts.length === 0 ? (
+            <p className="text-xs text-gray-500">No kiosk accounts yet. Create one in Team → “Time clock kiosk”.</p>
+          ) : (
+            <ul className="space-y-2">
+              {kioskAccounts.map((a) => (
+                <li key={a.id} className="rounded-md border border-gray-200 bg-white p-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium text-gray-800">{a.email ?? a.id}</span>
+                    {a.banned && <span className="rounded bg-red-100 px-1.5 py-0.5 text-[11px] font-medium text-red-700">killed</span>}
+                    <div className="ml-auto flex gap-2">
+                      <button onClick={() => kioskSession('kill', a.id)} disabled={busy} className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50">Kill (ban + rotate)</button>
+                      <button onClick={() => kioskSession('rotate', a.id)} disabled={busy} className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 disabled:opacity-50">Rotate</button>
+                      <button onClick={() => kioskSession('unban', a.id)} disabled={busy || !a.banned} className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 disabled:opacity-50">Unban</button>
+                    </div>
+                  </div>
+                  {reveal?.id === a.id && (
+                    <div className="mt-2 rounded-md border border-gray-300 bg-gray-50 px-2 py-1.5">
+                      <p className="text-[11px] text-gray-500">New password — shown once. Sign the tablet back in; Rotate again if you miss it.</p>
+                      <code className="mt-0.5 block break-all font-mono text-xs text-gray-900">{reveal.password}</code>
+                      <button onClick={() => setReveal(null)} className="mt-0.5 text-[11px] text-gray-500 underline">Dismiss</button>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
-
-        {kioskPassword && (
-          <div className="rounded-md border border-gray-300 bg-white px-3 py-2">
-            <p className="text-xs text-gray-500">New kiosk password — shown once. Use it to sign the tablet back in; Rotate again if you miss it.</p>
-            <code className="mt-1 block break-all font-mono text-gray-900">{kioskPassword}</code>
-            <button onClick={() => setKioskPassword(null)} className="mt-1 text-xs text-gray-500 underline">Dismiss</button>
-          </div>
-        )}
       </div>
 
       {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
