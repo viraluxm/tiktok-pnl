@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useEmployees } from '@/hooks/useEmployees';
-import { code128ToSvg } from '@/lib/barcode/code128';
 
 interface Badge {
   id: string;
@@ -11,12 +10,6 @@ interface Badge {
   active: boolean;
   issued_at: string;
   revoked_at: string | null;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[<>&"']/g, (c) =>
-    c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '&' ? '&amp;' : c === '"' ? '&quot;' : '&#39;',
-  );
 }
 
 // Owner-facing badge administration: issue / revoke per employee, print a badge sheet, and a
@@ -163,22 +156,31 @@ export default function BadgeAdmin() {
     await loadKioskAccounts();
   };
 
-  const printSheet = () => {
-    const cards = activeEmployees
-      .map((emp) => {
-        const b = activeByEmployee.get(emp.id);
-        if (!b) return '';
-        return (
-          `<div style="display:inline-block;margin:10px;padding:10px;border:1px solid #ccc;border-radius:8px;text-align:center;page-break-inside:avoid;">` +
-          `<div style="font-family:sans-serif;font-size:15px;font-weight:600;margin-bottom:6px;">${escapeHtml(emp.name)}</div>` +
-          code128ToSvg(b.code, { caption: b.code, moduleWidth: 2, barHeight: 60 }) +
-          `</div>`
-        );
-      })
-      .join('');
+  // Photo capture (part of the badge-setup flow): server-mediated upload → employees.photo_path.
+  const uploadPhoto = async (employeeId: string, file: File) => {
+    setBusy(true);
+    setError(null);
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`/api/admin/employees/${employeeId}/photo`, { method: 'POST', body: form });
+    const j = (await res.json().catch(() => ({}))) as { error?: string };
+    setBusy(false);
+    if (!res.ok) setError(j.error ?? 'Could not upload photo.');
+  };
+
+  // Print sheet is built server-side with headshots inlined as data-URIs (no signed-URL expiry race);
+  // anyone without a photo gets an initials monogram.
+  const printSheet = async () => {
+    setError(null);
+    const res = await fetch('/api/admin/badges/print-sheet', { method: 'POST' });
+    if (!res.ok) {
+      setError('Could not build the badge sheet.');
+      return;
+    }
+    const html = await res.text();
     const w = window.open('', '_blank');
     if (!w) return;
-    w.document.write(`<!doctype html><html><head><title>Employee badges</title></head><body>${cards}</body></html>`);
+    w.document.write(html);
     w.document.close();
     w.focus();
     w.print();
@@ -277,6 +279,19 @@ export default function BadgeAdmin() {
                 <p className="text-sm text-gray-500">{emp.role}</p>
               </div>
               <div className="flex items-center gap-3">
+                <label className="cursor-pointer text-sm font-medium text-gray-600 hover:text-gray-900">
+                  {(emp as { photo_path?: string | null }).photo_path ? 'Photo ✓' : 'Add photo'}
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) void uploadPhoto(emp.id, f);
+                      e.currentTarget.value = '';
+                    }}
+                  />
+                </label>
                 {b ? (
                   <>
                     <code className="rounded bg-gray-100 px-2 py-1 font-mono text-sm text-gray-800">{b.code}</code>
