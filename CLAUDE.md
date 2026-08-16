@@ -33,6 +33,17 @@ claimed prefix (check tracked files, untracked working-tree files, and branches)
 do not backfill gaps. Claude writes migration files but does **not** apply them —
 the user applies by hand, gated on write-activity silence (below).
 
+### `create or replace`: rebuild from live `prosrc`, never hand-copy
+
+A `create or replace function` ships the **entire** body. Hand-copying it to change
+a few lines silently risks dropping or rewording any other line — a drifted line
+changes live behavior with nothing to catch it. **Rule:** author a create-or-replace
+by pulling the current body from the live DB (`select prosrc from pg_proc …`), apply
+**only** the intended edit, and **diff the new body against live `prosrc` before
+applying** — the diff must show *only* the intended change (comments included). Never
+reconstruct the body from memory or an older migration file. (This caught real comment
+drift in the 097 kiosk-instants fix.)
+
 ## Write-activity silence gate
 
 Gate covered writes on **write-activity silence** — **not** on `live_sessions.status
