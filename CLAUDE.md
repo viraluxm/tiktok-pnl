@@ -54,9 +54,22 @@ the first write**:
 - the latest `capture_events` write, and
 - `live_sessions.last_seen_at`.
 
-**What the gate covers:** schema migrations, and any write (insert/update/delete/
-backfill/seed) to a table **in the capture or order-sync path** — the tables read or
-written during a live show. Weekends are not automatically quiet — shows run on Sundays.
+**What the gate covers — DATABASE writes only:**
+- schema migrations, **especially any that modify a shared function or trigger** (those
+  change behaviour for every concurrent reader/writer the instant they land), and
+- any write (insert/update/delete/backfill/seed) to a table **in the capture or
+  order-sync path** — the tables read or written during a live show.
+
+**What the gate does NOT cover: web-only Vercel deploys.** The business runs live
+essentially 24/7, so a genuine write-quiet window may never arrive; gating application
+deploys on it made the gate unopenable in practice and simply blocked shipping. Deploys
+are governed by the risk classes below (additive code ships freely; auth/session/extension
+changes need a reviewed diff), **not** by write-activity silence. The capture path writes
+to PostgREST directly and does not route through Next.js, so a Vercel deploy cannot
+interrupt a show in progress. Still check and report the gate for any DB write in the
+same unit of work.
+
+Weekends are not automatically quiet — shows run on Sundays.
 
 **Exempt (NOT gated):** the scheduling tables — `shift_rules`, `shift_instances`,
 `shift_claims`, `employee_access_tokens`, `attendance_events`. Nothing reads them during
