@@ -55,8 +55,12 @@ export default function BadgeKiosk() {
   const [pickList, setPickList] = useState<PickEmployee[]>([]);
   const [pickBusy, setPickBusy] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
+  const [idleLocked, setIdleLocked] = useState(false);   // from /api/kiosk/window-state
+  const [dismissedUntil, setDismissedUntil] = useState(0); // owner-dismiss grace (epoch ms)
+  const [idleGate, setIdleGate] = useState(false);        // the unlock supervisor modal
 
   const overlayRef = useRef<Overlay>(null);
+  const lockedRef = useRef(false);
   const bufferRef = useRef('');
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,7 +137,7 @@ export default function BadgeKiosk() {
 
   const handleScan = useCallback(
     async (raw: string) => {
-      if (overlayRef.current) return; // ignore scans while a modal is open
+      if (overlayRef.current || lockedRef.current) return; // ignore scans while a modal is open or idle-locked
       const badge = raw.trim().toUpperCase();
       if (!badge) return;
       if (dismissTimer.current) clearTimeout(dismissTimer.current);
@@ -188,6 +192,28 @@ export default function BadgeKiosk() {
   useEffect(() => {
     return () => {
       if (dismissTimer.current) clearTimeout(dismissTimer.current);
+    };
+  }, []);
+
+  // Idle auto-lock (Option B): poll window-state ~1/min. UNLOCKED if a scheduled shift window is
+  // open OR anyone is on the clock; otherwise LOCKED. On a network error we keep the last state
+  // (never flap the lock on a blip). Re-render on each poll re-evaluates the owner-dismiss grace.
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/kiosk/window-state');
+        const j = (await res.json().catch(() => ({}))) as { locked?: boolean };
+        if (active && res.ok) setIdleLocked(!!j.locked);
+      } catch {
+        /* keep last state */
+      }
+    };
+    void poll();
+    const id = setInterval(poll, 60_000);
+    return () => {
+      active = false;
+      clearInterval(id);
     };
   }, []);
 
@@ -263,6 +289,11 @@ export default function BadgeKiosk() {
     window.location.href = '/login';
   };
 
+  // Locked per window-state, minus any active owner-dismiss grace. Kept on a ref so the scan buffer
+  // (a stable listener) can consult it without re-subscribing.
+  const effectiveLocked = idleLocked && Date.now() >= dismissedUntil;
+  lockedRef.current = effectiveLocked;
+
   return (
     <div className="flex min-h-screen flex-col bg-gray-950 text-white">
       <header className="flex items-center justify-between px-6 py-4">
@@ -306,6 +337,37 @@ export default function BadgeKiosk() {
           />
         )}
       </main>
+
+      {/* Idle auto-lock overlay (Option B). Distinct from the manual Lock button above: the owner
+          password DISMISSES this back to scanning (stays signed in) for a short grace, whereas Lock
+          signs the account out. Covers the whole screen, so scanning + the header are blocked. */}
+      {effectiveLocked && !idleGate && (
+        <div className="fixed inset-0 z-40 flex flex-col items-center justify-center bg-gray-950 px-6 text-center">
+          <div className="mb-6 text-6xl">🔒</div>
+          <p className="text-3xl font-semibold text-gray-100">Kiosk locked</p>
+          <p className="mt-3 max-w-md text-gray-400">
+            No scheduled shift right now. Working an unscheduled shift? A supervisor must add it to the
+            schedule — or unlock with the owner password to punch.
+          </p>
+          <button
+            onClick={() => setIdleGate(true)}
+            className="mt-8 rounded-xl border border-gray-600 px-6 py-3 text-lg font-medium text-gray-200 hover:bg-gray-800"
+          >
+            Unlock (supervisor)
+          </button>
+        </div>
+      )}
+      {idleGate && (
+        <SupervisorGate
+          title="Unlock kiosk"
+          submitLabel="Unlock"
+          onCancel={() => setIdleGate(false)}
+          onVerified={() => {
+            setDismissedUntil(Date.now() + 5 * 60_000); // 5-min grace so a worker can punch (their open entry then keeps it awake)
+            setIdleGate(false);
+          }}
+        />
+      )}
 
       {overlay === 'lock' && (
         <SupervisorGate title="Exit kiosk" submitLabel="Exit" onCancel={() => setOverlay(null)} onVerified={onLockVerified} />
