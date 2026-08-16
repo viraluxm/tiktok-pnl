@@ -70,3 +70,14 @@ export const syncLimiter = createRateLimiter({
 export const scheduleTokenLimiter = createRateLimiter({ limit: 60, windowMs: 60 * 1000 });
 export const scheduleIpLimiter = createRateLimiter({ limit: 120, windowMs: 60 * 1000 });
 export const scheduleWriteLimiter = createRateLimiter({ limit: 15, windowMs: 60 * 1000 });
+
+// Badge time-clock kiosk. The whole warehouse punches from ONE IP and a shift change is a burst of
+// 8+ scans in a minute, so the meaningful key is the BADGE, not the IP: per-badge is burst-tolerant
+// (a 60s window that easily absorbs a shift change but stops a stuck scanner spamming one code), and
+// the per-IP ceiling is deliberately LOOSE — abuse-only, never the primary control. Do NOT copy the
+// schedule board's tight per-IP limit here; it would throttle a normal shift change.
+export const kioskBadgeLimiter = createRateLimiter({ limit: 30, windowMs: 60 * 1000 });
+export const kioskIpLimiter = createRateLimiter({ limit: 240, windowMs: 60 * 1000 });
+// The supervisor password check is the opposite case: a floor-facing brute-force target. Tight, and
+// per-IP is correct here (unlike the punch routes).
+export const kioskSupervisorIpLimiter = createRateLimiter({ limit: 8, windowMs: 10 * 60 * 1000 });

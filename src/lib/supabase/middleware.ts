@@ -112,12 +112,15 @@ export async function updateSession(request: NextRequest) {
   // (fail closed). NOTE: '/api/team' (self-scoped fulfillment-performance) is deliberately NOT
   // reachable — member data comes only from owner-scoped /api/member/*.
   const STATION_CONFINEMENT = { home: '/fulfillment', allow: ['/fulfillment', '/api/station'] };
+  // The badge time-clock kiosk account (app_metadata.role='timeclock'). THIS is the security
+  // boundary for the kiosk login: it is confined to the kiosk page and its API namespace ONLY —
+  // '/kiosk' plus '/api/kiosk/*' and nothing else. It can never reach the dashboard, employees data,
+  // or any other owner surface. Each /api/kiosk/* route additionally re-checks the role via
+  // requireTimeclockScope and runs service-role, owner-from-app_metadata (never client input).
+  const TIMECLOCK_CONFINEMENT = { home: '/kiosk', allow: ['/kiosk', '/api/kiosk'] };
   const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
-    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores'],
-    inventory: ['/team/inventory', '/api/member/inventory', '/api/member/stores'],
-    pnl: ['/team/pnl', '/api/member/pnl', '/api/member/stores'],
-    shows: ['/team/shows', '/api/member/shows', '/api/member/stores'],
-    team: ['/team/staff', '/api/member/team', '/api/member/stores'],
+    binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog'],
+    inventory: ['/team/inventory', '/api/member/inventory'],
   };
   const memberConfinement = (rawScopes: unknown): { home: string; allow: string[] } => {
     const scopes = Array.isArray(rawScopes) ? rawScopes.map(String) : [];
@@ -141,13 +144,38 @@ export async function updateSession(request: NextRequest) {
   const hasStationCookie = request.cookies
     .getAll()
     .some((c) => c.name === 'lensed_station');
+  // Mirror of the station hint for the badge/QR kiosk: an unattended wall tablet must stay confined
+  // during a transient auth blip (user momentarily null) instead of resolving to an UNCONFINED
+  // session that can reach /dashboard. Hint only, ANDed with transientAuthFailure — grants nothing
+  // without sb-* session evidence.
+  const hasTimeclockCookie = request.cookies
+    .getAll()
+    .some((c) => c.name === 'lensed_timeclock');
   const role =
     (user?.app_metadata?.role as string | undefined) ??
-    (transientAuthFailure && hasStationCookie ? 'station' : undefined);
+    (transientAuthFailure && hasStationCookie ? 'station'
+      : transientAuthFailure && hasTimeclockCookie ? 'timeclock'
+      : undefined);
   const roleHome =
     role === 'station' ? '/fulfillment'
       : role === 'member' ? memberConfinement(user?.app_metadata?.scopes).home
+      : role === 'timeclock' ? '/kiosk'
       : '/dashboard';
+
+  // Set the confinement HINT cookie for a CONFIRMED timeclock session (user present, role from
+  // app_metadata), so a later transient auth blip keeps the kiosk confined via hasTimeclockCookie
+  // above. It grants nothing on its own — the read path ANDs it with transientAuthFailure. (NOTE:
+  // lensed_station has no setter — dormant since #137; this adds one for timeclock. Station should
+  // get the same, tracked separately.)
+  if (user && (user.app_metadata?.role as string | undefined) === 'timeclock') {
+    supabaseResponse.cookies.set('lensed_timeclock', '1', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 30,
+    });
+  }
 
   // Fail closed: only an unset role or 'admin' is unconfined. ANY other value —
   // including a typo like 'statoin', or a member holding no recognized scope — is
@@ -160,7 +188,9 @@ export async function updateSession(request: NextRequest) {
         ? STATION_CONFINEMENT
         : role === 'member'
           ? memberConfinement(user?.app_metadata?.scopes)
-          : { home: '/login', allow: [] as string[] };
+          : role === 'timeclock'
+            ? TIMECLOCK_CONFINEMENT
+            : { home: '/login', allow: [] as string[] };
   if (confinement) {
     const path = request.nextUrl.pathname;
     // A confined role can always reach its own home, so the page redirect below
