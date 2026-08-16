@@ -10,7 +10,7 @@ import { useShiftRules } from '@/hooks/useShiftRules';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
 import { useHostLiveHours } from '@/hooks/useHostLiveHours';
 import { resolveScheduledSpan, employeeHasActiveRules, scheduleAppliesToDate } from '@/lib/schedule/scheduledSpan';
-import { computeConfirmFlags } from '@/lib/schedule/confirmFlags';
+import { computeConfirmFlags, IMPLAUSIBLE_SPAN_HOURS } from '@/lib/schedule/confirmFlags';
 import { liveHoursForHostDate, formatLiveHours } from '@/lib/schedule/liveHours';
 import type { Employee, Shift, ShiftRule, ShiftSource } from '@/types';
 import CalendarView from './weekly/CalendarView';
@@ -392,6 +392,24 @@ export default function ShiftsView({
           employeeHasRules: employeeHasActiveRules(row.employee_id, rules),
           scheduleAppliesToDate: scheduleAppliesToDate(row.employee_id, row.date, rules),
         });
+
+        // HARD BLOCK: an implausible span (>14h) is a forgotten clock-out, never a real shift
+        // (the longest legitimate shift here is ~12.6h). Refuse the confirm outright — there is
+        // no "confirm anyway" — so a 20–80h span can't be paid. The fix is to correct the
+        // clock-out time; until then the shift stays unconfirmed and unpaid. Client-side workflow
+        // gate only: the confirm RPC is still callable directly, so this is not a security boundary.
+        if (flags.some((f) => f.kind === 'implausible_span')) {
+          const hrs = paidShiftHours(row).toFixed(2);
+          alert(
+            `Can't confirm this shift.\n\n` +
+              `Clocked span is ${hrs}h, which exceeds ${IMPLAUSIBLE_SPAN_HOURS}h — almost certainly a ` +
+              `forgotten clock-out, not a real shift.\n\n` +
+              `Fix: correct the clock-out time on this punch first. Until then the shift stays ` +
+              `unconfirmed and is not paid.`,
+          );
+          return;
+        }
+
         for (const f of flags) warnings.push(`${f.severity === 'warn' ? '⚠' : '•'} ${f.message}`);
       }
 
