@@ -81,3 +81,7 @@ export const kioskIpLimiter = createRateLimiter({ limit: 240, windowMs: 60 * 100
 // The supervisor password check is the opposite case: a floor-facing brute-force target. Tight, and
 // per-IP is correct here (unlike the punch routes).
 export const kioskSupervisorIpLimiter = createRateLimiter({ limit: 8, windowMs: 10 * 60 * 1000 });
+
+// Rotating-QR clock code issue: ~4 per 30s per employee, so a stuck /s/[token] sheet can't hammer
+// the issue endpoint (which rotates the code every 30s in normal use, with a 15s overlap).
+export const clockCodeLimiter = createRateLimiter({ limit: 4, windowMs: 30 * 1000 });
