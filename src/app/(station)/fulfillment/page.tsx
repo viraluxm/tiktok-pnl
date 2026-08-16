@@ -1,13 +1,29 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import PackStationOverlay from '@/components/shipping/PackStationOverlay';
+import { enterFullscreen, isFullscreen } from '@/lib/fullscreen';
 
-// The station login lands straight into the packing overlay — always-on, no idle tab view, no
-// fullscreen request (the page IS the whole screen under the bare (station) layout). Exit
+// The station login lands straight into the packing overlay — always-on, no idle tab view. Exit
 // (hold ✕) returns to scan-ready inside the overlay rather than unmounting. All data comes from
 // the /api/station/* routes (service_role, owner-scoped).
+//
+// ─── FULLSCREEN ───
+// This page originally requested fullscreen NOWHERE, on the theory that "the page IS the whole
+// screen under the bare (station) layout". That is true of the LAYOUT but not of the browser:
+// on the warehouse's Android Chrome tablets the URL bar, tab switcher and back affordance stay
+// on screen, and every one of them is a way to leave the route mid-box. Real device photos show
+// the URL bar visible during a pick.
+//
+// requestFullscreen() only works from a genuine user gesture, so it can never be issued on mount
+// — a mount-time request is denied every time and is worse than not trying, because it looks like
+// it should work. There are exactly two gestures available on this route, and both now carry it:
+//   1. the one-time device-mode picker's PICK/PACK tap (first run on a device), and
+//   2. a SHORT TAP on the mode chip (every run after that, since the picker no longer renders).
+// Both go through the shared, denial-tolerant helper in @/lib/fullscreen — the same mechanism the
+// Shipping tab and the time-clock kiosk use. Denial is non-fatal: the station keeps working
+// windowed exactly as it does today.
 //
 // Device mode ('pick' | 'pack') is remembered per device in the `lensed_station_mode` cookie. If
 // absent, a one-time full-screen picker chooses it; the current mode shows small in a corner as
@@ -34,12 +50,45 @@ export default function FulfillmentPage() {
   const [pickedCount, setPickedCount] = useState(0);
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Whether we are CURRENTLY fullscreen, so the chip can offer the affordance only when it would
+  // do something. Tracked via the browser's own event rather than assumed from our request: the
+  // OS/user can drop out of fullscreen at any time (Android back gesture, notification shade).
+  const [fullscreen, setFullscreen] = useState(false);
+  // The chip carries TWO gestures on one element, and they must not bleed into each other:
+  //   • SHORT TAP  → request fullscreen (gesture 2 of 2 — the only one left once the device-mode
+  //                  cookie is set and the picker screen no longer renders).
+  //   • LONG PRESS → change device mode (unchanged).
+  // Disambiguation: the long-press timer sets `longPressFired`, and the click handler — which the
+  // browser fires on release for BOTH gestures — consumes that flag and does nothing. So a
+  // completed hold never also toggles fullscreen, and a tap never changes mode. Cancelling by
+  // dragging off (pointerleave/cancel) suppresses no click, because the browser does not fire one.
+  // Declared with the other hooks, ABOVE the early returns below — hooks must run unconditionally.
+  const longPressFired = useRef(false);
+  // Fires on release for tap AND long-press; `longPressFired` tells them apart. `click` is used
+  // rather than `pointerup` because it is unambiguously an activation-triggering event for the
+  // Fullscreen API on Chrome.
+  const onChipClick = useCallback(() => {
+    if (longPressFired.current) { longPressFired.current = false; return; }
+    if (!isFullscreen()) void enterFullscreen();
+  }, []);
 
   // Read the saved device mode once on mount (cookie → avoids SSR hydration mismatch).
   useEffect(() => {
     setMounted(true);
     const m = getCookie(MODE_COOKIE);
     if (m === 'pick' || m === 'pack') setMode(m);
+  }, []);
+
+  useEffect(() => {
+    const sync = () => setFullscreen(isFullscreen());
+    sync();
+    document.addEventListener('fullscreenchange', sync);
+    // Safari/older WebKit on iPadOS emits the prefixed event only.
+    document.addEventListener('webkitfullscreenchange', sync);
+    return () => {
+      document.removeEventListener('fullscreenchange', sync);
+      document.removeEventListener('webkitfullscreenchange', sync);
+    };
   }, []);
 
   useEffect(() => {
@@ -55,7 +104,15 @@ export default function FulfillmentPage() {
 
   // One-time device-mode picker — two large buttons, sets the cookie for this device.
   if (!mode) {
-    const choose = (m: Mode) => { setCookie(MODE_COOKIE, m); setMode(m); };
+    // GESTURE 1 of 2. This tap is the first (and on a fresh device, only) real user gesture the
+    // route gets, so fullscreen is requested here — synchronously inside the handler, BEFORE the
+    // state updates that unmount this screen. Awaiting anything first would spend the gesture's
+    // user-activation and the request would be denied.
+    const choose = (m: Mode) => {
+      void enterFullscreen();
+      setCookie(MODE_COOKIE, m);
+      setMode(m);
+    };
     return (
       <main className="min-h-screen bg-tt-bg text-tt-text flex flex-col items-center justify-center gap-8 p-8 select-none">
         <div className="text-center">
@@ -87,7 +144,13 @@ export default function FulfillmentPage() {
   // one-time picker (setMode(null)); releasing early cancels and resets the progress fill.
   const beginHoldChange = () => {
     setHolding(true);
-    holdTimer.current = setTimeout(() => { setHolding(false); setMode(null); }, 900);
+    longPressFired.current = false;
+    holdTimer.current = setTimeout(() => {
+      holdTimer.current = null;
+      longPressFired.current = true;
+      setHolding(false);
+      setMode(null);
+    }, 900);
   };
   const cancelHoldChange = () => {
     setHolding(false);
@@ -116,7 +179,12 @@ export default function FulfillmentPage() {
           onPointerUp={cancelHoldChange}
           onPointerLeave={cancelHoldChange}
           onPointerCancel={cancelHoldChange}
-          aria-label={`Mode: ${mode}. Press and hold to change.`}
+          onClick={onChipClick}
+          aria-label={
+            fullscreen
+              ? `Mode: ${mode}. Press and hold to change.`
+              : `Mode: ${mode}. Tap for fullscreen, press and hold to change.`
+          }
           className="fixed z-[205] flex items-center gap-2 overflow-hidden rounded-lg border border-tt-border bg-tt-card/90 px-3 py-1.5 text-xs backdrop-blur cursor-pointer select-none touch-none"
           style={{ top: 'calc(env(safe-area-inset-top) + 0.75rem)', left: 'calc(env(safe-area-inset-left) + 0.75rem)' }}
         >
@@ -128,7 +196,12 @@ export default function FulfillmentPage() {
             style={{ transform: holding ? 'scaleX(1)' : 'scaleX(0)', transition: holding ? 'transform 0.9s linear' : 'transform 0s' }}
           />
           <span className="relative font-bold uppercase tracking-wide text-tt-text">{mode}</span>
-          <span className="relative text-[10px] normal-case text-tt-muted">hold to change</span>
+          {/* The label doubles as the discoverability hint for fullscreen: an operator who has
+              never seen the device-mode picker (cookie already set) would otherwise have no way
+              to know the tap does anything. Once fullscreen, only the hold remains meaningful. */}
+          <span className="relative text-[10px] normal-case text-tt-muted">
+            {fullscreen ? 'hold to change' : 'tap = fullscreen · hold = change'}
+          </span>
         </button>,
         document.body,
       )}
