@@ -14,7 +14,42 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStores } from '@/hooks/useStores';
 import { useEmployees } from '@/hooks/useEmployees';
 import { printOrderTickets, type PickTicketGroup } from '@/lib/shipping/pickTickets';
-import PackStationOverlay from '@/components/shipping/PackStationOverlay';
+import PackStationOverlay, { type OpenBox } from '@/components/shipping/PackStationOverlay';
+
+// ── interrupted-session record ─────────────────────────────────────────────────────────────
+// The scanner overlay is unmounted by anything that unmounts this tab: a reload, a middleware
+// 307 round-trip, or an accidental tab activation. sessionStorage (per-tab, survives reload,
+// dies with the tab) records that a session was open and which box was loaded, so the idle view
+// can OFFER to resume instead of starting cold.
+//
+// Resume is deliberately EXPLICIT and deliberately does NOT re-enter the box: the operator may
+// have set that label aside, and silently re-opening it would invite double-picking. The record
+// names the box so the operator can decide, then rescan it.
+const RESUME_KEY = 'lensed.stationResume';
+// A record older than a shift is stale — a resume prompt for yesterday's box is noise, not help.
+const RESUME_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+
+interface ResumeRecord { active: boolean; box: OpenBox | null; at: number }
+
+function readResume(): ResumeRecord | null {
+  try {
+    const raw = sessionStorage.getItem(RESUME_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<ResumeRecord>;
+    if (!parsed || parsed.active !== true || typeof parsed.at !== 'number') return null;
+    if (Date.now() - parsed.at > RESUME_MAX_AGE_MS) return null;
+    return { active: true, box: parsed.box ?? null, at: parsed.at };
+  } catch {
+    // Unparseable or storage unavailable — treat as "nothing to resume", never throw into render.
+    return null;
+  }
+}
+function writeResume(box: OpenBox | null) {
+  try { sessionStorage.setItem(RESUME_KEY, JSON.stringify({ active: true, box, at: Date.now() } satisfies ResumeRecord)); } catch { /* ignore */ }
+}
+function clearResume() {
+  try { sessionStorage.removeItem(RESUME_KEY); } catch { /* ignore */ }
+}
 
 export default function ShippingTab() {
   const [focus, setFocus] = useState(false);
@@ -52,11 +87,26 @@ export default function ShippingTab() {
     no_timestamp_orders: number;
   }>(null);
 
-  // Leaving the tab (unmount) while still full-screen → drop out of fullscreen.
+  // Leaving the tab (unmount) while still full-screen → drop out of fullscreen. The resume
+  // record is deliberately NOT cleared here: an unmount is exactly the interruption we want to
+  // offer a resume for. Only a deliberate exit (onExit) or "Start fresh" clears it.
   useEffect(() => () => {
     const d = document as Document & { webkitExitFullscreen?: () => Promise<void> | void; webkitFullscreenElement?: Element | null };
     if (d.fullscreenElement || d.webkitFullscreenElement) { try { (d.exitFullscreen ?? d.webkitExitFullscreen)?.call(d); } catch { /* ignore */ } }
   }, []);
+
+  // Interrupted-session offer. Read once on mount (effect, not a lazy initializer, so SSR and
+  // the first client render agree). Never auto-resumes.
+  const [resume, setResume] = useState<ResumeRecord | null>(null);
+  useEffect(() => {
+    const r = readResume();
+    if (r) setResume(r);
+  }, []);
+
+  // Stable identity: PackStationOverlay takes this as an effect dependency.
+  const handleBoxChange = useCallback((b: OpenBox | null) => { writeResume(b); }, []);
+
+  const dismissResume = () => { clearResume(); setResume(null); };
 
   const storeName = activeStore === 'all'
     ? 'All stores'
@@ -196,7 +246,13 @@ export default function ShippingTab() {
 
   // "Start scanning" — enter fullscreen from the gesture, then mount the overlay (which opens the
   // picker gate on mount, exactly as before).
-  const beginSession = () => { setErr(null); enterFullscreen(); setFocus(true); };
+  const beginSession = () => {
+    setErr(null);
+    setResume(null);
+    writeResume(null); // session open, no box yet
+    enterFullscreen();
+    setFocus(true);
+  };
 
   // ── idle (tab) view ──
   if (!focus) {
@@ -204,6 +260,35 @@ export default function ShippingTab() {
       <div>
         <div className="text-xl font-bold">Packing station</div>
         <div className="text-sm text-tt-muted mt-1 mb-6">Print your order-id pick tickets, then scan them to pick each box. Full-screen, scanner-driven.</div>
+        {/* Interrupted-session offer. Explicit by design — resuming re-opens the scanner at
+            scan-ready; it does NOT re-open the box. The box is named so the operator can decide
+            whether to rescan that label or set it aside. */}
+        {resume && (
+          <div className="mb-6 rounded-2xl border-2 border-tt-yellow/50 bg-tt-yellow/10 p-4">
+            <div className="text-base font-bold text-tt-text">
+              <span className="mr-2" aria-hidden>⚠</span>Scanning session was interrupted
+            </div>
+            <div className="mt-1 text-sm text-tt-muted">
+              {resume.box
+                ? <>Box <span className="font-mono text-tt-text break-all">{resume.box.label}</span> was open. Resuming returns you to scan-ready — rescan that label if it still needs picking.</>
+                : <>The scanner was open with no box loaded.</>}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                onClick={beginSession}
+                className="min-h-[44px] px-6 py-3 rounded-xl bg-tt-yellow text-black font-bold cursor-pointer hover:opacity-90"
+              >
+                Resume scanning
+              </button>
+              <button
+                onClick={dismissResume}
+                className="min-h-[44px] px-6 py-3 rounded-xl border border-tt-border text-tt-text cursor-pointer hover:bg-tt-card-hover"
+              >
+                Start fresh
+              </button>
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-3">
           <button
             onClick={beginSession}
@@ -292,7 +377,9 @@ export default function ShippingTab() {
       onPickerChange={setPickerId}
       pickedCount={pickedToday}
       onBoxPicked={() => setPickedToday((n) => n + 1)}
-      onExit={() => { exitFullscreen(); setFocus(false); }}
+      onBoxChange={handleBoxChange}
+      // A deliberate exit ends the session — there is nothing to resume.
+      onExit={() => { clearResume(); setResume(null); exitFullscreen(); setFocus(false); }}
     />
   );
 }

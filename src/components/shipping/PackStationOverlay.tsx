@@ -186,7 +186,15 @@ export interface PackStationOverlayProps {
   pickedCount: number;
   onBoxPicked: () => void;
   onExit: () => void;
+  // OPTIONAL, purely observational: fires whenever the loaded box changes (null on scan-ready).
+  // ShippingTab uses it to record which box was open so an interrupted session can be resumed.
+  // The station mount (/fulfillment) does not pass it, so its behavior is unchanged. Must be a
+  // STABLE reference (useCallback) — it is an effect dependency below.
+  onBoxChange?: (box: OpenBox | null) => void;
 }
+
+/** The minimum a caller needs to describe the open box to an operator. */
+export interface OpenBox { group_key: string; label: string }
 
 export default function PackStationOverlay({
   endpoints,
@@ -197,6 +205,7 @@ export default function PackStationOverlay({
   pickedCount,
   onBoxPicked,
   onExit,
+  onBoxChange,
 }: PackStationOverlayProps) {
   const [screen, setScreen] = useState<Screen>('ready');
   const [box, setBox] = useState<Box | null>(null);
@@ -222,6 +231,12 @@ export default function PackStationOverlay({
   // Keep the scanner aimed at the hidden input — but NOT while the picker gate is open (the modal
   // owns focus then). When the gate closes this re-runs and re-arms the scanner.
   useEffect(() => { if (!pickerModalOpen) focusInput(); }, [screen, box, pickerModalOpen, focusInput]);
+
+  // Report the open box upward (no-op when the caller passes no handler). Read-only mirror of
+  // `box` — it never influences the overlay's own behavior.
+  useEffect(() => {
+    onBoxChange?.(box ? { group_key: box.group_key, label: box.scanned_value ?? box.scanned_order_id } : null);
+  }, [box, onBoxChange]);
 
   const pickLines = useMemo(() => (box ? buildPickLines(box) : []), [box]);
   const anyPicked = useMemo(() => Object.values(counts).some((v) => v > 0), [counts]);

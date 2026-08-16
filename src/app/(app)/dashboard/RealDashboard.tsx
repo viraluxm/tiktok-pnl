@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
@@ -30,7 +31,17 @@ const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: fal
 // P&L renders chart.js — load client-only, same as Charts.
 const PnlTab = dynamic(() => import('@/components/pnl/PnlTab'), { ssr: false });
 
-type ViewTab = 'dashboard' | 'pnl' | 'inventory' | 'shows' | 'shipping' | 'employees';
+// The active tab lives in the URL (?tab=…), not in component state. A reload, a middleware 307
+// round-trip, or an accidental tab activation therefore returns the operator to where they were
+// instead of dropping them on Dashboard — which matters most for the packing station, where the
+// Shipping tab is open for a whole shift and losing it means losing the scanner overlay.
+// 'dashboard' is the default and is represented by the ABSENCE of the param, so the bare
+// /dashboard URL keeps its current meaning and no redundant ?tab=dashboard is ever written.
+const TAB_VALUES = ['dashboard', 'pnl', 'inventory', 'shows', 'shipping', 'employees'] as const;
+type ViewTab = (typeof TAB_VALUES)[number];
+const DEFAULT_TAB: ViewTab = 'dashboard';
+const isViewTab = (v: unknown): v is ViewTab =>
+  typeof v === 'string' && (TAB_VALUES as readonly string[]).includes(v);
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
@@ -70,20 +81,50 @@ function getPreviousPeriodEntries(
 }
 
 export default function RealDashboard() {
-  const [activeView, setActiveView] = useState<ViewTab>('dashboard');
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
-  // One-shot: honor a tab a prior flow asked us to land on (e.g. Exit Kiosk → Team). Read from
-  // sessionStorage in a mount effect (not a lazy initializer) to avoid a hydration mismatch —
-  // same convention as PracticeModeLauncher's storage hydration.
+  // Derived, not stored: the URL is the single source of truth for the tab. An unrecognised
+  // ?tab= value falls back to the default WITHOUT rewriting the URL — a stale bookmark renders
+  // the dashboard rather than bouncing the history.
+  const tabParam = searchParams.get('tab');
+  const activeView: ViewTab = isViewTab(tabParam) ? tabParam : DEFAULT_TAB;
+
+  // 'push' for operator-initiated tab changes, so Back/Forward walk the tabs the way they read.
+  // 'replace' for programmatic landings (the one-shot handoff below), so no phantom entry is
+  // created that Back would bounce off. Other search params are preserved verbatim.
+  const setActiveView = useCallback(
+    (next: ViewTab, mode: 'push' | 'replace' = 'push') => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (next === DEFAULT_TAB) params.delete('tab');
+      else params.set('tab', next);
+      const qs = params.toString();
+      const url = qs ? `${pathname}?${qs}` : pathname;
+      if (mode === 'replace') router.replace(url, { scroll: false });
+      else router.push(url, { scroll: false });
+    },
+    [router, pathname, searchParams],
+  );
+
+  // One-shot: honor a tab a prior flow asked us to land on (e.g. Exit Kiosk → Team, written by
+  // ExitKioskButton). Read from sessionStorage in a mount effect (not a lazy initializer) to
+  // avoid a hydration mismatch — same convention as PracticeModeLauncher's storage hydration.
+  // The ref guards against the effect re-running if setActiveView's identity changes; the key is
+  // consumed (removed) on the first pass regardless, preserving the existing one-shot contract.
+  const handoffConsumed = useRef(false);
   useEffect(() => {
-    const t = sessionStorage.getItem('lensed.dashboardTab');
-    if (!t) return;
-    sessionStorage.removeItem('lensed.dashboardTab');
-    if (t === 'dashboard' || t === 'pnl' || t === 'inventory' || t === 'shows' || t === 'shipping' || t === 'employees') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing from sessionStorage on mount
-      setActiveView(t);
+    if (handoffConsumed.current) return;
+    handoffConsumed.current = true;
+    let t: string | null = null;
+    try {
+      t = sessionStorage.getItem('lensed.dashboardTab');
+      if (t) sessionStorage.removeItem('lensed.dashboardTab');
+    } catch {
+      /* storage unavailable (private mode) — no handoff, nothing to clean up */
     }
-  }, []);
+    if (isViewTab(t)) setActiveView(t, 'replace');
+  }, [setActiveView]);
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
