@@ -75,6 +75,10 @@ code is provably dead — scanning it returns `BADGE_NOT_FOUND` with no write.
 There are **two independent clock-in paths**, and they gate differently. Confusing
 them is the single most likely 2am mistake, so:
 
+> **The rule:** the schedule gates the **QR path**, not the **badge path**. An
+> unscheduled worker with an active badge clocks in **normally** on the kiosk — the
+> schedule/punch mismatch surfaces at **payroll reconciliation**, never at punch time.
+
 ### Badge scan is schedule-blind — it does NOT check the shift window
 A badge scan (`/api/kiosk/scan` → `lensed_kiosk_scan`, migration 091) checks only:
 the **kiosk is unlocked** (an active kiosk token) and the **badge is active for an
