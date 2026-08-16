@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import QRCode from 'qrcode';
+import { acquireClockActivity } from './clockActivity';
 
 // Clock controls for an IN-WINDOW assigned shift on the /s/[token] page. Additive — the release/drop
 // flow and the 24h cutoff are untouched; this only appears when now ∈ [start-45m, end+60m]. A tap
@@ -57,6 +58,11 @@ export function ClockControls({
     void fetchState().then((s) => { if (active) setState(s); });
     return () => { active = false; };
   }, [fetchState]);
+
+  // Mark this control "active" for its whole lifetime so the page's background auto-refresh
+  // (ScheduleAutoRefresh) never remounts it — which also keeps it from interrupting the QR sheet or
+  // an in-flight punch, both of which live inside this mounted control. See ./clockActivity.
+  useEffect(() => acquireClockActivity(), []);
 
   if (state === null) return null;
   const actions = ACTIONS[state];
