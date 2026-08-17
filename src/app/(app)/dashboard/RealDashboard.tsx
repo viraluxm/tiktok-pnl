@@ -150,15 +150,13 @@ export default function RealDashboard() {
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
-  // COGS from TWO server-computed sources (product-stats): the AUCTION cost snapshot
-  // (live_auction_item_skus.unit_cost_cents_snapshot) for auction orders, PLUS the name-based
-  // CATALOG resolver ($0.80×(boxes+1)) for non-auction storefront orders. Together they cost
-  // both halves of the business; what's still uncosted is surfaced (catalog unparseable names +
-  // class-c auction-lot orders), never silently zero-costed.
+  // COGS from the AUCTION cost snapshot (live_auction_item_skus.unit_cost_cents_snapshot), read via
+  // the canonical order-grain view. PARTIAL BY DESIGN: only auction orders carry a snapshot;
+  // cogsCoveredOrders vs totalOrders lets the UI label that coverage honestly. Non-auction
+  // (storefront) orders carry no snapshot and are not costed here.
   const snapshotCogs = orderTotals?.snapshotCogs || 0;
-  const catalogCogs = orderTotals?.catalogCogs || 0;
-  const totalProductCogs = snapshotCogs + catalogCogs;
-  const cogsCoveredOrders = (orderTotals?.cogsCoveredOrders || 0) + (orderTotals?.catalogCostedOrders || 0);
+  const totalProductCogs = snapshotCogs;
+  const cogsCoveredOrders = orderTotals?.cogsCoveredOrders || 0;
   const cogsTotalOrders = orderTotals?.totalOrders || 0;
   const cogsCoveragePct = cogsTotalOrders > 0 ? Math.round((cogsCoveredOrders / cogsTotalOrders) * 100) : 0;
 
@@ -166,7 +164,9 @@ export default function RealDashboard() {
   const metrics = useMemo(() => {
     // Compute base metrics from order totals (synced_order_ids) — more reliable than entries table
     const t = orderTotals;
-    const gmv = t?.totalGMV || 0;
+    // Headline GMV drops non-auction MERCHANDISE (gmv − shipping); auction GMV stays on the synced
+    // basis and non-auction shipping remains. This card answers "what did TikTok bill buyers".
+    const gmv = (t?.totalGMV || 0) - (t?.nonAuctionMerch || 0);
     const shipping = t?.totalShipping || 0;
     const affiliate = t?.totalAffiliate || 0;
     const platformFee = t?.totalPlatformFee || 0;
@@ -258,9 +258,9 @@ export default function RealDashboard() {
     totalProf -= totalUserCogs;
 
     const hasUserCogs = totalUserCogs > 0;
-    // COGS now spans auction (snapshot) + catalog (name resolver). The % is the combined coverage;
-    // the remainder is uncosted (catalog unparseable names + class-c auction-lot orders).
-    const cogsLabel = `COGS (auction + catalog, ${cogsCoveragePct}% of orders)`;
+    // COGS = auction cost snapshot only. The % is auction coverage; non-auction orders carry no
+    // snapshot and are not costed here.
+    const cogsLabel = `COGS (auction snapshot, ${cogsCoveragePct}% of orders)`;
     const breakdownLabels = hasUserCogs
       ? ['Platform Fee (6%)', cogsLabel, 'Shipping', 'Net Profit']
       : ['Platform Fee (6%)', 'Shipping', 'Net Profit'];
