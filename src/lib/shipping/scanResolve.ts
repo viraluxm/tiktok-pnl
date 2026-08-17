@@ -1,5 +1,4 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { fetchLiveShelfFlags } from '@/lib/shipping/shelfFlags';
 
 // Shared scan → box resolution used by both /api/shipping/pick-list (the
 // operator-facing picker, scoped to the caller's own user_id) and
@@ -165,9 +164,10 @@ export type SkuBlock = {
   barcode: string | null;
   thumbnail_url: string | null;
   required_qty: number;
-  // A picker reported this SKU missing from the shelf, within the read window (see
-  // lib/shipping/shelfFlags). Display-only: it dims the pick card and shows a band, and
-  // never gates grabbing, navigation, or box completion.
+  // This box needs a line that could not be filled from stock at BIND time. Display-only: it
+  // dims the pick card and shows a band, and never gates grabbing, navigation, or completion.
+  // Sourced from live_auction_item_skus.short_at_bind once migration 104 is applied; hardcoded
+  // false until then, so the band simply never shows.
   shelf_out: boolean;
 };
 export type ExcludedOrder = { order_id: string; reason: string; skus: string[] };
@@ -264,8 +264,6 @@ export async function assembleBox(
       });
     }
   }
-  // Picker-reported shelf flags for these SKUs (best-effort — an empty set on failure).
-  const shelfOut = await fetchLiveShelfFlags(db, userIds, skuIds);
   const skus: SkuBlock[] = skuIds
     .map((id) => {
       const a = agg.get(id)!;
@@ -277,7 +275,7 @@ export async function assembleBox(
         barcode: inv?.barcode ?? null,
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
-        shelf_out: shelfOut.has(id),
+        shelf_out: false,   // ← wired to short_at_bind after migration 104
       };
     })
     .sort((a, b) => (Number(a.sku_number) || 0) - (Number(b.sku_number) || 0));

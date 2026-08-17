@@ -3,7 +3,6 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
-import { fetchLiveShelfFlags } from '@/lib/shipping/shelfFlags';
 
 export const dynamic = 'force-dynamic';
 
@@ -305,9 +304,6 @@ export async function POST(req: Request) {
       });
     }
   }
-  // Picker-reported shelf flags for these SKUs (best-effort — an empty set on failure).
-  // Same helper as assembleBox uses, so the read window can't drift between the two surfaces.
-  const shelfOut = await fetchLiveShelfFlags(supabase, [user.id], skuIds);
   const skus = skuIds
     .map((id) => {
       const a = agg.get(id)!;
@@ -319,7 +315,7 @@ export async function POST(req: Request) {
         barcode: inv?.barcode ?? null,
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
-        shelf_out: shelfOut.has(id),
+        shelf_out: false,   // ← wired to short_at_bind after migration 104
       };
     })
     // Stable order: lowest SKU# first.

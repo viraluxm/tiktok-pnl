@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-export interface PackStationEndpoints { boxes: string; scan: string; confirm: string; shelfFlag: string }
+export interface PackStationEndpoints { boxes: string; scan: string; confirm: string }
 
 interface BoxSku {
   inventory_sku_id: string;
@@ -23,8 +23,9 @@ interface BoxSku {
   barcode: string | null;
   thumbnail_url: string | null;
   required_qty: number;
-  // Picker-reported "not on the shelf", from sku_shelf_flags within the server's read window.
-  // Older payloads omit it → treated as false.
+  // Set at BIND time when this order line could not be filled from stock (the sale went through
+  // with nothing on the shelf). A fact about the order, not a live inventory read: it is decided
+  // once, when the bind draws short, and never changes. Older payloads omit it → not short.
   shelf_out?: boolean;
 }
 interface MissingOrder { order_id: string; listing_name: string | null; seller_sku: string | null; }
@@ -52,16 +53,11 @@ interface Box {
 type Screen = 'ready' | 'alert' | 'pick' | 'finish' | 'empty';
 
 type PickLine =
-  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number }
+  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean }
   | { kind: 'catalog'; key: string; order_id: string; listing_name: string; seller_sku: string; required_qty: number };
 
-// Shelf flags are keyed by inventory_sku_id, which is exactly a 'sku' line's key — so the
-// server's flags seed the local map directly. Catalog lines have no SKU and never appear here.
-const seedShelfOut = (b: Box): Record<string, boolean> =>
-  Object.fromEntries(b.skus.filter((s) => s.shelf_out).map((s) => [s.inventory_sku_id, true]));
-
 const buildPickLines = (b: Box): PickLine[] => [
-  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty })),
+  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true })),
   ...(b.catalog_orders ?? []).map((c): PickLine => ({ kind: 'catalog', key: `cat:${c.order_id}`, order_id: c.order_id, listing_name: c.listing_name || 'Catalog item', seller_sku: c.seller_sku || '', required_qty: c.qty || 1 })),
 ];
 
@@ -209,9 +205,6 @@ export default function PackStationOverlay({
   const [screen, setScreen] = useState<Screen>('ready');
   const [box, setBox] = useState<Box | null>(null);
   const [counts, setCounts] = useState<Record<string, number>>({});
-  // Local shelf-flag state, seeded from the box payload and toggled optimistically by
-  // "Can't find it" / "Found it". Display-only — it gates nothing.
-  const [shelfOut, setShelfOut] = useState<Record<string, boolean>>({});
   const [activeIdx, setActiveIdx] = useState(0);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -273,7 +266,7 @@ export default function PackStationOverlay({
         return;
       }
       const b = json as Box;
-      setBox(b); setCounts({}); setShelfOut(seedShelfOut(b)); setActiveIdx(0); confirmedRef.current = false; setErr(null);
+      setBox(b); setCounts({}); setActiveIdx(0); confirmedRef.current = false; setErr(null);
       pickStartedAtRef.current = new Date().toISOString();
       const unbound = (b.missing_orders?.length ?? 0) > 0 || b.missing_order_ids.length > 0;
       const lines = buildPickLines(b);
@@ -311,36 +304,13 @@ export default function PackStationOverlay({
         doneTimer.current = null;
         setJustDone(false);
         const complete = pickLines.every((l) => (nc[l.key] ?? 0) >= l.required_qty);
-        if (complete) enterFinish(box, nc);
+        if (complete) enterFinish(box);
         else setActiveIdx(firstUnpickedIdx(pickLines, nc));
       }, 550);
     }
   }
 
-  // "Can't find it" / "Found it" — SKU lines only (catalog orders have no inventory_sku_id and
-  // are deliberately not representable as shelf flags). Optimistic: the band flips immediately
-  // and the POST is fire-and-forget, because this is a display hint, not a gate — a picker who
-  // taps it has already walked to the rack and must not be made to wait on a round trip. A
-  // failed write means the NEXT picker doesn't see the band; it costs this picker nothing.
-  function toggleShelfOut(l: PickLine) {
-    if (l.kind !== 'sku') return;
-    const next = !shelfOut[l.key];
-    setShelfOut((s) => ({ ...s, [l.key]: next }));
-    focusInput();
-    fetch(endpoints.shelfFlag, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        inventory_sku_id: l.key,
-        action: next ? 'report' : 'clear',
-        picker_employee_id: pickerId || undefined,
-      }),
-    }).catch(() => {});
-  }
-
-  // `c` defaults to the rendered counts, but grab() must pass its freshly-computed map: the
-  // completing grab is still queued in React state when the 550ms timeout fires, so `counts`
-  // would be short exactly the SKU that just completed — the one most likely to be flagged.
-  function enterFinish(b: Box, c: Record<string, number> = counts) {
+  function enterFinish(b: Box) {
     setScreen('finish');
     if (!confirmedRef.current) {
       confirmedRef.current = true;
@@ -354,11 +324,6 @@ export default function PackStationOverlay({
           order_ids: b.order_ids,
           picker_employee_id: pickerId || undefined,
           pick_started_at: pickStartedAtRef.current || undefined,
-          // SKU lines actually grabbed → the server clears their shelf flags ('grabbed', the
-          // primary clear path). Catalog keys are 'cat:<order_id>' and are filtered out here.
-          picked_sku_ids: buildPickLines(b)
-            .filter((l) => l.kind === 'sku' && (c[l.key] ?? 0) > 0)
-            .map((l) => l.key),
         }),
       }).catch(() => {});
     }
@@ -374,19 +339,12 @@ export default function PackStationOverlay({
   // endpoints.confirm: shipment_verifications upserts on (user_id, group_key) with
   // ignoreDuplicates, so a pack confirm after a pick confirm is silently dropped. Show the
   // verified screen and count the box locally, with NO write.
-  //
-  // SHELF FLAGS: because this writes nothing, it also clears NO shelf flags — the 'grabbed'
-  // clear rides on endpoints.confirm (see enterFinish). That is correct only while "Can't find
-  // it" stays pick-mode-only, which it is today: the toggle renders inside the mode === 'pick'
-  // block. IF YOU ADD THE TOGGLE TO PACK MODE, flags reported here would never auto-clear and
-  // would linger until the read window expires — wire up a clear before doing so (a dedicated
-  // clear call, NOT endpoints.confirm, which would still be swallowed by the upsert above).
   function finishPack() {
     setScreen('finish');
     if (!confirmedRef.current) { confirmedRef.current = true; onBoxPicked(); }
   }
 
-  const backToReady = () => { cancelDoneTimer(); setJustDone(false); setBox(null); setCounts({}); setShelfOut({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
+  const backToReady = () => { cancelDoneTimer(); setJustDone(false); setBox(null); setCounts({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
 
   // ── hold-to-exit (tap-and-hold ~0.9s) → reset to scan-ready, then hand off to the caller. For
   // the Shipping tab onExit exits fullscreen + unmounts; for the station page it's a no-op so the
@@ -433,9 +391,9 @@ export default function PackStationOverlay({
   const line = box && screen === 'pick' ? pickLines[activeIdx] ?? null : null;
   const have = line ? counts[line.key] ?? 0 : 0;
   const lineDone = line ? have >= line.required_qty : false;
-  // Display-only. Never ANDed into lineDone, grab(), or allComplete — a flagged item is still
+  // Display-only. Never ANDed into lineDone, grab(), or allComplete — a short item is still
   // grabbable, still navigable, and still lets the box complete.
-  const lineShelfOut = !!(line && line.kind === 'sku' && shelfOut[line.key]);
+  const lineShelfOut = !!(line && line.kind === 'sku' && line.shelf_out);
 
   // ── focus-mode overlay — portalled to <body> so it escapes any transformed ancestor and fills
   // the whole dynamic viewport at z-[200], above app chrome. Safe under SSR (mounts client-side). ──
@@ -643,17 +601,9 @@ export default function PackStationOverlay({
                 <button onClick={() => setActiveIdx((i) => Math.min(pickLines.length - 1, i + 1))} disabled={activeIdx === pickLines.length - 1}
                   className="shrink-0 rounded-xl border border-tt-border text-tt-text disabled:opacity-40 cursor-pointer" style={{ padding: 'clamp(0.5rem,1.5vh,0.75rem) clamp(0.9rem,4vw,1.25rem)', minHeight: '44px', minWidth: '44px' }}>Next ›</button>
               </div>
-              {/* New label / can't-find-it / Finish. The shelf-flag toggle sits here rather than
-                  under Grab so the clamp-sized pinned block keeps its exact height — this row
-                  already exists and its controls are the same small text size. SKU lines only. */}
+              {/* New label / Finish */}
               <div className="flex items-center justify-between gap-3">
                 <button onClick={() => (anyPicked ? setAbandon({ scan: null }) : backToReady())} className="shrink-0 inline-flex items-center min-h-[44px] px-2 text-sm text-tt-muted underline cursor-pointer">New label</button>
-                {line.kind === 'sku' && (
-                  <button
-                    onClick={() => toggleShelfOut(line)}
-                    className={`shrink-0 inline-flex items-center min-h-[44px] px-2 text-sm underline cursor-pointer ${lineShelfOut ? 'text-tt-green' : 'text-tt-muted'}`}
-                  >{lineShelfOut ? 'Found it' : "Can't find it"}</button>
-                )}
                 {allComplete && (
                   <button onClick={() => enterFinish(box)} className="flex-1 min-h-[52px] px-6 py-3 rounded-xl bg-tt-cyan text-black text-lg font-extrabold cursor-pointer hover:opacity-90 shadow-lg">Finish box ›</button>
                 )}

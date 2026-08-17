@@ -98,7 +98,7 @@ export default function FulfillmentPage() {
     <>
       <PackStationOverlay
         mode={mode}
-        endpoints={{ boxes: '/api/station/boxes', scan: '/api/station/scan', confirm: '/api/station/confirm', shelfFlag: '/api/station/shelf-flag' }}
+        endpoints={{ boxes: '/api/station/boxes', scan: '/api/station/scan', confirm: '/api/station/confirm' }}
         pickers={pickers}
         storeLabel="All stores"
         pickerId={pickerId}

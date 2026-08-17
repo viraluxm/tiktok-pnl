@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import { requireStationScope } from '@/lib/station/guard';
 import { validatePicker } from '@/lib/shipping/pickerPerformance';
 import { buildVerificationRow } from '@/lib/shipping/confirmRow';
-import { clearShelfFlags } from '@/lib/shipping/shelfFlags';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,7 +15,7 @@ export async function POST(req: Request) {
   if (!scope.ok) return scope.response;
   const { admin, ownerIds } = scope;
 
-  let body: { group_key?: string; order_ids?: string[]; picker_employee_id?: string; pick_started_at?: string; picked_sku_ids?: string[] };
+  let body: { group_key?: string; order_ids?: string[]; picker_employee_id?: string; pick_started_at?: string};
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
 
   const groupKey = typeof body.group_key === 'string' ? body.group_key.trim() : '';
@@ -25,10 +24,6 @@ export async function POST(req: Request) {
     ? body.order_ids.filter((x): x is string => typeof x === 'string')
     : [];
   if (!orderIds.length) return NextResponse.json({ error: 'Missing order_ids' }, { status: 400 });
-  // SKUs the picker actually grabbed — drives the shelf-flag clear below (see /api/shipping/confirm).
-  const pickedSkuIds = Array.isArray(body.picked_sku_ids)
-    ? [...new Set(body.picked_sku_ids.filter((x): x is string => typeof x === 'string' && !!x.trim()))]
-    : [];
 
   // Resolve the box OWNER (whose user_id keys the verification) + its store from the orders,
   // constrained to the station's owner scope. All orders in a box share one owner user_id.
@@ -95,15 +90,6 @@ export async function POST(req: Request) {
   if (error) {
     console.error('[station/confirm] insert error:', error);
     return NextResponse.json({ error: 'Failed to save verification' }, { status: 500 });
-  }
-
-  // PRIMARY shelf-flag clear (see /api/shipping/confirm). Keyed to the box OWNER, so a station
-  // pick clears the same row the operator flow reads. Best-effort — never fails the box.
-  if (pickedSkuIds.length) {
-    const cleared = await clearShelfFlags(admin, {
-      ownerUserId, skuIds: pickedSkuIds, employeeId: pickerEmployeeId, reason: 'grabbed',
-    });
-    if (!cleared.ok) console.warn('[station/confirm] shelf-flag clear failed:', cleared.error);
   }
   return NextResponse.json({ ok: true, group_key: groupKey });
 }
