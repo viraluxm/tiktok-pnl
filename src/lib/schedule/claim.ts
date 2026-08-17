@@ -31,10 +31,16 @@ export interface ClaimResult {
 export async function claimShift(employee: Employee, instanceId: string): Promise<ClaimResult> {
   const admin = createAdminClient();
 
+  // OWNER SCOPE. This runs service-role (RLS bypassed) from a PUBLIC tokenized route, and
+  // instanceId is client-supplied — so the owner filter is the only thing binding the instance to
+  // the caller's account. Without it a token holder who learned another owner's instance UUID
+  // could claim it. release.ts gets this for free via `.eq('employee_id', employee.id)` (you can
+  // only release your own); a claimer does not own the row yet, so it must be explicit here.
   const { data: inst, error } = await admin
     .from('shift_instances')
     .select('id, status, starts_at, ends_at, shift_date, user_id, released_by')
     .eq('id', instanceId)
+    .eq('user_id', employee.user_id)
     .maybeSingle();
   if (error) throw new ScheduleError('READ_FAILED', error.message);
   if (!inst) throw new ScheduleError('NOT_FOUND');
@@ -47,6 +53,7 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
     .from('employees')
     .select('role')
     .eq('id', inst.released_by)
+    .eq('user_id', employee.user_id)   // same owner scope as the instance read above
     .maybeSingle();
   if (relErr) throw new ScheduleError('READ_FAILED', relErr.message);
   if (!releaser || releaser.role !== employee.role) throw new ScheduleError('WRONG_ROLE');
@@ -81,11 +88,27 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
 
   if (claimAutoApproves(projected)) {
     // AUTO-APPROVE: projected week <= 40h (40 is straight time, not OT). Atomic claim.
+    // THE RACE GUARD. `.eq('status','released')` lives HERE, in the UPDATE's WHERE, evaluated
+    // atomically by Postgres — the status check at the top of this function is a fast-path for
+    // messaging ONLY and must never be treated as the guard. Exactly one concurrent claimer
+    // matches while the row is still 'released'; every loser matches 0 rows.
+    //   • .is('employee_id', null) — second guard. release.ts nulls employee_id when it releases,
+    //     so a genuinely-released row always has NULL here; this catches any future path that
+    //     flips status without clearing the owner.
+    //   • .eq('user_id', …) — owner scope, mirroring the read above.
+    //   • .select() is REQUIRED: without it there is no row count, so the loser is undetectable.
+    //   • .maybeSingle(), never .single() — single() throws on 0 rows, turning a clean
+    //     ALREADY_CLAIMED (409) into an opaque 500.
+    //   • Chained .eq()/.is() ONLY. NEVER .or() on an update: PostgREST rejects it (42703/400)
+    //     and the thrown error gets swallowed as a false "lost race" — the same failure mode that
+    //     silently killed TikTok token refresh for three weeks.
     const { data: won, error: uErr } = await admin
       .from('shift_instances')
       .update({ status: 'claimed', employee_id: employee.id, source: 'claim' })
       .eq('id', instanceId)
+      .eq('user_id', employee.user_id)
       .eq('status', 'released')
+      .is('employee_id', null)
       .select('id, shift_date, user_id')
       .maybeSingle();
     if (uErr) throw new ScheduleError('CLAIM_FAILED', uErr.message);
@@ -129,6 +152,33 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
   // approval (Part 7). This is a deliberate departure from the literal spec pseudocode, which
   // wrote the claimed event in both branches; writing it for an unapproved claim would corrupt
   // drop netting. Flagged in the Deploy B summary.
+  // DUPLICATE-PENDING GUARD. shift_claims has NO unique constraint (085 defines only a status
+  // CHECK and a partial index), and this insert is unconditional, so a double-tap or a second
+  // device files two identical 'pending' rows and a manager sees the same request twice.
+  //
+  // Keyed on (instance, claimer) — NOT on the instance alone. Two DIFFERENT employees each filing
+  // a pending OT claim on the same released shift is legitimate; the manager picks between them.
+  //
+  // Honest limit: check-then-insert is NOT atomic. It closes the realistic case (a repeat tap, a
+  // revisit, a second tab) but two truly simultaneous submits can still both pass.
+  // TODO: the correct fix is a partial unique index on shift_claims —
+  //   `unique (shift_instance_id, claimed_by) where status = 'pending'`
+  // Add it the next time that schema is touched; this read then becomes belt-and-braces.
+  const { data: dupe, error: dErr } = await admin
+    .from('shift_claims')
+    .select('id')
+    .eq('user_id', inst.user_id)
+    .eq('shift_instance_id', instanceId)
+    .eq('claimed_by', employee.id)
+    .eq('status', 'pending')
+    .limit(1);
+  if (dErr) throw new ScheduleError('READ_FAILED', dErr.message);
+  if ((dupe ?? []).length > 0) {
+    // Idempotent: this claimer's request is already queued. Return the SAME shape rather than an
+    // error — nothing changed, and the UI should show the same "not yours yet" message.
+    return { result: 'pending_approval', projected_week_hours: projected };
+  }
+
   const { error: pErr } = await admin.from('shift_claims').insert({
     user_id: inst.user_id,
     shift_instance_id: instanceId,
