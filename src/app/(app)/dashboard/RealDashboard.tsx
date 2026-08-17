@@ -7,12 +7,10 @@ import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import UnmappedSessionsBanner from '@/components/admin/UnmappedSessionsBanner';
 import SummaryCards from '@/components/dashboard/SummaryCards';
-import ForecastCard from '@/components/dashboard/ForecastCard';
 import InventorySection from '@/components/inventory/InventorySection';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useTikTok } from '@/hooks/useTikTok';
 import { useEntries } from '@/hooks/useEntries';
-import { useProductCosts } from '@/hooks/useProductCosts';
 import { useProductStats } from '@/hooks/useProductStats';
 import { useLabor, useSavePackerLabor } from '@/hooks/useLabor';
 import { useFilters } from '@/hooks/useFilters';
@@ -45,34 +43,37 @@ const isViewTab = (v: unknown): v is ViewTab =>
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
-  activeQuickFilter: number | 'all',
+  activeQuickFilter: number | 'all' | 'custom',
   dateFrom: string | null,
   dateTo: string | null,
 ): Entry[] {
   if (activeQuickFilter === 'all' || (!dateFrom && !dateTo)) return [];
 
-  const now = new Date();
+  // Pacific-anchored (America/Los_Angeles) to match the main filter + order-date derivation.
+  // shiftDays does pure calendar math on YYYY-MM-DD strings (parse+emit in UTC, no zone drift).
+  const toShopDate = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  const shiftDays = (isoDate: string, n: number) => {
+    const d = new Date(`${isoDate}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const todayStr = toShopDate(new Date());
+
   let prevFrom: string;
   let prevTo: string;
 
   if (activeQuickFilter === 0) {
-    const yesterday = new Date(now);
-    yesterday.setDate(yesterday.getDate() - 1);
-    prevFrom = prevTo = yesterday.toISOString().split('T')[0];
+    prevFrom = prevTo = shiftDays(todayStr, -1); // yesterday (Pacific)
   } else if (activeQuickFilter === 1) {
-    const dayBefore = new Date(now);
-    dayBefore.setDate(dayBefore.getDate() - 2);
-    prevFrom = prevTo = dayBefore.toISOString().split('T')[0];
+    prevFrom = prevTo = shiftDays(todayStr, -2); // day before yesterday (Pacific)
   } else if (dateFrom && dateTo) {
-    const from = new Date(dateFrom);
-    const to = new Date(dateTo);
-    const daysSpan = Math.round((to.getTime() - from.getTime()) / 86400000) + 1;
-    const prevEnd = new Date(from);
-    prevEnd.setDate(prevEnd.getDate() - 1);
-    const prevStart = new Date(prevEnd);
-    prevStart.setDate(prevStart.getDate() - daysSpan + 1);
-    prevFrom = prevStart.toISOString().split('T')[0];
-    prevTo = prevEnd.toISOString().split('T')[0];
+    const daysSpan =
+      Math.round(
+        (new Date(`${dateTo}T00:00:00Z`).getTime() - new Date(`${dateFrom}T00:00:00Z`).getTime()) /
+          86400000,
+      ) + 1;
+    prevTo = shiftDays(dateFrom, -1);
+    prevFrom = shiftDays(dateFrom, -daysSpan);
   } else {
     return [];
   }
@@ -125,11 +126,10 @@ export default function RealDashboard() {
     }
     if (isViewTab(t)) setActiveView(t, 'replace');
   }, [setActiveView]);
-  const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
+  const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all' | 'custom'>('all');
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
-  const { costsMap } = useProductCosts();
   const { data: productStatsData } = useProductStats(filters.dateFrom, filters.dateTo);
   const productStats = productStatsData?.products;
   const orderTotals = productStatsData?.totals;
@@ -304,6 +304,17 @@ export default function RealDashboard() {
     setQuickFilter(days);
   }
 
+  // Last-touched-wins: an explicit date edit clears the quick-filter highlight (→ 'custom'),
+  // and a quick-filter click (handleQuickFilter) overwrites the dates. Exactly one is ever active.
+  function handleDateFrom(date: string | null) {
+    setActiveQuickFilter('custom');
+    setDateFrom(date);
+  }
+  function handleDateTo(date: string | null) {
+    setActiveQuickFilter('custom');
+    setDateTo(date);
+  }
+
   const tabs: Array<{ label: string; value: ViewTab }> = [
     { label: 'Dashboard', value: 'dashboard' },
     { label: 'P&L', value: 'pnl' },
@@ -378,8 +389,8 @@ export default function RealDashboard() {
         <FiltersBar
           filters={filters}
           onQuickFilter={handleQuickFilter}
-          onDateFromChange={setDateFrom}
-          onDateToChange={setDateTo}
+          onDateFromChange={handleDateFrom}
+          onDateToChange={handleDateTo}
           activeQuickFilter={activeQuickFilter}
         />
 
@@ -408,7 +419,7 @@ export default function RealDashboard() {
             {laborData && (
               <div className="rounded-xl border border-tt-border bg-tt-card p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm font-semibold text-tt-text">Labor (hosts measured, packers entered)</div>
+                  <div className="text-sm font-semibold text-tt-text">Labor (hosts measured; fulfillment not yet tracked)</div>
                   <div className="text-sm text-tt-muted">−${totalLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} from net</div>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
@@ -425,7 +436,7 @@ export default function RealDashboard() {
                     )}
                   </div>
                   <div className="rounded-lg bg-tt-card-hover px-3 py-2">
-                    <div className="text-xs text-tt-muted">Packer labor · entered {laborData.packer.entered ? '' : '(not set)'}</div>
+                    <div className="text-xs text-tt-muted">Fulfillment labor · not yet tracked {laborData.packer.entered ? '(manual)' : ''}</div>
                     <div className="flex items-center gap-2">
                       <span className="text-tt-muted">$</span>
                       <input
@@ -449,7 +460,6 @@ export default function RealDashboard() {
                 </div>
               </div>
             )}
-            <ForecastCard entries={allEntries} costsMap={costsMap} />
             <Charts chartData={chartData} />
           </>
         )}

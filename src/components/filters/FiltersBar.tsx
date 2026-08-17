@@ -8,7 +8,7 @@ interface FiltersBarProps {
   onQuickFilter: (days: number | 'all') => void;
   onDateFromChange: (date: string | null) => void;
   onDateToChange: (date: string | null) => void;
-  activeQuickFilter: number | 'all';
+  activeQuickFilter: number | 'all' | 'custom';
 }
 
 export default function FiltersBar({
