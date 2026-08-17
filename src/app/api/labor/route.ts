@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { laWallTimeToUtc } from '@/lib/schedule/timezone';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,13 +39,16 @@ export async function GET(request: Request) {
   const hostRate = rates.length ? Math.min(...rates) : 0;
   const hostRatesDiffer = rates.length > 1;
 
-  // Sessions in the window (Pacific date), with duration; sum only the bounded ones.
+  // Sessions in the window, resolved from Pacific business dates to UTC instants. The offset is
+  // looked up PER DATE (laWallTimeToUtc, DST-correct two-pass) rather than hardcoded: -07:00 is
+  // PDT only, so from 2026-11-01 it moves both bounds an hour off and silently pulls the wrong
+  // sessions into the period. Boundary semantics are otherwise unchanged.
   const { data: sessions } = await admin
     .from('live_sessions')
     .select('started_at, ended_at, last_seen_at')
     .eq('user_id', user.id)
-    .gte('started_at', `${from}T00:00:00-07:00`)
-    .lte('started_at', `${to}T23:59:59-07:00`);
+    .gte('started_at', laWallTimeToUtc(from, '00:00:00').toISOString())
+    .lte('started_at', laWallTimeToUtc(to, '23:59:59').toISOString());
 
   let hostHours = 0, excludedOverCapHours = 0, excludedOverCapCount = 0, excludedUnder10m = 0, counted = 0;
   for (const s of sessions ?? []) {
