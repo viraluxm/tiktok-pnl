@@ -25,7 +25,7 @@ const SRC = path.join(ROOT, 'src');
 
 // Functions called ONLY via createAdminClient() (service role bypasses grants). They must stay
 // ungranted. Keep this list tiny and reviewed; add here when you add a service-role-only RPC.
-const SERVICE_ROLE_ONLY = new Set(['lensed_add_batch_admin', 'lensed_void_batch']);
+const SERVICE_ROLE_ONLY = new Set(['lensed_add_batch_admin', 'lensed_void_batch', 'lensed_log_auction_as']);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
 const PAT = process.env.SUPABASE_ACCESS_TOKEN;
