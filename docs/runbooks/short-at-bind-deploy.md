@@ -168,21 +168,224 @@ the band keeps working for those.
 
 ---
 
-## Confirming the feature actually works end to end
+## STEP 4 — Verify the TRUE case end to end (after step 3)
 
-You need a genuinely short bind. The next time a host sells at zero and the team
-binds with "Bind anyway" (`allow_negative`), that order line gets
-`short_at_bind = true`. When its label is later scanned, the pick card shows the
-dimmed image and the red **OUT OF STOCK** band — on that order's box only, not
-on every box holding the same SKU.
+The scenario this feature exists for: **a host sells an item without scanning
+it. After the live, the team binds the SKU, and the bind goes negative because
+the unit was already gone. The picker later scans that label and must see OUT OF
+STOCK before walking to the rack.**
+
+### 4.0 — You do not need to fabricate anything
+
+As of 2026-08-17 there are **at least 12 active SKUs already at or below zero**,
+several hundred units short in aggregate. Any bind of an unbound order for one
+of those SKUs goes through the `allow_negative` path automatically — the FIFO
+lookup finds no layer holding the qty, which is exactly the condition that sets
+the flag. Do **not** hand-edit `qty_on_hand` or `sku_batches` to force it; that
+is a capture-path write and it is not necessary.
+
+> **Expectation to set before you look at the results.** Because those SKUs are
+> already deeply negative, *every* new bind against one of them will be flagged,
+> not only the single unit that ran out. That is consistent with the design — the
+> line genuinely could not be drawn from recorded stock — but the band will not
+> be rare. It also means: if someone restocked physically without recording it,
+> the flag still fires. The flag's claim is "the system had no stock for this
+> line", and that is precisely what the picker is being warned about.
+
+### 4.1 — Pick a safe SKU
+
+Prefer a negative SKU with the **fewest open pick orders**, so a mistake touches
+as little live fulfilment as possible.
 
 ```sql
--- what has been flagged so far
-select ai.client_idempotency_key as order_id, s.sku_number_snapshot, s.qty, s.short_at_bind
-from live_auction_item_skus s
-join live_auction_items ai on ai.id = s.auction_item_id
-where s.short_at_bind is true
-order by s.created_at desc limit 20;
+select s.id, s.sku_number, s.title, s.qty_on_hand,
+       coalesce((select sum(b.qty_remaining) from sku_batches b where b.sku_id = s.id),0) as batch_remaining,
+       (select count(*) from live_auction_item_skus l
+          join live_auction_items ai on ai.id = l.auction_item_id
+          join synced_order_ids o on o.order_id = ai.client_idempotency_key
+        where l.inventory_sku_id = s.id and o.status = 'AWAITING_COLLECTION') as open_pick_orders
+from inventory_skus s
+where s.is_active and s.qty_on_hand <= 0
+order by open_pick_orders asc, s.qty_on_hand asc
+limit 10;
+```
+
+Choose a row with **low `open_pick_orders`** and `batch_remaining <= 0`. Record
+the `sku_number` and `id`.
+
+### 4.2 — Find a genuinely unbound order for that SKU
+
+The cleanest test is a bind the team **should be doing anyway** — a real
+captured-but-unbound order whose SKU is one of the negative ones. No synthetic
+data, and the bind is correct rather than a fabrication.
+
+```sql
+-- captured but never bound (no live_auction_items row for the order key)
+select c.order_id, c.product_name, c.platform_sku_ref, c.created_at, o.status
+from capture_events c
+left join live_auction_items ai on ai.client_idempotency_key = c.order_id
+left join synced_order_ids o on o.order_id = c.order_id
+where ai.id is null
+order by c.created_at desc
+limit 25;
+```
+
+Pick one whose product plainly corresponds to your chosen SKU. **If none
+matches, stop and wait** — do not bind an order to a SKU it does not contain
+just to exercise the test. A wrong bind is real inventory and real P&L damage,
+and it is worse than an unverified feature.
+
+### 4.3 — Bind it through the real post-live path
+
+Use the surface the team actually uses after a show:
+
+**`/team/binding` (the member binding queue)**
+1. Select the session the order belongs to.
+2. Expand the order row.
+3. Set the SKU line(s) to your chosen SKU, qty as sold.
+4. Press **Bind** — the primary action, which sends `allow_negative: false`.
+5. It will fail with **409 "Out of stock for that SKU"**. That is the expected
+   first result and is the whole point: negative stock is never the first action.
+6. The **"Bind anyway"** control now appears. Press it. This reposts with
+   `allow_negative: true`, which is the path that sets the flag.
+
+That route is `POST /api/member/bind` → **`lensed_log_auction_as`**.
+
+**To also cover the other patched function**, repeat once from the operator
+side: **Shows tab → expand an unbound row → bind → confirm the negative-stock
+dialog**. That is `POST /api/live/sessions/[id]/bind` →
+**`lensed_log_auction`**, which is the function the capture extension calls.
+Migration 105 patched both; one test each proves both.
+
+### 4.4 — Confirm the flag landed on that specific line
+
+```sql
+select ai.client_idempotency_key as order_id,
+       l.sku_number_snapshot, l.qty, l.short_at_bind, l.created_at
+from live_auction_item_skus l
+join live_auction_items ai on ai.id = l.auction_item_id
+where ai.client_idempotency_key = '<THE ORDER ID>';
+```
+
+`short_at_bind` must be **`true`** — not null, not false.
+
+- **null** → migration 105 is not applied (or you bound before applying it).
+- **false** → the bind found stock in some FIFO layer, so this order was not
+  short. Pick a different SKU, or check `batch_remaining` again.
+
+Sanity-check the negative case too: bind one order for an **in-stock** SKU and
+confirm it records **`false`**. A feature that flags everything is as useless as
+one that flags nothing.
+
+### 4.5 — Scan it on both surfaces
+
+**You do not need to buy a label.** The scan input accepts a **bare TikTok order
+id** as well as a shipping label — `pick-list` resolves digits directly against
+`synced_order_ids.order_id`.
+
+Getting the value into the field, in order of convenience:
+
+- **Hardware scanner** (the real path) — scan the actual shipping label if the
+  order already has one.
+- **Bluetooth keyboard** — type the order id and press Enter. The hidden input is
+  always focused.
+- **Barcode on a second screen** — render the order id as Code-128 and scan it.
+
+The overlay's input is deliberately `inputMode="none"`, so **a phone will not
+raise an on-screen keyboard.** Plan for a scanner or an external keyboard; you
+cannot simply tap and type.
+
+Do this on **both**:
+1. **Shipping tab → Start scanning** (operator path, `/api/shipping/pick-list`).
+2. **`/fulfillment`** (station path, `/api/station/scan` → `assembleBox`).
+
+They are separate implementations of the same logic. The band must appear on
+both. If it appears on one only, one reader did not get the change.
+
+Expected on the card: the item photo dimmed to ~30%, a red band across the
+middle reading **OUT OF STOCK**, and — critically — **Grab one still works**,
+Back / Next still navigate, and the box can still be completed. The band informs;
+it never blocks.
+
+### 4.6 — Clean up
+
+> ## ⚠️ Do NOT press "Finish box" on a test box
+>
+> Completing a box writes an **immutable** `shipment_verifications` row —
+> `ON CONFLICT (user_id, group_key) DO NOTHING`, so a re-confirm is a silent
+> no-op and **cannot be corrected by re-running it.** It is attributed to the
+> selected picker and feeds Average Pick Time, Active Picking Time and
+> orders-per-hour. A test box completed by you pollutes a real person's KPIs
+> permanently.
+>
+> To leave the card without recording anything: **hold the ✕ (hold-to-exit ~0.9s)**,
+> or press **New label** and choose **Discard & continue**.
+
+**Note what cleanup does and does not cover:**
+
+- **The pick queue is driven by TikTok status, not by bind state or
+  verification.** `pick-tickets` selects `synced_order_ids.status =
+  'AWAITING_COLLECTION'` and does **not** filter out verified boxes. So the test
+  order was already in the queue before you touched it, binding did not add it,
+  and completing it would not remove it. It leaves the queue when it genuinely
+  ships. There is nothing to clean up there.
+- **If the bind was correct**, leave it. It is real work the team owed anyway,
+  and the flag on it is true.
+- **If you bound the wrong SKU**, reverse it:
+  `POST /api/live/sessions/<session_id>/unbind { "order_id": "<order id>" }`
+  (Shows tab exposes this as **Unbind** on the row.) `lensed_unbind` restocks the
+  qty as a **fresh FIFO layer** at the snapshot cost and deletes the
+  `live_auction_items` / `_skus` rows — which also removes the `short_at_bind`
+  row. Caveat: it does not restore the original batch layout, it adds a new
+  layer. It is the sanctioned correction, not a byte-exact undo.
+- **If you did complete a test box by mistake**, the only remedy is deleting that
+  row by hand:
+  ```sql
+  -- inspect first; group_key is the combine-group id or 'order:<order_id>'
+  select * from shipment_verifications where group_key = '<group_key>';
+  ```
+  `shipment_verifications` is a fulfilment-side table, **not** on the capture or
+  order-sync path, so this delete is not write-silence gated. Confirm the row is
+  yours and is the test before removing it.
+
+### 4.7 — What to check on the phone, in the warehouse
+
+The band and the dimming were specified but have never been seen on a real
+device under real light. Look at these deliberately, standing where a picker
+stands:
+
+- **Is the band legible in warehouse lighting?** It is `red-800` at 95% opacity
+  with `red-50` text at **15px, medium weight**. 15px is small for an
+  arm's-length glance under overhead light — check it from where the phone
+  actually sits, not held up close.
+- **Is the 30%-opacity photo still recognisable enough to match against a
+  shelf?** This is the real tension in the design: the dimming must say "stop"
+  without destroying the picker's ability to identify the item. If the photo is
+  unusable at 30%, raise the opacity (say 45–50%) rather than removing the band.
+- **Does the band cover the part of the photo that identifies the item?** It sits
+  vertically centred and inset 12px each side. On a tall product shot the middle
+  may be the only distinguishing region.
+- **Glare and angle.** Red-on-red at 95% can flatten under direct light or on a
+  screen tilted away.
+- **Is it obvious the item is still grabbable?** The green Grab one button is
+  unchanged directly below a big red warning. Confirm that reads as "warning",
+  not "disabled" — if pickers hesitate, the copy or layout needs work, not the
+  logic.
+
+Note anything off and treat it as a follow-up commit against the overlay. None
+of it requires touching the migrations, the bind path, or either reader — the
+band is presentation only.
+
+### 4.8 — Ongoing: what has been flagged
+
+```sql
+select ai.client_idempotency_key as order_id, l.sku_number_snapshot, l.qty,
+       l.short_at_bind, l.created_at
+from live_auction_item_skus l
+join live_auction_items ai on ai.id = l.auction_item_id
+where l.short_at_bind is true
+order by l.created_at desc
+limit 20;
 ```
 
 ---
