@@ -59,7 +59,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
           </span>
         </div>
         <div className="text-[11px] text-tt-muted mt-1 leading-snug">
-          All TikTok Shop orders, net of platform fee, COGS, ad spend &amp; host labor. Excludes refunds and fulfillment labor.
+          All TikTok Shop orders, net of platform fee, COGS, ad spend &amp; labor. Does not subtract refunds.
         </div>
       </div>
 

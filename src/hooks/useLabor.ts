@@ -1,25 +1,30 @@
 'use client';
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useUser } from './useUser';
+
+// Punch-derived labor for a bounded Pacific period. Host + fulfillment both measured from
+// clock-in/out instants (see /api/labor). Unconfirmed punches are surfaced as `pending`.
+export interface LaborByDate {
+  date: string;
+  host_cents: number;
+  host_hours: number;
+  fulfillment_cents: number;
+  fulfillment_hours: number;
+  unconfirmed_hours: number;
+  basis: string;
+  zero_rate_flag: boolean;
+}
 
 export interface LaborData {
   period: { from: string; to: string; tz: string };
-  host: {
-    labor_cents: number;
-    hours: number;
-    rate_dollars: number;
-    rates_differ: boolean;
-    sessions_counted: number;
-    excluded_over_cap_count: number;
-    excluded_over_cap_hours: number;
-    cap_hours: number;
-    excluded_under_10m: number;
-  };
-  packer: { labor_cents: number; note: string | null; updated_at: string | null; entered: boolean };
+  host: { labor_cents: number; hours: number; zero_rate_flag: boolean };
+  fulfillment: { labor_cents: number; hours: number };
+  pending: { hours: number; pct: number };
+  provisional: boolean; // pending hours > 10% of period labor hours → net is provisional
+  by_date: LaborByDate[];
 }
 
-// Host labor is MEASURED (live_sessions); packer labor is an entered figure per period.
 // Only fetches when a bounded period is selected (both from & to present).
 export function useLabor(from: string | null, to: string | null) {
   const { user } = useUser();
@@ -32,21 +37,5 @@ export function useLabor(from: string | null, to: string | null) {
       return res.json();
     },
     staleTime: 30_000,
-  });
-}
-
-export function useSavePackerLabor() {
-  const qc = useQueryClient();
-  return useMutation<{ ok: boolean }, Error, { from: string; to: string; packer_labor_cents: number; note?: string }>({
-    mutationFn: async (input) => {
-      const res = await fetch('/api/labor', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed to save');
-      return res.json();
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['labor'] }),
   });
 }
