@@ -12,7 +12,7 @@ import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useTikTok } from '@/hooks/useTikTok';
 import { useEntries } from '@/hooks/useEntries';
 import { useProductStats } from '@/hooks/useProductStats';
-import { useLabor, useSavePackerLabor } from '@/hooks/useLabor';
+import { useLabor } from '@/hooks/useLabor';
 import { useFilters } from '@/hooks/useFilters';
 import { useShopVideos } from '@/hooks/useShopVideos';
 import { useTikTokBusiness } from '@/hooks/useTikTokBusiness';
@@ -137,14 +137,12 @@ export default function RealDashboard() {
   const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
   const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
   const { data: returnsData } = useReturns(filters.dateFrom, filters.dateTo);
-  // Labor line — host labor is MEASURED (live_sessions × rate), packer labor is a manual entry.
+  // Labor line — host + fulfillment, both punch-derived (clock-in/out via computeLaborByDateRole).
   // Only available when a bounded period is selected (needs from & to).
   const { data: laborData } = useLabor(filters.dateFrom, filters.dateTo);
-  const savePacker = useSavePackerLabor();
   const hostLaborDollars = (laborData?.host.labor_cents || 0) / 100;
-  const packerLaborDollars = (laborData?.packer.labor_cents || 0) / 100;
-  const totalLaborDollars = hostLaborDollars + packerLaborDollars;
-  const [packerInput, setPackerInput] = useState<string>('');
+  const fulfillmentLaborDollars = (laborData?.fulfillment.labor_cents || 0) / 100;
+  const totalLaborDollars = hostLaborDollars + fulfillmentLaborDollars;
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
@@ -224,8 +222,8 @@ export default function RealDashboard() {
       };
     }
 
-    // LABOR — period cost (host measured + packer entered), subtracted from net. Independent of
-    // computePay/shifts; see /api/labor. Reduces net profit + margin for the selected period.
+    // LABOR — period cost (host + fulfillment, both punch-derived), subtracted from net. Reuses
+    // payroll's payability (see /api/labor → computeLaborByDateRole). Reduces net + margin.
     if (totalLaborDollars > 0) {
       const afterLabor = result.totalNetProfit - totalLaborDollars;
       result = { ...result, totalNetProfit: afterLabor, avgMargin: result.totalGMV > 0 ? (afterLabor / result.totalGMV) * 100 : 0 };
@@ -415,49 +413,43 @@ export default function RealDashboard() {
         {activeView === 'dashboard' && (
           <>
             <SummaryCards metrics={metrics} prevMetrics={prevMetrics} />
-            {/* LABOR — two separate lines. Host is MEASURED (live_sessions); packer is ENTERED. */}
+            {/* LABOR — host + fulfillment, both PUNCH-DERIVED (clock-in/out). Provisional when a
+                material share of hours is still awaiting manager confirmation. */}
             {laborData && (
               <div className="rounded-xl border border-tt-border bg-tt-card p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm font-semibold text-tt-text">Labor (hosts measured; fulfillment not yet tracked)</div>
-                  <div className="text-sm text-tt-muted">−${totalLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} from net</div>
+                <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                  <div className="text-sm font-semibold text-tt-text">Labor · punch-derived</div>
+                  <div className={`text-sm ${laborData.provisional ? 'text-tt-yellow' : 'text-tt-muted'}`}>
+                    −${totalLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} from net
+                    {laborData.provisional && <span> · +{laborData.pending.hours}h pending confirmation</span>}
+                  </div>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="rounded-lg bg-tt-card-hover px-3 py-2">
-                    <div className="text-xs text-tt-muted">Host labor · measured</div>
+                    <div className="text-xs text-tt-muted">Host labor · punch-derived</div>
                     <div className="text-lg font-semibold text-tt-text">
                       ${hostLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      <span className="ml-2 text-xs font-normal text-tt-muted">{laborData.host.hours}h × ${laborData.host.rate_dollars}/h</span>
+                      <span className="ml-2 text-xs font-normal text-tt-muted">{laborData.host.hours}h</span>
                     </div>
-                    {(laborData.host.excluded_over_cap_count > 0 || laborData.host.rates_differ) && (
+                    {laborData.host.zero_rate_flag && (
                       <div className="mt-1 text-[11px] text-tt-yellow" role="note">
-                        ⚠ undercount: {laborData.host.excluded_over_cap_count} session{laborData.host.excluded_over_cap_count === 1 ? '' : 's'} &gt;{laborData.host.cap_hours}h excluded ({laborData.host.excluded_over_cap_hours}h){laborData.host.rates_differ ? '; hosts have differing rates — using the lowest' : ''}
+                        ⚠ some hosts have a $0 rate — hours counted, cost flagged (not silently $0)
                       </div>
                     )}
                   </div>
                   <div className="rounded-lg bg-tt-card-hover px-3 py-2">
-                    <div className="text-xs text-tt-muted">Fulfillment labor · not yet tracked {laborData.packer.entered ? '(manual)' : ''}</div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-tt-muted">$</span>
-                      <input
-                        type="number" min="0" step="0.01" inputMode="decimal"
-                        placeholder={(laborData.packer.labor_cents / 100).toFixed(2)}
-                        value={packerInput}
-                        onChange={(e) => setPackerInput(e.target.value)}
-                        className="w-32 rounded-md bg-tt-bg border border-tt-border px-2 py-1 text-lg font-semibold text-tt-text focus:outline-none focus:ring-2 focus:ring-tt-cyan"
-                      />
-                      <button
-                        type="button"
-                        disabled={savePacker.isPending || packerInput === '' || !filters.dateFrom || !filters.dateTo}
-                        onClick={() => savePacker.mutate({ from: filters.dateFrom!, to: filters.dateTo!, packer_labor_cents: Math.round(parseFloat(packerInput || '0') * 100) }, { onSuccess: () => setPackerInput('') })}
-                        className="rounded-md border border-tt-border-hover bg-tt-card-hover px-3 py-1 text-sm text-tt-text hover:bg-white/[0.06] disabled:opacity-50 cursor-pointer"
-                      >
-                        {savePacker.isPending ? 'Saving…' : 'Save'}
-                      </button>
+                    <div className="text-xs text-tt-muted">Fulfillment labor · punch-derived</div>
+                    <div className="text-lg font-semibold text-tt-text">
+                      ${fulfillmentLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      <span className="ml-2 text-xs font-normal text-tt-muted">{laborData.fulfillment.hours}h</span>
                     </div>
-                    <div className="mt-1 text-[11px] text-tt-muted">No reliable measured pack-time — enter the period figure.</div>
                   </div>
                 </div>
+                {laborData.provisional && (
+                  <div className="mt-2 text-[11px] text-tt-yellow" role="note">
+                    Provisional — {laborData.pending.hours}h ({laborData.pending.pct}% of labor) awaiting manager confirmation; net settles as punches confirm.
+                  </div>
+                )}
               </div>
             )}
             <Charts chartData={chartData} />
