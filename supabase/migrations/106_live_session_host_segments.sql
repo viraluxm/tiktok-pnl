@@ -473,38 +473,6 @@ grant  execute on function public.open_session_host_segment(uuid, uuid, timestam
 grant  execute on function public.close_session_host_segment(uuid, timestamptz, text) to authenticated;
 
 -- ══════════════════════════════════════════════════════════════════════════════
--- D. BACKFILL — one legacy segment per already-hosted session
--- ══════════════════════════════════════════════════════════════════════════════
--- 194 rows expected (239 sessions; 194 with a non-NULL host_id; 0 with a NULL started_at).
---
--- Calls lensed_session_activity_end — THE shared definition — so the backfill and read path
--- can never disagree about where a show ended.
---
--- Sessions with no recorded end are backfilled as OPEN segments (ended_at NULL) rather than
--- closed at their last capture: 6 such sessions exist and some are live right now. An open
--- segment lets the extension close it naturally, and the read path bounds it via
--- lensed_session_activity_end. Guarded so a re-run is a no-op.
-insert into public.live_session_host_segments
-  (user_id, session_id, host_id, started_at, ended_at, source, ended_source)
-select
-  ls.user_id,
-  ls.id,
-  ls.host_id,
-  ls.started_at,
-  case
-    when ls.ended_at is null then null   -- leave open; the read path bounds it
-    else public.lensed_session_activity_end(ls.id)
-  end,
-  'backfill_legacy',
-  case when ls.ended_at is null then null else 'backfill_legacy' end
-from public.live_sessions ls
-where ls.host_id is not null
-  and ls.started_at is not null
-  and not exists (
-    select 1 from public.live_session_host_segments s where s.session_id = ls.id
-  );
-
--- ══════════════════════════════════════════════════════════════════════════════
 -- E. READ FUNCTIONS
 -- ══════════════════════════════════════════════════════════════════════════════
 -- Structure, timezone handling and fee model copied from pnl_show_hourly (040): LANGUAGE sql
@@ -563,7 +531,11 @@ as $function$
   seg as (
     select s.id, s.host_id,
            greatest(s.started_at, ses.started_at) as eff_start,
-           least(coalesce(s.ended_at, 'infinity'::timestamptz), ses.eff_session_end) as eff_end
+           least(coalesce(s.ended_at, 'infinity'::timestamptz), ses.eff_session_end) as eff_end,
+           -- Is this segment's end the SESSION ceiling rather than its own recorded close?
+           -- Drives the closed-vs-half-open boundary below.
+           (least(coalesce(s.ended_at, 'infinity'::timestamptz), ses.eff_session_end)
+              >= ses.eff_session_end) as ends_at_session_ceiling
       from public.live_session_host_segments s
       join ses on ses.id = s.session_id
      where s.superseded_by is null
@@ -586,7 +558,18 @@ as $function$
   assigned as (
     select sale.item_id, sale.price_cents, seg.host_id, (seg.id is not null) as matched
       from sale
-      left join seg on sale.sale_at >= seg.eff_start and sale.sale_at < seg.eff_end
+      -- BOUNDARY. Half-open [eff_start, eff_end) BETWEEN segments, so a sale landing exactly
+      -- on a host switch belongs to the incoming host and to exactly one segment.
+      --
+      -- CLOSED at the session ceiling, because that ceiling IS the last sale's own instant
+      -- (lensed_session_activity_end returns max(sale_at) of the run). A purely half-open
+      -- comparison therefore excludes the final sale of EVERY session — caught in the 106
+      -- apply rehearsal, where cd3c1e95 reported Bella 807 + Unattributed 1 instead of
+      -- Bella 808. One misattributed sale per session, always the last one.
+      left join seg
+        on sale.sale_at >= seg.eff_start
+       and (sale.sale_at < seg.eff_end
+            or (seg.ends_at_session_ceiling and sale.sale_at <= seg.eff_end))
   ),
   -- UNION of two independent contributions, then one GROUP BY. Time comes from the segments
   -- (so a segment with zero sales still reports its minutes); sales come from the auctions (so
@@ -634,7 +617,11 @@ as $function$
   seg as (
     select s.id, s.host_id,
            greatest(s.started_at, ses.started_at) as eff_start,
-           least(coalesce(s.ended_at, 'infinity'::timestamptz), ses.eff_session_end) as eff_end
+           least(coalesce(s.ended_at, 'infinity'::timestamptz), ses.eff_session_end) as eff_end,
+           -- Is this segment's end the SESSION ceiling rather than its own recorded close?
+           -- Drives the closed-vs-half-open boundary below.
+           (least(coalesce(s.ended_at, 'infinity'::timestamptz), ses.eff_session_end)
+              >= ses.eff_session_end) as ends_at_session_ceiling
       from public.live_session_host_segments s
       join ses on ses.id = s.session_id
      where s.superseded_by is null
@@ -659,7 +646,13 @@ as $function$
   assigned as (
     select sale.item_id, sale.price_cents, sale.sale_local, seg.host_id, (seg.id is not null) as matched
       from sale
-      left join seg on sale.sale_at >= seg.eff_start and sale.sale_at < seg.eff_end
+      -- Same boundary rule as pnl_show_host_segments: half-open between segments, closed at
+      -- the session ceiling. Kept identical so the two functions can never disagree about
+      -- which host owns a given sale.
+      left join seg
+        on sale.sale_at >= seg.eff_start
+       and (sale.sale_at < seg.eff_end
+            or (seg.ends_at_session_ceiling and sale.sale_at <= seg.eff_end))
   )
   select date_trunc('hour', a.sale_local)::timestamp,
     extract(hour from a.sale_local)::integer,
@@ -688,5 +681,37 @@ grant  execute on function public.lensed_session_contiguity_gap() to authenticat
 grant  execute on function public.lensed_session_activity_end(uuid) to authenticated;
 grant  execute on function public.pnl_show_host_segments(uuid, text) to authenticated;
 grant  execute on function public.pnl_show_hourly_by_host(uuid, text) to authenticated;
+-- ══════════════════════════════════════════════════════════════════════════════
+-- D. BACKFILL — one legacy segment per already-hosted session
+-- ══════════════════════════════════════════════════════════════════════════════
+-- 194 rows expected (239 sessions; 194 with a non-NULL host_id; 0 with a NULL started_at).
+--
+-- Calls lensed_session_activity_end — THE shared definition — so the backfill and read path
+-- can never disagree about where a show ended.
+--
+-- Sessions with no recorded end are backfilled as OPEN segments (ended_at NULL) rather than
+-- closed at their last capture: 6 such sessions exist and some are live right now. An open
+-- segment lets the extension close it naturally, and the read path bounds it via
+-- lensed_session_activity_end. Guarded so a re-run is a no-op.
+insert into public.live_session_host_segments
+  (user_id, session_id, host_id, started_at, ended_at, source, ended_source)
+select
+  ls.user_id,
+  ls.id,
+  ls.host_id,
+  ls.started_at,
+  case
+    when ls.ended_at is null then null   -- leave open; the read path bounds it
+    else public.lensed_session_activity_end(ls.id)
+  end,
+  'backfill_legacy',
+  case when ls.ended_at is null then null else 'backfill_legacy' end
+from public.live_sessions ls
+where ls.host_id is not null
+  and ls.started_at is not null
+  and not exists (
+    select 1 from public.live_session_host_segments s where s.session_id = ls.id
+  );
+
 
 commit;
