@@ -36,7 +36,7 @@ function boot() {
   const read = (keys) => { const o = {}; (Array.isArray(keys) ? keys : keys == null ? Object.keys(store) : [keys]).forEach((k) => { if (k in store) o[k] = store[k]; }); return o; };
   window.chrome = {
     runtime: {
-      lastError: null, id: 't', getManifest: () => ({ version: '0.2.23' }),
+      lastError: null, id: 't', getManifest: () => ({ version: MANIFEST_VERSION }),
       onMessage: { addListener: (fn) => { onMessage = fn; } }, onMessageExternal: { addListener: () => {} }, sendMessage: () => {},
     },
     storage: { local: {
@@ -47,15 +47,17 @@ function boot() {
     tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => Promise.resolve(), onRemoved: { addListener() {} } },
   };
   const captureCalls = [];
+  const captureBodies = [];   // request BODIES, so the row literal itself is assertable
   let captureQueue = [];
   window.fetch = (url, opts) => {
     const u = String(url);
-    if (u.includes('/rest/v1/capture_events')) { captureCalls.push(u); return Promise.resolve(captureQueue.shift() || httpResp(201, '[]', [{}])); }
+    if (u.includes('/rest/v1/capture_events')) { captureCalls.push(u); captureBodies.push(opts && opts.body); return Promise.resolve(captureQueue.shift() || httpResp(201, '[]', [{}])); }
     return Promise.resolve(httpResp(200, '[]', []));
   };
   window.eval(bgText);
-  return { getOnMessage: () => onMessage, captureCalls, setCaptureQueue: (q) => { captureQueue = q; } };
+  return { getOnMessage: () => onMessage, captureCalls, captureBodies, setCaptureQueue: (q) => { captureQueue = q; } };
 }
+const MANIFEST_VERSION = '0.2.23';   // what the mocked chrome.runtime.getManifest() reports
 const send = (fn, msg) => new Promise((res) => { const r = fn(msg, {}, (resp) => res(resp)); if (r !== true) res(undefined); });
 const sale = (id, ok = true) => ({ orderId: id, buyerUsername: 'x', sellingPrice: '$5', isPaymentSuccessful: ok, roomId: 'room1', orderStatus: 1 });
 
@@ -70,6 +72,17 @@ async function run() {
   ok('A) capture upsert sends on_conflict=user_id,order_id', /on_conflict=user_id(%2C|,)order_id/.test(sw.captureCalls[0] || ''), sw.captureCalls[0]);
   ok('B) no-staged + capture ok → reply ok:true, bound:false', r1 && r1.ok === true && r1.bound === false, JSON.stringify(r1));
   ok('B) reason is no_staged (informational, not error)', r1 && r1.reason === 'no_staged', JSON.stringify(r1));
+
+  // A2) The capture row BODY — until now this suite only asserted request URLs, so every
+  // field in the row literal was untested. ext_version is the immediate reason (094 added the
+  // column and nothing populated it for 76,673 rows), but the standing value is that Phase 2
+  // edits this same literal to stamp the host, and a silently-dropped field would look
+  // identical to a working write from the outside.
+  const capBody = JSON.parse(sw.captureBodies[0] || '{}');
+  ok('A2) capture row carries ext_version from the manifest',
+     capBody.ext_version === MANIFEST_VERSION, JSON.stringify(capBody.ext_version));
+  ok('A2) capture row still carries the identifying fields',
+     capBody.order_id === 'order-A-1' && capBody.room_id === 'room1', JSON.stringify(capBody));
 
   // B + E: capture fails persistently (both attempts 409) → reply ok:false with real code.
   const before = sw.captureCalls.length;
