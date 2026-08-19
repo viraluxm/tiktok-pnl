@@ -1246,6 +1246,7 @@ function buildCaptureRow(sale, boundSkuId) {
     order_status: sale.orderStatus,
     bound_sku_id: boundSkuId || null,
     raw_payload: sale,
+    ext_version: EXT_VERSION,
   };
 }
 
@@ -1271,6 +1272,7 @@ async function upsertCaptureEvent(sale, boundSkuId) {
     order_status: sale.orderStatus,
     bound_sku_id: boundSkuId || null,
     raw_payload: sale,
+    ext_version: EXT_VERSION,
   };
   try {
     await supabaseUpsert('capture_events', row, 'user_id,order_id');
