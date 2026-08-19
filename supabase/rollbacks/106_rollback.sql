@@ -52,13 +52,14 @@ drop function if exists public.lensed_guard_host_segment_append_only();
 --    live_sessions, restoring pre-106 delete behaviour there.
 drop table if exists public.live_session_host_segments;
 
--- 5. Session-end helpers LAST — the read functions and the backfill referenced them.
---    NOTE: if any later migration or app code has started calling lensed_sane_session_end
---    (it is the single shared definition of a session end, so it is designed to be reused),
---    these DROPs will fail. That failure is correct — resolve the dependency deliberately
---    rather than dropping a definition something else now relies on.
-drop function if exists public.lensed_session_effective_end(uuid);
-drop function if exists public.lensed_session_activity(uuid);
-drop function if exists public.lensed_sane_session_end(timestamptz, timestamptz, timestamptz, timestamptz, timestamptz);
+-- 5. Session activity-end helper LAST — the read functions and the backfill referenced it.
+--    NOTE: if any later migration or app code has started calling
+--    lensed_session_activity_end (it is THE single shared definition of when a show stopped
+--    selling, and is designed to be converged onto by the other four session-end
+--    definitions), this DROP will fail. That failure is correct — resolve the dependency
+--    deliberately rather than dropping a definition something else now relies on.
+--    Also delete src/lib/sessions/sessionEnd.drift.test.mjs, which asserts the SQL constant
+--    matches autoEnd.ts IDLE_THRESHOLD_MIN and will fail once the function is gone.
+drop function if exists public.lensed_session_activity_end(uuid);
 
 commit;

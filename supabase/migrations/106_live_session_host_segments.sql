@@ -31,98 +31,66 @@
 begin;
 
 -- ══════════════════════════════════════════════════════════════════════════════
--- A0. SESSION-END HELPERS — the single definition of "when did this show end"
+-- A0. SESSION ACTIVITY END — the single definition of "when did this show stop selling"
 -- ══════════════════════════════════════════════════════════════════════════════
 -- This expression drives total_minutes AND auction attribution AND therefore gates bonus pay.
 -- It exists exactly ONCE, here, and is called by both the backfill (section D) and the read
 -- path (section E). Do not inline a variant anywhere.
 --
--- WHY IT IS NOT "just use ended_at": end_source is unreliable in BOTH directions, measured:
+-- THE RULE, in one line: the show ran from started_at to the last sale in its first contiguous
+-- run of sales. live_sessions.ended_at is NOT consulted at all.
 --
---   TOO LATE  — auto_ender overshoot. Session 9f3509e7 records ended_at 2026-08-18 16:00Z
---               while its last capture is 08:04Z: ~8h of phantom show time.
---   TOO EARLY — auto_ender/manual_recovery closing a session that was still selling. Three
---               sessions strand 408 captures AFTER ended_at, running 1.7–2.1h past it. The
---               first stranded capture arrives 0.3–2.3 MINUTES after the recorded end, i.e.
---               the show plainly continued; it was not a second show.
+-- WHY ended_at IS NOT CONSULTED. end_source is unreliable in both directions, measured:
+--   TOO LATE  — 2 sessions overshoot by a combined 21.7h. 9f3509e7 records ended_at
+--               2026-08-18 19:18Z with its last sale at 08:04Z. 2a3ea085 records 11.0h with
+--               its last sale 2.5 MINUTES after the session started.
+--   TOO EARLY — 8 sessions keep selling past the recorded end, the next sale landing
+--               0.3-2.3 min after it.
+-- A rule that ever lets the claim win has to decide which failure it is; a rule that always
+-- measures the sales does not. So: extend when the claim was early, pull back when it was
+-- late, trim when it was within. One branch, no thresholds comparing claim against evidence.
 --
--- Clamping to raw ended_at would have dumped those 408 real sales into 'Unattributed'.
+-- WHY last_seen_at IS A CEILING ONLY. The heartbeat means "the tab is open", not "a person is
+-- in the seat" — background.js:203-206 pings it deliberately regardless of whether auctions
+-- close. As an EXTENDER it is worth exactly zero and actively harmful: an earlier draft let it
+-- carry activity past the last sale and credited 46.9 phantom hours across three sessions
+-- whose tabs were simply left open overnight. It may only pull an end EARLIER (the show cannot
+-- have outlived the tab), never push one later.
 --
--- The rule below is symmetric: pull the end BACK when the claim runs far past the last
--- observed activity, push it FORWARD when activity demonstrably continued — but only when
--- that activity is CONTIGUOUS with the recorded end (<= 30 min gap), so a genuinely separate
--- show in the same room is never merged in. Measured worst case is 2.3 min, so the 30-minute
--- guard is loose enough for reality and tight enough to refuse a real gap.
+-- CLOCK. Sales are measured on coalesce(ordered_at, created_at) — the SALE clock, the same
+-- anchor the attribution CTEs use, so the window and the sales inside it share one clock.
+-- capture_events.created_at is the WRITE clock: over 30 days 931 captures land >5 min after
+-- their order, 461 >60 min, worst case 50.3 hours.
 
--- PURE rule. No table access, so it is trivially testable and cannot drift per call site.
-create or replace function public.lensed_sane_session_end(
-  p_started_at               timestamptz,
-  p_ended_at                 timestamptz,
-  p_activity_end             timestamptz,  -- greatest(last capture, last heartbeat), room-scoped
-  p_first_activity_after_end timestamptz,  -- earliest activity strictly after p_ended_at, else NULL
-  p_now                      timestamptz default now()
-)
+create or replace function public.lensed_session_activity_end(p_session_id uuid)
 returns timestamptz
 language sql
 stable
 as $$
-  -- GREATEST/LEAST ignore NULLs in Postgres, which is what makes the null-handling below safe.
-  select greatest(
-    p_started_at,
-    case
-      -- (1) No recorded end — the session is open (genuinely live, or orphaned). Use the last
-      --     evidence of life, capped at now(). Heartbeat is included in p_activity_end so a
-      --     no-sale lull does not truncate a live show.
-      when p_ended_at is null
-        then least(p_now, coalesce(p_activity_end, p_started_at))
-
-      -- (2) No activity evidence at all — nothing to check the claim against, so take it.
-      when p_activity_end is null
-        then p_ended_at
-
-      -- (3) ENDED TOO EARLY — activity continued past the recorded end AND resumed
-      --     contiguously. Extend to the real last activity.
-      when p_ended_at < p_activity_end
-       and p_first_activity_after_end is not null
-       and p_first_activity_after_end <= p_ended_at + interval '30 minutes'
-        then p_activity_end
-
-      -- (4) ENDED TOO LATE — the claim runs more than 6h past the last activity. Pull back.
-      --     6h is the duration route's existing tolerance, kept deliberately identical.
-      when p_ended_at > p_activity_end + interval '6 hours'
-        then p_activity_end
-
-      -- (5) The claim is sane.
-      else p_ended_at
-    end
-  )
-$$;
-
-comment on function public.lensed_sane_session_end(timestamptz,timestamptz,timestamptz,timestamptz,timestamptz) is
-  'THE definition of a live session end. Symmetric: pulls back an over-long claim, extends a '
-  'premature one when activity continued contiguously. Shared by the 106 backfill and the '
-  'segment read functions — never reimplement it.';
-
--- Activity evidence for one session: latest capture in the SAME ROOM, plus the heartbeat,
--- bounded above by the next session in that room so one show can never absorb the next.
---
--- ROOM SCOPING IS DELIBERATE and differs from /api/live/sessions/[id]/duration, which scopes
--- by user_id alone. Every store shares ONE owner account here, so user-only scoping picks up
--- other stores' captures during concurrent shows — measured: 7 of 8 sampled sessions resolve
--- differently, one by 8 hours. room_id is 100% populated (68,115/68,115 over 30d) and matches
--- a session 99.4% of the time.
---
--- NOTE it is NOT capped at ended_at. That cap is precisely what hides the ended-too-early case.
-create or replace function public.lensed_session_activity(p_session_id uuid)
-returns table(activity_end timestamptz, first_activity_after_end timestamptz)
-language sql
-stable
-as $$
-  with ses as (
-    select ls.id, ls.user_id, ls.tiktok_live_id, ls.started_at, ls.ended_at, ls.last_seen_at
+  with const as (
+    select
+      -- CONTIGUITY GAP — a sales gap larger than this ends the run. IMPORTED, not invented:
+      -- this is IDLE_THRESHOLD_MIN from src/lib/sessions/autoEnd.ts:12, the threshold the
+      -- auto-ender has been using in production to decide a live is over. Keeping our own
+      -- number here would mean two subsystems disagreeing about when a show ended.
+      -- Held in sync by the drift test at src/lib/sessions/sessionEnd.drift.test.mjs — if you
+      -- change one, that test fails until you change the other.
+      interval '45 minutes' as contiguity_gap,
+      -- WIND-DOWN GRACE — deliberately ZERO, named rather than absent so the decision is
+      -- visible. We do NOT invent a tail after the last sale. Direction of the bias, stated
+      -- openly: grace=0 shortens measured show time, which RAISES revenue-per-hour (favours
+      -- the host) and UNDERSTATES session-fallback labour. Both are conservative in the
+      -- direction we can defend; a non-zero grace would manufacture selling time nobody
+      -- observed.
+      interval '0 minutes'  as wind_down_grace
+  ),
+  ses as (
+    select ls.id, ls.user_id, ls.tiktok_live_id, ls.started_at, ls.last_seen_at
       from public.live_sessions ls
      where ls.id = p_session_id
   ),
+  -- Upper bound: the next session in the SAME room. One show can never absorb the next even
+  -- if the sales run straight through.
   nxt as (
     select min(ls2.started_at) as next_start
       from public.live_sessions ls2, ses
@@ -130,63 +98,48 @@ as $$
        and ls2.user_id = ses.user_id
        and ls2.started_at > ses.started_at
   ),
-  -- SALE CLOCK, not write clock. capture_events.created_at is when the EXTENSION wrote the
-  -- row, which for a queue-flushed sale can trail the actual order by hours — measured over
-  -- 30 days: 931 captures land >5 min late, 461 land >60 min late, worst case 50.3 HOURS.
-  -- Using created_at here would let a single late flush stretch a segment's window long past
-  -- the show while the sale itself attributes at its ordered_at inside the real window —
-  -- inflating total_minutes without inflating revenue, i.e. exactly the minutes/revenue
-  -- disagreement this design claims to prevent.
-  --
-  -- coalesce(ordered_at, created_at) is the SAME anchor the attribution CTEs use, so the
-  -- window and the sales that fall in it are measured on one clock. (ordered_at is in practice
-  -- 100% populated — 0 nulls in 30 days — so the coalesce is belt-and-braces.)
-  caps as (
-    select max(coalesce(ce.ordered_at, ce.created_at)) as last_cap,
-           min(coalesce(ce.ordered_at, ce.created_at)) filter (
-             where ses.ended_at is not null and coalesce(ce.ordered_at, ce.created_at) > ses.ended_at
-           ) as first_after
+  ev as (
+    select coalesce(ce.ordered_at, ce.created_at) as at
       from public.capture_events ce, ses, nxt
      where ce.room_id = ses.tiktok_live_id
        and ce.user_id = ses.user_id
        and coalesce(ce.ordered_at, ce.created_at) >= ses.started_at
        and (nxt.next_start is null or coalesce(ce.ordered_at, ce.created_at) < nxt.next_start)
+  ),
+  gaps as (
+    select at, at - lag(at) over (order by at) as gap from ev
+  ),
+  -- The first sale that opens a gap wider than the guard. The contiguous run ends before it;
+  -- everything from there on belongs to a different stretch of activity, not this show.
+  cut as (
+    select min(g.at) as cut_at from gaps g, const where g.gap > const.contiguity_gap
+  ),
+  run as (
+    select max(g.at) as run_end
+      from gaps g, cut
+     where cut.cut_at is null or g.at < cut.cut_at
   )
-  -- HEARTBEAT IS BOUNDED, and this bound is load-bearing. last_seen_at means "the tab is
-  -- open", NOT "the show is running" (background.js:203-206 pings it deliberately regardless
-  -- of whether auctions are closing). Unbounded, a tab left open overnight reads as show time:
-  -- measured, three sessions whose captures stopped ~2 minutes after their end carried a
-  -- heartbeat for 15.5-15.7 MORE hours, and an earlier draft of this helper credited all of
-  -- it — 46.9 phantom hours across those three alone.
-  --
-  -- So the heartbeat may carry activity at most 30 minutes past the last capture: enough to
-  -- cover a genuine no-sale lull on a live show, never enough to invent one. Same 30 minutes
-  -- as the contiguity guard in lensed_sane_session_end — one constant, not two.
-  --
-  -- The CASE is explicit because GREATEST/LEAST ignore NULLs in Postgres: a bare
-  -- least(last_seen_at, last_cap + 30 min) would silently return last_cap + 30 min when
-  -- last_seen_at is NULL, inventing half an hour from no evidence at all.
-  select
-    case
-      when ses.last_seen_at is null then caps.last_cap
-      when caps.last_cap    is null then ses.last_seen_at
-      else greatest(caps.last_cap, least(ses.last_seen_at, caps.last_cap + interval '30 minutes'))
-    end,
-    caps.first_after
-    from caps, ses
+  select case
+    -- No sales in the window at all. The heartbeat is NOT allowed to stand in for evidence
+    -- (that is the whole point of it being a ceiling), so the honest answer is a zero-length
+    -- span: no observed sales, no measured show time.
+    when (select run_end from run) is null then ses.started_at
+    else greatest(
+      ses.started_at,
+      least(
+        (select run_end from run) + (select wind_down_grace from const),
+        ses.last_seen_at   -- CEILING ONLY. NULL last_seen_at drops out: LEAST ignores NULLs.
+      )
+    )
+  end
+  from ses
 $$;
 
--- Composed convenience wrapper for the read path.
-create or replace function public.lensed_session_effective_end(p_session_id uuid)
-returns timestamptz
-language sql
-stable
-as $$
-  select public.lensed_sane_session_end(ls.started_at, ls.ended_at, a.activity_end, a.first_activity_after_end)
-    from public.live_sessions ls
-    cross join lateral public.lensed_session_activity(ls.id) a
-   where ls.id = p_session_id
-$$;
+comment on function public.lensed_session_activity_end(uuid) is
+  'THE definition of when a live session stopped selling: last sale of the first contiguous '
+  'run (45-min gap guard, imported from autoEnd.ts IDLE_THRESHOLD_MIN), zero wind-down grace, '
+  'ceilinged by last_seen_at. live_sessions.ended_at is never consulted. Shared by the 106 '
+  'backfill and the segment read functions — never reimplement it.';
 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- A. TABLE
@@ -509,13 +462,13 @@ grant  execute on function public.close_session_host_segment(uuid, timestamptz, 
 -- ══════════════════════════════════════════════════════════════════════════════
 -- 194 rows expected (239 sessions; 194 with a non-NULL host_id; 0 with a NULL started_at).
 --
--- Calls lensed_sane_session_end — THE shared definition — so the backfill and the read path
+-- Calls lensed_session_activity_end — THE shared definition — so the backfill and read path
 -- can never disagree about where a show ended.
 --
 -- Sessions with no recorded end are backfilled as OPEN segments (ended_at NULL) rather than
 -- closed at their last capture: 6 such sessions exist and some are live right now. An open
 -- segment lets the extension close it naturally, and the read path bounds it via
--- lensed_session_effective_end. Guarded so a re-run is a no-op.
+-- lensed_session_activity_end. Guarded so a re-run is a no-op.
 insert into public.live_session_host_segments
   (user_id, session_id, host_id, started_at, ended_at, source, ended_source)
 select
@@ -525,13 +478,11 @@ select
   ls.started_at,
   case
     when ls.ended_at is null then null   -- leave open; the read path bounds it
-    else public.lensed_sane_session_end(
-           ls.started_at, ls.ended_at, a.activity_end, a.first_activity_after_end)
+    else public.lensed_session_activity_end(ls.id)
   end,
   'backfill_legacy',
   case when ls.ended_at is null then null else 'backfill_legacy' end
 from public.live_sessions ls
-cross join lateral public.lensed_session_activity(ls.id) a
 where ls.host_id is not null
   and ls.started_at is not null
   and not exists (
@@ -549,7 +500,7 @@ where ls.host_id is not null
 -- [eff_start, eff_end) contains coalesce(ce.ordered_at, ce.created_at), so an instant landing
 -- exactly on a switch boundary belongs to exactly one host.
 --
--- EFFECTIVE END uses lensed_session_effective_end — NOT raw session.ended_at. The same clamped
+-- EFFECTIVE END uses lensed_session_activity_end — session.ended_at is never consulted. The same
 -- interval drives total_minutes AND auction attribution, so minutes and revenue can never
 -- disagree about a segment's bounds.
 --
@@ -569,7 +520,7 @@ language sql
 stable
 as $function$
   with ses as (
-    select ls.id, ls.started_at, public.lensed_session_effective_end(ls.id) as eff_session_end
+    select ls.id, ls.started_at, public.lensed_session_activity_end(ls.id) as eff_session_end
       from public.live_sessions ls where ls.id = p_session_id
   ),
   seg as (
@@ -639,7 +590,7 @@ language sql
 stable
 as $function$
   with ses as (
-    select ls.id, ls.started_at, public.lensed_session_effective_end(ls.id) as eff_session_end
+    select ls.id, ls.started_at, public.lensed_session_activity_end(ls.id) as eff_session_end
       from public.live_sessions ls where ls.id = p_session_id
   ),
   seg as (
@@ -691,14 +642,10 @@ $function$;
 
 -- Read + helper functions are SECURITY INVOKER, so RLS already scopes them to the caller.
 -- anon is revoked anyway — an unauthenticated caller has no business reaching them.
-revoke execute on function public.lensed_sane_session_end(timestamptz,timestamptz,timestamptz,timestamptz,timestamptz) from public, anon;
-revoke execute on function public.lensed_session_activity(uuid) from public, anon;
-revoke execute on function public.lensed_session_effective_end(uuid) from public, anon;
+revoke execute on function public.lensed_session_activity_end(uuid) from public, anon;
 revoke execute on function public.pnl_show_host_segments(uuid, text) from public, anon;
 revoke execute on function public.pnl_show_hourly_by_host(uuid, text) from public, anon;
-grant  execute on function public.lensed_sane_session_end(timestamptz,timestamptz,timestamptz,timestamptz,timestamptz) to authenticated;
-grant  execute on function public.lensed_session_activity(uuid) to authenticated;
-grant  execute on function public.lensed_session_effective_end(uuid) to authenticated;
+grant  execute on function public.lensed_session_activity_end(uuid) to authenticated;
 grant  execute on function public.pnl_show_host_segments(uuid, text) to authenticated;
 grant  execute on function public.pnl_show_hourly_by_host(uuid, text) to authenticated;
 
