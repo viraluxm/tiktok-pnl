@@ -32,10 +32,16 @@ export interface ClaimResult {
 export async function claimShift(employee: Employee, instanceId: string): Promise<ClaimResult> {
   const admin = createAdminClient();
 
+  // OWNER SCOPE. This runs service-role (RLS bypassed) from a PUBLIC tokenized route, and
+  // instanceId is client-supplied — the owner filter is the only thing binding the instance to
+  // the caller's account. Without it a token holder who learned another owner's instance UUID
+  // could claim it. release.ts gets this for free via `.eq('employee_id', employee.id)` (you can
+  // only release your own); a claimer does not own the row yet, so it must be explicit here.
   const { data: inst, error } = await admin
     .from('shift_instances')
     .select('id, status, starts_at, ends_at, shift_date, user_id, released_by, source, role')
     .eq('id', instanceId)
+    .eq('user_id', employee.user_id)
     .maybeSingle();
   if (error) throw new ScheduleError('READ_FAILED', error.message);
   if (!inst) throw new ScheduleError('NOT_FOUND');
@@ -48,7 +54,10 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
   let releaserRole: string | null = null;
   if (inst.released_by) {
     const { data: releaser, error: relErr } = await admin
-      .from('employees').select('role').eq('id', inst.released_by).maybeSingle();
+      .from('employees').select('role')
+      .eq('id', inst.released_by)
+      .eq('user_id', employee.user_id)   // same owner scope as the instance read above
+      .maybeSingle();
     if (relErr) throw new ScheduleError('READ_FAILED', relErr.message);
     releaserRole = releaser?.role ?? null;
   }
@@ -92,7 +101,9 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
       .from('shift_instances')
       .update({ status: 'claimed', employee_id: employee.id, source: 'claim' })
       .eq('id', instanceId)
+      .eq('user_id', employee.user_id)
       .eq('status', 'released')
+      .is('employee_id', null)
       .select('id, shift_date, user_id')
       .maybeSingle();
     if (uErr) throw new ScheduleError('CLAIM_FAILED', uErr.message);
@@ -136,6 +147,29 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
   // approval (Part 7). This is a deliberate departure from the literal spec pseudocode, which
   // wrote the claimed event in both branches; writing it for an unapproved claim would corrupt
   // drop netting. Flagged in the Deploy B summary.
+
+  // DUPLICATE-PENDING GUARD (application-level). shift_claims has NO unique constraint (085
+  // defines only a status CHECK and a partial index), and this insert is unconditional, so a
+  // double-tap or a second device files two identical 'pending' rows and the manager sees the
+  // same request twice — and, since main's alertPendingClaim runs below, gets two SMS for it.
+  // Keyed on (instance, claimer): two DIFFERENT employees filing on the same shift is
+  // legitimate, and the manager picks between them.
+  // Returns idempotently rather than throwing — the claim is already queued, so nothing changed
+  // and an error would be wrong. Returning HERE also skips the alert, which is the point.
+  // NOT atomic: check-then-insert can still lose a truly simultaneous double-submit.
+  // TODO: replace with `unique (shift_instance_id, claimed_by) where status = 'pending'` on
+  // shift_claims the next time that schema is touched, then this read becomes redundant.
+  const { data: dupe, error: dupErr } = await admin
+    .from('shift_claims')
+    .select('id')
+    .eq('user_id', inst.user_id)
+    .eq('shift_instance_id', instanceId)
+    .eq('claimed_by', employee.id)
+    .eq('status', 'pending')
+    .limit(1);
+  if (dupErr) throw new ScheduleError('READ_FAILED', dupErr.message);
+  if ((dupe ?? []).length > 0) return { result: 'pending_approval', projected_week_hours: projected };
+
   const { error: pErr } = await admin.from('shift_claims').insert({
     user_id: inst.user_id,
     shift_instance_id: instanceId,

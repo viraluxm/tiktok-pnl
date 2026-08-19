@@ -256,12 +256,12 @@ export async function POST(req: Request) {
 
   // 4) SKU lines, attributed to their order via auction_item_id. Snapshot fields are the
   //    authoritative "what was sold" (survive later inventory edits/deletes).
-  type Line = { order_id: string; inventory_sku_id: string; sku_number: number | null; title: string; qty: number };
+  type Line = { order_id: string; inventory_sku_id: string; sku_number: number | null; title: string; qty: number; short_at_bind: boolean };
   const lines: Line[] = [];
   if (itemIds.length) {
     const { data: raw2 } = await supabase
       .from('live_auction_item_skus')
-      .select('auction_item_id, inventory_sku_id, qty, sku_number_snapshot, title_snapshot')
+      .select('auction_item_id, inventory_sku_id, qty, sku_number_snapshot, title_snapshot, short_at_bind')
       .eq('user_id', user.id)
       .in('auction_item_id', itemIds);
     for (const l of raw2 ?? []) {
@@ -273,17 +273,21 @@ export async function POST(req: Request) {
         sku_number: (l.sku_number_snapshot as number | null) ?? null,
         title: (l.title_snapshot as string | null) || 'Untitled',
         qty: Number(l.qty) || 1,
+        // null (pre-dates migration 104, or not a sale) reads as NOT short.
+        short_at_bind: l.short_at_bind === true,
       });
     }
   }
 
   // PICKABLE aggregation: only lines from pickable orders, summed per inventory SKU across the box.
   const pickSet = new Set(pickOrderIds);
-  const agg = new Map<string, { sku_number: number | null; title: string; qty: number }>();
+  // shelf_out is OR'd across the box's contributing lines: one short line makes the box short.
+  const agg = new Map<string, { sku_number: number | null; title: string; qty: number; short: boolean }>();
   for (const l of lines) {
     if (!pickSet.has(l.order_id)) continue;
-    const cur = agg.get(l.inventory_sku_id) ?? { sku_number: l.sku_number, title: l.title, qty: 0 };
+    const cur = agg.get(l.inventory_sku_id) ?? { sku_number: l.sku_number, title: l.title, qty: 0, short: false };
     cur.qty += l.qty;
+    cur.short = cur.short || l.short_at_bind;
     agg.set(l.inventory_sku_id, cur);
   }
 
@@ -315,6 +319,7 @@ export async function POST(req: Request) {
         barcode: inv?.barcode ?? null,
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
+        shelf_out: a.short,
       };
     })
     // Stable order: lowest SKU# first.

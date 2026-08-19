@@ -164,6 +164,11 @@ export type SkuBlock = {
   barcode: string | null;
   thumbnail_url: string | null;
   required_qty: number;
+  // TRUE when ANY order line contributing to this box's SKU total could not be filled from
+  // stock at BIND time (live_auction_item_skus.short_at_bind). Per-line, OR'd up to the box:
+  // if the box holds two orders for one SKU and only one was short, the box still cannot be
+  // filled, so it warns. Display-only — it never gates grabbing, navigation, or completion.
+  shelf_out: boolean;
 };
 export type ExcludedOrder = { order_id: string; reason: string; skus: string[] };
 export type MissingOrder = { order_id: string; listing_name: string | null; seller_sku: string | null };
@@ -211,12 +216,12 @@ export async function assembleBox(
   const missingOrderIds = pickOrderIds.filter((id) => !orderIdsWithItems.has(id));
 
   // 4) SKU lines, attributed to their order via auction_item_id (snapshot fields).
-  type Line = { order_id: string; inventory_sku_id: string; sku_number: number | null; title: string; qty: number };
+  type Line = { order_id: string; inventory_sku_id: string; sku_number: number | null; title: string; qty: number; short_at_bind: boolean };
   const lines: Line[] = [];
   if (itemIds.length) {
     const { data: raw2 } = await db
       .from('live_auction_item_skus')
-      .select('auction_item_id, inventory_sku_id, qty, sku_number_snapshot, title_snapshot')
+      .select('auction_item_id, inventory_sku_id, qty, sku_number_snapshot, title_snapshot, short_at_bind')
       .in('user_id', userIds)
       .in('auction_item_id', itemIds);
     for (const l of raw2 ?? []) {
@@ -228,17 +233,21 @@ export async function assembleBox(
         sku_number: (l.sku_number_snapshot as number | null) ?? null,
         title: (l.title_snapshot as string | null) || 'Untitled',
         qty: Number(l.qty) || 1,
+        // null (pre-dates migration 104, or not a sale) reads as NOT short.
+        short_at_bind: l.short_at_bind === true,
       });
     }
   }
 
   // PICKABLE aggregation: only lines from pickable orders, summed per inventory SKU.
   const pickSet = new Set(pickOrderIds);
-  const agg = new Map<string, { sku_number: number | null; title: string; qty: number }>();
+  // shelf_out is OR'd across the box's contributing lines: one short line makes the box short.
+  const agg = new Map<string, { sku_number: number | null; title: string; qty: number; short: boolean }>();
   for (const l of lines) {
     if (!pickSet.has(l.order_id)) continue;
-    const cur = agg.get(l.inventory_sku_id) ?? { sku_number: l.sku_number, title: l.title, qty: 0 };
+    const cur = agg.get(l.inventory_sku_id) ?? { sku_number: l.sku_number, title: l.title, qty: 0, short: false };
     cur.qty += l.qty;
+    cur.short = cur.short || l.short_at_bind;
     agg.set(l.inventory_sku_id, cur);
   }
 
@@ -270,6 +279,7 @@ export async function assembleBox(
         barcode: inv?.barcode ?? null,
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
+        shelf_out: a.short,
       };
     })
     .sort((a, b) => (Number(a.sku_number) || 0) - (Number(b.sku_number) || 0));

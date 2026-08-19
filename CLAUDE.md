@@ -17,6 +17,12 @@ a separate Chrome capture extension.
   a flag, log-only first, and is dry-run with output shown before a real run.
 - **Explicit approval gates.** Merges and deploys require explicit approval — do
   not merge or deploy on your own initiative.
+- **`git log --all -- <path>` before declaring work unrecoverable.** A file whose
+  uncommitted changes were lost is not lost if another session committed the same
+  work on another branch. Check every ref — not just the current branch, not just
+  the reflog and `git fsck` — before reconstructing anything. This is not
+  hypothetical: `claim.ts` and `api/labor/route.ts` were both rebuilt from scratch
+  here while the real work sat on `main`, and the reconstruction was the stale side.
 - **Use `git worktree`** rather than checking out branches in the shared working
   tree — another session may be active in it. Keep branches short-lived; long-
   lived branches diverging from a moving base accumulate reconciliation cost that

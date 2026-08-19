@@ -23,6 +23,10 @@ interface BoxSku {
   barcode: string | null;
   thumbnail_url: string | null;
   required_qty: number;
+  // Set at BIND time when this order line could not be filled from stock (the sale went through
+  // with nothing on the shelf). A fact about the order, not a live inventory read: it is decided
+  // once, when the bind draws short, and never changes. Older payloads omit it → not short.
+  shelf_out?: boolean;
 }
 interface MissingOrder { order_id: string; listing_name: string | null; seller_sku: string | null; }
 interface CatalogOrder { order_id: string; listing_name: string | null; seller_sku: string | null; qty: number; }
@@ -49,11 +53,11 @@ interface Box {
 type Screen = 'ready' | 'alert' | 'pick' | 'finish' | 'empty';
 
 type PickLine =
-  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number }
+  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean }
   | { kind: 'catalog'; key: string; order_id: string; listing_name: string; seller_sku: string; required_qty: number };
 
 const buildPickLines = (b: Box): PickLine[] => [
-  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty })),
+  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true })),
   ...(b.catalog_orders ?? []).map((c): PickLine => ({ kind: 'catalog', key: `cat:${c.order_id}`, order_id: c.order_id, listing_name: c.listing_name || 'Catalog item', seller_sku: c.seller_sku || '', required_qty: c.qty || 1 })),
 ];
 
@@ -224,6 +228,11 @@ export default function PackStationOverlay({
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The 550ms "line complete" flash timer. Held in a ref (like holdTimer) because its callback
+  // finishes the box — it calls enterFinish, which fires the verification write. Left dangling,
+  // it survives the transition that cancelled the pick and confirms a box the picker abandoned.
+  const doneTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelDoneTimer = () => { if (doneTimer.current) { clearTimeout(doneTimer.current); doneTimer.current = null; } };
   const confirmedRef = useRef(false); // fire /confirm + count once per box
   const pickStartedAtRef = useRef<string | null>(null);
 
@@ -231,6 +240,9 @@ export default function PackStationOverlay({
   // Keep the scanner aimed at the hidden input — but NOT while the picker gate is open (the modal
   // owns focus then). When the gate closes this re-runs and re-arms the scanner.
   useEffect(() => { if (!pickerModalOpen) focusInput(); }, [screen, box, pickerModalOpen, focusInput]);
+  // Unmount cleanup — the Shipping tab unmounts the overlay on exit, and a surviving flash timer
+  // would confirm the box after the picker walked away.
+  useEffect(() => () => { if (doneTimer.current) clearTimeout(doneTimer.current); }, []);
 
   // Report the open box upward (no-op when the caller passes no handler). Read-only mirror of
   // `box` — it never influences the overlay's own behavior.
@@ -253,6 +265,9 @@ export default function PackStationOverlay({
 
   // ── scan → box resolution (endpoint-driven, unchanged shape) ──
   async function loadBox(scan: string) {
+    // Drop any pending flash timer from the OUTGOING box before its state is replaced — it would
+    // otherwise fire against the new box and confirm the previous one's group_key.
+    cancelDoneTimer(); setJustDone(false);
     setLoading(true); setErr(null);
     try {
       const res = await fetch(endpoints.scan, {
@@ -299,7 +314,9 @@ export default function PackStationOverlay({
     setCounts(nc);
     if (next >= line.required_qty) {
       setJustDone(true);
-      window.setTimeout(() => {
+      cancelDoneTimer();
+      doneTimer.current = setTimeout(() => {
+        doneTimer.current = null;
         setJustDone(false);
         const complete = pickLines.every((l) => (nc[l.key] ?? 0) >= l.required_qty);
         if (complete) enterFinish(box);
@@ -342,7 +359,7 @@ export default function PackStationOverlay({
     if (!confirmedRef.current) { confirmedRef.current = true; onBoxPicked(); }
   }
 
-  const backToReady = () => { setBox(null); setCounts({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
+  const backToReady = () => { cancelDoneTimer(); setJustDone(false); setBox(null); setCounts({}); setErr(null); pickStartedAtRef.current = null; setScreen('ready'); focusInput(); };
 
   // ── hold-to-exit (tap-and-hold ~0.9s) → reset to scan-ready, then hand off to the caller. For
   // the Shipping tab onExit exits fullscreen + unmounts; for the station page it's a no-op so the
@@ -389,6 +406,9 @@ export default function PackStationOverlay({
   const line = box && screen === 'pick' ? pickLines[activeIdx] ?? null : null;
   const have = line ? counts[line.key] ?? 0 : 0;
   const lineDone = line ? have >= line.required_qty : false;
+  // Display-only. Never ANDed into lineDone, grab(), or allComplete — a short item is still
+  // grabbable, still navigable, and still lets the box complete.
+  const lineShelfOut = !!(line && line.kind === 'sku' && line.shelf_out);
 
   // ── focus-mode overlay — portalled to <body> so it escapes any transformed ancestor and fills
   // the whole dynamic viewport at z-[200], above app chrome. Safe under SSR (mounts client-side). ──
@@ -530,6 +550,7 @@ export default function PackStationOverlay({
                 a CATALOG-tagged card with the real listing name + seller SKU (no internal #). */}
             <button onClick={() => grab(line)} disabled={lineDone}
               className="relative flex-1 min-h-0 w-full rounded-3xl border-2 border-tt-border bg-tt-card overflow-hidden flex items-center justify-center cursor-pointer disabled:cursor-default">
+              <div className={`w-full h-full flex items-center justify-center transition-opacity ${lineShelfOut ? 'opacity-30' : ''}`}>
               {line.kind === 'sku' ? (
                 line.thumbnail_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -545,6 +566,16 @@ export default function PackStationOverlay({
                   <span className="inline-block rounded-md border-2 border-tt-cyan text-tt-cyan font-extrabold tracking-wide" style={{ fontSize: 'clamp(0.8rem,2.6vh,1.15rem)', padding: '0.15em 0.5em' }}>CATALOG ITEM</span>
                   <div className="mt-4 font-bold text-tt-text break-words leading-tight" style={{ fontSize: 'clamp(1.1rem, 4.2vh, 2.1rem)' }}>{line.listing_name}</div>
                   <div className="mt-3 text-tt-muted break-words" style={{ fontSize: 'clamp(0.9rem, 3vh, 1.4rem)' }}>Seller SKU <span className="font-mono text-tt-text break-all">{line.seller_sku || '—'}</span></div>
+                </div>
+              )}
+              </div>
+              {/* Picker-reported out-of-stock band. pointer-events-none so the whole hero stays a
+                  tap target for grab() — a flagged item is still grabbable if it turns up. */}
+              {lineShelfOut && (
+                <div className="absolute inset-0 flex items-center pointer-events-none">
+                  <div className="w-full mx-3 rounded bg-red-800/95 text-red-50 text-center py-2 font-medium tracking-wide" style={{ fontSize: '15px' }}>
+                    OUT OF STOCK
+                  </div>
                 </div>
               )}
               {justDone && lineDone && (
