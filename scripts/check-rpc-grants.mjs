@@ -37,6 +37,10 @@ const SERVICE_ROLE_ONLY = new Set([
   // Reconcile cron RPC — called via admin.rpc() (service_role, CRON_SECRET-gated); app-COLLECTED,
   // so it must be listed here or the check would demand an `authenticated` grant it must not have.
   'lensed_reconcile_time_clock',
+  // Auto-ender segment close (108) — bypasses auth.uid() and takes the owner explicitly, so a
+  // grant to `authenticated` would let any signed-in user close another owner's segments.
+  // Called ONLY via createAdminClient from the CRON_SECRET-gated auto-ender.
+  'close_session_host_segment_as',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
