@@ -130,16 +130,27 @@ as $$
        and ls2.user_id = ses.user_id
        and ls2.started_at > ses.started_at
   ),
+  -- SALE CLOCK, not write clock. capture_events.created_at is when the EXTENSION wrote the
+  -- row, which for a queue-flushed sale can trail the actual order by hours — measured over
+  -- 30 days: 931 captures land >5 min late, 461 land >60 min late, worst case 50.3 HOURS.
+  -- Using created_at here would let a single late flush stretch a segment's window long past
+  -- the show while the sale itself attributes at its ordered_at inside the real window —
+  -- inflating total_minutes without inflating revenue, i.e. exactly the minutes/revenue
+  -- disagreement this design claims to prevent.
+  --
+  -- coalesce(ordered_at, created_at) is the SAME anchor the attribution CTEs use, so the
+  -- window and the sales that fall in it are measured on one clock. (ordered_at is in practice
+  -- 100% populated — 0 nulls in 30 days — so the coalesce is belt-and-braces.)
   caps as (
-    select max(ce.created_at) as last_cap,
-           min(ce.created_at) filter (
-             where ses.ended_at is not null and ce.created_at > ses.ended_at
+    select max(coalesce(ce.ordered_at, ce.created_at)) as last_cap,
+           min(coalesce(ce.ordered_at, ce.created_at)) filter (
+             where ses.ended_at is not null and coalesce(ce.ordered_at, ce.created_at) > ses.ended_at
            ) as first_after
       from public.capture_events ce, ses, nxt
      where ce.room_id = ses.tiktok_live_id
        and ce.user_id = ses.user_id
-       and ce.created_at >= ses.started_at
-       and (nxt.next_start is null or ce.created_at < nxt.next_start)
+       and coalesce(ce.ordered_at, ce.created_at) >= ses.started_at
+       and (nxt.next_start is null or coalesce(ce.ordered_at, ce.created_at) < nxt.next_start)
   )
   -- HEARTBEAT IS BOUNDED, and this bound is load-bearing. last_seen_at means "the tab is
   -- open", NOT "the show is running" (background.js:203-206 pings it deliberately regardless
