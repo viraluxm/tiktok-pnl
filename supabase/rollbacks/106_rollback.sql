@@ -61,5 +61,6 @@ drop table if exists public.live_session_host_segments;
 --    Also delete src/lib/sessions/sessionEnd.drift.test.mjs, which asserts the SQL constant
 --    matches autoEnd.ts IDLE_THRESHOLD_MIN and will fail once the function is gone.
 drop function if exists public.lensed_session_activity_end(uuid);
+drop function if exists public.lensed_session_contiguity_gap();
 
 commit;

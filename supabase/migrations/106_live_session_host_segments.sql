@@ -62,6 +62,21 @@ begin;
 -- capture_events.created_at is the WRITE clock: over 30 days 931 captures land >5 min after
 -- their order, 461 >60 min, worst case 50.3 hours.
 
+-- The contiguity guard as a FUNCTION, not a repeated literal: lensed_session_activity_end
+-- cuts the sales run on it, and pnl_show_host_segments measures the heartbeat-overhang flag
+-- against it. Two call sites, one literal, so they cannot drift apart.
+create or replace function public.lensed_session_contiguity_gap()
+returns interval
+language sql
+immutable
+as $$ select interval '45 minutes' $$;
+
+comment on function public.lensed_session_contiguity_gap() is
+  'Sales-gap threshold that ends a contiguous run. IMPORTED from '
+  'src/lib/sessions/autoEnd.ts IDLE_THRESHOLD_MIN (45); pinned by '
+  'src/lib/sessions/sessionEnd.drift.test.mjs. NOTE: fires on 0 of 201 real sessions as of '
+  '2026-08-19 — it is untested insurance, not load-bearing on observed data.';
+
 create or replace function public.lensed_session_activity_end(p_session_id uuid)
 returns timestamptz
 language sql
@@ -75,7 +90,7 @@ as $$
       -- number here would mean two subsystems disagreeing about when a show ended.
       -- Held in sync by the drift test at src/lib/sessions/sessionEnd.drift.test.mjs — if you
       -- change one, that test fails until you change the other.
-      interval '45 minutes' as contiguity_gap,
+      public.lensed_session_contiguity_gap() as contiguity_gap,
       -- WIND-DOWN GRACE — deliberately ZERO, named rather than absent so the decision is
       -- visible. We do NOT invent a tail after the last sale. Direction of the bias, stated
       -- openly: grace=0 shortens measured show time, which RAISES revenue-per-hour (favours
@@ -514,14 +529,36 @@ create or replace function public.pnl_show_host_segments(
 )
 returns table(
   host_id uuid, host_name text, segment_count bigint, total_minutes numeric,
-  auctions bigint, units bigint, revenue_cents numeric, cogs_cents numeric, net_profit_cents numeric
+  auctions bigint, units bigint, revenue_cents numeric, cogs_cents numeric, net_profit_cents numeric,
+  heartbeat_beyond_activity boolean
 )
 language sql
 stable
 as $function$
+  -- heartbeat_beyond_activity is a FLAG, not an adjustment. It fires when the tab kept
+  -- heartbeating for longer than the contiguity guard past the last sale.
+  --
+  -- WHY IT MATTERS: a capture outage and a genuinely dead show are INDISTINGUISHABLE in this
+  -- data. Both look like "sales stopped, tab stayed open". With wind_down_grace = 0 the
+  -- outage case silently zeroes the host for that stretch — they were working, the extension
+  -- was not recording. Rather than guess (any grace we invented would be wrong in the other
+  -- case), we surface the ambiguity and let a human judge.
+  --
+  -- Derived, never stored: it is a property of live_sessions.last_seen_at, which keeps moving,
+  -- and storing it on an append-only segment would freeze a stale answer.
+  --
+  -- Fires on 25 of 201 hosted sessions (12.4%) as of 2026-08-19, 0 of them still open.
   with ses as (
-    select ls.id, ls.started_at, public.lensed_session_activity_end(ls.id) as eff_session_end
+    select ls.id, ls.started_at, ls.last_seen_at,
+           public.lensed_session_activity_end(ls.id) as eff_session_end
       from public.live_sessions ls where ls.id = p_session_id
+  ),
+  flag as (
+    select coalesce(
+             ses.last_seen_at is not null
+             and ses.last_seen_at > ses.eff_session_end + public.lensed_session_contiguity_gap(),
+             false) as heartbeat_beyond_activity
+      from ses
   ),
   seg as (
     select s.id, s.host_id,
@@ -570,7 +607,8 @@ as $function$
     sum(p.segment_count)::bigint, sum(p.minutes)::numeric,
     sum(p.auctions)::bigint, sum(p.units)::bigint,
     sum(p.revenue_cents)::numeric, sum(p.cogs_cents)::numeric,
-    (sum(p.revenue_cents) - public.platform_fee_cents(sum(p.revenue_cents)) - sum(p.cogs_cents))::numeric
+    (sum(p.revenue_cents) - public.platform_fee_cents(sum(p.revenue_cents)) - sum(p.cogs_cents))::numeric,
+    (select heartbeat_beyond_activity from flag)
   from parts p
   left join public.employees e on e.id = p.host_id
   group by p.host_id, p.unattributed, e.name
@@ -642,9 +680,11 @@ $function$;
 
 -- Read + helper functions are SECURITY INVOKER, so RLS already scopes them to the caller.
 -- anon is revoked anyway — an unauthenticated caller has no business reaching them.
+revoke execute on function public.lensed_session_contiguity_gap() from public, anon;
 revoke execute on function public.lensed_session_activity_end(uuid) from public, anon;
 revoke execute on function public.pnl_show_host_segments(uuid, text) from public, anon;
 revoke execute on function public.pnl_show_hourly_by_host(uuid, text) from public, anon;
+grant  execute on function public.lensed_session_contiguity_gap() to authenticated;
 grant  execute on function public.lensed_session_activity_end(uuid) to authenticated;
 grant  execute on function public.pnl_show_host_segments(uuid, text) to authenticated;
 grant  execute on function public.pnl_show_hourly_by_host(uuid, text) to authenticated;

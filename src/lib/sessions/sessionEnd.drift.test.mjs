@@ -34,10 +34,10 @@ const idleThresholdMin = tsMatch ? Number(tsMatch[1]) : null;
 
 // ── the SQL constant ─────────────────────────────────────────────────────────
 const sqlSrc = fs.readFileSync(MIGRATION, 'utf8');
-// Matches:  interval '45 minutes' as contiguity_gap
-const sqlMatch = sqlSrc.match(/interval\s+'(\d+)\s*minutes'\s+as\s+contiguity_gap/i);
-ok('106 still declares contiguity_gap as an interval literal', !!sqlMatch,
-   'the CTE constant was renamed or restructured');
+// Matches the body of lensed_session_contiguity_gap():  select interval '45 minutes'
+const sqlMatch = sqlSrc.match(/function\s+public\.lensed_session_contiguity_gap\(\)[\s\S]*?select\s+interval\s+'(\d+)\s*minutes'/i);
+ok('106 still declares lensed_session_contiguity_gap() with an interval literal', !!sqlMatch,
+   'the constant function was renamed or its body restructured');
 const contiguityGapMin = sqlMatch ? Number(sqlMatch[1]) : null;
 
 // ── the assertion this file exists for ───────────────────────────────────────
