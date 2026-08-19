@@ -23,6 +23,16 @@ a separate Chrome capture extension.
   the reflog and `git fsck` — before reconstructing anything. This is not
   hypothetical: `claim.ts` and `api/labor/route.ts` were both rebuilt from scratch
   here while the real work sat on `main`, and the reconstruction was the stale side.
+- **Never run a state-mutating git command inside a diagnostic.** Investigating is
+  read-only: `log`, `show`, `diff`, `status`, `fsck`, `merge-tree`, `cat-file`. A
+  check that answers a question must not also change state. Two failures in one
+  session, same error class: `git stash -u` + `git checkout <sha> -- .` inside a
+  loop "verifying each commit typechecks in isolation" destroyed the uncommitted
+  work in 23 tracked files; `git reset` inside a check for whether a test failure
+  pre-dated the merge silently cleared `MERGE_HEAD`, turning the merge commit into
+  a single-parent commit. If a diagnostic genuinely needs a mutable tree, use a
+  throwaway `git worktree` or `git commit-tree`/`--no-index` against blobs — never
+  the tree you are working in.
 - **Use `git worktree`** rather than checking out branches in the shared working
   tree — another session may be active in it. Keep branches short-lived; long-
   lived branches diverging from a moving base accumulate reconciliation cost that
