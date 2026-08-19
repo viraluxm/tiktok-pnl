@@ -6,138 +6,107 @@ export const dynamic = 'force-dynamic';
 
 // GET /api/live/host-performance
 //
-// Per-HOST auction performance, grouped by host_id, for the Team > Roster badges.
-// READ-ONLY: SELECT only — no writes to auction/capture data.
+// Per-HOST auction performance, grouped by employees.id, for the Team > Roster badges.
+// READ-ONLY: a single SELECT via the pnl_host_performance RPC (migration 109).
 //
-// Attribution works only since migration 056 (live_sessions.host_id -> employees.id).
-// Auctions whose session has a NULL host_id (all history before 056) are EXCLUDED —
-// they are attributed to no one. On first ship this returns ~0 attributed auctions
-// for every host, which the UI renders as "No data yet" (expected, not an error).
+// ── WHY THIS IS AN RPC NOW ────────────────────────────────────────────────────────────────
+// The previous implementation windowed on live_auction_items.closed_at. lensed_log_auction
+// rewrites closed_at to now() on BOTH the retroactive-bind INSERT and the not_sold→sold
+// paid-flip UPDATE, so a lot sold during a show can carry a closed_at days later — measured:
+// 6.1% of sold auctions drift >1h, 4.1% >24h, worst case 18.3 days.
 //
-// Canonical grouped query this route mirrors (two rolling windows in one pass):
+// The drift is not noise, it is BIASED: retro-bound rows clear the 4× ASP goal at 1.6–2.4× a
+// host's true rate, so the old badges systematically flattered. Measured before/after on
+// production data — four hosts' entire 7-day ASP samples were retro-bound rows:
+//     Tiegan  56.1% → no data (187 → 0 auctions)
+//     Allison 60.0% → no data ( 20 → 0)
+//     Bailey  28.6% → no data ( 77 → 0)
+//     Lily    28.0% → 18.4%   (347 → 158)
+// Every material move was downward. Nobody was being under-credited.
 //
-//   with attributed as (
-//     select ls.host_id, lai.closed_at,
-//            sum(s.unit_cost_cents_snapshot * s.qty)     as break_even_cents,
-//            sum(s.unit_cost_cents_snapshot * s.qty) * 4 as asp_goal_cents (see @/lib/asp),
-//            ce.selling_price_cents                       as final_price
-//     from live_auction_items lai
-//     join live_sessions ls
-//       on ls.id = lai.session_id and ls.host_id is not null      -- attribution gate
-//     join live_auction_item_skus s on s.auction_item_id = lai.id
-//     join capture_events ce
-//       on ce.order_id = lai.client_idempotency_key and ce.user_id = lai.user_id
-//     where lai.status = 'sold' and lai.closed_at >= now() - interval '14 days'
-//     group by ls.host_id, lai.closed_at, ce.selling_price_cents
-//   )
-//   select host_id,
-//     count(*) filter (where closed_at >= now() - interval '7 days')                              as asp7_n,
-//     count(*) filter (where closed_at >= now() - interval '7 days' and final_price >= asp_goal_cents) as asp7_hits,
-//     count(*)                                                                                    as be14_n,
-//     count(*) filter (where final_price < break_even_cents)                                      as be14_below
-//   from attributed group by host_id;
+// The fix could not be applied in place: the old route filtered auctions through PostgREST and
+// then joined realized prices from a SEPARATE capture_events fetch in JS, so the window
+// predicate could not live on the capture side where the correct anchor lives. The RPC inverts
+// the drive direction — it starts from capture_events and windows on
+// coalesce(ordered_at, created_at), the same anchor pnl_show_hourly and pnl_show_host_segments
+// use. See supabase/migrations/109_pnl_host_performance.sql.
 //
-// The 14-day fetch is the superset; the 7-day ASP window is a filter within it.
-// Thresholds + the MIN_AUCTIONS guard live in the client badge (display concern).
+// Also fixed by the move: the RPC uses the canonical
+// coalesce(unit_cost_cents_snapshot, inventory_skus.unit_cost_cents, 0) cost chain. Summing the
+// raw snapshot column drops 147 of 72,285 sold SKU lines, which deflates break-even and
+// inflates ASP-hit — the same direction of error as the closed_at drift.
 //
-// RLS note: user-scoped server client, so ce.user_id = lai.user_id is implicit
-// (both tables filtered to auth.uid()). Consistent with the auction-performance card.
+// ── CONTRACT ──────────────────────────────────────────────────────────────────────────────
+// Response shape is UNCHANGED and must stay so: { asp_window_days, be_window_days,
+// hosts: { [employees.id]: { asp7_n, asp7_hits, be14_n, be14_below } } }. Consumers are
+// src/hooks/useHostPerformance.ts → HostPerformanceBadges / EmployeesTab. Field names keep
+// their 7/14 suffixes even though the windows are now parameters, because renaming them is a
+// client change and this commit is deliberately server-only and revertable on its own.
+//
+// Thresholds and the MIN_AUCTIONS guard stay in the client badge (display concern).
+//
+// NOTE: /api/member/team/host-performance still carries the old closed_at logic. It reads
+// owner-scoped via the admin client, so converting it needs a service-role `_as` twin of
+// pnl_host_performance that 109 deliberately does not ship yet. Until then the station Team
+// page shows the OLD, flattering numbers while this page shows corrected ones — a known and
+// temporary divergence.
 
-const PAGE = 1000;
 const ASP_WINDOW_DAYS = 7;
 const BE_WINDOW_DAYS = 14;
 
-type SkuRow = { unit_cost_cents_snapshot: number | null; qty: number | null };
-type AuctionRow = {
-  closed_at: string | null;
-  client_idempotency_key: string | null;
-  live_sessions: { host_id: string | null } | null;
-  live_auction_item_skus: SkuRow[] | null;
+type HostAgg = { asp7_n: number; asp7_hits: number; be14_n: number; be14_below: number };
+
+// One row per host from the RPC. Counts arrive as bigint, which PostgREST serializes as string.
+type RpcRow = {
+  host_id: string | null;
+  asp_n: number | string | null;
+  asp_hits: number | string | null;
+  be_n: number | string | null;
+  be_below: number | string | null;
 };
 
-// Per-host tallies for the two windows.
-type HostAgg = { asp7_n: number; asp7_hits: number; be14_n: number; be14_below: number };
+const num = (v: number | string | null | undefined): number => {
+  const n = typeof v === 'string' ? Number(v) : v;
+  return Number.isFinite(n as number) ? (n as number) : 0;
+};
 
 export async function GET() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const now = Date.now();
-  const be14Cutoff = new Date(now - BE_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  const asp7CutoffMs = now - ASP_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  // Captures land at ~close time; small back-buffer avoids dropping edge matches.
-  const capCutoffIso = new Date(be14Cutoff.getTime() - 24 * 60 * 60 * 1000).toISOString();
+  // SECURITY INVOKER on the RPC, so RLS on capture_events / live_auction_items / live_sessions
+  // scopes every row to this caller — the same guarantee the old paginated reads relied on.
+  //
+  // ASP_GOAL_MULTIPLIER is passed IN rather than hardcoded in SQL so src/lib/asp.ts stays the
+  // single source of truth for the goal multiple (see that file's header: "there are no
+  // hardcoded multipliers left").
+  // rpc-grants: pnl_host_performance
+  const { data, error } = await supabase.rpc('pnl_host_performance', {
+    p_asp_window_days: ASP_WINDOW_DAYS,
+    p_be_window_days: BE_WINDOW_DAYS,
+    p_asp_goal_multiplier: ASP_GOAL_MULTIPLIER,
+  });
 
-  // ── Attributed sold auctions in the 14d superset window: inner-join the session
-  //    and require a non-null host_id, embed the SKU cost snapshots. Paginated.
-  const auctions: AuctionRow[] = [];
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
-      .from('live_auction_items')
-      .select('closed_at, client_idempotency_key, live_sessions!inner(host_id), live_auction_item_skus(unit_cost_cents_snapshot, qty)')
-      .eq('status', 'sold')
-      .gte('closed_at', be14Cutoff.toISOString())
-      .not('live_sessions.host_id', 'is', null)
-      .order('closed_at', { ascending: false })
-      .range(from, from + PAGE - 1);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    const rows = (data ?? []) as unknown as AuctionRow[];
-    auctions.push(...rows);
-    if (rows.length < PAGE) break;
-  }
-
-  // ── Realized win price by order id (RLS scopes to this user, so order_id is the key).
-  const priceByOrder = new Map<string, number>();
-  for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
-      .from('capture_events')
-      .select('order_id, selling_price_cents')
-      .gte('created_at', capCutoffIso)
-      .range(from, from + PAGE - 1);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    const rows = (data ?? []) as { order_id: string | null; selling_price_cents: number | null }[];
-    for (const r of rows) {
-      if (r.order_id != null && r.selling_price_cents != null && !priceByOrder.has(String(r.order_id))) {
-        priceByOrder.set(String(r.order_id), r.selling_price_cents);
-      }
-    }
-    if (rows.length < PAGE) break;
-  }
-
-  // ── Group by host_id, tallying both windows in one pass. An auction counts only
-  //    once it has a realized-price match.
-  const byHost = new Map<string, HostAgg>();
-  for (const a of auctions) {
-    const hostId = a.live_sessions?.host_id;
-    const key = a.client_idempotency_key ? String(a.client_idempotency_key) : null;
-    if (!hostId || key == null) continue;
-    const finalPrice = priceByOrder.get(key);
-    if (finalPrice == null) continue;
-
-    const breakEven = (a.live_auction_item_skus ?? []).reduce(
-      (sum, s) => sum + (Number(s.unit_cost_cents_snapshot) || 0) * (Number(s.qty) || 1),
-      0,
-    );
-    const aspGoal = breakEven * ASP_GOAL_MULTIPLIER;
-    const inAsp7 = a.closed_at != null && new Date(a.closed_at).getTime() >= asp7CutoffMs;
-
-    const agg = byHost.get(hostId) ?? { asp7_n: 0, asp7_hits: 0, be14_n: 0, be14_below: 0 };
-    agg.be14_n += 1;
-    if (finalPrice < breakEven) agg.be14_below += 1;
-    if (inAsp7) {
-      agg.asp7_n += 1;
-      if (finalPrice >= aspGoal) agg.asp7_hits += 1;
-    }
-    byHost.set(hostId, agg);
+  if (error) {
+    console.error('[live/host-performance] rpc error:', error);
+    return NextResponse.json({ error: 'Failed to load host performance' }, { status: 500 });
   }
 
   const hosts: Record<string, HostAgg> = {};
-  for (const [k, v] of byHost) hosts[k] = v;
+  for (const r of (data ?? []) as RpcRow[]) {
+    if (!r.host_id) continue; // the RPC gates on host_id IS NOT NULL; belt-and-braces
+    hosts[String(r.host_id)] = {
+      asp7_n: num(r.asp_n),
+      asp7_hits: num(r.asp_hits),
+      be14_n: num(r.be_n),
+      be14_below: num(r.be_below),
+    };
+  }
 
   return NextResponse.json({
     asp_window_days: ASP_WINDOW_DAYS,
     be_window_days: BE_WINDOW_DAYS,
-    hosts, // keyed by employees.id; absent host => no attributed auctions yet
+    hosts, // keyed by employees.id; a host with no attributed auctions is absent
   });
 }
