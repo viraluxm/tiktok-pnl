@@ -95,4 +95,20 @@ $$;
 revoke execute on function public.close_session_host_segment_as(uuid, uuid, timestamptz, text) from public, anon, authenticated;
 grant  execute on function public.close_session_host_segment_as(uuid, uuid, timestamptz, text) to service_role;
 
+-- ── Housekeeping carried over from 106 (which is already APPLIED — do NOT re-apply it) ──
+-- 106 created lensed_guard_host_segment_append_only() without revoking the default PUBLIC
+-- EXECUTE that CREATE FUNCTION grants, so it is the one object in the 106 set still reachable
+-- by anon. Post-apply audit of the live DB:
+--   lensed_guard_host_segment_append_only  authenticated=true  anon=TRUE   <- the outlier
+--   every other 106 function                                    anon=false
+--
+-- The exposure is nil in practice: Postgres refuses to invoke a trigger function outside a
+-- trigger context ("trigger functions can only be called as triggers"), and the long-standing
+-- set_updated_at() carries the same default. Fixed here anyway rather than left as a documented
+-- oddity, because "the append-only guard is the only thing anon can execute" is a sentence
+-- nobody should have to read twice during a future audit.
+--
+-- Idempotent: revoking an absent privilege is a no-op.
+revoke execute on function public.lensed_guard_host_segment_append_only() from public, anon;
+
 commit;

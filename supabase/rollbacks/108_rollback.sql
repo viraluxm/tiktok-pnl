@@ -15,4 +15,9 @@ begin;
 
 drop function if exists public.close_session_host_segment_as(uuid, uuid, timestamptz, text);
 
+-- 108 also revoked the stray PUBLIC/anon EXECUTE that 106 left on the append-only trigger
+-- function. NOT restored here: re-granting anon EXECUTE on a trigger guard would be a
+-- deliberate step backwards, and nothing depends on it (a trigger function cannot be invoked
+-- outside a trigger context). Documented rather than reversed.
+
 commit;
