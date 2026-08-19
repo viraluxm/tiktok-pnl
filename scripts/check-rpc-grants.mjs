@@ -41,6 +41,9 @@ const SERVICE_ROLE_ONLY = new Set([
   // grant to `authenticated` would let any signed-in user close another owner's segments.
   // Called ONLY via createAdminClient from the CRON_SECRET-gated auto-ender.
   'close_session_host_segment_as',
+  // Owner-scoped host-performance twin (111) — bypasses RLS, caller asserts p_owner_user_ids.
+  // Called ONLY via createAdminClient from /api/member/team/host-performance.
+  'pnl_host_performance_as',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;

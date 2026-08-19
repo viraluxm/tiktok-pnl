@@ -234,9 +234,91 @@ Then attribution:
   `autoEnd.ts:12 IDLE_THRESHOLD_MIN` and pinned by `src/lib/sessions/sessionEnd.drift.test.mjs`,
   but untested against production data. Phase 2 does not change that; a genuinely long mid-show
   gap would be its first real exercise.
-- **R4 — two tabs / two rooms on one machine.** Segments are session-scoped and the unique index is
-  per-session, so this is structurally fine, but the extension's single in-memory `selectedHostId`
-  is not. Worth an explicit test if any machine ever runs two lives.
+- **R4 — RESOLVED IN DESIGN, see §9.** Was: "two tabs on one machine". It is not a test-if-it-
+  happens risk; it is a required design change to the writer.
 - **R5 — `/api/member/team/host-performance` still reads `closed_at`.** The station Team page keeps
   showing the old flattering numbers until a service-role `_as` twin of `pnl_host_performance`
   exists. Unrelated to Phase 2, but it will be visible as a discrepancy between two pages.
+
+---
+
+## 9. `selectedHostId` must be keyed by ROOM, not one global scalar (was R4)
+
+`background.js:197` holds **one** `selectedHostId` for the whole service worker, and
+`hostAppliedForSession` is likewise a single value. With two live tabs on one machine:
+
+1. Tab A (room 1): operator picks host A → `selectedHostId = A`, segment opens on session 1.
+2. Tab B (room 2): operator picks host B → `selectedHostId = B` — **A's value is gone**.
+3. Any subsequent `maybeApplyHost` for session 1 (session reuse on the next sale, or a
+   post-reload re-assert) now opens a segment for **B** on session 1.
+
+Both sessions end up attributed to whoever picked last. **The partial unique index does not
+protect against this** — it guarantees one open segment *per session*, and this produces exactly
+one open segment per session. Each is internally valid and wrongly attributed. Cross-session
+correctness is not something the schema can enforce; it has to be right in the writer.
+
+This is not hypothetical: Snore has run **3 concurrent sessions** on one store, and the store's
+sessions all live under one owner account.
+
+**Required change:** replace both scalars with room-keyed maps.
+
+```
+var selectedHostByRoom     = {};   // roomId -> employees.id
+var hostAppliedByRoom      = {};   // roomId -> sessionId the host has been pushed to
+```
+
+- `setSelectedHost(hostId, roomId)` — `roomId` becomes a **required** argument. The content
+  script already sends it (`{ type: 'SET_SESSION_HOST', hostId, roomId }`, `tiktok-content.js:2948`),
+  so the message contract does not change; the worker just stops ignoring it.
+- `maybeApplyHost(roomId)` resolves the host and the session for **that room only**.
+- Room-change reset clears **only that room's** entry, never the whole map.
+- User-change reset clears the **entire** map (a new Supabase user must inherit nothing) — this
+  is the one case where global clearing is correct.
+- `chrome.storage.local` persistence (`LK_HOST`) already carries `roomId`; the restore path must
+  key on it instead of overwriting a single slot.
+
+**Reject any host pick that arrives with no `roomId`.** Guessing the room is how the wrong
+session gets attributed, and a rejected pick is visible via §10 where a wrong one is not.
+
+**Test explicitly** (belongs in the §7 smoke test, on the controlled machine): two tabs, two
+rooms, pick a different host in each, then let a sale land in each. Assert two sessions, two
+segments, each with the host picked in *its* tab.
+
+---
+
+## 10. A failed `open_session_host_segment` must fail LOUDLY in the overlay
+
+Today `maybeApplyHost` (`background.js:1078-1086`) is fire-and-forget: on failure it resets the
+memo and `console.warn`s. Nobody sees a console warning during a live.
+
+That is the same failure class as the unauthenticated-sale discard — the incident that produced
+the persisted sale queue and the overlay's loud "N queued" banner. A silently-failed host switch
+means the host believes they are being credited and they are not, and the loss is
+**unrecoverable after the fact**: there is no record a switch was ever attempted, which is the
+whole reason segments exist.
+
+**Required behaviour:**
+
+- `setSelectedHost` becomes **async-reporting**: the RPC result (or failure) is broadcast back to
+  the content script rather than swallowed.
+- The overlay's existing host row grows a state next to the dropdown, reusing
+  `lensed-host-warn` / `renderHostWarning()`:
+  - in flight → `⏳ saving host…`
+  - success → clear (the dropdown value alone is the confirmation)
+  - **failure → `⚠ HOST NOT SAVED — retry` in the warning colour, persistent, not a toast.**
+- The failed host must **not** be left showing as selected. Either revert the dropdown to the
+  last confirmed value, or keep the selection but pair it with the persistent error — never show
+  a clean selected state for a host the DB rejected.
+- Retry: `maybeApplyHost` already re-fires on the next session reuse. Make that path re-attempt
+  while a room's host is in the failed state, and surface the retry in the same indicator.
+- Errors worth distinguishing in the message, because the operator action differs:
+  - `HOST_NOT_FOUND_OR_NOT_OWNED` → the employee is inactive or belongs to another owner → pick
+    someone else.
+  - `SESSION_NOT_FOUND_OR_NOT_OWNED` → the session is not resolved yet → it will retry.
+  - `INVALID_SOURCE` → a build bug; must be visible rather than swallowed (this is the residual
+    that migration 110 shrinks but cannot eliminate).
+  - network/401 → transient; retrying.
+
+**Capture is never blocked by any of this.** A host who cannot be saved still sells; the sale
+still lands in `capture_events`. The banner exists so the attribution gap is known *during* the
+show, while it can still be fixed, instead of being discovered in payroll.
