@@ -1,4 +1,4 @@
-// Room-keyed host selection (Phase 2a). Loads the REAL background.js in jsdom and proves the
+// Room-keyed host selection (2a) + the segment writer (2b). Loads the REAL background.js in jsdom and proves the
 // worker keeps ONE HOST PER ROOM rather than one global scalar.
 //
 // The bug this pins: with a single `selectedHostId`, two live tabs on one machine meant the
@@ -54,15 +54,20 @@ function boot() {
     alarms: { create: () => {}, clear: () => {}, onAlarm: { addListener: () => {} } },
   };
 
-  // Every set_session_host RPC call, in order — the assertion surface for attribution.
+  // Every host RPC call, in order — the assertion surface for attribution. `fn` records WHICH
+  // rpc was hit so the test can prove set_session_host is no longer used at all.
   const hostRpcCalls = [];
     window.fetch = (url, opts) => {
     const u = String(url);
     let body = {};
     try { body = opts && opts.body ? JSON.parse(opts.body) : {}; } catch (_) {}
 
+    if (u.includes('/rpc/open_session_host_segment')) {
+      hostRpcCalls.push({ fn: 'open_session_host_segment', session: body.p_session_id, host: body.p_host_id, at: body.p_at, source: body.p_source });
+      return Promise.resolve(httpResp(200, '', 'seg-' + hostRpcCalls.length));
+    }
     if (u.includes('/rpc/set_session_host')) {
-      hostRpcCalls.push({ session: body.p_session_id, host: body.p_host_id });
+      hostRpcCalls.push({ fn: 'set_session_host', session: body.p_session_id, host: body.p_host_id });
       return Promise.resolve(httpResp(200, '', null));
     }
     // Session lookup: return the session belonging to the requested room.
@@ -87,6 +92,7 @@ function boot() {
 // and never calls getOrCreateSession, so no session resolves and no host is attached.
 const STAGED = [{ id: 'sku-1111', qty: 1 }];
 const sale = (id, room) => ({ orderId: id, buyerUsername: 'x', sellingPrice: '$5', isPaymentSuccessful: true, roomId: room, orderStatus: 1 });
+const hostRpcCalls_none = (sw, fn) => !sw.hostRpcCalls.some((c) => c.fn === fn);
 const send = (fn, msg) => new Promise((res) => { const r = fn(msg, {}, (resp) => res(resp)); if (r !== true) res(undefined); });
 
 async function run() {
@@ -166,6 +172,30 @@ async function run() {
   ok('6) …and room2 session was NEVER attached to host A',
      room2Attaches.length > 0 && room2Attaches.every((c) => c.host === HOST_B),
      JSON.stringify(room2Attaches));
+
+  // ── 7. (2b) the writer replaced set_session_host entirely ─────────────────────────
+  ok('7) set_session_host is NEVER called any more',
+     hostRpcCalls_none(sw, 'set_session_host') && sw.hostRpcCalls.length > 0,
+     JSON.stringify(sw.hostRpcCalls.map((c) => c.fn)));
+  ok('7) every host attach went through open_session_host_segment',
+     sw.hostRpcCalls.every((c) => c.fn === 'open_session_host_segment'),
+     JSON.stringify(sw.hostRpcCalls.map((c) => c.fn)));
+
+  // ── 8. (2b) p_source distinguishes the three trigger kinds ────────────────────────
+  const sources = [...new Set(sw.hostRpcCalls.map((c) => c.source))].sort();
+  ok('8) p_source is always a valid vocabulary value',
+     sw.hostRpcCalls.length > 0 && sw.hostRpcCalls.every((c) =>
+       ['extension_switch', 'session_create', 'session_reuse'].includes(c.source)),
+     JSON.stringify(sources));
+  ok('8) a session-resolution source is used, not only extension_switch',
+     sources.some((x) => x === 'session_create' || x === 'session_reuse'),
+     JSON.stringify(sources));
+
+  // ── 9. (2b) p_at carries the operator's pick instant, not null ────────────────────
+  const withAt = sw.hostRpcCalls.filter((c) => c.at);
+  ok('9) p_at carries an ISO instant so a switch lands when it was MADE',
+     withAt.length > 0 && withAt.every((c) => !Number.isNaN(Date.parse(c.at))),
+     `${withAt.length}/${sw.hostRpcCalls.length} calls carried p_at: ${JSON.stringify(withAt.map((c) => c.at))}`);
 
   console.log('');
   console.log(fail === 0 ? `ALL PASS: ${pass} passed, 0 failed` : `FAILED: ${pass} passed, ${fail} failed`);

@@ -306,6 +306,15 @@ whole reason segments exist.
   - in flight → `⏳ saving host…`
   - success → clear (the dropdown value alone is the confirmation)
   - **failure → `⚠ HOST NOT SAVED — retry` in the warning colour, persistent, not a toast.**
+- **A DEFERRED pick that never resolves must not read as cleanly selected either.** `ROOM_UNKNOWN`
+  is a self-healing race, not a failure — the content script re-asserts once the room resolves —
+  so it must NOT show the error state. But if it never resolves (the room never becomes known,
+  or the tab is closed first), the operator is looking at a dropdown showing a host that was
+  never written anywhere. Required: while a pick is deferred, the indicator shows a distinct
+  pending state (`⏳ waiting for room…`), and if the deferral is still unresolved after a bounded
+  wait it escalates to the same persistent `⚠ HOST NOT SAVED` treatment as a hard failure. A
+  pending state that never resolves and never escalates is indistinguishable from success, which
+  is the whole failure mode section 10 exists to close.
 - The failed host must **not** be left showing as selected. Either revert the dropdown to the
   last confirmed value, or keep the selection but pair it with the persistent error — never show
   a clean selected state for a host the DB rejected.
