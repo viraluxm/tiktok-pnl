@@ -14,8 +14,13 @@
 
 Each branch stacks on the previous one; `feat/ext-capture-dedupe` is the tip and contains all of it.
 
-**Migrations required, all APPLIED:** 106, 108, 110, 112, 113. (107 is still gated and is NOT
-required by this build — nothing reads `host_id_snapshot`.)
+**Migrations — all seven APPLIED.**
+
+| | required by this build | why |
+|---|---|---|
+| 106, 108, 110, 112, 113 | **yes** | the segment table, the service-role close, the source vocabulary, the boundary fixes, the head-of-show reach-back |
+| 109, 111 | no | the host-performance anchor fix and its owner-scoped twin. Applied, and their route changes already shipped to `main` — listed here so their absence from the "required" set reads as a distinction rather than an omission |
+| 107 | **not applied** | still write-silence gated. Not needed: nothing reads `host_id_snapshot` yet |
 
 ---
 
@@ -39,10 +44,10 @@ Every hosted session created since then has a `host_id` and no segment.
 
 **Current gap: 6 sessions**, earliest `2026-08-19 23:17:02Z`. It grows with every show.
 
-- [ ] Run section D of `supabase/migrations/106_live_session_host_segments.sql` verbatim.
-      Idempotent — the `NOT EXISTS` guard skips any session that already has a segment.
+- [ ] Run it using the exact command in **§11** — `supabase/backfill/phase2_backfill_rerun.sql`.
+      Do NOT re-derive it from migration 106; §11 and that file are the single instruction.
 - [ ] Run it **after the last pre-Phase-2 show and before the first Phase-2 show.**
-- [ ] Confirm afterwards: `NEED_BACKFILL_NOW = 0`.
+- [ ] Confirm afterwards with §11's verification query: it must return **0**.
 
 Ordering only matters for tidiness: the guard is per-session, so a session that already has an
 extension-written segment is skipped either way and can never end up with both a
@@ -101,7 +106,7 @@ Load unpacked on that one controlled machine.
 | 6 | open a second live tab, pick host C | A/B's room keeps its own host; C's room gets C. **This is the 2a regression** — verify at the segment level, not just the dropdown |
 | 7 | end the live | the open segment closes with `ended_source = 'session_end'` |
 | 8 | conservation | `sum(auctions)` from `pnl_show_host_segments` = the session's sold count |
-| 9 | force a failure — pick a host, then set an employee to `status='former'` and re-pick them | the overlay shows the persistent `⚠ HOST NOT SAVED` state, **not** a clean selection (spec §10) |
+| 9 | force a failure — pick a host, then set an employee to `status='former'` and re-pick them | persistent `⚠ HOST NOT SAVED — inactive, pick someone else` next to the dropdown, the dropdown itself outlined red (`lensed-host-unsaved`), and the underlying DB error in the element's tooltip. **Not** a clean selection, and **not** a toast that fades. |
 
 ### Rollback
 
@@ -249,15 +254,29 @@ The governing facts:
 
 So there is no scenario below where the correct response is to panic mid-show.
 
+### FIRST, AT EVERY STEP, BEFORE ANYTHING ELSE — capture the diagnostics ring
+
+**Do this on any failure at any step, on any machine, before touching the extension.**
+
+- [ ] Open the overlay's diagnostics panel and export/copy the ring.
+
+It is the **only** forensic record of what happened. It lives in memory in the service worker
+and the page, it is **local-only** (`ext_diag_events` is not being uploaded — the table is
+empty), and it is destroyed by removing the extension, reloading the tab, or the worker being
+evicted. Every `host.segment_open`, `host.segment_error`, `host.segment_close`,
+`host.segment_close_error`, `host.save_failed` and `host.deferred_timeout` event lives there and
+nowhere else.
+
+If you skip this and roll back, the failure is unreproducible and undiagnosable.
+
 ### Universal rollback (any step)
 
-1. [ ] `chrome://extensions` → **Remove** the unpacked 0.7.0 → **Load unpacked** the previous zip.
-2. [ ] Reload the live tab. Capture resumes on the old build immediately.
-3. [ ] Leave the segments written so far **in place** — they are additive and diagnostic. Do not
+1. [ ] Ring captured (above). **Do not skip.**
+2. [ ] `chrome://extensions` → **Remove** the unpacked 0.7.0 → **Load unpacked** the previous zip.
+3. [ ] Reload the live tab. Capture resumes on the old build immediately.
+4. [ ] Leave the segments written so far **in place** — they are additive and diagnostic. Do not
        delete them; the append-only trigger blocks row deletes anyway, and they are the evidence
        of what went wrong.
-4. [ ] Capture the diagnostics ring (overlay diagnostics panel) **before** removing the
-       extension — it is in-memory and local, and `ext_diag_events` is not being uploaded.
 
 Reverting the extension does **not** require reverting any migration. All seven are additive and
 harmless with no writer.
@@ -274,7 +293,7 @@ harmless with no writer.
 | 5 | sales attribute to the wrong host | writer or boundary | Finish the show; segments are diagnostic. Rollback after, not during. |
 | 7 | segment stays open after the live ends | a close path did not fire | **Not urgent.** `lensed_session_activity_end` bounds an orphan to the last sale — measured, 456.2h of exposure collapses to 5.85h. Finish, then read the ring for `host.segment_close_error`. Keep `SEGMENT_CLOSE_WRITE_ENABLED` off. |
 | 8 | conservation fails (`sum(auctions)` ≠ sold count) | attribution is losing or duplicating sales | Finish the show. Determine direction first: **less** than sold count = sales lost to a gap; **more** = an overlap double-counting. The second is worse. Rollback the extension either way before the next show. |
-| **9** | **the overlay shows a clean selection for a host that failed** | **spec §10 not satisfied** | **This is not a rollback.** It is a UI gap, not a data bug — the DB correctly refused the write. But it is the failure mode that makes every other failure invisible, so it **blocks distribution to host machines**. Finish the test, fix the indicator, re-run step 9. |
+| **9** | **the overlay shows a clean selection for a host that failed** | **spec §10 regression** | **This is not a rollback.** It is a UI gap, not a data bug — the DB correctly refused the write. But it is the failure mode that makes every other failure invisible, so it **blocks distribution to host machines**. Capture the ring, finish the test, fix the indicator, re-run step 9. The indicator is covered by `extension/test/content-host-failure.test.mjs` (38 checks), so a regression here should have failed the suite first — if it did not, the test has a gap too. |
 
 ### The distinction that matters
 
