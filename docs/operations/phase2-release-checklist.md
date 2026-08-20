@@ -170,3 +170,162 @@ If a real show does not produce this shape, stop and compare against it.
   their show began, not head-of-show artifacts.
 - **`/api/member/team/host-performance`** now matches the Roster (111), but any *future* read of
   host performance must use the same anchor or the two will diverge again.
+
+---
+
+# 9. Merge / build sequence
+
+The five branches are a **stack** — each was branched off the previous one, so each already
+contains its predecessors. `feat/ext-capture-dedupe` is the tip and contains all five.
+
+```
+main
+ └─ feat/ext-room-keyed-host        (2a)
+     └─ feat/ext-segment-writer     (2b)
+         └─ feat/ext-segment-close-paths   (2c)
+             └─ feat/autoend-closes-segments (2d)
+                 └─ feat/ext-capture-dedupe  (2e)  ← tip, contains everything
+```
+
+Plus one independent branch off `main` that is **already applied to the DB** and needs its file
+recorded: `fix/segment-head-of-show` (113).
+
+### Recommended: ONE merge commit from the tip, no squash
+
+- [ ] Open **one PR: `feat/ext-capture-dedupe` → `main`.**
+- [ ] Merge with a **merge commit** (`--merge`), **NOT squash.**
+- [ ] Do **not** open PRs for 2a–2d individually. They are ancestors of the tip; merging the tip
+      brings them with their individual commits intact.
+
+**Why not squash:** the commit messages carry the mutation-proof results, the measured numbers,
+and the reasoning for each decision. Squashing collapses five reviewable units into one blob and
+loses the per-part attribution — and if a bisect is ever needed, 2a (a standalone correctness
+fix) must stay separately revertable from 2b–2e.
+
+**Why not merge each branch separately:** it produces five PRs whose diffs are cumulative and
+therefore mostly redundant, and four intermediate `main` states where the extension calls
+`open_session_host_segment` with no close paths (2b alone) — a state that should never be a
+deployable `main`.
+
+### Also needs to land
+
+- [ ] `fix/segment-head-of-show` (113) — **separate PR, merge first.** It is applied to the DB and
+      the repo is the only record of what has run; leaving it unmerged means `main` does not
+      record reality.
+- [ ] Confirm after both merges that `main` contains files 106 through 113, and that 107 still
+      carries its `NOT APPLIED — write-silence gated` header.
+
+### Order
+
+1. [ ] Merge `fix/segment-head-of-show` → `main` (113 file, records applied state).
+2. [ ] Rebase or merge `main` into `feat/ext-capture-dedupe`; re-run the full suite.
+3. [ ] Merge `feat/ext-capture-dedupe` → `main` (2a–2e).
+4. [ ] **Only now** build the zip, from `main`.
+
+Building from a feature branch is what let 0.6.4/0.6.5 diverge in the first place. Build from
+`main` after the merge, so the zip corresponds to a commit that exists on `main`.
+
+### CI note
+
+`rpc-grants` will be **red** — it has been failing on missing repo secrets since at least
+2026-08-16, across every branch, and three PRs merged past it. Once the secrets are restored,
+re-run it against `main`: a local run currently reports three pre-existing registry gaps
+(`pnl_by_period_as`, `pnl_by_show_as`, `pnl_show_hourly_as`) tracked separately. Do not treat a
+red `rpc-grants` as approval to skip reading it.
+
+---
+
+# 10. If the smoke test fails — per step
+
+**The extension is already loaded on your machine at this point, and a live may be running.**
+The governing facts:
+
+- Segments are **additive**. Nothing pre-Phase-2 reads them. A wrong segment does not corrupt
+  capture, binding, revenue, P&L, or payroll.
+- `live_sessions.host_id` is still maintained by `open_session_host_segment`, so the nine
+  pre-existing consumers keep working even if segments are wrong.
+- **Capture is never blocked** by any host-segment failure. Sales keep landing in
+  `capture_events` regardless.
+
+So there is no scenario below where the correct response is to panic mid-show.
+
+### Universal rollback (any step)
+
+1. [ ] `chrome://extensions` → **Remove** the unpacked 0.7.0 → **Load unpacked** the previous zip.
+2. [ ] Reload the live tab. Capture resumes on the old build immediately.
+3. [ ] Leave the segments written so far **in place** — they are additive and diagnostic. Do not
+       delete them; the append-only trigger blocks row deletes anyway, and they are the evidence
+       of what went wrong.
+4. [ ] Capture the diagnostics ring (overlay diagnostics panel) **before** removing the
+       extension — it is in-memory and local, and `ext_diag_events` is not being uploaded.
+
+Reverting the extension does **not** require reverting any migration. All seven are additive and
+harmless with no writer.
+
+### Step-specific
+
+| step | failure | what it means | action |
+|---|---|---|---|
+| 1 | `ext_version` NULL on the new row | the stamp or the dedupe broke | **Stop.** Universal rollback. This is the one failure that indicates a bad build rather than a bad behaviour — do not continue the test. |
+| 2 | no open segment, or `host_id` wrong | the writer is not firing | Check the overlay for `⚠ HOST NOT SAVED`. If shown, read the classified error — an `INVALID_SOURCE` means a vocabulary gap (a 110 regression); anything else is likely auth/session. Rollback; capture the ring. |
+| 3 | an `Unattributed` row appears | 113's reach-back or the boundary is wrong | **Do not roll back mid-show** — capture is fine and the numbers are diagnostic. Finish the show, then compare against §7. This is a read-path bug, fixable without touching the extension. |
+| 4/6 | boundaries not contiguous, or overlap | a 112 regression | Finish the show; **do not flip `SEGMENT_CLOSE_WRITE_ENABLED`.** Overlap double-counts revenue in the read functions, so treat any affected show's per-host numbers as unusable until fixed. Session totals are unaffected. |
+| **6** | **the second tab's pick clobbers the first** | **2a regression — the original bug** | **Roll back the extension.** This is the failure that silently misattributes an entire concurrent show, and it is invisible without inspecting segments. Do not continue with two tabs on the old build either — close the second tab and run one live per machine until fixed. |
+| 5 | sales attribute to the wrong host | writer or boundary | Finish the show; segments are diagnostic. Rollback after, not during. |
+| 7 | segment stays open after the live ends | a close path did not fire | **Not urgent.** `lensed_session_activity_end` bounds an orphan to the last sale — measured, 456.2h of exposure collapses to 5.85h. Finish, then read the ring for `host.segment_close_error`. Keep `SEGMENT_CLOSE_WRITE_ENABLED` off. |
+| 8 | conservation fails (`sum(auctions)` ≠ sold count) | attribution is losing or duplicating sales | Finish the show. Determine direction first: **less** than sold count = sales lost to a gap; **more** = an overlap double-counting. The second is worse. Rollback the extension either way before the next show. |
+| **9** | **the overlay shows a clean selection for a host that failed** | **spec §10 not satisfied** | **This is not a rollback.** It is a UI gap, not a data bug — the DB correctly refused the write. But it is the failure mode that makes every other failure invisible, so it **blocks distribution to host machines**. Finish the test, fix the indicator, re-run step 9. |
+
+### The distinction that matters
+
+- **Steps 1 and 6 are rollback-now.** A bad build, and the silent-misattribution bug.
+- **Steps 3, 4, 5, 7, 8 are finish-then-fix.** The data is additive and diagnostic; ending the
+  show early loses information you would want.
+- **Step 9 is fix-before-distribution.** No rollback, but a hard gate.
+
+---
+
+# 11. The backfill re-run — exact command
+
+**It is a single idempotent statement.** One `INSERT … SELECT` with a `NOT EXISTS` guard; safe to
+run any number of times. Re-running after the writer is live is also safe: the guard is
+per-session, so any session that already has a segment is skipped.
+
+Saved verbatim as `supabase/backfill/phase2_backfill_rerun.sql` so nothing has to be composed in
+the distribution window.
+
+```bash
+psql "$LENSED_DB_URL" -1 -v ON_ERROR_STOP=1 -f supabase/backfill/phase2_backfill_rerun.sql
+```
+
+`-1` wraps it in a transaction (the file has no `begin`/`commit` of its own, deliberately — the
+106 file does, which is why applying *that* requires dropping `-1`).
+
+Expected output: `INSERT 0 <n>`, where `<n>` was **6** at the time of writing.
+
+### Before
+
+```sql
+select count(*) as need_backfill
+from public.live_sessions ls
+where ls.host_id is not null and ls.started_at is not null
+  and not exists (select 1 from public.live_session_host_segments s where s.session_id = ls.id);
+```
+
+### After — must be 0
+
+Re-run the same query. If it is not 0, **stop and investigate before distributing**; a non-zero
+result means a session has a `host_id` the guard did not cover.
+
+### If you would rather not use psql
+
+The same statement through the Management API:
+
+```bash
+RAW=$(security find-generic-password -s "Supabase CLI" -w)
+TOKEN=$(echo "${RAW#go-keyring-base64:}" | base64 -d)
+python3 -c "import json,sys;print(json.dumps({'query':sys.stdin.read()}))" \
+  < supabase/backfill/phase2_backfill_rerun.sql \
+  | curl -s -X POST "https://api.supabase.com/v1/projects/dvucodtdojumvplmgjeu/database/query" \
+      -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d @-
+```
