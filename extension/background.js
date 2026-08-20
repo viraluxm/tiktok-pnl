@@ -192,12 +192,25 @@ var cachedSkus = null;
 // Manually-selected live HOST (a person from the Team/Employees roster) chosen in the
 // overlay. This is NOT the auto-detected TikTok account/shop — it identifies the
 // employee running the show, for host-hours / performance attribution. Held in memory
-// and pushed to live_sessions.host_id via set_session_host. The content script owns the
+// and pushed to live_session_host_segments via open_session_host_segment (which also keeps
+// live_sessions.host_id in sync). The content script owns the
 // durable per-room/session persistence and re-asserts it after a SW restart.
-var selectedHostId = null;
-// The session id we've already pushed selectedHostId to — so the attach RPC fires at
-// most once per (session, host) and never per-order on the hot bind path.
-var hostAppliedForSession = null;
+// KEYED BY ROOM, not a single scalar. One worker can serve several live tabs at once
+// (Snore has run 3 concurrent sessions on one store), and a single scalar means the second
+// tab's host pick silently overwrites the first — after which any re-apply for the first
+// session attaches the WRONG host. The per-session unique index in the DB cannot catch that:
+// each session still ends up with exactly one host, internally consistent and wrongly
+// attributed. Cross-session correctness has to be right here.
+var selectedHostByRoom = Object.create(null);   // roomId -> employees.id
+// roomId -> the session id that room's host has already been pushed to, so the attach RPC
+// fires at most once per (room, session, host) and never per-order on the hot bind path.
+var hostAppliedByRoom = Object.create(null);    // roomId -> sessionId
+// roomId -> ISO instant the operator made the pick, sent as p_at so a switch lands at the moment
+// it was MADE rather than the moment it happened to flush (the apply defers until this room's
+// session is the cached one). The RPC clamps it to [session.started_at, now()] and refuses an
+// instant at or before the open segment's own start, so a wrong client clock cannot corrupt a
+// boundary — see migration 112.
+var hostPickedAtByRoom = Object.create(null);
 
 // ─── Tab-alive heartbeat ─────────────────────────────────────────────
 // The live tab pings us every HEARTBEAT_MS (content script) while open; we stamp
@@ -472,6 +485,10 @@ async function handleLiveEnd(room) {
       );
       diagCrit('live.ended', 'info', 'session ended via live-end signal', { room: diagRedactId(room) });
       console.log('[LENSED][BG] live session ended (live_ended) for room:', room);
+      // Close the host segment for the SAME room. Resolved by room inside the helper, so this
+      // works even when the SW was evicted and the end arrived with no in-memory session — the
+      // same reason the PATCH above is keyed by tiktok_live_id rather than session id.
+      await closeHostSegmentForRoom(room, (sessionRoomId === room ? currentSessionId : null), 'session_end');
     } catch (e) {
       console.warn('[LENSED][BG] live-end write failed (non-fatal):', String((e && e.message) || e));
     }
@@ -878,8 +895,9 @@ async function clearAuth() {
   currentRoomId = null;
   sessionRoomId = null;
   cachedSkus = null;
-  selectedHostId = null;
-  hostAppliedForSession = null;
+  selectedHostByRoom = Object.create(null);
+  hostAppliedByRoom = Object.create(null);
+  hostPickedAtByRoom = Object.create(null);
   // 'lensed_refresh_token' is a legacy key from the pre-single-refresher build; remove
   // it by literal so upgrading hosts purge any stored refresh token they still hold.
   await chrome.storage.local.remove([SK_ACCESS_TOKEN, 'lensed_refresh_token', SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
@@ -1064,35 +1082,125 @@ async function fetchActiveHosts() {
   }
 }
 
-// Attach the selected host to the current live session via the set_session_host RPC.
+// Open a host segment for `roomId` on that room's session, via open_session_host_segment.
 // Fire-and-forget + memoized so it never slows or breaks the capture path: if the RPC
 // is absent (migration not yet applied) or fails transiently, it logs and no-ops —
 // capture and binding are entirely unaffected. Never added to the session INSERT, so
 // session creation cannot fail on a missing host_id column.
-function maybeApplyHost() {
-  if (!isAuthenticated() || !currentSessionId || !selectedHostId) return;
-  if (hostAppliedForSession === currentSessionId) return;
+// Push the host selected for `roomId` to that room's session. roomId is REQUIRED — attaching
+// without knowing which room a pick belongs to is how the wrong session gets attributed.
+//
+// Only applies when the worker's cached session is the one for THIS room. When it is not (the
+// other tab's session is currently cached), the pick stays in selectedHostByRoom and is applied
+// by the next getOrCreateSession(roomId) for that room. Deferring is correct: it never attaches
+// a host to a session belonging to a different live.
+function maybeApplyHost(roomId, source) {
+  if (!roomId) return;
+  if (!isAuthenticated()) return;
+  var hid = selectedHostByRoom[roomId];
+  if (!hid) return;
+  // The cached session must belong to this room.
+  if (!currentSessionId || sessionRoomId !== roomId) return;
   var sid = currentSessionId;
-  var hid = selectedHostId;
-  hostAppliedForSession = sid; // optimistic — prevents duplicate concurrent RPCs
-  supabaseRpc('set_session_host', { p_session_id: sid, p_host_id: hid })
-    .then(function () {
-      console.log('[LENSED][BG] host attached to session', sid, '->', hid);
+  if (hostAppliedByRoom[roomId] === sid) return;
+  hostAppliedByRoom[roomId] = sid; // optimistic — prevents duplicate concurrent RPCs
+  var src = source || 'extension_switch';
+  var at = hostPickedAtByRoom[roomId] || null;   // null => the server uses now()
+  // open_session_host_segment REPLACES set_session_host. It atomically closes whatever segment
+  // is open for this session and opens the new one, AND keeps live_sessions.host_id in sync —
+  // so calling both would double-write the scalar from two racing RPCs and preserve a path
+  // where the scalar moves without a segment opening, the divergence segments exist to remove.
+  supabaseRpc('open_session_host_segment', {
+    p_session_id: sid, p_host_id: hid, p_at: at, p_source: src,
+  })
+    .then(function (res) {
+      var segId = Array.isArray(res) ? res[0] : res;
+      console.log('[LENSED][BG] host segment opened', segId, 'session', sid, 'room', roomId, '->', hid, '(' + src + ')');
+      diag('host.segment_open', 'info', 'host segment opened', { room: roomId, source: src });
     })
     .catch(function (e) {
-      // Reset the memo so a later trigger (next bind / re-assert) can retry.
-      if (hostAppliedForSession === sid) hostAppliedForSession = null;
-      console.warn('[LENSED][BG] set_session_host failed (non-fatal):', String((e && e.message) || e));
+      // Reset this room's memo so a later trigger (next bind / re-assert) can retry.
+      if (hostAppliedByRoom[roomId] === sid) hostAppliedByRoom[roomId] = null;
+      var msg = String((e && e.message) || e);
+      var code = classifyHostSegmentError(msg);
+      console.warn('[LENSED][BG] open_session_host_segment failed room', roomId, code, ':', msg);
+      diagCrit('host.segment_error', 'error', 'open_session_host_segment failed', { room: roomId, source: src, code: code, msg: msg.slice(0, 200) });
+      broadcastHostSegmentFailure(roomId, hid, code, msg.slice(0, 200));
     });
+}
+
+// Close the open host segment for a room. Used by all four end/reset paths.
+//
+// BEST-EFFORT AND NON-FATAL by design — it must never block a reset or an end. But NOT silent:
+// per the R1 analysis a swallowed close leaves a segment open forever, and an open segment is
+// indistinguishable from "still selling". So a genuine failure is escalated the same way a
+// failed open is (diagCrit + a broadcast the overlay can surface).
+//
+// `sid` may be passed when the caller already knows the session (it is often about to null it);
+// otherwise the session is resolved BY ROOM via the same read-only mapping the heartbeat uses,
+// so this still works after a service-worker eviction lost the in-memory pointer.
+//
+// A null return from the RPC means NOTHING WAS OPEN. That is an idempotent no-op, not an error —
+// room-change fires unconditionally and must stay safe to call.
+async function closeHostSegmentForRoom(room, sid, source) {
+  if (!isAuthenticated()) return null;
+  var target = sid || (room ? await resolveHeartbeatSessionId(room) : null);
+  if (!target) return null;   // no session for this room: nothing to close
+  try {
+    var res = await supabaseRpc('close_session_host_segment', {
+      p_session_id: target, p_at: null, p_source: source,
+    });
+    var closed = Array.isArray(res) ? res[0] : res;
+    if (closed) {
+      console.log('[LENSED][BG] host segment closed', closed, 'session', target, 'room', room, '(' + source + ')');
+      diag('host.segment_close', 'info', 'host segment closed', { room: room, source: source });
+    } else {
+      // Expected on most calls — e.g. a room change where no host was ever picked.
+      console.log('[LENSED][BG] no open host segment to close for session', target, '(' + source + ')');
+      diag('host.segment_close_noop', 'info', 'no open segment to close', { room: room, source: source });
+    }
+    if (room) delete hostAppliedByRoom[room];   // a later re-open must re-fire
+    return closed || null;
+  } catch (e) {
+    var msg = String((e && e.message) || e);
+    var code = classifyHostSegmentError(msg);
+    console.warn('[LENSED][BG] close_session_host_segment failed room', room, code, ':', msg);
+    diagCrit('host.segment_close_error', 'error', 'close_session_host_segment failed', { room: room, source: source, code: code, msg: msg.slice(0, 200) });
+    broadcastHostSegmentFailure(room, null, code, msg.slice(0, 200));
+    return null;
+  }
 }
 
 // Record the operator's host choice and (re)apply it to the current session. Called
 // from the content script on selection change and on post-reload re-assert.
-function setSelectedHost(hostId) {
-  selectedHostId = hostId || null;
-  hostAppliedForSession = null; // force a re-apply to the current session
-  maybeApplyHost();
-  return { ok: true, sessionId: currentSessionId || null, hostId: selectedHostId };
+function setSelectedHost(hostId, roomId) {
+  // NO ROOM, NO GUESS. A pick that does not say which live it belongs to cannot be attached
+  // safely — with two tabs open, guessing would attribute the wrong session. This is NOT an
+  // error though: the overlay legitimately lets a host be chosen before the room is known, and
+  // the content script persists that pick and re-asserts it via restoreHostByRoom once the room
+  // resolves. Report it as DEFERRED so the overlay can say "waiting for room" rather than
+  // showing a failure for something that will resolve on its own.
+  if (!roomId) {
+    console.log('[LENSED][BG] host pick deferred — room not known yet');
+    return { ok: true, deferred: true, reason: 'ROOM_UNKNOWN', sessionId: null, roomId: null, hostId: hostId || null };
+  }
+  if (hostId) {
+    selectedHostByRoom[roomId] = hostId;
+    hostPickedAtByRoom[roomId] = new Date().toISOString();
+  } else {
+    delete selectedHostByRoom[roomId];
+    delete hostPickedAtByRoom[roomId];
+  }
+  hostAppliedByRoom[roomId] = null;  // force a re-apply for THIS room only
+  maybeApplyHost(roomId, 'extension_switch');
+  return {
+    ok: true,
+    sessionId: (sessionRoomId === roomId ? currentSessionId : null) || null,
+    roomId: roomId,
+    hostId: selectedHostByRoom[roomId] || null,
+    // true when the pick is recorded but this room's session is not the cached one yet
+    pending: !!(selectedHostByRoom[roomId] && sessionRoomId !== roomId),
+  };
 }
 
 // Resolve (or create) the live session for a specific tiktok room. `roomId` is the
@@ -1140,7 +1248,7 @@ async function getOrCreateSession(roomId) {
       diagCrit('session.resolve', 'info', 'reused room-scoped session', { session: diagRedactId(currentSessionId), room: room, created: false });
       persistSession();
       broadcastSession();
-      maybeApplyHost();
+      maybeApplyHost(room, 'session_reuse');
       return currentSessionId;
     }
 
@@ -1163,7 +1271,7 @@ async function getOrCreateSession(roomId) {
       diagCrit('session.resolve', 'info', 'created room-scoped session', { session: diagRedactId(currentSessionId), room: room, created: true });
       persistSession();
       broadcastSession();
-      maybeApplyHost();
+      maybeApplyHost(room, 'session_create');
       return currentSessionId;
     }
     console.error('[LENSED][BG] session create returned empty');
@@ -1227,8 +1335,10 @@ async function logAuction(sessionId, result, skus, idemKey) {
   }
 }
 
-// Build the capture_events row — shared by upsertCaptureEvent and the unauth-queue
-// flush replay (replayQueuedSale) so both write the identical shape.
+// Build the capture_events row. THE single definition — called by upsertCaptureEvent (the hot
+// path) and by replayQueuedSale (the unauth-queue flush), so both write the identical shape.
+// Add a field here and it lands on both paths; that was not true before the two literals were
+// collapsed, which is how ext_version had to be added in two places.
 function buildCaptureRow(sale, boundSkuId) {
   return {
     user_id: userId,
@@ -1246,6 +1356,7 @@ function buildCaptureRow(sale, boundSkuId) {
     order_status: sale.orderStatus,
     bound_sku_id: boundSkuId || null,
     raw_payload: sale,
+    ext_version: EXT_VERSION,
   };
 }
 
@@ -1255,23 +1366,11 @@ function buildCaptureRow(sale, boundSkuId) {
 // of raising 23505 (the empty-upsert bug that failed 135× during the replay storm).
 async function upsertCaptureEvent(sale, boundSkuId) {
   if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return { ok: false, reason: 'not_authenticated' }; }
-  var row = {
-    user_id: userId,
-    order_id: sale.orderId,
-    room_id: sale.roomId || currentRoomId,
-    buyer_username: sale.buyerUsername || null,
-    selling_price_cents: parsePriceToCents(sale.sellingPrice),
-    product_name: sale.productName || null,
-    platform_sku_ref: sale.platformSkuRef || null,
-    tiktok_sku_id: sale.skuId || null,
-    tiktok_product_id: sale.productId || null,
-    item_image_url: sale.imageUrl || null,
-    ordered_at: sale.orderedAtMs ? new Date(sale.orderedAtMs).toISOString() : null,
-    is_payment_successful: sale.isPaymentSuccessful,
-    order_status: sale.orderStatus,
-    bound_sku_id: boundSkuId || null,
-    raw_payload: sale,
-  };
+  // ONE definition of the capture row. buildCaptureRow's docstring has always claimed it was
+  // shared with this function; it was not — an identical 16-field literal was inlined here, and
+  // the two stayed in sync by luck. They were verified byte-identical immediately before this
+  // collapse, so it is a pure de-duplication with no behaviour change.
+  var row = buildCaptureRow(sale, boundSkuId);
   try {
     await supabaseUpsert('capture_events', row, 'user_id,order_id');
     console.log('[LENSED][BG] capture_events upserted:', sale.orderId);
@@ -1899,6 +1998,38 @@ function persistSession() {
 
 // Tell open TikTok tabs which live session they're attached to, so each overlay
 // can scope its persisted order counter to this session id.
+// Tell every live tab that a host switch did NOT register. Modelled on broadcastSession.
+// Loud by design (Phase 2 spec section 10): a silently-failed switch leaves no record that one
+// was attempted, so the attribution loss is unrecoverable afterwards. The overlay decides how
+// to render it; the worker's job is to stop swallowing the failure.
+function broadcastHostSegmentFailure(roomId, hostId, code, message) {
+  chrome.tabs.query({ url: 'https://shop.tiktok.com/*' }, function (tabs) {
+    if (chrome.runtime.lastError) return;
+    for (var i = 0; i < tabs.length; i++) {
+      try {
+        chrome.tabs.sendMessage(tabs[i].id, {
+          type: 'LENSED_HOST_SEGMENT_FAILED',
+          roomId: roomId || null,
+          hostId: hostId || null,
+          code: code || 'UNKNOWN',
+          message: message || null,
+        }).catch(function () {});
+      } catch (_) {}
+    }
+  });
+}
+
+// Classify an open_session_host_segment failure into the four cases the operator can act on
+// differently (Phase 2 spec section 10). Anything else is transient/unknown and retries.
+function classifyHostSegmentError(msg) {
+  var m = String(msg || '');
+  if (m.indexOf('HOST_NOT_FOUND_OR_NOT_OWNED') >= 0) return 'HOST_NOT_FOUND_OR_NOT_OWNED';
+  if (m.indexOf('SESSION_NOT_FOUND_OR_NOT_OWNED') >= 0) return 'SESSION_NOT_FOUND_OR_NOT_OWNED';
+  if (m.indexOf('INVALID_SOURCE') >= 0) return 'INVALID_SOURCE';
+  if (m.indexOf('(401)') >= 0 || m.indexOf('(403)') >= 0) return 'AUTH';
+  return 'TRANSIENT';
+}
+
 function broadcastSession(reason) {
   chrome.tabs.query({ url: 'https://shop.tiktok.com/*' }, function (tabs) {
     if (chrome.runtime.lastError) return;
@@ -1948,13 +2079,19 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
           !previousUserId || !incomingUserId || previousUserId !== incomingUserId;
 
         if (identityChanged) {
-          var hadSession = !!currentSessionId, hadHost = !!selectedHostId;
+          var hadSession = !!currentSessionId, hadHost = Object.keys(selectedHostByRoom).length > 0;
+          // Close the outgoing user's open segment before any of this is cleared — afterwards
+          // we no longer know which session or room it belonged to.
+          closeHostSegmentForRoom(sessionRoomId || currentRoomId, currentSessionId, 'user_change_close');
           cachedSkus = null; // invalidate SKU cache for the new/unknown user
           currentSessionId = null; // re-resolve session for the new user
           currentRoomId = null;
           sessionRoomId = null;
-          selectedHostId = null;      // a new user's live must not inherit the prior host
-          hostAppliedForSession = null;
+          // A new user's live must not inherit ANY prior host — this is the one reset that
+          // is correctly global rather than per-room.
+          selectedHostByRoom = Object.create(null);
+          hostAppliedByRoom = Object.create(null);
+          hostPickedAtByRoom = Object.create(null);
           // Drop the previous user's pinned session/room so the new user never resumes
           // it; broadcast the reset (with a reason) so overlays clear staged SKUs and
           // re-scope their counter.
@@ -1990,12 +2127,18 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
 chrome.tabs.onRemoved.addListener(function (tabId) {
   if (liveTabId == null || tabId !== liveTabId) return;
   var sid = currentSessionId;
+  var room = sessionRoomId;
   liveTabId = null;
   currentSessionId = null;
   sessionRoomId = null;
   lastHeartbeatWriteTs = 0;
   try { persistSession(); } catch (_) {} // clears SK_SESSION_ID / SK_ROOM_ID
-  if (sid) markSessionEndedOnTabClose(sid);
+  if (sid) {
+    // Close the segment as well as the session — otherwise the host stays "open" against a
+    // session that has already been marked ended.
+    closeHostSegmentForRoom(room, sid, 'tab_closed');
+    markSessionEndedOnTabClose(sid);
+  }
 });
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
@@ -2062,12 +2205,24 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       // this new live's orders never attach to the old live. A fresh room-scoped
       // session is resolved/created on the next bind.
       console.log('[LENSED][BG] session discarded — room mismatch: session', currentSessionId, 'was room', sessionRoomId, '→ new room', newRoom);
+      // Capture the outgoing room AND session BEFORE they are nulled — the host map is keyed
+      // by room, and the segment close needs the session id.
+      var sessionRoomIdBeingLeft = sessionRoomId;
+      var sessionIdBeingLeft = currentSessionId;
+      // Close the outgoing live's segment so it never dangles into the new show.
+      closeHostSegmentForRoom(sessionRoomIdBeingLeft, sessionIdBeingLeft, 'room_change_close');
       currentSessionId = null;
       sessionRoomId = null;
       // A new live (new room) is a new show — never carry the prior live's host over.
       // The overlay re-selects the host (and warns while none is chosen) for this room.
-      selectedHostId = null;
-      hostAppliedForSession = null;
+      //
+      // Clear ONLY the room we are leaving. Wiping the whole map would drop a host another
+      // tab is still selling under, which is the bug this keying exists to prevent.
+      if (sessionRoomIdBeingLeft) {
+        delete selectedHostByRoom[sessionRoomIdBeingLeft];
+        delete hostAppliedByRoom[sessionRoomIdBeingLeft];
+        delete hostPickedAtByRoom[sessionRoomIdBeingLeft];
+      }
       // The discarded session's per-order dedup no longer applies to the new live;
       // clear both maps in lockstep (also bounds them across a multi-live worker).
       loggedOrderStatus.clear();
@@ -2171,7 +2326,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === 'SET_SESSION_HOST') {
     // Operator picked (or re-asserted after reload) the host running this live.
     try {
-      sendResponse(setSelectedHost(message.hostId));
+      sendResponse(setSelectedHost(message.hostId, message.roomId || null));
     } catch (err) {
       sendResponse({ ok: false, error: String((err && err.message) || err) });
     }

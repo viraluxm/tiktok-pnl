@@ -171,14 +171,18 @@ async function run() {
     const sw = boot(freshSessionSeed('user-A'));
     await sleep(25);
     // Select a host for the active session (SET_SESSION_HOST echoes {sessionId, hostId}).
-    const setResp = await send(sw.getInternal(), { type: 'SET_SESSION_HOST', hostId: 'host-1' });
+    // roomId is REQUIRED since the host map became room-keyed: a pick that does not say which
+    // live it belongs to cannot be attached safely, because with two tabs open the worker would
+    // have to guess. All four real send sites in tiktok-content.js already pass roomId; this
+    // test previously omitted it as a shortcut. The seeded room is 'room-' + uid.
+    const setResp = await send(sw.getInternal(), { type: 'SET_SESSION_HOST', hostId: 'host-1', roomId: 'room-user-A' });
     ok('7) host selected against active session', setResp && setResp.ok === true && setResp.hostId === 'host-1' && setResp.sessionId === 'sess-user-A', JSON.stringify(setResp));
     sw.clearBroadcasts();
     await send(sw.getExternal(), { type: 'LENSED_AUTH', accessToken: jwt('user-A', 2), refreshToken: 'rA2' }); // same user
     ok('7) same-user refresh did not reset session (no null broadcast)', sw.sessionBroadcasts().length === 0, JSON.stringify(sw.sessionBroadcasts()));
     // Re-assert host: SET_SESSION_HOST echoes the STILL-CURRENT session id → proves the
     // session (and, in the same reset block, the selected host) survived the refresh.
-    const reResp = await send(sw.getInternal(), { type: 'SET_SESSION_HOST', hostId: 'host-1' });
+    const reResp = await send(sw.getInternal(), { type: 'SET_SESSION_HOST', hostId: 'host-1', roomId: 'room-user-A' });
     ok('7) session still current after refresh (host API echoes sess-user-A)', reResp && reResp.sessionId === 'sess-user-A' && reResp.hostId === 'host-1', JSON.stringify(reResp));
   }
 
