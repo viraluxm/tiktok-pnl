@@ -35,6 +35,16 @@ export interface AutoEndResult {
   no_captures_count: number;
   no_captures: Record<string, unknown>[];
   closed: number;
+  // ── HOST SEGMENTS (migration 106/108/110/112) ──────────────────────────────────────
+  // A session that ends with an OPEN host segment leaves that segment open forever. The read
+  // path bounds it (lensed_session_activity_end ceilings it at the last sale, so it cannot
+  // credit a host past their last sale), but "open" still reads as "currently selling".
+  // Closing it here is the only server-side path that ever does.
+  segment_close_write_enabled: boolean;
+  segments_would_close_count: number;
+  segments_would_close: Record<string, unknown>[];
+  segments_closed: number;
+  segment_close_errors: Record<string, unknown>[];
 }
 
 // Runs the sweep. write=false ⇒ compute-only (nothing written). write=true ⇒ close
@@ -99,7 +109,11 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
       // left for the one-time cleanup (we can't tell if it's genuinely over).
       if (hasHeartbeat && (hbIdleMin as number) > AUTO_END_MINUTES) {
         wouldClose.push({
-          id: s.id, store_id: s.store_id, started_at: s.started_at, captures: 0,
+          // user_id is REQUIRED here as well as in `base`: this branch builds its own object
+          // rather than spreading base, and the service-role segment close needs the owner.
+          // Without it p_owner_user_id arrives undefined and the RPC raises OWNER_REQUIRED —
+          // swallowed as non-fatal, so the segment would silently stay open.
+          id: s.id, user_id: s.user_id, store_id: s.store_id, started_at: s.started_at, captures: 0,
           signal: 'heartbeat', idle_minutes: hbIdleMin, last_seen_at: s.last_seen_at,
           proposed_ended_at: s.last_seen_at,
           duration_hours: +((hbLastMs - new Date(s.started_at).getTime()) / 3_600_000).toFixed(2),
@@ -127,7 +141,7 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     const durationHours = +((lastMs - new Date(s.started_at).getTime()) / 3_600_000).toFixed(2);
 
     const base = {
-      id: s.id, store_id: s.store_id, started_at: s.started_at,
+      id: s.id, user_id: s.user_id, store_id: s.store_id, started_at: s.started_at,
       captures: times.length, span_hours: spanHours, max_gap_hours: maxGapHours,
       distinct_pt_days: distinctPtDays, last_capture_at: lastCaptureIso, idle_minutes: idleMin,
     };
@@ -164,7 +178,50 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     }
   }
 
+  // ── HOST SEGMENTS: what WOULD be closed ───────────────────────────────────────────────
+  // Computed for the dry run too, so the report is inspectable before the flag ever flips.
+  // Scoped to the wouldClose set ONLY — multiLive sessions are flagged for manual split and
+  // never auto-closed, so their segments are deliberately left open.
+  const segmentCloseWriteEnabled = process.env.SEGMENT_CLOSE_WRITE_ENABLED === 'true';
+  const segmentsWouldClose: Record<string, unknown>[] = [];
+  if (wouldClose.length) {
+    const ids = wouldClose.map((w) => w.id as string);
+    const { data: openSegs, error: segErr } = await admin
+      .from('live_session_host_segments')
+      .select('id, session_id, host_id, started_at')
+      .in('session_id', ids)
+      .is('ended_at', null)
+      .is('superseded_by', null);
+    if (segErr) {
+      // Read failure here must not sink the sweep — sessions still end.
+      console.error('[auto-end] open-segment read failed (non-fatal):', segErr.message);
+    } else {
+      const byId = new Map(wouldClose.map((w) => [w.id as string, w]));
+      for (const seg of (openSegs ?? []) as Array<{ id: string; session_id: string; host_id: string | null; started_at: string }>) {
+        const w = byId.get(seg.session_id);
+        if (!w) continue;
+        const proposed = w.proposed_ended_at as string;
+        const segStartMs = new Date(seg.started_at).getTime();
+        const proposedMs = new Date(proposed).getTime();
+        segmentsWouldClose.push({
+          session_id: seg.session_id,
+          owner_user_id: w.user_id as string,
+          segment_id: seg.id,
+          host_id: seg.host_id,
+          segment_started_at: seg.started_at,
+          // proposed_ended_at, NOT now(). autoEnd trims the idle tail off a session; now()
+          // would hand the host every minute of the gap being trimmed.
+          proposed_ended_at: proposed,
+          resulting_duration_minutes: Math.round(((proposedMs - segStartMs) / 60000) * 100) / 100,
+          inverted: proposedMs < segStartMs,
+        });
+      }
+    }
+  }
+
   let closed = 0;
+  let segmentsClosed = 0;
+  const segmentCloseErrors: Record<string, unknown>[] = [];
   if (write && wouldClose.length) {
     for (const w of wouldClose) {
       const { error } = await admin
@@ -172,8 +229,39 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
         .update({ status: 'ended', ended_at: w.proposed_ended_at as string, end_source: 'auto_ender' })
         .eq('id', w.id as string)
         .is('ended_at', null); // never overwrite an already-ended session
-      if (error) console.error('[auto-end] update error', w.id, error.message);
-      else closed++;
+      if (error) { console.error('[auto-end] update error', w.id, error.message); continue; }
+      closed++;
+
+      // ── SEGMENT CLOSE — best-effort, non-fatal, AFTER the session actually ended ────────
+      // Deliberately not awaited into the session's success/failure accounting: `closed` is
+      // already incremented above, so nothing below can stop a session from being ended. A
+      // segment-close failure is recorded and the sweep continues to the next session.
+      //
+      // close_session_host_segment_AS, not the auth.uid() variant: this runs from a
+      // CRON_SECRET-gated route via createAdminClient(), where auth.uid() is NULL and the
+      // user-facing RPC could only ever raise SESSION_NOT_FOUND_OR_NOT_OWNED.
+      if (!segmentCloseWriteEnabled) continue;
+      const seg = segmentsWouldClose.find((x) => x.session_id === (w.id as string));
+      if (!seg) continue;
+      try {
+        // rpc-grants: close_session_host_segment_as
+        const { error: rpcErr } = await admin.rpc('close_session_host_segment_as', {
+          p_owner_user_id: w.user_id as string,
+          p_session_id: w.id as string,
+          p_at: w.proposed_ended_at as string,
+          p_source: 'session_end',
+        });
+        if (rpcErr) {
+          segmentCloseErrors.push({ session_id: w.id, segment_id: seg.segment_id, error: rpcErr.message });
+          console.error('[auto-end] segment close failed (non-fatal)', w.id, rpcErr.message);
+        } else {
+          segmentsClosed++;
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        segmentCloseErrors.push({ session_id: w.id, segment_id: seg.segment_id, error: msg });
+        console.error('[auto-end] segment close threw (non-fatal)', w.id, msg);
+      }
     }
   }
 
@@ -191,5 +279,10 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     no_captures_count: noCaptures.length,
     no_captures: noCaptures,
     closed: write ? closed : 0,
+    segment_close_write_enabled: segmentCloseWriteEnabled,
+    segments_would_close_count: segmentsWouldClose.length,
+    segments_would_close: segmentsWouldClose,
+    segments_closed: write ? segmentsClosed : 0,
+    segment_close_errors: segmentCloseErrors,
   };
 }
