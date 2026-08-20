@@ -44,7 +44,7 @@ export const TIMECLOCK_CONFINEMENT: Confinement = { home: '/kiosk', allow: ['/ki
 // performance) is deliberately NOT reachable — member data comes only from owner-scoped
 // /api/member/*.
 export const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
-  binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog'],
+  binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores'],
   inventory: ['/team/inventory', '/api/member/inventory'],
 };
 

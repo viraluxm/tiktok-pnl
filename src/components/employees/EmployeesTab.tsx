@@ -13,6 +13,8 @@ import { Field, StatusBadge, titleCase, ROLE_PRESETS, STATUSES } from './shared'
 import MobileDataCard from '@/components/ui/MobileDataCard';
 import { useScheduleLinks, scheduleLinkUrl, type ScheduleLink } from '@/hooks/useScheduleLinks';
 import { ScheduleLinkButton, ScheduleLinkSection, LINK_WARNING, copyText } from './ScheduleLinkButton';
+import { BadgeButton } from './BadgeButton';
+import { useBadges, type ActiveBadge } from '@/hooks/useBadges';
 
 interface EmployeesTabProps {
   // The selected period, driven by the dashboard's global FiltersBar. Nulls = all time.
@@ -54,6 +56,10 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   // Schedule-link tokens (roster Create/Copy + Edit-modal Revoke/Regenerate).
   const { byEmployee: links, mint: mintLink, revoke: revokeLink } = useScheduleLinks();
   const [linkWarn, setLinkWarn] = useState(false); // shows LINK_WARNING after a link is created
+  // Per-employee badge state (roster Issue/Reissue) — a second entry point onto /api/admin/badges,
+  // the same routes /admin/badges uses. The rotating QR is NOT provisioned per employee and has no
+  // roster action — it's minted on demand from the schedule link.
+  const { byEmployee: badges, issue: issueBadge, reissue: reissueBadge } = useBadges();
 
   // Employee add/edit modal
   const [modalOpen, setModalOpen] = useState(false);
@@ -172,6 +178,9 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
           links={links}
           onMintLink={(id) => mintLink.mutateAsync(id)}
           onLinkCreated={() => setLinkWarn(true)}
+          badges={badges}
+          onIssueBadge={issueBadge}
+          onReissueBadge={reissueBadge}
           onCopyAll={copyAllLinks}
           linkWarn={linkWarn}
           onDismissWarn={() => setLinkWarn(false)}
@@ -314,6 +323,9 @@ function RosterView({
   links,
   onMintLink,
   onLinkCreated,
+  badges,
+  onIssueBadge,
+  onReissueBadge,
   onCopyAll,
   linkWarn,
   onDismissWarn,
@@ -327,6 +339,9 @@ function RosterView({
   links: Record<string, ScheduleLink>;
   onMintLink: (employeeId: string) => Promise<{ url: string }>;
   onLinkCreated: () => void;
+  badges: Record<string, ActiveBadge>;
+  onIssueBadge: (employeeId: string) => Promise<void>;
+  onReissueBadge: (employeeId: string, badgeId: string) => Promise<void>;
   onCopyAll: () => Promise<boolean>;
   linkWarn: boolean;
   onDismissWarn: () => void;
@@ -410,6 +425,14 @@ function RosterView({
                     onMint={onMintLink}
                     onCreated={onLinkCreated}
                   />
+                  <span className="ml-2 inline-block">
+                    <BadgeButton
+                      employeeId={e.id}
+                      badge={badges[e.id] ?? null}
+                      onIssue={onIssueBadge}
+                      onReissue={onReissueBadge}
+                    />
+                  </span>
                   <button
                     onClick={() => onEdit(e)}
                     className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
@@ -464,6 +487,12 @@ function RosterView({
                     token={links[e.id]?.token ?? null}
                     onMint={onMintLink}
                     onCreated={onLinkCreated}
+                  />
+                  <BadgeButton
+                    employeeId={e.id}
+                    badge={badges[e.id] ?? null}
+                    onIssue={onIssueBadge}
+                    onReissue={onReissueBadge}
                   />
                   <button
                     onClick={() => onEdit(e)}

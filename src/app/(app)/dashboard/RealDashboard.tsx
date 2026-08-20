@@ -7,14 +7,12 @@ import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import UnmappedSessionsBanner from '@/components/admin/UnmappedSessionsBanner';
 import SummaryCards from '@/components/dashboard/SummaryCards';
-import ForecastCard from '@/components/dashboard/ForecastCard';
 import InventorySection from '@/components/inventory/InventorySection';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useTikTok } from '@/hooks/useTikTok';
 import { useEntries } from '@/hooks/useEntries';
-import { useProductCosts } from '@/hooks/useProductCosts';
 import { useProductStats } from '@/hooks/useProductStats';
-import { useLabor, useSavePackerLabor } from '@/hooks/useLabor';
+import { useLabor } from '@/hooks/useLabor';
 import { useFilters } from '@/hooks/useFilters';
 import { useShopVideos } from '@/hooks/useShopVideos';
 import { useTikTokBusiness } from '@/hooks/useTikTokBusiness';
@@ -45,34 +43,37 @@ const isViewTab = (v: unknown): v is ViewTab =>
 
 function getPreviousPeriodEntries(
   allEntries: Entry[],
-  activeQuickFilter: number | 'all',
+  activeQuickFilter: number | 'all' | 'custom',
   dateFrom: string | null,
   dateTo: string | null,
 ): Entry[] {
   if (activeQuickFilter === 'all' || (!dateFrom && !dateTo)) return [];
 
-  const now = new Date();
+  // Pacific-anchored (America/Los_Angeles) to match the main filter + order-date derivation.
+  // shiftDays does pure calendar math on YYYY-MM-DD strings (parse+emit in UTC, no zone drift).
+  const toShopDate = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  const shiftDays = (isoDate: string, n: number) => {
+    const d = new Date(`${isoDate}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const todayStr = toShopDate(new Date());
+
   let prevFrom: string;
   let prevTo: string;
 
   if (activeQuickFilter === 0) {
-    const yesterday = new Date(now);
-    yesterday.setDate(yesterday.getDate() - 1);
-    prevFrom = prevTo = yesterday.toISOString().split('T')[0];
+    prevFrom = prevTo = shiftDays(todayStr, -1); // yesterday (Pacific)
   } else if (activeQuickFilter === 1) {
-    const dayBefore = new Date(now);
-    dayBefore.setDate(dayBefore.getDate() - 2);
-    prevFrom = prevTo = dayBefore.toISOString().split('T')[0];
+    prevFrom = prevTo = shiftDays(todayStr, -2); // day before yesterday (Pacific)
   } else if (dateFrom && dateTo) {
-    const from = new Date(dateFrom);
-    const to = new Date(dateTo);
-    const daysSpan = Math.round((to.getTime() - from.getTime()) / 86400000) + 1;
-    const prevEnd = new Date(from);
-    prevEnd.setDate(prevEnd.getDate() - 1);
-    const prevStart = new Date(prevEnd);
-    prevStart.setDate(prevStart.getDate() - daysSpan + 1);
-    prevFrom = prevStart.toISOString().split('T')[0];
-    prevTo = prevEnd.toISOString().split('T')[0];
+    const daysSpan =
+      Math.round(
+        (new Date(`${dateTo}T00:00:00Z`).getTime() - new Date(`${dateFrom}T00:00:00Z`).getTime()) /
+          86400000,
+      ) + 1;
+    prevTo = shiftDays(dateFrom, -1);
+    prevFrom = shiftDays(dateFrom, -daysSpan);
   } else {
     return [];
   }
@@ -125,11 +126,10 @@ export default function RealDashboard() {
     }
     if (isViewTab(t)) setActiveView(t, 'replace');
   }, [setActiveView]);
-  const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all'>('all');
+  const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all' | 'custom'>('all');
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
-  const { costsMap } = useProductCosts();
   const { data: productStatsData } = useProductStats(filters.dateFrom, filters.dateTo);
   const productStats = productStatsData?.products;
   const orderTotals = productStatsData?.totals;
@@ -137,28 +137,24 @@ export default function RealDashboard() {
   const { isConnected: bizConnected, advertiserName, connect: connectBiz, disconnect: disconnectBiz, syncAdSpend } = useTikTokBusiness();
   const { data: adSpendMetrics } = useAdSpend(filters.dateFrom, filters.dateTo);
   const { data: returnsData } = useReturns(filters.dateFrom, filters.dateTo);
-  // Labor line — host labor is MEASURED (live_sessions × rate), packer labor is a manual entry.
+  // Labor line — host + fulfillment, both punch-derived (clock-in/out via computeLaborByDateRole).
   // Only available when a bounded period is selected (needs from & to).
   const { data: laborData } = useLabor(filters.dateFrom, filters.dateTo);
-  const savePacker = useSavePackerLabor();
   const hostLaborDollars = (laborData?.host.labor_cents || 0) / 100;
-  const packerLaborDollars = (laborData?.packer.labor_cents || 0) / 100;
-  const totalLaborDollars = hostLaborDollars + packerLaborDollars;
-  const [packerInput, setPackerInput] = useState<string>('');
+  const fulfillmentLaborDollars = (laborData?.fulfillment.labor_cents || 0) / 100;
+  const totalLaborDollars = hostLaborDollars + fulfillmentLaborDollars;
 
   // All entries (no filter) for previous period comparison & forecast
   const { entries: allEntries } = useEntries({ dateFrom: null, dateTo: null, productId: 'all' });
   const { entries } = useEntries(filters);
 
-  // COGS from TWO server-computed sources (product-stats): the AUCTION cost snapshot
-  // (live_auction_item_skus.unit_cost_cents_snapshot) for auction orders, PLUS the name-based
-  // CATALOG resolver ($0.80×(boxes+1)) for non-auction storefront orders. Together they cost
-  // both halves of the business; what's still uncosted is surfaced (catalog unparseable names +
-  // class-c auction-lot orders), never silently zero-costed.
+  // COGS from the AUCTION cost snapshot (live_auction_item_skus.unit_cost_cents_snapshot), read via
+  // the canonical order-grain view. PARTIAL BY DESIGN: only auction orders carry a snapshot;
+  // cogsCoveredOrders vs totalOrders lets the UI label that coverage honestly. Non-auction
+  // (storefront) orders carry no snapshot and are not costed here.
   const snapshotCogs = orderTotals?.snapshotCogs || 0;
-  const catalogCogs = orderTotals?.catalogCogs || 0;
-  const totalProductCogs = snapshotCogs + catalogCogs;
-  const cogsCoveredOrders = (orderTotals?.cogsCoveredOrders || 0) + (orderTotals?.catalogCostedOrders || 0);
+  const totalProductCogs = snapshotCogs;
+  const cogsCoveredOrders = orderTotals?.cogsCoveredOrders || 0;
   const cogsTotalOrders = orderTotals?.totalOrders || 0;
   const cogsCoveragePct = cogsTotalOrders > 0 ? Math.round((cogsCoveredOrders / cogsTotalOrders) * 100) : 0;
 
@@ -166,7 +162,9 @@ export default function RealDashboard() {
   const metrics = useMemo(() => {
     // Compute base metrics from order totals (synced_order_ids) — more reliable than entries table
     const t = orderTotals;
-    const gmv = t?.totalGMV || 0;
+    // Headline GMV drops non-auction MERCHANDISE (gmv − shipping); auction GMV stays on the synced
+    // basis and non-auction shipping remains. This card answers "what did TikTok bill buyers".
+    const gmv = (t?.totalGMV || 0) - (t?.nonAuctionMerch || 0);
     const shipping = t?.totalShipping || 0;
     const affiliate = t?.totalAffiliate || 0;
     const platformFee = t?.totalPlatformFee || 0;
@@ -224,8 +222,8 @@ export default function RealDashboard() {
       };
     }
 
-    // LABOR — period cost (host measured + packer entered), subtracted from net. Independent of
-    // computePay/shifts; see /api/labor. Reduces net profit + margin for the selected period.
+    // LABOR — period cost (host + fulfillment, both punch-derived), subtracted from net. Reuses
+    // payroll's payability (see /api/labor → computeLaborByDateRole). Reduces net + margin.
     if (totalLaborDollars > 0) {
       const afterLabor = result.totalNetProfit - totalLaborDollars;
       result = { ...result, totalNetProfit: afterLabor, avgMargin: result.totalGMV > 0 ? (afterLabor / result.totalGMV) * 100 : 0 };
@@ -258,9 +256,9 @@ export default function RealDashboard() {
     totalProf -= totalUserCogs;
 
     const hasUserCogs = totalUserCogs > 0;
-    // COGS now spans auction (snapshot) + catalog (name resolver). The % is the combined coverage;
-    // the remainder is uncosted (catalog unparseable names + class-c auction-lot orders).
-    const cogsLabel = `COGS (auction + catalog, ${cogsCoveragePct}% of orders)`;
+    // COGS = auction cost snapshot only. The % is auction coverage; non-auction orders carry no
+    // snapshot and are not costed here.
+    const cogsLabel = `COGS (auction snapshot, ${cogsCoveragePct}% of orders)`;
     const breakdownLabels = hasUserCogs
       ? ['Platform Fee (6%)', cogsLabel, 'Shipping', 'Net Profit']
       : ['Platform Fee (6%)', 'Shipping', 'Net Profit'];
@@ -302,6 +300,17 @@ export default function RealDashboard() {
   function handleQuickFilter(days: number | 'all') {
     setActiveQuickFilter(days);
     setQuickFilter(days);
+  }
+
+  // Last-touched-wins: an explicit date edit clears the quick-filter highlight (→ 'custom'),
+  // and a quick-filter click (handleQuickFilter) overwrites the dates. Exactly one is ever active.
+  function handleDateFrom(date: string | null) {
+    setActiveQuickFilter('custom');
+    setDateFrom(date);
+  }
+  function handleDateTo(date: string | null) {
+    setActiveQuickFilter('custom');
+    setDateTo(date);
   }
 
   const tabs: Array<{ label: string; value: ViewTab }> = [
@@ -378,8 +387,8 @@ export default function RealDashboard() {
         <FiltersBar
           filters={filters}
           onQuickFilter={handleQuickFilter}
-          onDateFromChange={setDateFrom}
-          onDateToChange={setDateTo}
+          onDateFromChange={handleDateFrom}
+          onDateToChange={handleDateTo}
           activeQuickFilter={activeQuickFilter}
         />
 
@@ -404,52 +413,45 @@ export default function RealDashboard() {
         {activeView === 'dashboard' && (
           <>
             <SummaryCards metrics={metrics} prevMetrics={prevMetrics} />
-            {/* LABOR — two separate lines. Host is MEASURED (live_sessions); packer is ENTERED. */}
+            {/* LABOR — host + fulfillment, both PUNCH-DERIVED (clock-in/out). Provisional when a
+                material share of hours is still awaiting manager confirmation. */}
             {laborData && (
               <div className="rounded-xl border border-tt-border bg-tt-card p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm font-semibold text-tt-text">Labor (hosts measured, packers entered)</div>
-                  <div className="text-sm text-tt-muted">−${totalLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} from net</div>
+                <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                  <div className="text-sm font-semibold text-tt-text">Labor · punch-derived</div>
+                  <div className={`text-sm ${laborData.provisional ? 'text-tt-yellow' : 'text-tt-muted'}`}>
+                    −${totalLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} from net
+                    {laborData.provisional && <span> · +{laborData.pending.hours}h pending confirmation</span>}
+                  </div>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="rounded-lg bg-tt-card-hover px-3 py-2">
-                    <div className="text-xs text-tt-muted">Host labor · measured</div>
+                    <div className="text-xs text-tt-muted">Host labor · punch-derived</div>
                     <div className="text-lg font-semibold text-tt-text">
                       ${hostLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      <span className="ml-2 text-xs font-normal text-tt-muted">{laborData.host.hours}h × ${laborData.host.rate_dollars}/h</span>
+                      <span className="ml-2 text-xs font-normal text-tt-muted">{laborData.host.hours}h</span>
                     </div>
-                    {(laborData.host.excluded_over_cap_count > 0 || laborData.host.rates_differ) && (
+                    {laborData.host.zero_rate_flag && (
                       <div className="mt-1 text-[11px] text-tt-yellow" role="note">
-                        ⚠ undercount: {laborData.host.excluded_over_cap_count} session{laborData.host.excluded_over_cap_count === 1 ? '' : 's'} &gt;{laborData.host.cap_hours}h excluded ({laborData.host.excluded_over_cap_hours}h){laborData.host.rates_differ ? '; hosts have differing rates — using the lowest' : ''}
+                        ⚠ some hosts have a $0 rate — hours counted, cost flagged (not silently $0)
                       </div>
                     )}
                   </div>
                   <div className="rounded-lg bg-tt-card-hover px-3 py-2">
-                    <div className="text-xs text-tt-muted">Packer labor · entered {laborData.packer.entered ? '' : '(not set)'}</div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-tt-muted">$</span>
-                      <input
-                        type="number" min="0" step="0.01" inputMode="decimal"
-                        placeholder={(laborData.packer.labor_cents / 100).toFixed(2)}
-                        value={packerInput}
-                        onChange={(e) => setPackerInput(e.target.value)}
-                        className="w-32 rounded-md bg-tt-bg border border-tt-border px-2 py-1 text-lg font-semibold text-tt-text focus:outline-none focus:ring-2 focus:ring-tt-cyan"
-                      />
-                      <button
-                        type="button"
-                        disabled={savePacker.isPending || packerInput === '' || !filters.dateFrom || !filters.dateTo}
-                        onClick={() => savePacker.mutate({ from: filters.dateFrom!, to: filters.dateTo!, packer_labor_cents: Math.round(parseFloat(packerInput || '0') * 100) }, { onSuccess: () => setPackerInput('') })}
-                        className="rounded-md border border-tt-border-hover bg-tt-card-hover px-3 py-1 text-sm text-tt-text hover:bg-white/[0.06] disabled:opacity-50 cursor-pointer"
-                      >
-                        {savePacker.isPending ? 'Saving…' : 'Save'}
-                      </button>
+                    <div className="text-xs text-tt-muted">Fulfillment labor · punch-derived</div>
+                    <div className="text-lg font-semibold text-tt-text">
+                      ${fulfillmentLaborDollars.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      <span className="ml-2 text-xs font-normal text-tt-muted">{laborData.fulfillment.hours}h</span>
                     </div>
-                    <div className="mt-1 text-[11px] text-tt-muted">No reliable measured pack-time — enter the period figure.</div>
                   </div>
                 </div>
+                {laborData.provisional && (
+                  <div className="mt-2 text-[11px] text-tt-yellow" role="note">
+                    Provisional — {laborData.pending.hours}h ({laborData.pending.pct}% of labor) awaiting manager confirmation; net settles as punches confirm.
+                  </div>
+                )}
               </div>
             )}
-            <ForecastCard entries={allEntries} costsMap={costsMap} />
             <Charts chartData={chartData} />
           </>
         )}

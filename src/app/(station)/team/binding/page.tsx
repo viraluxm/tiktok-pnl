@@ -71,6 +71,7 @@ export default function MemberBindingPage() {
   const [stores, setStores] = useState<{ id: string; name: string | null }[]>([]);
   const [selectedStore, setSelectedStore] = useState<string | null>(null); // store uuid | 'unmapped' | null(all)
   const selectedStoreRef = useRef<string | null>(null);
+  const [storesErr, setStoresErr] = useState<string | null>(null); // store-list fetch failure — shown, never swallowed
 
   // Date filter (pills). Default 7 days. Ref mirrors it for the stable loadPage.
   const [dateFilter, setDateFilter] = useState<DateFilter>('7d');
@@ -173,10 +174,17 @@ export default function MemberBindingPage() {
       .then((r) => (r.ok ? r.json() : { skus: [] }))
       .then((d) => setSkus((d.skus ?? []) as Sku[]))
       .catch(() => { /* catalog is best-effort; the picker just shows no SKUs */ });
+    // The store pills are the only filter row whose EXISTENCE depends on a fetch, so mapping a
+    // failure to [] made "the request was rejected" render identically to "this member has no
+    // stores" — which is how a middleware allowlist gap hid as a missing feature. Fail loud like
+    // loadPage does. The queue itself is unaffected, so this never blocks binding.
     fetch('/api/member/stores')
-      .then((r) => (r.ok ? r.json() : { stores: [] }))
-      .then((d) => setStores((d.stores ?? []) as { id: string; name: string | null }[]))
-      .catch(() => { /* best-effort; no pills if it fails */ });
+      .then(async (r) => {
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Failed to load stores (${r.status})`);
+        return r.json();
+      })
+      .then((d) => { setStores((d.stores ?? []) as { id: string; name: string | null }[]); setStoresErr(null); })
+      .catch((e) => setStoresErr((e as Error).message));
     probeUnmapped('7d');
   }, [loadPage, probeUnmapped]);
 
@@ -281,7 +289,6 @@ export default function MemberBindingPage() {
     ...stores.map((s) => ({ value: s.id, label: s.name ?? s.id })),
     ...(showUnmapped ? [{ value: 'unmapped', label: 'Unmapped' }] : []),
   ];
-  const showAllPill = storeButtons.length > 1; // "All stores" only meaningful with >1 bucket
   const pillCls = (active: boolean) =>
     `px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${active ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'}`;
 
@@ -296,6 +303,28 @@ export default function MemberBindingPage() {
         </div>
       </div>
 
+      {/* Store-list failure. Deliberately NOT the red queue banner below: the queue is unaffected
+          and still fully usable — only the store narrowing is missing. Shown independently of the
+          pill row so a rejected request can never be read as "this member has no stores". */}
+      {storesErr && (
+        <div className="mb-2 rounded-lg border-2 border-tt-yellow/40 bg-tt-yellow/10 px-3 py-2 text-xs text-tt-yellow">
+          Store filter unavailable — {storesErr}. The queue below is not filtered by store.
+        </div>
+      )}
+
+      {/* Store filter pills + an "Unmapped" pill when null-store rows exist in this range. All three
+          filters compose (store + date + sort); selecting refetches from page 1. "All stores" always
+          renders with the row, including for a single-store member — without it there is no way back
+          to the unfiltered queue once a store is picked. */}
+      {storeButtons.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1">
+          <button onClick={() => selectStore(null)} className={pillCls(selectedStore === null)}>All stores</button>
+          {storeButtons.map((b) => (
+            <button key={b.value} onClick={() => selectStore(b.value)} className={pillCls(selectedStore === b.value)}>{b.label}</button>
+          ))}
+        </div>
+      )}
+
       {/* Date filter pills (default 7 days). Today/7d/30d are bounded at the PT day-start so the
           scan seeds at the bound; All is unbounded. Direction is the separate sort toggle below. */}
       <div className="mb-2 flex flex-wrap gap-1">
@@ -307,28 +336,11 @@ export default function MemberBindingPage() {
       {/* Sort pills (default newest first). Independent of the date filter — oldest-first is how
           the backlog gets worked, and how you avoid the top of the queue being a running show's
           orders, which the live-room lockout refuses. */}
-      <div className="mb-2 flex flex-wrap gap-1">
+      <div className="mb-4 flex flex-wrap gap-1">
         {SORT_PILLS.map(([v, label]) => (
           <button key={v} onClick={() => selectSort(v)} className={pillCls(sortOrder === v)}>{label}</button>
         ))}
       </div>
-
-      {/* Store filter pills + an "Unmapped" pill when null-store rows exist in this range. Both
-          filters compose (store + date); selecting refetches from page 1. A single-store member with
-          nothing unmapped sees just their store as a label pill. */}
-      {storeButtons.length > 0 && (
-        <div className="mb-4 flex flex-wrap gap-1">
-          {showAllPill && (
-            <button onClick={() => selectStore(null)} className={pillCls(selectedStore === null)}>All stores</button>
-          )}
-          {storeButtons.map((b) => {
-            const active = selectedStore === b.value || (!showAllPill && selectedStore === null);
-            return (
-              <button key={b.value} onClick={() => selectStore(b.value)} className={pillCls(active)}>{b.label}</button>
-            );
-          })}
-        </div>
-      )}
 
       {loading && rows.length === 0 && <div className="text-lg text-tt-muted">Loading queue…</div>}
       {err && <div className="rounded-xl border-2 border-tt-red/50 bg-tt-red/10 px-4 py-3 text-tt-red font-semibold">{err}</div>}

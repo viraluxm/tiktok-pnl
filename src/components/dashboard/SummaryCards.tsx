@@ -49,7 +49,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
       {/* 2. Net Profit · All Shop Orders */}
       <div className="bg-tt-card border border-tt-border rounded-[14px] p-4 md:p-6 backdrop-blur-xl transition-all hover:border-tt-border-hover hover:-translate-y-0.5 animate-fade-in-1">
         <div className="flex items-center gap-2 mb-2">
-          <span className="text-xs text-tt-muted uppercase tracking-wide">Net Profit · All Shop Orders</span>
+          <span className="text-xs text-tt-muted uppercase tracking-wide">Net · All Shop Orders</span>
           <ChangeIndicator change={profitChange} />
         </div>
         <div className={`text-2xl md:text-[30px] font-bold break-words min-w-0 tabular-nums ${profitColor}`}>{fmt(metrics.totalNetProfit)}</div>
@@ -59,7 +59,7 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
           </span>
         </div>
         <div className="text-[11px] text-tt-muted mt-1 leading-snug">
-          All TikTok Shop orders — incl. fees, shipping, affiliate &amp; ad spend
+          All TikTok Shop orders, net of platform fee, COGS, ad spend &amp; labor. Does not subtract refunds.
         </div>
       </div>
 
