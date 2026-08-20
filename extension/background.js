@@ -485,6 +485,10 @@ async function handleLiveEnd(room) {
       );
       diagCrit('live.ended', 'info', 'session ended via live-end signal', { room: diagRedactId(room) });
       console.log('[LENSED][BG] live session ended (live_ended) for room:', room);
+      // Close the host segment for the SAME room. Resolved by room inside the helper, so this
+      // works even when the SW was evicted and the end arrived with no in-memory session — the
+      // same reason the PATCH above is keyed by tiktok_live_id rather than session id.
+      await closeHostSegmentForRoom(room, (sessionRoomId === room ? currentSessionId : null), 'session_end');
     } catch (e) {
       console.warn('[LENSED][BG] live-end write failed (non-fatal):', String((e && e.message) || e));
     }
@@ -1123,6 +1127,48 @@ function maybeApplyHost(roomId, source) {
       diagCrit('host.segment_error', 'error', 'open_session_host_segment failed', { room: roomId, source: src, code: code, msg: msg.slice(0, 200) });
       broadcastHostSegmentFailure(roomId, hid, code, msg.slice(0, 200));
     });
+}
+
+// Close the open host segment for a room. Used by all four end/reset paths.
+//
+// BEST-EFFORT AND NON-FATAL by design — it must never block a reset or an end. But NOT silent:
+// per the R1 analysis a swallowed close leaves a segment open forever, and an open segment is
+// indistinguishable from "still selling". So a genuine failure is escalated the same way a
+// failed open is (diagCrit + a broadcast the overlay can surface).
+//
+// `sid` may be passed when the caller already knows the session (it is often about to null it);
+// otherwise the session is resolved BY ROOM via the same read-only mapping the heartbeat uses,
+// so this still works after a service-worker eviction lost the in-memory pointer.
+//
+// A null return from the RPC means NOTHING WAS OPEN. That is an idempotent no-op, not an error —
+// room-change fires unconditionally and must stay safe to call.
+async function closeHostSegmentForRoom(room, sid, source) {
+  if (!isAuthenticated()) return null;
+  var target = sid || (room ? await resolveHeartbeatSessionId(room) : null);
+  if (!target) return null;   // no session for this room: nothing to close
+  try {
+    var res = await supabaseRpc('close_session_host_segment', {
+      p_session_id: target, p_at: null, p_source: source,
+    });
+    var closed = Array.isArray(res) ? res[0] : res;
+    if (closed) {
+      console.log('[LENSED][BG] host segment closed', closed, 'session', target, 'room', room, '(' + source + ')');
+      diag('host.segment_close', 'info', 'host segment closed', { room: room, source: source });
+    } else {
+      // Expected on most calls — e.g. a room change where no host was ever picked.
+      console.log('[LENSED][BG] no open host segment to close for session', target, '(' + source + ')');
+      diag('host.segment_close_noop', 'info', 'no open segment to close', { room: room, source: source });
+    }
+    if (room) delete hostAppliedByRoom[room];   // a later re-open must re-fire
+    return closed || null;
+  } catch (e) {
+    var msg = String((e && e.message) || e);
+    var code = classifyHostSegmentError(msg);
+    console.warn('[LENSED][BG] close_session_host_segment failed room', room, code, ':', msg);
+    diagCrit('host.segment_close_error', 'error', 'close_session_host_segment failed', { room: room, source: source, code: code, msg: msg.slice(0, 200) });
+    broadcastHostSegmentFailure(room, null, code, msg.slice(0, 200));
+    return null;
+  }
 }
 
 // Record the operator's host choice and (re)apply it to the current session. Called
@@ -2043,6 +2089,9 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
 
         if (identityChanged) {
           var hadSession = !!currentSessionId, hadHost = Object.keys(selectedHostByRoom).length > 0;
+          // Close the outgoing user's open segment before any of this is cleared — afterwards
+          // we no longer know which session or room it belonged to.
+          closeHostSegmentForRoom(sessionRoomId || currentRoomId, currentSessionId, 'user_change_close');
           cachedSkus = null; // invalidate SKU cache for the new/unknown user
           currentSessionId = null; // re-resolve session for the new user
           currentRoomId = null;
@@ -2087,12 +2136,18 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
 chrome.tabs.onRemoved.addListener(function (tabId) {
   if (liveTabId == null || tabId !== liveTabId) return;
   var sid = currentSessionId;
+  var room = sessionRoomId;
   liveTabId = null;
   currentSessionId = null;
   sessionRoomId = null;
   lastHeartbeatWriteTs = 0;
   try { persistSession(); } catch (_) {} // clears SK_SESSION_ID / SK_ROOM_ID
-  if (sid) markSessionEndedOnTabClose(sid);
+  if (sid) {
+    // Close the segment as well as the session — otherwise the host stays "open" against a
+    // session that has already been marked ended.
+    closeHostSegmentForRoom(room, sid, 'tab_closed');
+    markSessionEndedOnTabClose(sid);
+  }
 });
 
 chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
@@ -2159,8 +2214,12 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       // this new live's orders never attach to the old live. A fresh room-scoped
       // session is resolved/created on the next bind.
       console.log('[LENSED][BG] session discarded — room mismatch: session', currentSessionId, 'was room', sessionRoomId, '→ new room', newRoom);
-      // Capture the outgoing room BEFORE sessionRoomId is nulled — the host map is keyed by it.
+      // Capture the outgoing room AND session BEFORE they are nulled — the host map is keyed
+      // by room, and the segment close needs the session id.
       var sessionRoomIdBeingLeft = sessionRoomId;
+      var sessionIdBeingLeft = currentSessionId;
+      // Close the outgoing live's segment so it never dangles into the new show.
+      closeHostSegmentForRoom(sessionRoomIdBeingLeft, sessionIdBeingLeft, 'room_change_close');
       currentSessionId = null;
       sessionRoomId = null;
       // A new live (new room) is a new show — never carry the prior live's host over.
