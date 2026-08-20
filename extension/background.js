@@ -1335,8 +1335,10 @@ async function logAuction(sessionId, result, skus, idemKey) {
   }
 }
 
-// Build the capture_events row — shared by upsertCaptureEvent and the unauth-queue
-// flush replay (replayQueuedSale) so both write the identical shape.
+// Build the capture_events row. THE single definition — called by upsertCaptureEvent (the hot
+// path) and by replayQueuedSale (the unauth-queue flush), so both write the identical shape.
+// Add a field here and it lands on both paths; that was not true before the two literals were
+// collapsed, which is how ext_version had to be added in two places.
 function buildCaptureRow(sale, boundSkuId) {
   return {
     user_id: userId,
@@ -1364,24 +1366,11 @@ function buildCaptureRow(sale, boundSkuId) {
 // of raising 23505 (the empty-upsert bug that failed 135× during the replay storm).
 async function upsertCaptureEvent(sale, boundSkuId) {
   if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return { ok: false, reason: 'not_authenticated' }; }
-  var row = {
-    user_id: userId,
-    order_id: sale.orderId,
-    room_id: sale.roomId || currentRoomId,
-    buyer_username: sale.buyerUsername || null,
-    selling_price_cents: parsePriceToCents(sale.sellingPrice),
-    product_name: sale.productName || null,
-    platform_sku_ref: sale.platformSkuRef || null,
-    tiktok_sku_id: sale.skuId || null,
-    tiktok_product_id: sale.productId || null,
-    item_image_url: sale.imageUrl || null,
-    ordered_at: sale.orderedAtMs ? new Date(sale.orderedAtMs).toISOString() : null,
-    is_payment_successful: sale.isPaymentSuccessful,
-    order_status: sale.orderStatus,
-    bound_sku_id: boundSkuId || null,
-    raw_payload: sale,
-    ext_version: EXT_VERSION,
-  };
+  // ONE definition of the capture row. buildCaptureRow's docstring has always claimed it was
+  // shared with this function; it was not — an identical 16-field literal was inlined here, and
+  // the two stayed in sync by luck. They were verified byte-identical immediately before this
+  // collapse, so it is a pure de-duplication with no behaviour change.
+  var row = buildCaptureRow(sale, boundSkuId);
   try {
     await supabaseUpsert('capture_events', row, 'user_id,order_id');
     console.log('[LENSED][BG] capture_events upserted:', sale.orderId);
