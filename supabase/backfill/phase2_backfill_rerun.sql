@@ -28,7 +28,7 @@ select
   ls.host_id,
   ls.started_at,
   case
-    when ls.ended_at is null then null   -- leave open; the read path bounds it
+    when ls.ended_at is null then null   -- leave open — the read path bounds it
     else public.lensed_session_activity_end(ls.id)
   end,
   'backfill_legacy',
