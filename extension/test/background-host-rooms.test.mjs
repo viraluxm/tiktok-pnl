@@ -50,12 +50,13 @@ function boot() {
       set: (o, cb) => cb ? setTimeout(() => { Object.assign(store, o); cb(); }, 1) : new Promise((r) => setTimeout(() => { Object.assign(store, o); r(); }, 1)),
       remove: (k, cb) => cb && cb(),
     } },
-    tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => Promise.resolve(), onRemoved: { addListener() {} } },
+    tabs: { query: (q, cb) => cb && cb([{ id: 1 }]), sendMessage: (id, m) => { tabMessages.push(m); return Promise.resolve(); }, onRemoved: { addListener() {} } },
     alarms: { create: () => {}, clear: () => {}, onAlarm: { addListener: () => {} } },
   };
 
   // Every host RPC call, in order — the assertion surface for attribution. `fn` records WHICH
   // rpc was hit so the test can prove set_session_host is no longer used at all.
+  const tabMessages = [];   // broadcasts to tabs, so the OK/FAILED messages are assertable
   const hostRpcCalls = [];
     window.fetch = (url, opts) => {
     const u = String(url);
@@ -85,7 +86,7 @@ function boot() {
     return Promise.resolve(httpResp(200, '', []));
   };
   window.eval(bgText);
-  return { getOnMessage: () => onMessage, hostRpcCalls, win: window };
+  return { getOnMessage: () => onMessage, hostRpcCalls, tabMessages, win: window };
 }
 
 // A fresh bind needs staged SKUs — without them handleAutoBind takes the captured-only path
@@ -172,6 +173,51 @@ async function run() {
   ok('6) …and room2 session was NEVER attached to host A',
      room2Attaches.length > 0 && room2Attaches.every((c) => c.host === HOST_B),
      JSON.stringify(room2Attaches));
+
+  // ── 6b. THE REPLY SHAPE ITSELF — room known, no session yet ────────────────────────
+  //     This is the shape the overlay renders from, so it has to be asserted HERE, against the
+  //     real worker, not hand-constructed in the overlay test. A constructed reply is exactly
+  //     how the overlay came to render "waiting for room" for a room that was known: the
+  //     overlay test built {deferred:true, reason:'ROOM_UNKNOWN'} and production returned
+  //     {pending:true, reason:'NO_SESSION_YET'}.
+  {
+    const sw2 = boot();
+    await sleep(25);
+    const l2 = sw2.getOnMessage();
+    await send(l2, { type: 'TIKTOK_ROOM', roomId: 'room1' });
+    await sleep(10);
+    // NO sale driven, so getOrCreateSession never runs and no session exists.
+    const r = await send(l2, { type: 'SET_SESSION_HOST', hostId: HOST_A, roomId: 'room1' });
+    ok('6b) room known + no session → ok:true (not an error)', r && r.ok === true, JSON.stringify(r));
+    ok('6b) …roomId echoed back (the room WAS known)', r && r.roomId === 'room1', JSON.stringify(r));
+    ok('6b) …pending:true', r && r.pending === true, JSON.stringify(r));
+    ok('6b) …reason is NO_SESSION_YET, NOT ROOM_UNKNOWN',
+       r && r.reason === 'NO_SESSION_YET', JSON.stringify(r && r.reason));
+    ok('6b) …deferred is NOT set (that flag is room-unknown only)',
+       !(r && r.deferred), JSON.stringify(r && r.deferred));
+    ok('6b) …sessionId is null', r && r.sessionId === null, JSON.stringify(r && r.sessionId));
+    ok('6b) …and no host RPC fired (nothing to attach to)',
+       sw2.hostRpcCalls.length === 0, JSON.stringify(sw2.hostRpcCalls));
+  }
+
+  // ── 6c. a success broadcast is emitted when a segment DOES open ────────────────────
+  {
+    const sw3 = boot();
+    await sleep(25);
+    const l3 = sw3.getOnMessage();
+    await send(l3, { type: 'TIKTOK_ROOM', roomId: 'room1' });
+    await sleep(10);
+    await send(l3, { type: 'SET_SESSION_HOST', hostId: HOST_A, roomId: 'room1' });
+    await send(l3, { type: 'AUTO_BIND', sale: sale('order-ok-1', 'room1'), stagedSkus: STAGED });
+    await sleep(40);
+    const oks = sw3.tabMessages.filter((m) => m && m.type === 'LENSED_HOST_SEGMENT_OK');
+    ok('6c) opening a segment broadcasts LENSED_HOST_SEGMENT_OK',
+       oks.length >= 1, JSON.stringify(sw3.tabMessages.map((m) => m && m.type)));
+    ok('6c) …carrying the room and host so the overlay can filter it',
+       oks.length >= 1 && oks[0].roomId === 'room1' && oks[0].hostId === HOST_A, JSON.stringify(oks[0]));
+    ok('6c) …and the RPC really ran (not a vacuous pass)',
+       sw3.hostRpcCalls.length >= 1, String(sw3.hostRpcCalls.length));
+  }
 
   // ── 7. (2b) the writer replaced set_session_host entirely ─────────────────────────
   ok('7) set_session_host is NEVER called any more',

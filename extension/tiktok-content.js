@@ -2984,11 +2984,20 @@
       cls += ' lensed-host-warn-pending';
       unsaved = true;                       // not confirmed yet either
     } else if (hostSaveState === 'deferred') {
-      // Distinct from failure: this is a self-healing race, so it must NOT show the error
-      // state. But it escalates (see scheduleHostDeferredEscalation) so a deferral that
-      // never resolves cannot pass for success.
-      text = '\u23f3 waiting for room\u2026';
-      title = 'The host is recorded locally but not written yet — the live room is not known. It saves automatically once the room resolves.';
+      // Distinct from failure: both deferrals are self-healing, so neither shows the error
+      // state. But they are NOT the same condition and must not share a message — reporting
+      // "waiting for room" when the room was known is what sent an operator looking for a
+      // problem that did not exist.
+      if (hostSaveErrCode === 'NO_SESSION_YET') {
+        // NOT a problem. A live_sessions row is only created by the first sale carrying staged
+        // SKUs, so between going live and that sale there is genuinely nothing to attach to.
+        // The pick IS recorded and applies by itself. Say so plainly.
+        text = '\u23f3 host saved \u2014 applies on first sale';
+        title = 'The host is recorded. It is written to the show as soon as the first sale with a staged SKU comes in — a live session does not exist before that. Nothing is wrong and no action is needed.';
+      } else {
+        text = '\u23f3 waiting for room\u2026';
+        title = 'The host is recorded locally but not written yet — the live room is not known. It saves automatically once the room resolves.';
+      }
       cls += ' lensed-host-warn-pending';
       unsaved = true;
     } else if (authConnected && !selectedHostId) {
@@ -3004,6 +3013,15 @@
     if (hostSelectEl) {
       hostSelectEl.className = 'lensed-host-select' + (unsaved && selectedHostId ? ' lensed-host-unsaved' : '');
     }
+  }
+
+  // Both host broadcasts go to EVERY live tab, so each overlay must ignore the other room's.
+  // Without this, a failure in tab 1 banners tab 2 — the same cross-room bleed that room-keying
+  // the worker state was meant to end. A broadcast with no roomId is accepted (older worker).
+  function hostBroadcastIsForThisTab(message) {
+    if (!message || !message.roomId) return true;
+    if (!currentRoomId) return true;
+    return message.roomId === currentRoomId;
   }
 
   function setHostSaveState(state, code, msg) {
@@ -3055,7 +3073,18 @@
           if (chrome.runtime.lastError) { setHostSaveState('failed', 'TRANSIENT', String(chrome.runtime.lastError.message || '')); return; }
           if (!selectedHostId) { setHostSaveState(null); return; }   // cleared to none
           if (!resp || resp.ok !== true) { setHostSaveState('failed', 'TRANSIENT', resp && resp.error ? String(resp.error) : null); return; }
-          if (resp.deferred || resp.pending) { setHostSaveState('deferred'); scheduleHostDeferredEscalation(); return; }
+              // Carry the worker's REASON through instead of inferring one. Escalate ROOM_UNKNOWN
+          // only: NO_SESSION_YET is waiting for a sale that may legitimately be 20 minutes
+          // away, so a timer would fire a false alarm on essentially every show — and a banner
+          // that cries wolf every show trains the operator to ignore the one signal section 10
+          // exists to give them. If NO_SESSION_YET ever needs a bound, the trigger is "a sale
+          // landed and the host still did not apply", never elapsed time.
+          if (resp.deferred || resp.pending) {
+            var why = resp.reason || (resp.deferred ? 'ROOM_UNKNOWN' : 'NO_SESSION_YET');
+            setHostSaveState('deferred', why);
+            if (why === 'ROOM_UNKNOWN') scheduleHostDeferredEscalation();
+            return;
+          }
           setHostSaveState('saved');
         }
       );
@@ -3299,9 +3328,17 @@
       // explains why; older background builds omit it (backward compatible).
       if (message.sessionId) adoptSession(message.sessionId);
       else onSessionReset(message.reason || 'session_null');
+    } else if (message.type === 'LENSED_HOST_SEGMENT_OK') {
+      // The segment actually opened. This is the ONLY path that can clear a pending or stale
+      // failed banner after a deferred pick applies on its own, which makes 'saved' an
+      // ASSERTED state rather than an optimistic one.
+      if (!hostBroadcastIsForThisTab(message)) return;
+      dlog('host.save_ok', 'info', 'host segment opened', { seg: message.segmentId ? 'set' : null });
+      setHostSaveState('saved');
     } else if (message.type === 'LENSED_HOST_SEGMENT_FAILED') {
       // The DB refused the host write. Arrives asynchronously — the RPC is fired after the
       // worker has already replied to SET_SESSION_HOST — so it can overturn a 'saved' state.
+      if (!hostBroadcastIsForThisTab(message)) return;
       dlog('host.save_failed', 'error', 'host segment write failed', { code: message.code || null });
       setHostSaveState('failed', message.code || 'TRANSIENT', message.message || null);
     } else if (message.type === 'SHOT_STATUS') {

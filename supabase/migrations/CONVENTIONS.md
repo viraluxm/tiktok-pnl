@@ -77,3 +77,44 @@ Rules:
 
 This is a reporting convention, not just a SQL one: the same trap exists in any test that filters
 before it asserts.
+
+---
+
+## Verification: test error and deferred paths from what the CALLER ACTUALLY RETURNS
+
+A test that hand-constructs the reply it expects proves only that the renderer handles the
+*imagined* shape. It says nothing about the shape production actually produces — and it passes
+either way, which is what makes it dangerous.
+
+**This shipped a bug.** The overlay's deferred-state test built the reply itself:
+
+```js
+cfg.setReply = { ok: true, deferred: true, reason: 'ROOM_UNKNOWN' };   // imagined
+```
+
+and asserted the overlay said "waiting for room". It passed. Production returned:
+
+```js
+{ ok: true, roomId: '7676…', pending: true, reason: 'NO_SESSION_YET' }  // real
+```
+
+A different flag, a different reason, and a room that was known perfectly well — so the overlay
+fell through to the room-unknown message and told the operator to look for a problem that did not
+exist. Both the test and the code were self-consistent; only the *seam between them* was wrong,
+and nothing tested the seam.
+
+Rules:
+
+1. **Assert the reply SHAPE against the real producer**, in the producer's own test. If the
+   worker returns `{pending, reason}`, a worker test asserts those exact fields for that exact
+   precondition — driven by putting the worker into the state, not by stubbing its output.
+2. **Then** the consumer test may use a constructed reply — but it must be *copied from* the
+   producer test's asserted shape, with a comment saying so.
+3. **Enumerate the preconditions, not the replies.** "Room unknown" and "room known but no
+   session" are two preconditions. Testing one reply shape twice is not coverage of two states.
+4. A constructed reply that no producer test asserts is a **liability**: it will keep passing
+   after the producer's contract changes underneath it.
+
+Applies to any seam a test stubs: RPC returns, `sendMessage` replies, fetch responses, webhook
+payloads. The anti-vacuity rule above catches assertions with nothing to check; this one catches
+assertions checking the wrong thing.
