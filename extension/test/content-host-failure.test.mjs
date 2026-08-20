@@ -144,6 +144,76 @@ async function run() {
     ok('D) …and error styling', (warnEl(w).className || '').includes('lensed-host-warn-error'), warnEl(w).className);
   }
 
+  // ── D2. NO_SESSION_YET — the reply the worker ACTUALLY returns when the room is known ──
+  //     Room resolved, no live_sessions row (no staged sale yet). This is the shape observed on
+  //     the 0.7.0 test live: {ok:true, roomId:<set>, pending:true, reason:'NO_SESSION_YET'}.
+  //     Block D above hand-constructed a ROOM_UNKNOWN reply and therefore never exercised this.
+  {
+    const cfg = { setCalls: [] };
+    const w = boot(cfg); await sleep(60); detectRoom(w, 'R1'); await sleep(20);
+    cfg.setReply = { ok: true, roomId: 'R1', hostId: 'emp-A', sessionId: null, pending: true, reason: 'NO_SESSION_YET' };
+    await pickHost(w, 'emp-A');
+    const t = warnEl(w).textContent || '';
+    ok('D2) NO_SESSION_YET does NOT say "waiting for room"', !t.includes('waiting for room'), t);
+    ok('D2) …it says the pick is saved and applies on the first sale',
+       t.includes('applies on first sale'), t);
+    ok('D2) …styled pending, not error',
+       (warnEl(w).className || '').includes('lensed-host-warn-pending') &&
+       !(warnEl(w).className || '').includes('lensed-host-warn-error'), warnEl(w).className);
+    ok('D2) …tooltip says no action is needed',
+       (warnEl(w).title || '').includes('no action is needed'), warnEl(w).title);
+    // THE HIGH-PRIORITY ONE: no false alarm on every show.
+    await sleep(150);   // well past the (harness-collapsed) escalation window
+    const t2 = warnEl(w).textContent || '';
+    ok('D2) NO_SESSION_YET NEVER escalates to HOST NOT SAVED (no false alarm per show)',
+       !t2.includes('HOST NOT SAVED'), t2);
+    ok('D2) …and is still showing the pending copy afterwards',
+       t2.includes('applies on first sale'), t2);
+  }
+
+  // ── D3. the success broadcast clears a pending state (part 3, the structural hole) ─────
+  {
+    const cfg = { setCalls: [] };
+    const w = boot(cfg); await sleep(60); detectRoom(w, 'R1'); await sleep(20);
+    cfg.setReply = { ok: true, roomId: 'R1', hostId: 'emp-A', sessionId: null, pending: true, reason: 'NO_SESSION_YET' };
+    await pickHost(w, 'emp-A');
+    ok('D3) starts pending', (warnEl(w).textContent || '').includes('applies on first sale'), warnEl(w).textContent);
+    // the first staged sale creates the session and the worker applies the recorded host
+    cfg.onMsg({ type: 'LENSED_HOST_SEGMENT_OK', roomId: 'R1', hostId: 'emp-A', segmentId: 'seg-1' });
+    await sleep(20);
+    ok('D3) the OK broadcast clears it to saved', (warnEl(w).textContent || '') === '', JSON.stringify(warnEl(w).textContent));
+    ok('D3) …and drops the unsaved styling',
+       !(selEl(w).className || '').includes('lensed-host-unsaved'), selEl(w).className);
+  }
+
+  // ── D4. the OK broadcast also clears a STALE failed banner ────────────────────────────
+  {
+    const cfg = { setCalls: [] };
+    const w = boot(cfg); await sleep(60); detectRoom(w, 'R1'); await sleep(20);
+    await pickHost(w, 'emp-A');
+    cfg.onMsg({ type: 'LENSED_HOST_SEGMENT_FAILED', roomId: 'R1', hostId: 'emp-A', code: 'TRANSIENT', message: 'blip' });
+    await sleep(20);
+    ok('D4) failed banner shown', (warnEl(w).textContent || '').includes('HOST NOT SAVED'), warnEl(w).textContent);
+    cfg.onMsg({ type: 'LENSED_HOST_SEGMENT_OK', roomId: 'R1', hostId: 'emp-A', segmentId: 'seg-2' });
+    await sleep(20);
+    ok('D4) a later OK clears the stale failure', (warnEl(w).textContent || '') === '', JSON.stringify(warnEl(w).textContent));
+  }
+
+  // ── D5. broadcasts for ANOTHER room must not banner this tab ──────────────────────────
+  {
+    const cfg = { setCalls: [] };
+    const w = boot(cfg); await sleep(60); detectRoom(w, 'R1'); await sleep(20);
+    await pickHost(w, 'emp-A');
+    cfg.onMsg({ type: 'LENSED_HOST_SEGMENT_FAILED', roomId: 'R2-other-tab', hostId: 'emp-B', code: 'AUTH', message: 'x' });
+    await sleep(20);
+    ok('D5) a failure in ANOTHER room does not banner this tab',
+       !(warnEl(w).textContent || '').includes('HOST NOT SAVED'), warnEl(w).textContent);
+    cfg.onMsg({ type: 'LENSED_HOST_SEGMENT_FAILED', roomId: 'R1', hostId: 'emp-A', code: 'AUTH', message: 'x' });
+    await sleep(20);
+    ok('D5) …but its OWN room still does (not a vacuous pass)',
+       (warnEl(w).textContent || '').includes('HOST NOT SAVED'), warnEl(w).textContent);
+  }
+
   // ── E. a deferral that RESOLVES must not escalate ────────────────────────────────────
   {
     const cfg = { setCalls: [], setReply: { ok: true, deferred: true, reason: 'ROOM_UNKNOWN', hostId: 'emp-A' } };

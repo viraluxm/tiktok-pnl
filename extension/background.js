@@ -1117,6 +1117,9 @@ function maybeApplyHost(roomId, source) {
       var segId = Array.isArray(res) ? res[0] : res;
       console.log('[LENSED][BG] host segment opened', segId, 'session', sid, 'room', roomId, '->', hid, '(' + src + ')');
       diag('host.segment_open', 'info', 'host segment opened', { room: roomId, source: src });
+      // Tell the overlay it landed. This is the only path that can clear a stale pending or
+      // failed banner after a deferred pick applies on its own.
+      broadcastHostSegmentOk(roomId, hid, segId);
     })
     .catch(function (e) {
       // Reset this room's memo so a later trigger (next bind / re-assert) can retry.
@@ -1193,13 +1196,23 @@ function setSelectedHost(hostId, roomId) {
   }
   hostAppliedByRoom[roomId] = null;  // force a re-apply for THIS room only
   maybeApplyHost(roomId, 'extension_switch');
+  // PENDING means: recorded for this room, but this room's session is not the cached one, so
+  // the RPC has not run. The overwhelmingly common cause is that NO SESSION EXISTS YET — a
+  // live_sessions row is only INSERTed by getOrCreateSession, which is only reached by a sale
+  // carrying staged SKUs. So between going live and the first staged sale there is nothing to
+  // attach a host to. (The other cause — another tab's session is the cached one — has the same
+  // remedy: it applies on the next sale in THIS room.)
+  //
+  // The reason is RETURNED rather than left for the overlay to infer. Inferring it is what made
+  // the overlay show "waiting for room" when the room was known perfectly well.
+  var pending = !!(selectedHostByRoom[roomId] && sessionRoomId !== roomId);
   return {
     ok: true,
     sessionId: (sessionRoomId === roomId ? currentSessionId : null) || null,
     roomId: roomId,
     hostId: selectedHostByRoom[roomId] || null,
-    // true when the pick is recorded but this room's session is not the cached one yet
-    pending: !!(selectedHostByRoom[roomId] && sessionRoomId !== roomId),
+    pending: pending,
+    reason: pending ? 'NO_SESSION_YET' : null,
   };
 }
 
@@ -1998,6 +2011,29 @@ function persistSession() {
 
 // Tell open TikTok tabs which live session they're attached to, so each overlay
 // can scope its persisted order counter to this session id.
+// Tell the live tabs a host segment WAS opened. Without this the overlay's 'saved' state is
+// only ever set from the synchronous SET_SESSION_HOST reply, so a pick that was DEFERRED and
+// then applied later has no path back to 'saved' — it stays visibly wrong forever even though
+// the data is correct. That is the structural hole; the wrong-message bug merely exposed it.
+//
+// 'saved' therefore becomes ASSERTED rather than optimistic, which is the whole point: an
+// optimistic state is what let the old build show clean selections for picks that never landed.
+function broadcastHostSegmentOk(roomId, hostId, segmentId) {
+  chrome.tabs.query({ url: 'https://shop.tiktok.com/*' }, function (tabs) {
+    if (chrome.runtime.lastError) return;
+    for (var i = 0; i < tabs.length; i++) {
+      try {
+        chrome.tabs.sendMessage(tabs[i].id, {
+          type: 'LENSED_HOST_SEGMENT_OK',
+          roomId: roomId || null,
+          hostId: hostId || null,
+          segmentId: segmentId || null,
+        }).catch(function () {});
+      } catch (_) {}
+    }
+  });
+}
+
 // Tell every live tab that a host switch did NOT register. Modelled on broadcastSession.
 // Loud by design (Phase 2 spec section 10): a silently-failed switch leaves no record that one
 // was attempted, so the attribution loss is unrecoverable afterwards. The overlay decides how
