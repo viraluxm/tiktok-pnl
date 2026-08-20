@@ -1,4 +1,8 @@
 -- 107_auction_host_id_snapshot.sql
+-- ┌─────────────────────────────────────────────────────────────────────────────┐
+-- │ NOT APPLIED — WRITE-SILENCE GATED. The only unapplied file in the 106-113   │
+-- │ range. Touches live_auction_items (capture path). See the gate below.       │
+-- └─────────────────────────────────────────────────────────────────────────────┘
 --
 -- Forensic per-auction host snapshot.  NOT APPLIED — authored only.
 --

@@ -1,6 +1,11 @@
 -- 111_pnl_host_performance_as.sql
+-- ┌─────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-08-20                                          │
+-- │ Verified present in the live schema. DO NOT RE-APPLY.                       │
+-- │ This DB has no migration ledger — this file IS the record that it ran.      │
+-- └─────────────────────────────────────────────────────────────────────────────┘
 --
--- Service-role owner-scoped twin of pnl_host_performance.  NOT APPLIED.
+-- Service-role owner-scoped twin of pnl_host_performance.  (see the APPLIED banner above)
 -- Additive, no capture-path lock, no write-silence gate. Depends on 109.
 --
 -- WHY NOW RATHER THAN LATER: /api/member/team/host-performance still windows on

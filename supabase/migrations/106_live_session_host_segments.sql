@@ -1,6 +1,11 @@
 -- 106_live_session_host_segments.sql
+-- ┌─────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-08-19 23:11:32Z (INSERT 0 202)                 │
+-- │ Verified present in the live schema. DO NOT RE-APPLY.                       │
+-- │ This DB has no migration ledger — this file IS the record that it ran.      │
+-- └─────────────────────────────────────────────────────────────────────────────┘
 --
--- PER-HOST TIME SEGMENTATION WITHIN A LIVE SESSION.  NOT APPLIED — authored only.
+-- PER-HOST TIME SEGMENTATION WITHIN A LIVE SESSION.  Applied — see the banner above.
 --
 -- NO CAPTURE-PATH LOCK. This migration touches live_sessions only through the RPCs at call
 -- time; it creates one new table and six functions and reads capture_events. It is therefore

@@ -1,6 +1,11 @@
 -- 109_pnl_host_performance.sql
+-- ┌─────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-08-20                                          │
+-- │ Verified present in the live schema. DO NOT RE-APPLY.                       │
+-- │ This DB has no migration ledger — this file IS the record that it ran.      │
+-- └─────────────────────────────────────────────────────────────────────────────┘
 --
--- Per-host ASP-hit / below-break-even rollup for the Team roster badges.  NOT APPLIED.
+-- Per-host ASP-hit / below-break-even rollup for the Team roster badges.  (see the APPLIED banner above)
 -- No capture-path change, no write-silence gate. Independent of 106/107/108.
 --
 -- WHY: /api/live/host-performance filters live_auction_items on closed_at, which

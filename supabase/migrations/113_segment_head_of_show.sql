@@ -1,6 +1,11 @@
 -- 113_segment_head_of_show.sql
+-- ┌─────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-08-20                                          │
+-- │ Verified present in the live schema. DO NOT RE-APPLY.                       │
+-- │ This DB has no migration ledger — this file IS the record that it ran.      │
+-- └─────────────────────────────────────────────────────────────────────────────┘
 --
--- Reclaim the sales that land BEFORE a session's started_at.  NOT APPLIED.
+-- Reclaim the sales that land BEFORE a session's started_at.  (see the APPLIED banner above)
 -- Function bodies only. No table, no data, no capture-path lock, no write-silence gate.
 -- Depends on 106/110/112 (all applied).
 --

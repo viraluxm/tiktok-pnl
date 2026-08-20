@@ -1,6 +1,11 @@
 -- 112_segment_boundary_adjacency.sql
+-- ┌─────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-08-20                                          │
+-- │ Verified present in the live schema. DO NOT RE-APPLY.                       │
+-- │ This DB has no migration ledger — this file IS the record that it ran.      │
+-- └─────────────────────────────────────────────────────────────────────────────┘
 --
--- Fix two boundary defects in the segment RPCs.  NOT APPLIED.
+-- Fix two boundary defects in the segment RPCs.  (see the APPLIED banner above)
 -- Function bodies only — no table, no data, no capture-path lock, no write-silence gate.
 -- Depends on 106/108/110 (all applied).
 --

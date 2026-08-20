@@ -1,6 +1,11 @@
 -- 108_close_session_host_segment_as.sql
+-- ┌─────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-08-20 (with the 110 chain)                     │
+-- │ Verified present in the live schema. DO NOT RE-APPLY.                       │
+-- │ This DB has no migration ledger — this file IS the record that it ran.      │
+-- └─────────────────────────────────────────────────────────────────────────────┘
 --
--- Service-role twin of close_session_host_segment, for the auto-ender.  NOT APPLIED.
+-- Service-role twin of close_session_host_segment, for the auto-ender.  (see the APPLIED banner above)
 -- Depends on 106. No capture-path change, so NO write-silence gate.
 --
 -- WHY A TWIN: close_session_host_segment is SECURITY DEFINER and re-imposes ownership via
