@@ -194,10 +194,16 @@ var cachedSkus = null;
 // employee running the show, for host-hours / performance attribution. Held in memory
 // and pushed to live_sessions.host_id via set_session_host. The content script owns the
 // durable per-room/session persistence and re-asserts it after a SW restart.
-var selectedHostId = null;
-// The session id we've already pushed selectedHostId to — so the attach RPC fires at
-// most once per (session, host) and never per-order on the hot bind path.
-var hostAppliedForSession = null;
+// KEYED BY ROOM, not a single scalar. One worker can serve several live tabs at once
+// (Snore has run 3 concurrent sessions on one store), and a single scalar means the second
+// tab's host pick silently overwrites the first — after which any re-apply for the first
+// session attaches the WRONG host. The per-session unique index in the DB cannot catch that:
+// each session still ends up with exactly one host, internally consistent and wrongly
+// attributed. Cross-session correctness has to be right here.
+var selectedHostByRoom = Object.create(null);   // roomId -> employees.id
+// roomId -> the session id that room's host has already been pushed to, so the attach RPC
+// fires at most once per (room, session, host) and never per-order on the hot bind path.
+var hostAppliedByRoom = Object.create(null);    // roomId -> sessionId
 
 // ─── Tab-alive heartbeat ─────────────────────────────────────────────
 // The live tab pings us every HEARTBEAT_MS (content script) while open; we stamp
@@ -878,8 +884,8 @@ async function clearAuth() {
   currentRoomId = null;
   sessionRoomId = null;
   cachedSkus = null;
-  selectedHostId = null;
-  hostAppliedForSession = null;
+  selectedHostByRoom = Object.create(null);
+  hostAppliedByRoom = Object.create(null);
   // 'lensed_refresh_token' is a legacy key from the pre-single-refresher build; remove
   // it by literal so upgrading hosts purge any stored refresh token they still hold.
   await chrome.storage.local.remove([SK_ACCESS_TOKEN, 'lensed_refresh_token', SK_USER_ID, SK_SESSION_ID, SK_ROOM_ID, SK_SESSION_TS]);
@@ -1069,30 +1075,59 @@ async function fetchActiveHosts() {
 // is absent (migration not yet applied) or fails transiently, it logs and no-ops —
 // capture and binding are entirely unaffected. Never added to the session INSERT, so
 // session creation cannot fail on a missing host_id column.
-function maybeApplyHost() {
-  if (!isAuthenticated() || !currentSessionId || !selectedHostId) return;
-  if (hostAppliedForSession === currentSessionId) return;
+// Push the host selected for `roomId` to that room's session. roomId is REQUIRED — attaching
+// without knowing which room a pick belongs to is how the wrong session gets attributed.
+//
+// Only applies when the worker's cached session is the one for THIS room. When it is not (the
+// other tab's session is currently cached), the pick stays in selectedHostByRoom and is applied
+// by the next getOrCreateSession(roomId) for that room. Deferring is correct: it never attaches
+// a host to a session belonging to a different live.
+function maybeApplyHost(roomId) {
+  if (!roomId) return;
+  if (!isAuthenticated()) return;
+  var hid = selectedHostByRoom[roomId];
+  if (!hid) return;
+  // The cached session must belong to this room.
+  if (!currentSessionId || sessionRoomId !== roomId) return;
   var sid = currentSessionId;
-  var hid = selectedHostId;
-  hostAppliedForSession = sid; // optimistic — prevents duplicate concurrent RPCs
+  if (hostAppliedByRoom[roomId] === sid) return;
+  hostAppliedByRoom[roomId] = sid; // optimistic — prevents duplicate concurrent RPCs
   supabaseRpc('set_session_host', { p_session_id: sid, p_host_id: hid })
     .then(function () {
-      console.log('[LENSED][BG] host attached to session', sid, '->', hid);
+      console.log('[LENSED][BG] host attached to session', sid, 'room', roomId, '->', hid);
     })
     .catch(function (e) {
-      // Reset the memo so a later trigger (next bind / re-assert) can retry.
-      if (hostAppliedForSession === sid) hostAppliedForSession = null;
-      console.warn('[LENSED][BG] set_session_host failed (non-fatal):', String((e && e.message) || e));
+      // Reset this room's memo so a later trigger (next bind / re-assert) can retry.
+      if (hostAppliedByRoom[roomId] === sid) hostAppliedByRoom[roomId] = null;
+      console.warn('[LENSED][BG] set_session_host failed (non-fatal) room', roomId, ':', String((e && e.message) || e));
     });
 }
 
 // Record the operator's host choice and (re)apply it to the current session. Called
 // from the content script on selection change and on post-reload re-assert.
-function setSelectedHost(hostId) {
-  selectedHostId = hostId || null;
-  hostAppliedForSession = null; // force a re-apply to the current session
-  maybeApplyHost();
-  return { ok: true, sessionId: currentSessionId || null, hostId: selectedHostId };
+function setSelectedHost(hostId, roomId) {
+  // NO ROOM, NO GUESS. A pick that does not say which live it belongs to cannot be attached
+  // safely — with two tabs open, guessing would attribute the wrong session. This is NOT an
+  // error though: the overlay legitimately lets a host be chosen before the room is known, and
+  // the content script persists that pick and re-asserts it via restoreHostByRoom once the room
+  // resolves. Report it as DEFERRED so the overlay can say "waiting for room" rather than
+  // showing a failure for something that will resolve on its own.
+  if (!roomId) {
+    console.log('[LENSED][BG] host pick deferred — room not known yet');
+    return { ok: true, deferred: true, reason: 'ROOM_UNKNOWN', sessionId: null, roomId: null, hostId: hostId || null };
+  }
+  if (hostId) selectedHostByRoom[roomId] = hostId;
+  else delete selectedHostByRoom[roomId];
+  hostAppliedByRoom[roomId] = null;  // force a re-apply for THIS room only
+  maybeApplyHost(roomId);
+  return {
+    ok: true,
+    sessionId: (sessionRoomId === roomId ? currentSessionId : null) || null,
+    roomId: roomId,
+    hostId: selectedHostByRoom[roomId] || null,
+    // true when the pick is recorded but this room's session is not the cached one yet
+    pending: !!(selectedHostByRoom[roomId] && sessionRoomId !== roomId),
+  };
 }
 
 // Resolve (or create) the live session for a specific tiktok room. `roomId` is the
@@ -1140,7 +1175,7 @@ async function getOrCreateSession(roomId) {
       diagCrit('session.resolve', 'info', 'reused room-scoped session', { session: diagRedactId(currentSessionId), room: room, created: false });
       persistSession();
       broadcastSession();
-      maybeApplyHost();
+      maybeApplyHost(room);
       return currentSessionId;
     }
 
@@ -1163,7 +1198,7 @@ async function getOrCreateSession(roomId) {
       diagCrit('session.resolve', 'info', 'created room-scoped session', { session: diagRedactId(currentSessionId), room: room, created: true });
       persistSession();
       broadcastSession();
-      maybeApplyHost();
+      maybeApplyHost(room);
       return currentSessionId;
     }
     console.error('[LENSED][BG] session create returned empty');
@@ -1948,13 +1983,15 @@ chrome.runtime.onMessageExternal.addListener(function (message, sender, sendResp
           !previousUserId || !incomingUserId || previousUserId !== incomingUserId;
 
         if (identityChanged) {
-          var hadSession = !!currentSessionId, hadHost = !!selectedHostId;
+          var hadSession = !!currentSessionId, hadHost = Object.keys(selectedHostByRoom).length > 0;
           cachedSkus = null; // invalidate SKU cache for the new/unknown user
           currentSessionId = null; // re-resolve session for the new user
           currentRoomId = null;
           sessionRoomId = null;
-          selectedHostId = null;      // a new user's live must not inherit the prior host
-          hostAppliedForSession = null;
+          // A new user's live must not inherit ANY prior host — this is the one reset that
+          // is correctly global rather than per-room.
+          selectedHostByRoom = Object.create(null);
+          hostAppliedByRoom = Object.create(null);
           // Drop the previous user's pinned session/room so the new user never resumes
           // it; broadcast the reset (with a reason) so overlays clear staged SKUs and
           // re-scope their counter.
@@ -2062,12 +2099,19 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       // this new live's orders never attach to the old live. A fresh room-scoped
       // session is resolved/created on the next bind.
       console.log('[LENSED][BG] session discarded — room mismatch: session', currentSessionId, 'was room', sessionRoomId, '→ new room', newRoom);
+      // Capture the outgoing room BEFORE sessionRoomId is nulled — the host map is keyed by it.
+      var sessionRoomIdBeingLeft = sessionRoomId;
       currentSessionId = null;
       sessionRoomId = null;
       // A new live (new room) is a new show — never carry the prior live's host over.
       // The overlay re-selects the host (and warns while none is chosen) for this room.
-      selectedHostId = null;
-      hostAppliedForSession = null;
+      //
+      // Clear ONLY the room we are leaving. Wiping the whole map would drop a host another
+      // tab is still selling under, which is the bug this keying exists to prevent.
+      if (sessionRoomIdBeingLeft) {
+        delete selectedHostByRoom[sessionRoomIdBeingLeft];
+        delete hostAppliedByRoom[sessionRoomIdBeingLeft];
+      }
       // The discarded session's per-order dedup no longer applies to the new live;
       // clear both maps in lockstep (also bounds them across a multi-live worker).
       loggedOrderStatus.clear();
@@ -2171,7 +2215,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   if (message.type === 'SET_SESSION_HOST') {
     // Operator picked (or re-asserted after reload) the host running this live.
     try {
-      sendResponse(setSelectedHost(message.hostId));
+      sendResponse(setSelectedHost(message.hostId, message.roomId || null));
     } catch (err) {
       sendResponse({ ok: false, error: String((err && err.message) || err) });
     }
