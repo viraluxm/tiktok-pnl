@@ -165,6 +165,22 @@
   var hostRowEl = null;
   var hostSelectEl = null;
   var hostWarnEl = null;
+  // ── Host-save status (Phase 2 spec section 10) ─────────────────────────────────────
+  // A silently-failed host switch is the same failure class as the unauthenticated-sale
+  // discard, and worse: it leaves NO record that a switch was attempted, so the
+  // attribution loss is unrecoverable afterwards. The operator has to be able to see it
+  // DURING the show, while it can still be fixed.
+  //   'saving'   in flight
+  //   'saved'    the worker accepted it and applied it to this room's session
+  //   'deferred' accepted but not applied yet (room not known, or this room's session
+  //              isn't the cached one). Self-healing — EXCEPT when it never resolves.
+  //   'failed'   the DB refused it, or a deferral timed out
+  var hostSaveState = null;
+  var hostSaveErrCode = null;
+  var hostSaveErrMsg = null;
+  var hostDeferredTimer = null;
+  // A deferral that never resolves is indistinguishable from success unless it escalates.
+  var HOST_DEFERRED_ESCALATE_MS = 90 * 1000;
 
   // Persisted overlay size (chrome.storage.local key `lensed_overlay_size`), set
   // only by the bottom-right resize grip. Cached in memory so SPA re-injects
@@ -500,6 +516,10 @@
     }\
     .lensed-host-select:focus { outline: none; border-color: #34d399; }\
     .lensed-host-warn { color: #d1a054; font-size: 11px; flex: 0 0 auto; white-space: nowrap; }\
+    /* A host the DB refused must never look cleanly selected (spec section 10). */\
+    .lensed-host-select.lensed-host-unsaved { border-color: #ef4444; color: #fca5a5; }\
+    .lensed-host-warn.lensed-host-warn-error { color: #ef4444; font-weight: 600; }\
+    .lensed-host-warn.lensed-host-warn-pending { color: #9ca3af; }\
     /* Top status bar (below header): connection + host, moved out of the work area. */\
     .lensed-statusbar {\
       display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;\
@@ -2919,15 +2939,114 @@
 
   // Subtle, non-blocking nudge when connected but no host is chosen. Capture is never
   // blocked; unselected simply reports as "Unassigned" downstream.
+  // The four cases are separated because the OPERATOR'S ACTION differs for each. A single
+  // generic "failed" would leave them guessing whether to pick someone else, wait, or shout.
+  function hostErrorCopy(code) {
+    switch (code) {
+      case 'HOST_NOT_FOUND_OR_NOT_OWNED':
+        return { text: '\u26a0 HOST NOT SAVED \u2014 inactive, pick someone else',
+                 title: 'That employee is not active on this account. Choose a different host; this one will never save.' };
+      case 'SESSION_NOT_FOUND_OR_NOT_OWNED':
+        return { text: '\u26a0 HOST NOT SAVED \u2014 no live session yet, retrying',
+                 title: 'The live session has not been resolved yet. This retries automatically on the next sale — if it persists past a sale or two, report it.' };
+      case 'INVALID_SOURCE':
+        return { text: '\u26a0 HOST NOT SAVED \u2014 BUILD ERROR, report this',
+                 title: 'The extension sent a value the database rejects (INVALID_SOURCE). This will not fix itself; report it.' };
+      case 'AUTH':
+        return { text: '\u26a0 HOST NOT SAVED \u2014 signed out, reconnect',
+                 title: 'Not authenticated to Lensed. Reconnect, then re-pick the host.' };
+      case 'ROOM_UNKNOWN_TIMEOUT':
+        return { text: '\u26a0 HOST NOT SAVED \u2014 room never resolved, re-pick',
+                 title: 'The pick was held waiting for the live room and it never arrived. Nothing was written. Re-pick the host.' };
+      default:
+        return { text: '\u26a0 HOST NOT SAVED \u2014 retrying',
+                 title: 'A transient error saving the host. It retries on the next sale. Capture is unaffected.' };
+    }
+  }
+
   function renderHostWarning() {
     if (!hostWarnEl) return;
-    if (authConnected && !selectedHostId) {
-      hostWarnEl.textContent = '\u26a0 No host selected';
-      hostWarnEl.title = 'Select the person running this live so their hours and sales are tracked. Capture still works if left unset.';
-    } else {
-      hostWarnEl.textContent = '';
-      hostWarnEl.title = '';
+    var cls = 'lensed-host-warn';
+    var unsaved = false;
+    var text = '';
+    var title = '';
+
+    if (hostSaveState === 'failed') {
+      // PERSISTENT — not a toast. It stays until the next successful save.
+      var c = hostErrorCopy(hostSaveErrCode);
+      text = c.text;
+      title = c.title + (hostSaveErrMsg ? ('\n\n' + hostSaveErrMsg) : '');
+      cls += ' lensed-host-warn-error';
+      unsaved = true;                       // the selection is NOT confirmed
+    } else if (hostSaveState === 'saving') {
+      text = '\u23f3 saving host\u2026';
+      title = 'Writing the host to this live session.';
+      cls += ' lensed-host-warn-pending';
+      unsaved = true;                       // not confirmed yet either
+    } else if (hostSaveState === 'deferred') {
+      // Distinct from failure: both deferrals are self-healing, so neither shows the error
+      // state. But they are NOT the same condition and must not share a message — reporting
+      // "waiting for room" when the room was known is what sent an operator looking for a
+      // problem that did not exist.
+      if (hostSaveErrCode === 'NO_SESSION_YET') {
+        // NOT a problem. A live_sessions row is only created by the first sale carrying staged
+        // SKUs, so between going live and that sale there is genuinely nothing to attach to.
+        // The pick IS recorded and applies by itself. Say so plainly.
+        text = '\u23f3 host saved \u2014 applies on first sale';
+        title = 'The host is recorded. It is written to the show as soon as the first sale with a staged SKU comes in — a live session does not exist before that. Nothing is wrong and no action is needed.';
+      } else {
+        text = '\u23f3 waiting for room\u2026';
+        title = 'The host is recorded locally but not written yet — the live room is not known. It saves automatically once the room resolves.';
+      }
+      cls += ' lensed-host-warn-pending';
+      unsaved = true;
+    } else if (authConnected && !selectedHostId) {
+      text = '\u26a0 No host selected';
+      title = 'Select the person running this live so their hours and sales are tracked. Capture still works if left unset.';
     }
+
+    hostWarnEl.textContent = text;
+    hostWarnEl.title = title;
+    hostWarnEl.className = cls;
+    // The dropdown itself carries the not-confirmed state, so a failed host can never sit
+    // there looking exactly like a saved one.
+    if (hostSelectEl) {
+      hostSelectEl.className = 'lensed-host-select' + (unsaved && selectedHostId ? ' lensed-host-unsaved' : '');
+    }
+  }
+
+  // Both host broadcasts go to EVERY live tab, so each overlay must ignore the other room's.
+  // Without this, a failure in tab 1 banners tab 2 — the same cross-room bleed that room-keying
+  // the worker state was meant to end. A broadcast with no roomId is accepted (older worker).
+  function hostBroadcastIsForThisTab(message) {
+    if (!message || !message.roomId) return true;
+    if (!currentRoomId) return true;
+    return message.roomId === currentRoomId;
+  }
+
+  function setHostSaveState(state, code, msg) {
+    hostSaveState = state || null;
+    hostSaveErrCode = code || null;
+    hostSaveErrMsg = msg || null;
+    if (state !== 'deferred') clearHostDeferredEscalation();
+    renderHostWarning();
+  }
+
+  function clearHostDeferredEscalation() {
+    if (hostDeferredTimer) { try { clearTimeout(hostDeferredTimer); } catch (_) {} hostDeferredTimer = null; }
+  }
+
+  // A pending state that never resolves and never escalates is indistinguishable from
+  // success — which is the whole failure mode section 10 exists to close.
+  function scheduleHostDeferredEscalation() {
+    clearHostDeferredEscalation();
+    hostDeferredTimer = setTimeout(function () {
+      hostDeferredTimer = null;
+      if (hostSaveState === 'deferred') {
+        dlog('host.deferred_timeout', 'error', 'host pick never resolved', { ms: HOST_DEFERRED_ESCALATE_MS });
+        setHostSaveState('failed', 'ROOM_UNKNOWN_TIMEOUT', null);
+      }
+    }, HOST_DEFERRED_ESCALATE_MS);
   }
 
   // Operator changed the dropdown. Persist locally, tell the worker to attach it to the
@@ -2943,12 +3062,35 @@
     persistSelectedHost();
     renderHostWarning();
     dlog('host.selected', 'info', 'host selection changed', { host: val ? 'set' : 'none', changingMidLive: changingMidLive });
+    // The reply used to be discarded. It carries whether the pick was applied, deferred, or
+    // is still pending on this room's session — which is the only way the overlay can tell
+    // the operator the truth.
+    if (selectedHostId) setHostSaveState('saving');
     try {
       chrome.runtime.sendMessage(
         { type: 'SET_SESSION_HOST', hostId: selectedHostId, roomId: currentRoomId || null },
-        function () { if (chrome.runtime.lastError) return; }
+        function (resp) {
+          if (chrome.runtime.lastError) { setHostSaveState('failed', 'TRANSIENT', String(chrome.runtime.lastError.message || '')); return; }
+          if (!selectedHostId) { setHostSaveState(null); return; }   // cleared to none
+          if (!resp || resp.ok !== true) { setHostSaveState('failed', 'TRANSIENT', resp && resp.error ? String(resp.error) : null); return; }
+              // Carry the worker's REASON through instead of inferring one. Escalate ROOM_UNKNOWN
+          // only: NO_SESSION_YET is waiting for a sale that may legitimately be 20 minutes
+          // away, so a timer would fire a false alarm on essentially every show — and a banner
+          // that cries wolf every show trains the operator to ignore the one signal section 10
+          // exists to give them. If NO_SESSION_YET ever needs a bound, the trigger is "a sale
+          // landed and the host still did not apply", never elapsed time.
+          if (resp.deferred || resp.pending) {
+            var why = resp.reason || (resp.deferred ? 'ROOM_UNKNOWN' : 'NO_SESSION_YET');
+            setHostSaveState('deferred', why);
+            if (why === 'ROOM_UNKNOWN') scheduleHostDeferredEscalation();
+            return;
+          }
+          setHostSaveState('saved');
+        }
       );
-    } catch (_) {}
+    } catch (e) {
+      setHostSaveState('failed', 'TRANSIENT', String((e && e.message) || e));
+    }
     if (changingMidLive && resolvedLabelEl) {
       resolvedLabelEl.textContent = '\u26a0 Host changed \u2014 this live\u2019s orders now attribute to the new host.';
     }
@@ -3186,6 +3328,19 @@
       // explains why; older background builds omit it (backward compatible).
       if (message.sessionId) adoptSession(message.sessionId);
       else onSessionReset(message.reason || 'session_null');
+    } else if (message.type === 'LENSED_HOST_SEGMENT_OK') {
+      // The segment actually opened. This is the ONLY path that can clear a pending or stale
+      // failed banner after a deferred pick applies on its own, which makes 'saved' an
+      // ASSERTED state rather than an optimistic one.
+      if (!hostBroadcastIsForThisTab(message)) return;
+      dlog('host.save_ok', 'info', 'host segment opened', { seg: message.segmentId ? 'set' : null });
+      setHostSaveState('saved');
+    } else if (message.type === 'LENSED_HOST_SEGMENT_FAILED') {
+      // The DB refused the host write. Arrives asynchronously — the RPC is fired after the
+      // worker has already replied to SET_SESSION_HOST — so it can overturn a 'saved' state.
+      if (!hostBroadcastIsForThisTab(message)) return;
+      dlog('host.save_failed', 'error', 'host segment write failed', { code: message.code || null });
+      setHostSaveState('failed', message.code || 'TRANSIENT', message.message || null);
     } else if (message.type === 'SHOT_STATUS') {
       // [SCREENSHOT] Background pushed updated counters after a store/clear.
       applyShotStatus(message.status);
