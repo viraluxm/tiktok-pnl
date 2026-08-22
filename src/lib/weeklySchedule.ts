@@ -226,6 +226,12 @@ export interface WeekShiftCard {
   ruleId: string | null;
   hours: number; // 0 for open shifts. time_clock rows: paid hours from the punch instants
                  // (= paidShiftHours); everything else: wall-clock duration.
+  // Carried through so the edit modal can PREFILL from the same basis `hours` is computed from
+  // (shiftEditPrefill). Without these the form would reopen at the stale wall clock and a save
+  // would write it back over the punch. Null on generated recurring instances.
+  source: string | null;
+  clock_in_at: string | null;
+  clock_out_at: string | null;
   startMin: number;
   endMin: number; // overnight-extended (+1440); for open shifts, equals startMin
 }
@@ -256,6 +262,9 @@ function cardFromShift(s: ShiftRow): WeekShiftCard {
     isFrozen: frozen,
     modified: false,
     ruleId: s.source_rule_id ?? null,
+    source: s.source ?? null,
+    clock_in_at: s.clock_in_at ?? null,
+    clock_out_at: s.clock_out_at ?? null,
     hours: paidFromInstants
       ? instantHours(s.clock_in_at as string, s.clock_out_at as string, s.break_minutes ?? 0)
       : durationHours(s.start_time, s.end_time),
@@ -279,6 +288,10 @@ function cardFromGenerated(g: GeneratedRow): WeekShiftCard {
     isFrozen: false,
     modified: g.modified,
     ruleId: g.rule_id,
+    // A projected recurring instance has no stored row, so no source and no instants.
+    source: null,
+    clock_in_at: null,
+    clock_out_at: null,
     hours: durationHours(g.start_time, g.end_time),
     startMin,
     endMin: toMinutes(g.end_time) + (overnight ? 1440 : 0),

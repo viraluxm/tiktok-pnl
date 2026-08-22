@@ -1,4 +1,4 @@
-import { laWallTimeToUtc, addDaysISO } from '@/lib/schedule/timezone';
+import { laWallTimeToUtc, laWallClockOf, addDaysISO } from '@/lib/schedule/timezone';
 import { isOvernight } from '@/lib/weeklySchedule';
 
 // PUNCH INSTANTS ARE THE SINGLE SOURCE OF TRUTH FOR PAID HOURS.
@@ -62,14 +62,38 @@ export const REOPEN_PUNCH_ERROR =
   "This is a time-clock shift — it can't be reopened. Correct its start and end times instead, " +
   'or unconfirm it if it should not be paid.';
 
-// The row as stored, for the fields this decision needs. `source` and `date` must come from the
-// ROW, never from a caller's card model (which carries no source and can be stale) — getting
-// this branch wrong in either direction corrupts pay.
+// The row as stored, for the fields these decisions need. `source` must come from the ROW (or a
+// card faithfully carrying it) — getting the branch wrong in either direction corrupts pay.
 export interface EditableShiftRow {
   source: string | null;
   date: string;
   start_time: string;
   end_time: string | null;
+  clock_in_at?: string | null;
+  clock_out_at?: string | null;
+}
+
+// 'HH:MM' from an 'HH:MM' / 'HH:MM:SS' time string — the granularity the operator's
+// <input type="time"> works at, and therefore the granularity every comparison here uses.
+function hhmm(t: string): string {
+  return t.slice(0, 5);
+}
+
+// A time_clock row's hours come from its instants, so the instants are also what the edit form
+// must OPEN AT. Prefilling from start_time/end_time on one of the diverging rows would show the
+// stale wall clock and — since a save recomputes instants from the fields — write it straight
+// over the good punch. Manual rows have no instants and keep their wall clock.
+//
+// This is the single definition of "the wall clock this row currently means", used by the modal
+// to prefill AND by buildShiftEditPatch to detect change, so prefill and write cannot disagree.
+export function shiftEditPrefill(row: EditableShiftRow): { start: string; end: string } {
+  if (row.source === 'time_clock' && row.clock_in_at && row.clock_out_at) {
+    return {
+      start: laWallClockOf(row.clock_in_at).time,
+      end: laWallClockOf(row.clock_out_at).time,
+    };
+  }
+  return { start: hhmm(row.start_time), end: row.end_time == null ? '' : hhmm(row.end_time) };
 }
 
 export interface ShiftEditPatch {
@@ -82,29 +106,53 @@ export interface ShiftEditPatch {
 // The exact column patch for a start/end-time edit. THE single place that decides which layer a
 // correction lands in, shared by useShifts.updateShift and its test so neither reimplements it.
 //
-//   * time_clock → punch instants (the pay basis) AND the wall clock, kept in sync. Both
-//     instants are recomputed whenever EITHER side changes, because the out instant's calendar
-//     date depends on the start/end pair via the overnight rule — a start-only edit can move it.
+//   * time_clock → punch instants (the pay basis) AND the wall clock, kept in sync.
 //   * manual → the wall clock only. Instants stay NULL (097's CHECK exempts non-time_clock rows)
 //     and paidShiftHours already reads the wall clock for them.
 //
-// Returns null when there is nothing to change. That case must NOT fall through to a write:
-// recomputing instants from the stored wall clock on a row nobody edited would overwrite a real
-// punch with a derived value — which for the 44 known diverging rows would be a silent backfill.
+// AN UNCHANGED ENDPOINT'S INSTANT IS NEVER REWRITTEN. Change is judged against
+// shiftEditPrefill — what the form opened at — at MINUTE granularity, because that is all the
+// operator can express. Real punches carry seconds and microseconds (49 of 49 diverging rows
+// do), so recomputing an untouched endpoint from its own 'HH:MM' would silently truncate a true
+// punch by up to 59s, and on a row whose clock_out_at was hand-corrected it would destroy the
+// good value. Nothing changed at minute granularity ⇒ null ⇒ NO WRITE AT ALL, so open-and-save
+// is inert. This is the guard that keeps an edit from becoming an implicit backfill.
+//
+// The out instant is also rewritten when the pair's OVERNIGHT-ness flips (e.g. 22:00→06:00
+// edited to 04:00→06:00 stops crossing midnight), because its calendar date depends on the pair,
+// not on the end value alone — otherwise the out instant would be left a day late.
 export function buildShiftEditPatch(
   row: EditableShiftRow,
   edit: { start_time?: string; end_time?: string | null },
 ): ShiftEditPatch | null {
   if (edit.start_time === undefined && edit.end_time === undefined) return null;
 
-  const patch: ShiftEditPatch = {};
-  if (edit.start_time !== undefined) patch.start_time = edit.start_time;
-  if (edit.end_time !== undefined) patch.end_time = edit.end_time;
-  if (row.source !== 'time_clock') return patch;
+  // What the form opened at — the SAME basis the modal prefilled from.
+  const current = shiftEditPrefill(row);
+  const nextStart = edit.start_time !== undefined ? hhmm(edit.start_time) : current.start;
+  const nextEnd = edit.end_time !== undefined ? edit.end_time : current.end;
+  const startChanged = nextStart !== current.start;
 
-  // Effective span after this edit: the new value where supplied, else what is stored.
-  const nextStart = edit.start_time !== undefined ? edit.start_time : row.start_time;
-  const nextEnd = edit.end_time !== undefined ? edit.end_time : row.end_time;
+  if (row.source !== 'time_clock') {
+    // Manual rows: wall clock only, unchanged behaviour — but still skip a genuine no-op.
+    const patch: ShiftEditPatch = {};
+    if (edit.start_time !== undefined && startChanged) patch.start_time = edit.start_time;
+    if (edit.end_time !== undefined && (edit.end_time === null ? current.end !== '' : hhmm(edit.end_time) !== current.end)) {
+      patch.end_time = edit.end_time;
+    }
+    return Object.keys(patch).length === 0 ? null : patch;
+  }
+
+  // Reopening would null clock_out_at and violate shifts_time_clock_has_instants (097).
   if (nextEnd == null) throw new Error(REOPEN_PUNCH_ERROR);
-  return { ...patch, ...punchInstantsForWallClock(row.date, nextStart, nextEnd) };
+  const endChanged = hhmm(nextEnd) !== current.end;
+  const overnightFlipped =
+    isOvernight(nextStart, hhmm(nextEnd)) !== isOvernight(current.start, current.end);
+  if (!startChanged && !endChanged && !overnightFlipped) return null; // instants untouched
+
+  const instants = punchInstantsForWallClock(row.date, nextStart, hhmm(nextEnd));
+  const patch: ShiftEditPatch = { start_time: nextStart, end_time: hhmm(nextEnd) };
+  if (startChanged) patch.clock_in_at = instants.clock_in_at;
+  if (endChanged || overnightFlipped) patch.clock_out_at = instants.clock_out_at;
+  return patch;
 }

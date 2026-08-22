@@ -48,6 +48,32 @@ export function laWallTimeToUtc(dateISO: string, timeHHMMSS: string): Date {
   return new Date(utc);
 }
 
+// The INVERSE of laWallTimeToUtc: the LA-local calendar date + minute-of-day for an instant.
+// Same Intl mechanism and same pinned zone, so the pair round-trips (laWallTimeToUtc → this →
+// laWallTimeToUtc is the identity at minute granularity, asserted in shifts/punchEdit.test.mjs).
+// `time` is 'HH:MM' — MINUTE granularity, matching the <input type="time"> the operator edits and
+// the date_trunc('minute', …) the punch RPCs write into start_time/end_time. Seconds are
+// deliberately dropped: callers that must not lose a punch's sub-minute precision compare minute
+// values and leave the instant untouched rather than rewriting it (see buildShiftEditPatch).
+export function laWallClockOf(instant: Date | string): { date: string; time: string } {
+  const d = typeof instant === 'string' ? new Date(instant) : instant;
+  const parts: Record<string, string> = {};
+  for (const p of new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TZ,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(d)) {
+    parts[p.type] = p.value;
+  }
+  // Intl renders hour '24' at midnight in some engines; normalize to '00' (same fix as tzOffsetMs).
+  const hour = parts.hour === '24' ? '00' : parts.hour;
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${hour}:${parts.minute}` };
+}
+
 // Today's LA-local calendar date as 'YYYY-MM-DD'. Correct on both a UTC server (Vercel) and an
 // LA dev machine, because it reads the date through the business timezone, not the host's.
 export function laTodayISO(now: Date = new Date()): string {
