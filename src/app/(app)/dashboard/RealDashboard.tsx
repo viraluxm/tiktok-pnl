@@ -89,7 +89,7 @@ export default function RealDashboard() {
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
   const { syncProgress, isConnected, connection } = useTikTok();
   const { costsMap } = useProductCosts();
-  const { data: productStatsData } = useProductStats(filters.dateFrom, filters.dateTo);
+  const { data: productStatsData, isError: productStatsError } = useProductStats(filters.dateFrom, filters.dateTo);
   const productStats = productStatsData?.products;
   const orderTotals = productStatsData?.totals;
   const { data: videoMetrics } = useShopVideos(filters.dateFrom, filters.dateTo);
@@ -120,6 +120,13 @@ export default function RealDashboard() {
   const cogsCoveredOrders = (orderTotals?.cogsCoveredOrders || 0) + (orderTotals?.catalogCostedOrders || 0);
   const cogsTotalOrders = orderTotals?.totalOrders || 0;
   const cogsCoveragePct = cogsTotalOrders > 0 ? Math.round((cogsCoveredOrders / cogsTotalOrders) * 100) : 0;
+  // A period with revenue cannot legitimately have zero product cost — both COGS sources failed,
+  // so net profit below is computed from missing cost data and must not be shown as a number.
+  const cogsUnavailable = (orderTotals?.totalGMV || 0) > 0 && totalProductCogs === 0;
+  // A failed stats read is the same class of problem, and looks worse: orderTotals is undefined,
+  // so GMV and COGS both compute to 0, cogsUnavailable stays false, and the card would render a
+  // confident $0 net for a period that actually has revenue. Treat both as unavailable cost data.
+  const costDataUnavailable = productStatsError || cogsUnavailable;
 
   // Adjust net profit with product-level COGS and overlay video metrics
   const metrics = useMemo(() => {
@@ -153,6 +160,7 @@ export default function RealDashboard() {
       returnsCount: returnsData?.summary?.totalReturns ?? t?.returnsCount ?? 0,
       returnsAmount: returnsData?.summary?.totalAmount ?? t?.returnsAmount ?? 0,
       samplesCount: t?.samplesCount || 0,
+      cogsUnavailable: costDataUnavailable,
     };
 
     // Override video metrics from shop_videos table if available
@@ -191,7 +199,7 @@ export default function RealDashboard() {
     }
 
     return result;
-  }, [orderTotals, totalProductCogs, videoMetrics, adSpendMetrics, returnsData, totalLaborDollars]);
+  }, [orderTotals, totalProductCogs, costDataUnavailable, videoMetrics, adSpendMetrics, returnsData, totalLaborDollars]);
   // Build chart data from orderTotals.byDate (synced_order_ids) instead of entries
   const chartData = useMemo((): ChartData => {
     const byDate = orderTotals?.byDate || {};

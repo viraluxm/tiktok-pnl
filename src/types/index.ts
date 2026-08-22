@@ -65,6 +65,9 @@ export interface DashboardMetrics {
   returnsCount?: number;
   returnsAmount?: number;
   samplesCount?: number;
+  // True when the period has revenue but resolved zero product COGS — the COGS source failed,
+  // so totalNetProfit/avgMargin are too high and must not be displayed as numbers.
+  cogsUnavailable?: boolean;
 }
 
 export interface ChartData {

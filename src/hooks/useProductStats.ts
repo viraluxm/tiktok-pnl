@@ -71,9 +71,12 @@ export function useProductStats(dateFrom: string | null, dateTo: string | null) 
       const res = await fetch(`/api/tiktok/product-stats?${params}`);
       if (!res.ok) throw new Error('Failed to fetch product stats');
       const data = await res.json();
+      // Never fabricate a zeroed totals object: zero COGS with real GMV silently inflates net
+      // profit on the dashboard. A response without totals is a failure, not an empty period.
+      if (!data.totals) throw new Error('product-stats returned no totals');
       return {
         products: data.products || [],
-        totals: data.totals || { totalGMV: 0, totalShipping: 0, totalAffiliate: 0, totalPlatformFee: 0, totalUnits: 0, totalOrders: 0, byDate: {}, returnsCount: 0, returnsAmount: 0, samplesCount: 0, snapshotCogs: 0, cogsCoveredOrders: 0, catalogCogs: 0, catalogCostedOrders: 0, catalogUncostedUnparseable: 0, catalogExcludedNumeric: 0 },
+        totals: data.totals as OrderTotals,
       };
     },
     staleTime: 30_000,

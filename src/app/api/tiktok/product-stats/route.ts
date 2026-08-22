@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrgId } from '@/lib/org';
-import { inChunks } from '@/lib/supabase/inChunks';
+import { inChunksPaged, selectAllPages } from '@/lib/supabase/inChunks';
 
 export async function GET(request: Request) {
   const supabase = await createClient();
@@ -84,8 +84,11 @@ export async function GET(request: Request) {
   // with 0 sales still appear — but NOT old/inactive variations from order history.
   // SHARED catalog: scope by org (admin bypasses RLS, so filter explicitly).
   const orgId = await getOrgId(admin, data.user.id);
-  const { data: prods } = await admin.from('products').select('tiktok_product_id, name, image_url, variants').eq('org_id', orgId);
-  const productsData: Record<string, unknown>[] = prods || [];
+  const { rows: prods, error: prodsErr } = await selectAllPages<Record<string, unknown>>((from, to) =>
+    admin.from('products').select('tiktok_product_id, name, image_url, variants')
+      .eq('org_id', orgId).order('id', { ascending: true }).range(from, to));
+  if (prodsErr) console.error('Product stats: products read failed:', prodsErr);
+  const productsData: Record<string, unknown>[] = prods;
 
   const productLookup = new Map<string, { name: string; image_url: string | null }>();
   for (const p of productsData) {
@@ -200,16 +203,29 @@ export async function GET(request: Request) {
   const orderIds = [...new Set(allRows.map((r) => String(r.order_id || '')).filter(Boolean))];
   let snapshotCogs = 0;               // dollars
   const coveredOrders = new Set<string>();
+  // Row counts + the first failed cost read, for the sanity check below. A cost read that errors
+  // or truncates yields $0 COGS, which is indistinguishable from a genuinely costless period —
+  // so the counts have to be reported, never inferred from the resulting zero.
+  let auctionItemRows = 0;
+  let snapshotSkuRows = 0;
+  let captureRows = 0;
+  let costReadError: unknown = null;
   if (orderIds.length) {
-    const { rows: items } = await inChunks<{ id: string; client_idempotency_key: string }>(orderIds, (slice) =>
+    const { rows: items, error: itemsErr } = await inChunksPaged<{ id: string; client_idempotency_key: string }>(orderIds, (slice, from, to) =>
       admin.from('live_auction_items').select('id, client_idempotency_key')
-        .eq('user_id', data.user.id).eq('status', 'sold').in('client_idempotency_key', slice));
+        .eq('user_id', data.user.id).eq('status', 'sold').in('client_idempotency_key', slice)
+        .order('id', { ascending: true }).range(from, to));
+    if (itemsErr) { costReadError = itemsErr; console.error('Product stats: live_auction_items read failed:', itemsErr); }
+    auctionItemRows = items.length;
     const itemToOrder = new Map(items.map((i) => [String(i.id), String(i.client_idempotency_key)]));
     const itemIds = items.map((i) => String(i.id));
     if (itemIds.length) {
-      const { rows: skus } = await inChunks<{ auction_item_id: string; qty: number | null; unit_cost_cents_snapshot: number | null }>(itemIds, (slice) =>
+      const { rows: skus, error: skusErr } = await inChunksPaged<{ auction_item_id: string; qty: number | null; unit_cost_cents_snapshot: number | null }>(itemIds, (slice, from, to) =>
         admin.from('live_auction_item_skus').select('auction_item_id, qty, unit_cost_cents_snapshot')
-          .eq('user_id', data.user.id).in('auction_item_id', slice));
+          .eq('user_id', data.user.id).in('auction_item_id', slice)
+          .order('id', { ascending: true }).range(from, to));
+      if (skusErr) { costReadError = skusErr; console.error('Product stats: live_auction_item_skus read failed:', skusErr); }
+      snapshotSkuRows = skus.length;
       for (const s of skus) {
         snapshotCogs += ((Number(s.unit_cost_cents_snapshot) || 0) * (Number(s.qty) || 1)) / 100;
         const oid = itemToOrder.get(String(s.auction_item_id));
@@ -239,8 +255,11 @@ export async function GET(request: Request) {
   let catalogUncostedUnparseable = 0;   // named but no pack indicator (e.g. "Default")
   let catalogExcludedNumeric = 0;       // class-c auction lots sitting in the no-capture set
   if (orderIds.length) {
-    const { rows: caps } = await inChunks<{ order_id: string }>(orderIds, (slice) =>
-      admin.from('capture_events').select('order_id').eq('user_id', data.user.id).in('order_id', slice));
+    const { rows: caps, error: capsErr } = await inChunksPaged<{ order_id: string }>(orderIds, (slice, from, to) =>
+      admin.from('capture_events').select('order_id').eq('user_id', data.user.id).in('order_id', slice)
+        .order('id', { ascending: true }).range(from, to));
+    if (capsErr) { costReadError = costReadError ?? capsErr; console.error('Product stats: capture_events read failed:', capsErr); }
+    captureRows = caps.length;
     const captureSet = new Set(caps.map((c) => String(c.order_id)));
     for (const row of allRows) {
       const oid = String(row.order_id || '');
@@ -256,6 +275,24 @@ export async function GET(request: Request) {
     }
   }
   const catalogCostedOrdersCount = catalogCostedOrders.size;
+
+  // ── SANITY CHECK ─────────────────────────────────────────────────────────────
+  // A period with revenue cannot legitimately resolve zero product cost: every order is either
+  // an auction order (snapshot COGS) or a catalog order (tape-curve COGS). Both sources coming
+  // back empty against non-zero GMV means a cost read failed or truncated, and the totals below
+  // carry a net profit that is too high. Log it with the row counts — a bare $0 in the response
+  // is unfalsifiable after the fact. (The client refuses to render net when COGS is 0 vs GMV > 0.)
+  if (totalGMV > 0 && snapshotCogs === 0 && catalogCogs === 0) {
+    console.error('Product stats: COGS resolved to $0 against non-zero GMV — cost read failed or truncated', {
+      userId: data.user.id, dateFrom, dateTo,
+      totalGMV, totalOrders,
+      orderRowsFetched: allRows.length, distinctOrderIds: orderIds.length,
+      auctionItemRows, snapshotSkuRows, captureRows,
+      catalogCostedOrders: catalogCostedOrdersCount,
+      catalogUncostedUnparseable, catalogExcludedNumeric,
+      costReadError: costReadError ? String(costReadError) : null,
+    });
+  }
 
   return NextResponse.json({
     products: result,
