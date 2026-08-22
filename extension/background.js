@@ -1209,6 +1209,60 @@ async function getOrCreateSession(roomId) {
   }
 }
 
+// PER-ROOM SINGLE FLIGHT over getOrCreateSession.
+//
+// getOrCreateSession is check-then-act: it GETs the room's open session and INSERTs only
+// when that GET came back empty. Two overlapping calls for the SAME room can both finish
+// the GET before either INSERT commits, so both insert — six duplicate "shadow" sessions on
+// onlybidss between Aug 17-22, inserted 0.001s-0.094s apart. The losing rows carried
+// last_seen_at NULL and 0-1 auction items, but rendered as full duplicate shows and were
+// served as work in /team/binding.
+//
+// The dispatch layer is what allows the overlap: AUTO_BIND and CAPTURE_STORE are each
+// started with `handler(...).then(...)` and `return true` (no serialization), so a sale and
+// a screenshot — or two sales from one order batch — can be inside getOrCreateSession at the
+// same time in ONE worker. Sharing the in-flight promise collapses those into one GET+INSERT.
+//
+// Keyed by ROOM, not global: two rooms going live at once must not block each other.
+//
+// STALENESS BOUND. The entry carries the time it was created and is only joined for
+// SESSION_INFLIGHT_MAX_MS. fetchWithTimeout clears its AbortController timer as soon as the
+// FETCH settles (headers), so the body read that follows in supabaseGet/supabasePost has NO
+// timeout — a stalled body never settles, and without this bound the room would be dead for
+// the rest of the worker's life. Unbounded, one stalled read turns a single lost bind into a
+// whole show's worth. Past the window a caller starts its own attempt instead of joining.
+//
+// SCOPE — this covers concurrency inside one service worker ONLY. Two extension installs,
+// two machines, or an SW restart mid-flight still race, because this Map is module-scope
+// state that dies with the worker (same as currentSessionId). Those need a server-side
+// atomic RPC; deliberately not attempted here.
+var sessionInFlight = new Map(); // room -> { p: Promise<sessionId|null>, at: ms }
+var SESSION_INFLIGHT_MAX_MS = 15000;
+
+function getOrCreateSessionGuarded(roomId) {
+  // Resolve the room the SAME way getOrCreateSession does, and key on the resolved value.
+  // Keying on the raw argument instead would short-circuit a sale that has no roomId of its
+  // own but would today bind via currentRoomId — a silent regression in the bind path.
+  var room = roomId || currentRoomId || null;
+  if (!room) return getOrCreateSession(roomId); // no room: let it take its own no-room path
+  var entry = sessionInFlight.get(room);
+  if (entry && (Date.now() - entry.at) < SESSION_INFLIGHT_MAX_MS) {
+    // The evidence that the race is real and is now being caught. diagCrit (not diag) so it
+    // records with the ring off — a gated counter is exactly why the onlybidss evidence was lost.
+    diagCrit('session.inflight_join', 'info', 'joined in-flight session create', { room: room });
+    return entry.p;
+  }
+  // Clear on BOTH settle paths so a rejected attempt does not poison later calls for this
+  // room. The identity check means a stale promise settling late can never evict the entry
+  // belonging to the attempt that superseded it.
+  var p = getOrCreateSession(roomId).finally(function () {
+    var cur = sessionInFlight.get(room);
+    if (cur && cur.p === p) sessionInFlight.delete(room);
+  });
+  sessionInFlight.set(room, { p: p, at: Date.now() });
+  return p;
+}
+
 // Resolve — but NEVER create — a session for a queued sale being flushed. A stale queue
 // (e.g. a previous live's tail flushed hours later) must attach to that room's EXISTING
 // session, not mint a fresh 'live' row (the e4b58b91 ghost). If the room has no session,
@@ -1488,7 +1542,7 @@ async function handleAutoBind(sale, stagedSkus) {
     // ── Fresh bind: requires staged SKUs + a room-scoped session ───────────────
     // Pass the sale's own room so a stale in-memory/persisted session (different
     // room) is never reused for this order — the July-3 root cause.
-    var sessionId = await getOrCreateSession(sale.roomId);
+    var sessionId = await getOrCreateSessionGuarded(sale.roomId);
     if (sessionId) {
       // Aggregate by sku_id, summing per-pill qty (qty defaults to 1 if absent).
       var byId = {};
@@ -1763,7 +1817,7 @@ async function handleCaptureStore(msg) {
   // it broadcasts the resolved session so later shots have it too. manual_test
   // (kind='manual' / no roomId) stays /nosession/ with null session_id.
   if (!sessionId && msg.base64 && msg.kind !== 'manual' && msg.roomId && isAuthenticated()) {
-    try { sessionId = await getOrCreateSession(msg.roomId); } catch (_) {}
+    try { sessionId = await getOrCreateSessionGuarded(msg.roomId); } catch (_) {}
   }
   msg.sessionId = sessionId; // shotRowFrom (row.session_id), object key, and outbox all read this
 
