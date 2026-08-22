@@ -10,6 +10,8 @@
 //     matching employees.ts, so weekday/step math is free of local-timezone / DST drift.
 //   * `durationHours` mirrors `shiftHours` in employees.ts EXACTLY (end<start ⇒ +24h for an
 //     overnight shift; a null end ⇒ 0). A parity test asserts the two never diverge.
+//   * `instantHours` likewise mirrors the punch-instants branch of `paidShiftHours`. A card's
+//     `hours` uses it for time_clock rows, so the grid always shows the figure payroll pays.
 //   * Hours/pay logic itself is unchanged — this module only shapes existing rows for the
 //     weekly grid. Recurring generation + materialization behaviour stay in employees.ts.
 
@@ -126,6 +128,20 @@ export function durationHours(startTime: string, endTime: string | null): number
   return mins / 60;
 }
 
+// Paid hours for a shift that carries PUNCH INSTANTS: (clock_out_at − clock_in_at) minus the
+// unpaid break, floored at 0. Mirrors the instants branch of paidShiftHours in employees.ts
+// (:62-69) EXACTLY. Duplicated rather than imported for the same reason durationHours mirrors
+// shiftHours — this module must stay free of value imports so it can be transpiled standalone;
+// a parity test asserts the two never diverge.
+//
+// This is the number PAYROLL pays. The calendar previously showed durationHours(start,end) for
+// every row while the shifts list showed paidShiftHours — that disagreement is what let 44
+// discarded corrections go unnoticed, because the calendar echoed the edit back to the admin.
+export function instantHours(clockInAt: string, clockOutAt: string, breakMinutes = 0): number {
+  const spanH = (Date.parse(clockOutAt) - Date.parse(clockInAt)) / 3_600_000;
+  return Math.max(0, spanH - breakMinutes / 60);
+}
+
 // True when the shift crosses midnight (end strictly earlier than start). Open shifts
 // (null end) are never overnight.
 export function isOvernight(startTime: string, endTime: string | null): boolean {
@@ -176,6 +192,13 @@ export interface ShiftRow {
   start_time: string;
   end_time: string | null;
   source_rule_id?: string | null;
+  // Time-clock fields (migrations 070/072). Optional so a caller passing only the wall clock
+  // still type-checks; when `source` is 'time_clock' the instants are what pay uses, so the
+  // card's `hours` must be derived from them (see cardFromShift).
+  source?: string | null;
+  break_minutes?: number | null;
+  clock_in_at?: string | null;
+  clock_out_at?: string | null;
 }
 
 export interface GeneratedRow {
@@ -201,7 +224,14 @@ export interface WeekShiftCard {
   isFrozen: boolean; // materialized recurring payroll-history row (source_rule_id set) → read-only
   modified: boolean; // recurring instance overridden by a 'modified' exception
   ruleId: string | null;
-  hours: number; // 0 for open shifts
+  hours: number; // 0 for open shifts. time_clock rows: paid hours from the punch instants
+                 // (= paidShiftHours); everything else: wall-clock duration.
+  // Carried through so the edit modal can PREFILL from the same basis `hours` is computed from
+  // (shiftEditPrefill). Without these the form would reopen at the stale wall clock and a save
+  // would write it back over the punch. Null on generated recurring instances.
+  source: string | null;
+  clock_in_at: string | null;
+  clock_out_at: string | null;
   startMin: number;
   endMin: number; // overnight-extended (+1440); for open shifts, equals startMin
 }
@@ -212,6 +242,12 @@ function cardFromShift(s: ShiftRow): WeekShiftCard {
   const startMin = toMinutes(s.start_time);
   const overnight = isOvernight(s.start_time, s.end_time);
   const endMin = isOpen ? startMin : toMinutes(s.end_time as string) + (overnight ? 1440 : 0);
+  // A punch row's hours come from its instants — the same basis paidShiftHours uses — so the
+  // calendar can never show a different number than the one being paid. Only `hours` changes;
+  // startMin/endMin stay wall-clock, because they position the card on a minute-of-day grid
+  // and drive overlap detection. Manual rows (NULL instants) keep the wall-clock path.
+  const paidFromInstants =
+    !isOpen && s.source === 'time_clock' && !!s.clock_in_at && !!s.clock_out_at;
   return {
     id: s.id,
     // A materialized recurring row is payroll history — surface it as recurring, never as a
@@ -226,7 +262,12 @@ function cardFromShift(s: ShiftRow): WeekShiftCard {
     isFrozen: frozen,
     modified: false,
     ruleId: s.source_rule_id ?? null,
-    hours: durationHours(s.start_time, s.end_time),
+    source: s.source ?? null,
+    clock_in_at: s.clock_in_at ?? null,
+    clock_out_at: s.clock_out_at ?? null,
+    hours: paidFromInstants
+      ? instantHours(s.clock_in_at as string, s.clock_out_at as string, s.break_minutes ?? 0)
+      : durationHours(s.start_time, s.end_time),
     startMin,
     endMin,
   };
@@ -247,6 +288,10 @@ function cardFromGenerated(g: GeneratedRow): WeekShiftCard {
     isFrozen: false,
     modified: g.modified,
     ruleId: g.rule_id,
+    // A projected recurring instance has no stored row, so no source and no instants.
+    source: null,
+    clock_in_at: null,
+    clock_out_at: null,
     hours: durationHours(g.start_time, g.end_time),
     startMin,
     endMin: toMinutes(g.end_time) + (overnight ? 1440 : 0),
