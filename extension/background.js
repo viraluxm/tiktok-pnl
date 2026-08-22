@@ -327,8 +327,9 @@ async function handleAccountDetected(account, room) {
   // (a real-but-unmapped channel like infinit.deals → add it to the map) vs 'garbage'
   // (UI text like "10s"/"English"/"Close" → the DOM lied). Neither is ever written.
   await ensureChannelSet();
-  var known = account.handle ? isKnownChannel(account.handle) : false;
-  var unknownClass = (account.handle && !known) ? classifyUnknownHandle(account.handle) : null;
+  var guardOn = channelGuardActive(); // false when the map is empty/unavailable → denylist fallback
+  var known = (guardOn && account.handle) ? isKnownChannel(account.handle) : false;
+  var handleClass = account.handle ? classifyUnknownHandle(account.handle) : null; // 'plausible' | 'garbage'
 
   // Read the current channel_handle FIRST (authoritative), then the storage map, so the
   // non-destructive guard can compare against what's already persisted.
@@ -358,16 +359,35 @@ async function handleAccountDetected(account, room) {
     // is a no-op; only a STRONG (sec_uid) identity may overwrite a different known handle;
     // a WEAK handle never clobbers a different existing one (the jumbosteals→"Close" case).
     var decision;
-    if (!account.handle) decision = 'no_handle';
-    else if (!known) decision = 'unknown_' + unknownClass; // 'unknown_plausible' | 'unknown_garbage' → WRITE NOTHING (backstop)
-    else if (!existingHandle) { acceptHandle = account.handle; decision = 'first_write'; }
-    else if (existingHandle === account.handle) decision = 'unchanged';
-    else if (incomingStrong) { acceptHandle = account.handle; decision = 'overwrite_strong'; }
-    else decision = 'rejected_weak_overwrite'; // KEEP existing — do NOT clobber
-    // Unknown-handle triage — distinct, always-on messages so the operator can tell
-    // "add this to the map" from "the DOM lied" straight from the diagnostics.
-    if (account.handle && !known) {
-      if (unknownClass === 'plausible') {
+    if (!account.handle) {
+      decision = 'no_handle';
+    } else if (guardOn) {
+      // GUARD ARMED (non-empty map loaded): the known-set is authoritative.
+      if (!known) decision = 'unknown_' + handleClass; // 'unknown_plausible' | 'unknown_garbage' → WRITE NOTHING
+      else if (!existingHandle) { acceptHandle = account.handle; decision = 'first_write'; }
+      else if (existingHandle === account.handle) decision = 'unchanged';
+      else if (incomingStrong) { acceptHandle = account.handle; decision = 'overwrite_strong'; }
+      else decision = 'rejected_weak_overwrite'; // KEEP existing — do NOT clobber
+    } else {
+      // GUARD DISARMED (map empty/unavailable, e.g. RLS): do NOT silently reject everything
+      // (the v0.6.4 regression). Fall back to the pre-0.6.4 denylist — accept plausible
+      // handles, reject obvious UI text — and raise a LOUD signal that the guard is off.
+      if (handleClass === 'garbage') decision = 'fallback_rejected_garbage';
+      else if (!existingHandle) { acceptHandle = account.handle; decision = 'fallback_first_write'; }
+      else if (existingHandle === account.handle) decision = 'unchanged';
+      else if (incomingStrong) { acceptHandle = account.handle; decision = 'fallback_overwrite_strong'; }
+      else decision = 'rejected_weak_overwrite'; // still never weak-overwrite a different value
+    }
+
+    if (!guardOn && account.handle) {
+      // Unmissable: the allow-list guard is NOT running. Emit once-loud per detection so the
+      // host + operator can see it (the empty-allow-list-looks-like-a-working-one lesson).
+      diagCrit('channel.guard_unavailable', 'warn',
+        'channel guard OFFLINE (map ' + channelSetState + ') — cannot validate "' + account.handle + '"; using fallback denylist (' + decision + ')',
+        { handle: account.handle, state: channelSetState, classification: handleClass, applied: !!acceptHandle, source: src, room: r || null, session: sid ? diagRedactId(sid) : null });
+    } else if (guardOn && account.handle && !known) {
+      // Guard armed but handle not in the map — triage: add-to-map vs the-DOM-lied.
+      if (handleClass === 'plausible') {
         diagCrit('channel.unmapped', 'warn',
           'unmapped channel "' + account.handle + '" — handle-shaped but NOT in channel_store_map; add it to the map to attribute this session',
           { handle: account.handle, classification: 'plausible', action: 'not_written', source: src, room: r || null, session: sid ? diagRedactId(sid) : null });
@@ -431,7 +451,9 @@ async function handleAccountDetected(account, room) {
   return {
     handle: account.handle || null,
     known: known,
-    classification: unknownClass, // 'plausible' | 'garbage' | null (known/no-handle)
+    classification: handleClass, // 'plausible' | 'garbage' | null (no handle)
+    guardState: channelSetState, // 'loaded' | 'empty' | 'unavailable' | 'unloaded'
+    guardOn: guardOn,            // false → overlay shows "guard offline" warning
     written: !!acceptHandle,
   };
 }
@@ -1007,35 +1029,48 @@ async function fetchAllSkus() {
 // is UI text ("10s", "English", "Close") or an unmapped-but-real channel and must
 // NOT corrupt the session. Cached with a short TTL and refreshed lazily — the map is
 // a handful of rows, so this is cheap. Fetched the SAME way SKUs/hosts are.
-var cachedChannelSet = null;      // Set<string> of normalized channel_name, or null until first load
+var cachedChannelSet = null;       // Set<string> of normalized channel_name; null until first load
 var cachedChannelSetTs = 0;
+var channelSetState = 'unloaded';  // 'loaded'(rows>0) | 'empty'(200,0 rows) | 'unavailable'(error/unauth) | 'unloaded'
 var CHANNEL_MAP_TTL_MS = 5 * 60 * 1000;
 
 function normChannel(h) { return String(h == null ? '' : h).trim().replace(/^@+/, '').toLowerCase(); }
 
-// Load/refresh the known-channel set. Never CLEARS an existing set on a transient
-// failure — a fetch error must not open the gate to garbage, so we keep the last
-// good set. Returns the set (possibly null if never loaded and unauthenticated).
+// Load/refresh the known-channel set. CRITICAL (v0.6.5): a 0-row result is NOT a valid
+// allow-list — it is recorded as 'empty', which leaves the guard DISARMED (see
+// channelGuardActive) rather than silently rejecting every handle. That empty-vs-loaded
+// ambiguity was the v0.6.4 fail-closed regression: RLS hid channel_store_map from the
+// non-admin operator JWT → the fetch returned [] → an empty Set looked identical to a
+// working map and suppressed every handle for two whole lives. A transient error keeps a
+// previously-loaded set ('loaded' stays), so a blip never disarms a working guard.
 async function ensureChannelSet(force) {
   var now = Date.now();
-  if (!force && cachedChannelSet && (now - cachedChannelSetTs) < CHANNEL_MAP_TTL_MS) return cachedChannelSet;
-  if (!isAuthenticated()) return cachedChannelSet;
+  if (!force && channelSetState === 'loaded' && (now - cachedChannelSetTs) < CHANNEL_MAP_TTL_MS) return;
+  if (!isAuthenticated()) { if (channelSetState !== 'loaded') channelSetState = 'unavailable'; return; }
   try {
     var rows = await supabaseGet('channel_store_map', 'select=channel_name');
-    var set = new Set();
-    (rows || []).forEach(function (r) { var n = normChannel(r && r.channel_name); if (n) set.add(n); });
-    cachedChannelSet = set;
-    cachedChannelSetTs = now;
+    if (Array.isArray(rows) && rows.length > 0) {
+      var set = new Set();
+      rows.forEach(function (r) { var n = normChannel(r && r.channel_name); if (n) set.add(n); });
+      cachedChannelSet = set; channelSetState = 'loaded'; cachedChannelSetTs = now;
+    } else {
+      // 200 but ZERO rows — cannot distinguish "map truly empty" from "RLS hid it".
+      // Never arm the guard on this; the caller falls back to the denylist + warns.
+      channelSetState = 'empty'; cachedChannelSetTs = now;
+    }
   } catch (e) {
-    console.warn('[LENSED][BG] channel_store_map fetch failed (non-fatal, keeping last set):', String((e && e.message) || e));
+    if (channelSetState !== 'loaded') channelSetState = 'unavailable'; // keep a prior good set on a blip
+    console.warn('[LENSED][BG] channel_store_map fetch failed:', String((e && e.message) || e));
   }
-  return cachedChannelSet;
 }
 
-// A handle is writable ONLY if it is a known channel. If the set never loaded
-// (null), nothing is known → nothing is written (fail CLOSED, never open).
+// The guard is ARMED only when a NON-EMPTY map actually loaded. Empty/unavailable/unloaded
+// → disarmed → the caller falls back to the denylist and raises a visible warning.
+function channelGuardActive() { return channelSetState === 'loaded'; }
+
+// A handle is a known channel ONLY when the guard is armed. (Belt: also checks the set.)
 function isKnownChannel(handle) {
-  if (!cachedChannelSet) return false;
+  if (channelSetState !== 'loaded' || !cachedChannelSet) return false;
   return cachedChannelSet.has(normChannel(handle));
 }
 
@@ -1293,6 +1328,60 @@ async function getOrCreateSession(roomId) {
     console.error('[LENSED][BG] session get-or-create error:', e);
     return null;
   }
+}
+
+// PER-ROOM SINGLE FLIGHT over getOrCreateSession.
+//
+// getOrCreateSession is check-then-act: it GETs the room's open session and INSERTs only
+// when that GET came back empty. Two overlapping calls for the SAME room can both finish
+// the GET before either INSERT commits, so both insert — six duplicate "shadow" sessions on
+// onlybidss between Aug 17-22, inserted 0.001s-0.094s apart. The losing rows carried
+// last_seen_at NULL and 0-1 auction items, but rendered as full duplicate shows and were
+// served as work in /team/binding.
+//
+// The dispatch layer is what allows the overlap: AUTO_BIND and CAPTURE_STORE are each
+// started with `handler(...).then(...)` and `return true` (no serialization), so a sale and
+// a screenshot — or two sales from one order batch — can be inside getOrCreateSession at the
+// same time in ONE worker. Sharing the in-flight promise collapses those into one GET+INSERT.
+//
+// Keyed by ROOM, not global: two rooms going live at once must not block each other.
+//
+// STALENESS BOUND. The entry carries the time it was created and is only joined for
+// SESSION_INFLIGHT_MAX_MS. fetchWithTimeout clears its AbortController timer as soon as the
+// FETCH settles (headers), so the body read that follows in supabaseGet/supabasePost has NO
+// timeout — a stalled body never settles, and without this bound the room would be dead for
+// the rest of the worker's life. Unbounded, one stalled read turns a single lost bind into a
+// whole show's worth. Past the window a caller starts its own attempt instead of joining.
+//
+// SCOPE — this covers concurrency inside one service worker ONLY. Two extension installs,
+// two machines, or an SW restart mid-flight still race, because this Map is module-scope
+// state that dies with the worker (same as currentSessionId). Those need a server-side
+// atomic RPC; deliberately not attempted here.
+var sessionInFlight = new Map(); // room -> { p: Promise<sessionId|null>, at: ms }
+var SESSION_INFLIGHT_MAX_MS = 15000;
+
+function getOrCreateSessionGuarded(roomId) {
+  // Resolve the room the SAME way getOrCreateSession does, and key on the resolved value.
+  // Keying on the raw argument instead would short-circuit a sale that has no roomId of its
+  // own but would today bind via currentRoomId — a silent regression in the bind path.
+  var room = roomId || currentRoomId || null;
+  if (!room) return getOrCreateSession(roomId); // no room: let it take its own no-room path
+  var entry = sessionInFlight.get(room);
+  if (entry && (Date.now() - entry.at) < SESSION_INFLIGHT_MAX_MS) {
+    // The evidence that the race is real and is now being caught. diagCrit (not diag) so it
+    // records with the ring off — a gated counter is exactly why the onlybidss evidence was lost.
+    diagCrit('session.inflight_join', 'info', 'joined in-flight session create', { room: room });
+    return entry.p;
+  }
+  // Clear on BOTH settle paths so a rejected attempt does not poison later calls for this
+  // room. The identity check means a stale promise settling late can never evict the entry
+  // belonging to the attempt that superseded it.
+  var p = getOrCreateSession(roomId).finally(function () {
+    var cur = sessionInFlight.get(room);
+    if (cur && cur.p === p) sessionInFlight.delete(room);
+  });
+  sessionInFlight.set(room, { p: p, at: Date.now() });
+  return p;
 }
 
 // Resolve — but NEVER create — a session for a queued sale being flushed. A stale queue
@@ -1563,7 +1652,7 @@ async function handleAutoBind(sale, stagedSkus) {
     // ── Fresh bind: requires staged SKUs + a room-scoped session ───────────────
     // Pass the sale's own room so a stale in-memory/persisted session (different
     // room) is never reused for this order — the July-3 root cause.
-    var sessionId = await getOrCreateSession(sale.roomId);
+    var sessionId = await getOrCreateSessionGuarded(sale.roomId);
     if (sessionId) {
       // Aggregate by sku_id, summing per-pill qty (qty defaults to 1 if absent).
       var byId = {};
@@ -1838,7 +1927,7 @@ async function handleCaptureStore(msg) {
   // it broadcasts the resolved session so later shots have it too. manual_test
   // (kind='manual' / no roomId) stays /nosession/ with null session_id.
   if (!sessionId && msg.base64 && msg.kind !== 'manual' && msg.roomId && isAuthenticated()) {
-    try { sessionId = await getOrCreateSession(msg.roomId); } catch (_) {}
+    try { sessionId = await getOrCreateSessionGuarded(msg.roomId); } catch (_) {}
   }
   msg.sessionId = sessionId; // shotRowFrom (row.session_id), object key, and outbox all read this
 
