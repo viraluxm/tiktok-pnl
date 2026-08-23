@@ -1,0 +1,37 @@
+-- 115_drop_product_stats_totals_as.sql
+--
+-- Drop public.lensed_product_stats_totals_as, created by 114 and APPLIED BY HAND on 2026-08-22.
+--
+-- 114 is committed alongside this file deliberately. This DB has no migration ledger, so the repo
+-- file is the only record that the function ever existed in production -- a drop with no matching
+-- create reads like a mistake six months from now. Read the pair as: 114 applied, 115 reverted it.
+--
+-- WHY IT GOES: 114 backed a server-side-aggregation rewrite of /api/tiktok/product-stats that has
+-- been abandoned. Commit 56412257 ("read COGS + non-auction identity from canonical order-grain
+-- view; drop $0.80/box catalog resolver") solved the same round-trip fanout on main by a different
+-- design, and deleted the $0.80x(boxes+1) catalog resolver that 114 had faithfully ported into SQL.
+-- Keeping 114 would leave a function computing a catalogCogs figure the application no longer has
+-- any concept of. Nothing references it: it was never wired -- grep src/ for the name.
+--
+-- SECOND REASON, independent of the above -- it is an unnecessary read surface:
+--   * public.synced_order_ids has RLS DISABLED (relrowsecurity = false, 0 policies).
+--   * `authenticated` holds SELECT on that table.
+--   * 114 is SECURITY INVOKER with EXECUTE granted to `authenticated` (and, via the default PUBLIC
+--     grant, `anon` -- though anon is blocked at the table level, returning 42501).
+-- Together that makes it a cross-tenant read primitive: any logged-in user could pass an arbitrary
+-- p_owner_user_ids and read that owner's GMV, COGS, order counts and daily series. The route only
+-- ever called it with the service-role client, which bypasses grants, so the `authenticated` grant
+-- bought nothing. Its pnl_*_as siblings are correctly service_role+postgres only.
+--
+-- Dropping is safe and needs no write-silence window: nothing reads it, and DROP FUNCTION takes no
+-- lock on any table. Verify before applying:
+--   select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'public' and p.proname = 'lensed_product_stats_totals_as';   -- expect 1
+-- and after applying, expect 0.
+--
+-- NOT DROPPED HERE: the older 4-arg public.lensed_product_stats_totals(uuid, uuid, date, date),
+-- which also has no migration file and is likewise unreferenced. It is SECURITY DEFINER and granted
+-- to authenticated, so it carries the same cross-tenant shape and deserves the same treatment --
+-- but it predates this work and is out of scope for this change. Flagged, not bundled.
+
+drop function if exists public.lensed_product_stats_totals_as(uuid[], uuid[], date, date, text);
