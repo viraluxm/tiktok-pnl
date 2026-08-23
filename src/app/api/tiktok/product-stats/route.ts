@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrgId } from '@/lib/org';
-import { inChunksPaged, selectAllPages } from '@/lib/supabase/inChunks';
+import { selectAllPages } from '@/lib/supabase/inChunks';
 
 export async function GET(request: Request) {
   const supabase = await createClient();
@@ -147,165 +147,65 @@ export async function GET(request: Request) {
       };
     });
 
-  // Compute aggregate dashboard totals from the same raw order data
-  let totalGMV = 0;
-  let totalShipping = 0;
-  let totalAffiliate = 0;
-  let totalPlatformFee = 0;
-  let totalUnits = 0;
-  let totalOrders = 0;
-  const byDate: Record<string, { gmv: number; shipping: number; affiliate: number; platformFee: number }> = {};
+  // ── TOTALS: ONE server-side aggregate (migration 114) ───────────────────────
+  // This used to be assembled here in TypeScript: a totals loop over allRows, then three
+  // chunked `.in()` joins (live_auction_items -> live_auction_item_skus for snapshot COGS, plus
+  // capture_events to isolate catalog orders) at 300 ids per request. That was ~1,400 sequential
+  // PostgREST round-trips on the 'all' filter at 0.2-0.36s each, and any one of them failing
+  // silently zeroed COGS -- which renders net profit ~2.5x too high rather than erroring.
+  // lensed_product_stats_totals_as does the whole thing in a single query (447ms for 3 days,
+  // 2.5s for all 139,981 orders) and is a verified behaviour-identical port.
+  //
+  // p_store_ids is null (= all stores), which is what this route has always done -- it accepts no
+  // store parameter today. Wiring a store filter through from the client is a separate change.
+  // rpc-grants: lensed_product_stats_totals_as
+  const { data: totalsJson, error: totalsErr } = await admin.rpc('lensed_product_stats_totals_as', {
+    p_owner_user_ids: [data.user.id],
+    p_store_ids: null,
+    p_from: dateFrom,
+    p_to: dateTo,
+    p_tz: 'America/Los_Angeles',
+  });
+  if (totalsErr) console.error('Product stats: totals RPC failed:', totalsErr);
 
-  let returnsCount = 0;
-  let returnsAmount = 0;
-  let samplesCount = 0;
-
-  for (const row of allRows) {
-    const status = String(row.status || '').toUpperCase();
-    const gmv = Number(row.gmv) || 0;
-    const shipping = Number(row.shipping) || 0;
-    const affiliate = Number(row.affiliate) || 0;
-    const platformFee = Number(row.platform_fee) || 0;
-    const date = String(row.order_date || '');
-
-    // Count returns/cancellations
-    if (status === 'CANCELLED' || status.includes('CANCEL') || status.includes('REVERSE') || status.includes('REFUND') || status.includes('RETURN')) {
-      returnsCount += 1;
-      returnsAmount += gmv;
-      continue; // Don't include in GMV totals
-    }
-
-    // Count samples ($0 GMV completed orders)
-    if (gmv === 0 && (status === 'COMPLETED' || status === 'DELIVERED' || status === 'IN_TRANSIT' || status === '')) {
-      samplesCount += 1;
-    }
-
-    totalGMV += gmv;
-    totalShipping += shipping;
-    totalAffiliate += affiliate;
-    totalPlatformFee += platformFee;
-    totalUnits += Number(row.units) || 0;
-    totalOrders += 1;
-    if (date) {
-      if (!byDate[date]) byDate[date] = { gmv: 0, shipping: 0, affiliate: 0, platformFee: 0 };
-      byDate[date].gmv += gmv;
-      byDate[date].shipping += shipping;
-      byDate[date].affiliate += affiliate;
-      byDate[date].platformFee += platformFee;
-    }
-  }
-
-  // ── COGS from the AUCTION COST SNAPSHOT (live_auction_item_skus.unit_cost_cents_snapshot) —
-  //    the same populated source P&L/Shows/export use, joined order_id -> sold auction item.
-  //    Replaces the product_costs/costsMap path, which is nearly empty (~13 rows) and read $0.
-  //    PARTIAL BY DESIGN: only AUCTION orders have a snapshot; catalog/non-auction orders carry
-  //    no COGS here (cogsCoveredOrders vs totalOrders lets the UI label that honestly).
-  const orderIds = [...new Set(allRows.map((r) => String(r.order_id || '')).filter(Boolean))];
-  let snapshotCogs = 0;               // dollars
-  const coveredOrders = new Set<string>();
-  // Row counts + the first failed cost read, for the sanity check below. A cost read that errors
-  // or truncates yields $0 COGS, which is indistinguishable from a genuinely costless period —
-  // so the counts have to be reported, never inferred from the resulting zero.
-  let auctionItemRows = 0;
-  let snapshotSkuRows = 0;
-  let captureRows = 0;
-  let costReadError: unknown = null;
-  if (orderIds.length) {
-    const { rows: items, error: itemsErr } = await inChunksPaged<{ id: string; client_idempotency_key: string }>(orderIds, (slice, from, to) =>
-      admin.from('live_auction_items').select('id, client_idempotency_key')
-        .eq('user_id', data.user.id).eq('status', 'sold').in('client_idempotency_key', slice)
-        .order('id', { ascending: true }).range(from, to));
-    if (itemsErr) { costReadError = itemsErr; console.error('Product stats: live_auction_items read failed:', itemsErr); }
-    auctionItemRows = items.length;
-    const itemToOrder = new Map(items.map((i) => [String(i.id), String(i.client_idempotency_key)]));
-    const itemIds = items.map((i) => String(i.id));
-    if (itemIds.length) {
-      const { rows: skus, error: skusErr } = await inChunksPaged<{ auction_item_id: string; qty: number | null; unit_cost_cents_snapshot: number | null }>(itemIds, (slice, from, to) =>
-        admin.from('live_auction_item_skus').select('auction_item_id, qty, unit_cost_cents_snapshot')
-          .eq('user_id', data.user.id).in('auction_item_id', slice)
-          .order('id', { ascending: true }).range(from, to));
-      if (skusErr) { costReadError = skusErr; console.error('Product stats: live_auction_item_skus read failed:', skusErr); }
-      snapshotSkuRows = skus.length;
-      for (const s of skus) {
-        snapshotCogs += ((Number(s.unit_cost_cents_snapshot) || 0) * (Number(s.qty) || 1)) / 100;
-        const oid = itemToOrder.get(String(s.auction_item_id));
-        if (oid) coveredOrders.add(oid);
-      }
-    }
-  }
-  const cogsCoveredOrders = coveredOrders.size;
-
-  // ── CATALOG COGS (non-auction storefront orders) ─────────────────────────────
-  // Auction orders get COGS from the snapshot above. Catalog (storefront) orders never touch
-  // an auction, so they have no snapshot — resolve their cost from the sku NAME via the Snore
-  // tape cost curve. Name-based ON PURPOSE: the product is re-listed constantly (6× so far),
-  // each re-list minting new sku_ids that orphan product_costs; the name pattern is stable.
-  //   cost = $0.80 × (boxes + 1)  PER ORDER — a "3 Black" bundle is $3.20 total, not ×3.
-  //   Verified against all 12 legacy product_costs tiers (1→$1.60, 4→$4.00, 12/"1 Year"→$10.40).
-  // TWO HARD GUARDS (both produced wrong answers in analysis):
-  //   • "N Pcs" = N/30 boxes ("120 Pcs" = 4, not 120) — a leading-int read overcounts 30×.
-  //   • pure-numeric sku_names ("9","21") are AUCTION LOT numbers (class-c never-captured
-  //     auction), NOT catalog — excluded entirely, never given tape cost (this is what made
-  //     June's modeled COGS exceed its revenue during analysis).
-  // Unresolvable names ("Default", no pack indicator) are LEFT UNCOSTED and COUNTED — never
-  // silently defaulted. Catalog = orders with NO capture_events row (every auction order, bound
-  // or unbound, has one); that filter plus the numeric guard isolates true storefront sales.
-  let catalogCogs = 0;                  // dollars
-  const catalogCostedOrders = new Set<string>();
-  let catalogUncostedUnparseable = 0;   // named but no pack indicator (e.g. "Default")
-  let catalogExcludedNumeric = 0;       // class-c auction lots sitting in the no-capture set
-  if (orderIds.length) {
-    const { rows: caps, error: capsErr } = await inChunksPaged<{ order_id: string }>(orderIds, (slice, from, to) =>
-      admin.from('capture_events').select('order_id').eq('user_id', data.user.id).in('order_id', slice)
-        .order('id', { ascending: true }).range(from, to));
-    if (capsErr) { costReadError = costReadError ?? capsErr; console.error('Product stats: capture_events read failed:', capsErr); }
-    captureRows = caps.length;
-    const captureSet = new Set(caps.map((c) => String(c.order_id)));
-    for (const row of allRows) {
-      const oid = String(row.order_id || '');
-      if (!oid || captureSet.has(oid) || coveredOrders.has(oid)) continue; // any auction order → skip
-      const status = String(row.status || '').toUpperCase();
-      if (/CANCEL|REVERSE|REFUND|RETURN/.test(status)) continue;           // mirror GMV's exclusion
-      const boxes = resolveCatalogBoxes(String(row.sku_name || ''));
-      if (boxes === 'numeric') { catalogExcludedNumeric += 1; continue; }
-      if (boxes == null) { catalogUncostedUnparseable += 1; continue; }
-      const units = Number(row.units) || 1;
-      catalogCogs += 0.8 * (boxes + 1) * units;
-      catalogCostedOrders.add(oid);
-    }
-  }
-  const catalogCostedOrdersCount = catalogCostedOrders.size;
+  const totals = (totalsJson ?? null) as Record<string, unknown> | null;
 
   // ── SANITY CHECK ─────────────────────────────────────────────────────────────
   // A period with revenue cannot legitimately resolve zero product cost: every order is either
-  // an auction order (snapshot COGS) or a catalog order (tape-curve COGS). Both sources coming
-  // back empty against non-zero GMV means a cost read failed or truncated, and the totals below
-  // carry a net profit that is too high. Log it with the row counts — a bare $0 in the response
-  // is unfalsifiable after the fact. (The client refuses to render net when COGS is 0 vs GMV > 0.)
-  if (totalGMV > 0 && snapshotCogs === 0 && catalogCogs === 0) {
-    console.error('Product stats: COGS resolved to $0 against non-zero GMV — cost read failed or truncated', {
+  // an auction order (snapshot COGS) or a catalog order (tape-curve COGS). Log it with the row
+  // counts -- a bare $0 in the response is unfalsifiable after the fact. Returning totals: null
+  // on RPC failure is deliberate: the client throws on a missing `totals` and renders "cost data
+  // didn't load" instead of a confident wrong number.
+  const gmv = Number(totals?.totalGMV) || 0;
+  const snapCogs = Number(totals?.snapshotCogs) || 0;
+  const catCogs = Number(totals?.catalogCogs) || 0;
+  if (!totals) {
+    console.error('Product stats: totals RPC returned no row -- responding with totals: null', {
+      userId: data.user.id, dateFrom, dateTo, orderRowsFetched: allRows.length,
+      rpcError: totalsErr ? String(totalsErr.message ?? totalsErr) : null,
+    });
+  } else if (gmv > 0 && snapCogs === 0 && catCogs === 0) {
+    console.error('Product stats: COGS resolved to $0 against non-zero GMV', {
       userId: data.user.id, dateFrom, dateTo,
-      totalGMV, totalOrders,
-      orderRowsFetched: allRows.length, distinctOrderIds: orderIds.length,
-      auctionItemRows, snapshotSkuRows, captureRows,
-      catalogCostedOrders: catalogCostedOrdersCount,
-      catalogUncostedUnparseable, catalogExcludedNumeric,
-      costReadError: costReadError ? String(costReadError) : null,
+      totalGMV: gmv, totalOrders: totals.totalOrders,
+      orderRowsFetched: allRows.length,
+      cogsCoveredOrders: totals.cogsCoveredOrders,
+      catalogCostedOrders: totals.catalogCostedOrders,
+      catalogUncostedUnparseable: totals.catalogUncostedUnparseable,
+      catalogExcludedNumeric: totals.catalogExcludedNumeric,
     });
   }
 
   return NextResponse.json({
     products: result,
-    totals: {
-      totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate,
-      returnsCount, returnsAmount, samplesCount,
-      snapshotCogs, cogsCoveredOrders,
-      catalogCogs, catalogCostedOrders: catalogCostedOrdersCount,
-      catalogUncostedUnparseable, catalogExcludedNumeric,
-    },
+    totals,
   });
 }
 
+// NO LONGER CALLED at runtime — the live implementation is the CASE expression in migration
+// 114_product_stats_totals_as.sql, which this function was ported to (\y not \b for the word
+// boundary; -1 as the 'numeric' sentinel). Kept as the readable reference for that port and for
+// the cost-curve rule itself. If you change one, change both.
 // Resolve the number of 30-day BOXES a catalog sku_name represents, for the $0.80×(boxes+1)
 // tape cost curve. Returns 'numeric' for pure-numeric auction lot numbers (NOT catalog — must be
 // excluded), or null when the name has no pack indicator (leave uncosted + count, never guess).
