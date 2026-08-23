@@ -199,6 +199,9 @@ export async function GET(request: Request) {
   //    recognise no auction revenue; their merchandise (uncaptured_gmv = gmv − shipping) is reported
   //    as nonAuctionMerch and dropped from the dashboard headline GMV (auction GMV is untouched).
   //    The view is order-grain (one row per order), so plain JS sums are safe.
+  // A break out of the paging loop below leaves snapshotCogs partially summed, and a COGS total
+  // that is too low reads as a healthy margin rather than an error. Flag it for the client.
+  let cogsReadFailed = false;
   let snapshotCogs = 0;                 // dollars — canonical auction cost snapshot (matches fingerprint)
   let nonAuctionMerch = 0;              // dollars — non-auction gmv−shipping, dropped from headline GMV
   const cogsCoveredSet = new Set<string>();
@@ -212,7 +215,7 @@ export async function GET(request: Request) {
       if (dateFrom) vq = vq.gte('business_date', dateFrom);
       if (dateTo) vq = vq.lte('business_date', dateTo);
       const { data: vpage, error: verr } = await vq.range(vOffset, vOffset + PAGE - 1);
-      if (verr) { console.error('pnl_order_grain read error:', verr); break; }
+      if (verr) { console.error('pnl_order_grain read error:', verr); cogsReadFailed = true; break; }
       if (!vpage || vpage.length === 0) break;
       for (const r of vpage) {
         if (r.cogs_cents != null) { snapshotCogs += Number(r.cogs_cents) / 100; cogsCoveredSet.add(String(r.order_id)); }
@@ -230,6 +233,7 @@ export async function GET(request: Request) {
       totalGMV, totalShipping, totalAffiliate, totalPlatformFee, totalUnits, totalOrders, byDate,
       returnsCount, returnsAmount, samplesCount,
       snapshotCogs, cogsCoveredOrders, nonAuctionMerch,
+      cogsUnavailable: cogsReadFailed,
     },
   });
 }

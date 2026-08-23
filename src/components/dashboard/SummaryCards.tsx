@@ -27,7 +27,8 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
   const profitColor = metrics.totalNetProfit >= 0 ? 'text-tt-green' : 'text-tt-red';
 
   const gmvChange = prevMetrics ? pctChange(metrics.totalGMV, prevMetrics.totalGMV) : null;
-  const profitChange = prevMetrics ? pctChange(metrics.totalNetProfit, prevMetrics.totalNetProfit) : null;
+  // Suppress the delta too — it derives from the same untrustworthy profit figure.
+  const profitChange = prevMetrics && !metrics.cogsUnavailable ? pctChange(metrics.totalNetProfit, prevMetrics.totalNetProfit) : null;
   const unitsChange = prevMetrics ? pctChange(metrics.totalUnits, prevMetrics.totalUnits) : null;
 
   return (
@@ -52,12 +53,20 @@ export default function SummaryCards({ metrics, prevMetrics }: SummaryCardsProps
           <span className="text-xs text-tt-muted uppercase tracking-wide">Net · All Shop Orders</span>
           <ChangeIndicator change={profitChange} />
         </div>
-        <div className={`text-2xl md:text-[30px] font-bold break-words min-w-0 tabular-nums ${profitColor}`}>{fmt(metrics.totalNetProfit)}</div>
-        <div className="text-xs mt-1">
-          <span className={`${metrics.avgMargin >= 25 ? 'text-tt-green' : metrics.avgMargin >= 10 ? 'text-tt-yellow' : 'text-tt-red'}`}>
-            {fmtPct(metrics.avgMargin)} margin
-          </span>
-        </div>
+        {metrics.cogsUnavailable ? (
+          <div className="text-sm md:text-base font-semibold text-tt-yellow break-words min-w-0 leading-snug">
+            Net unavailable — cost data didn&apos;t load
+          </div>
+        ) : (
+          <>
+            <div className={`text-2xl md:text-[30px] font-bold break-words min-w-0 tabular-nums ${profitColor}`}>{fmt(metrics.totalNetProfit)}</div>
+            <div className="text-xs mt-1">
+              <span className={`${metrics.avgMargin >= 25 ? 'text-tt-green' : metrics.avgMargin >= 10 ? 'text-tt-yellow' : 'text-tt-red'}`}>
+                {fmtPct(metrics.avgMargin)} margin
+              </span>
+            </div>
+          </>
+        )}
         <div className="text-[11px] text-tt-muted mt-1 leading-snug">
           All TikTok Shop orders, net of platform fee, COGS, ad spend &amp; labor. Does not subtract refunds.
         </div>

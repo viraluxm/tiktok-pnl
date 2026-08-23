@@ -65,6 +65,10 @@ export interface DashboardMetrics {
   returnsCount?: number;
   returnsAmount?: number;
   samplesCount?: number;
+  // True when the COGS source failed, so totalNetProfit/avgMargin are too high and must not be
+  // rendered as numbers. Set from the stats read failing, the route flagging a truncated COGS
+  // read, or recognised revenue resolving zero COGS.
+  cogsUnavailable?: boolean;
 }
 
 export interface ChartData {
