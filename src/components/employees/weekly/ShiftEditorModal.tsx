@@ -10,6 +10,7 @@ import {
   nextDayWeekday,
   type WeekShiftCard,
 } from '@/lib/weeklySchedule';
+import { shiftEditPrefill } from '@/lib/shifts/punchEdit';
 
 // What the modal was opened for.
 export type EditorIntent =
@@ -113,14 +114,21 @@ export default function ShiftEditorModal({
     [form],
   );
 
+  // The values the form must OPEN AT. For a time_clock card this is the punch instants rendered
+  // as Pacific wall clock — NOT start_time/end_time, which on the 49 known diverging rows still
+  // hold a correction payroll never applied. Prefilling from the stale copy and saving would
+  // write it back over the good punch, so prefill and the write path share one definition
+  // (shiftEditPrefill). Manual/recurring cards have no instants and fall back to the wall clock.
+  const prefill = useMemo(() => (card ? shiftEditPrefill(card) : null), [card]);
+
   function startEdit() {
-    if (!card) return;
+    if (!card || !prefill) return;
     setForm({
       kind: 'edit',
       employeeId: card.employee_id,
       date: card.date,
-      start: card.start_time.slice(0, 5),
-      end: (card.end_time ?? '').slice(0, 5),
+      start: prefill.start,
+      end: prefill.end,
       open: card.isOpen,
       cardId: card.id,
       lockEmployee: true,
@@ -133,13 +141,13 @@ export default function ShiftEditorModal({
   }
 
   function startEndOpen() {
-    if (!card) return;
+    if (!card || !prefill) return;
     const now = new Date().toTimeString().slice(0, 5);
     setForm({
       kind: 'edit',
       employeeId: card.employee_id,
       date: card.date,
-      start: card.start_time.slice(0, 5),
+      start: prefill.start,
       end: now,
       open: false,
       cardId: card.id,
@@ -153,14 +161,16 @@ export default function ShiftEditorModal({
   }
 
   function startDuplicate(destDate: string) {
-    if (!card) return;
+    if (!card || !prefill) return;
+    // duplicatePrefill still resolves the employee/open-shift rules; the TIMES come from the
+    // same basis as an edit, so duplicating a punch shift copies what was actually worked.
     const pre = duplicatePrefill(card);
     setForm({
       kind: 'duplicate',
       employeeId: pre.employee_id,
       date: destDate,
-      start: pre.start_time.slice(0, 5),
-      end: (pre.end_time ?? '').slice(0, 5),
+      start: prefill.start,
+      end: prefill.end,
       open: false,
       lockEmployee: true,
       lockDate: false,
@@ -172,13 +182,13 @@ export default function ShiftEditorModal({
   }
 
   function startModifyOccurrence() {
-    if (!card) return;
+    if (!card || !prefill) return;
     setForm({
       kind: 'occurrence',
       employeeId: card.employee_id,
       date: card.date,
-      start: card.start_time.slice(0, 5),
-      end: (card.end_time ?? '').slice(0, 5),
+      start: prefill.start,
+      end: prefill.end,
       open: false,
       ruleId: card.ruleId,
       lockEmployee: true,
@@ -259,8 +269,8 @@ export default function ShiftEditorModal({
     return (
       <Shell title="Shift" onClose={onClose}>
         <p className="text-xs text-tt-muted mb-4">
-          {nameById(card.employee_id)} · {card.date} · {formatTime12(card.start_time)}
-          {card.isOpen ? ' – open' : `–${formatTime12(card.end_time as string)}`}
+          {nameById(card.employee_id)} · {card.date} · {formatTime12(prefill?.start ?? card.start_time)}
+          {card.isOpen ? ' – open' : `–${formatTime12(prefill?.end ?? (card.end_time as string))}`}
           {card.isOvernight && ` · Ends ${nextDayWeekday(card.date)}`}
         </p>
 

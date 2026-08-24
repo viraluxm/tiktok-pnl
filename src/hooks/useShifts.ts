@@ -3,6 +3,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { createClient } from '@/lib/supabase/client';
 import type { Shift } from '@/types';
+import { buildShiftEditPatch, type EditableShiftRow } from '@/lib/shifts/punchEdit';
 import { useUser } from './useUser';
 
 export interface ShiftInput {
@@ -88,15 +89,41 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shifts'] }),
   });
 
-  // Edit an existing one-off shift's start and/or end time. Only start_time/end_time are
-  // touched — never source_rule_id — so this can never rewrite a materialized recurring
-  // payroll row (the weekly grid only offers Edit on plain one-offs). Passing end_time:null
-  // reopens a shift; validation is the caller's job (see validateShiftTimes).
+  // Edit an existing shift's start and/or end time. source_rule_id is never touched, so this
+  // can never rewrite a materialized recurring payroll row. Passing end_time:null reopens a
+  // shift (manual rows only — see below); validation is the caller's job (validateShiftTimes).
+  //
+  // WHICH COLUMN CARRIES THE CORRECTION — the load-bearing part:
+  //   * source='time_clock' → the PUNCH INSTANTS. paidShiftHours reads clock_in_at/clock_out_at
+  //     for these rows and (given migration 097's CHECK) can never fall through to the wall
+  //     clock, so writing only start_time/end_time discarded the correction silently. The
+  //     instants are now written too, with start_time/end_time kept in sync — other surfaces
+  //     still render the wall clock, and a stale copy of it is exactly what hid this bug.
+  //   * source='manual' → start_time/end_time only, unchanged. Manual rows carry NULL instants
+  //     (097's CHECK does not apply to them) and paidShiftHours already reads their wall clock.
+  //
+  // The branch itself lives in buildShiftEditPatch (lib/shifts/punchEdit.ts) so it is decided
+  // in exactly one place and unit-tested directly, including the DST/overnight conversion.
+  //
+  // `source` and `date` are read back from the ROW rather than taken from the caller: the
+  // calendar's card model carries no `source` and can be stale, and getting this branch wrong
+  // in either direction corrupts pay.
   const updateShift = useMutation({
     mutationFn: async ({ id, start_time, end_time }: { id: string; start_time?: string; end_time?: string | null }) => {
-      const patch: { start_time?: string; end_time?: string | null } = {};
-      if (start_time !== undefined) patch.start_time = start_time;
-      if (end_time !== undefined) patch.end_time = end_time;
+      // Nothing to change → do not touch the row at all (see buildShiftEditPatch).
+      if (start_time === undefined && end_time === undefined) return null;
+
+      const { data: row, error: readErr } = await supabase
+        .from('shifts')
+        .select('source, date, start_time, end_time')
+        .eq('id', id)
+        .single();
+      if (readErr) throw readErr;
+
+      // Which layer the correction lands in is decided in ONE place, unit-tested directly.
+      const patch = buildShiftEditPatch(row as EditableShiftRow, { start_time, end_time });
+      if (patch == null) return null;
+
       const { data, error } = await supabase
         .from('shifts')
         .update(patch)
