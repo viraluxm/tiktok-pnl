@@ -198,34 +198,33 @@ export async function GET(request: Request) {
   //    vs totalOrders lets the UI label that honestly). Non-auction orders (source='non_auction')
   //    recognise no auction revenue; their merchandise (uncaptured_gmv = gmv − shipping) is reported
   //    as nonAuctionMerch and dropped from the dashboard headline GMV (auction GMV is untouched).
-  //    The view is order-grain (one row per order), so plain JS sums are safe.
-  // A break out of the paging loop below leaves snapshotCogs partially summed, and a COGS total
-  // that is too low reads as a healthy margin rather than an error. Flag it for the client.
+  //
+  // AGGREGATED SERVER-SIDE (migration 116). This used to page the view 1000 rows at a time and sum
+  // in JS. One 1000-row page costs 32.6s — LIMIT/OFFSET forces an incremental sort over the view's
+  // 195k-row UNION dedup, redone per page — against the 8s statement_timeout PostgREST enforces.
+  // So page 1 always errored, the loop broke with snapshotCogs still 0, and the card rendered a net
+  // profit with no COGS subtracted. Dropping the LIMIT drops the pathology: ~2s warm, ~6.6s cold.
   let cogsReadFailed = false;
   let snapshotCogs = 0;                 // dollars — canonical auction cost snapshot (matches fingerprint)
   let nonAuctionMerch = 0;              // dollars — non-auction gmv−shipping, dropped from headline GMV
-  const cogsCoveredSet = new Set<string>();
+  let cogsCoveredOrders = 0;
   {
-    let vOffset = 0;
-    for (;;) {
-      let vq = admin
-        .from('pnl_order_grain')
-        .select('order_id, source, cogs_cents, uncaptured_gmv_cents')
-        .eq('user_id', data.user.id);
-      if (dateFrom) vq = vq.gte('business_date', dateFrom);
-      if (dateTo) vq = vq.lte('business_date', dateTo);
-      const { data: vpage, error: verr } = await vq.range(vOffset, vOffset + PAGE - 1);
-      if (verr) { console.error('pnl_order_grain read error:', verr); cogsReadFailed = true; break; }
-      if (!vpage || vpage.length === 0) break;
-      for (const r of vpage) {
-        if (r.cogs_cents != null) { snapshotCogs += Number(r.cogs_cents) / 100; cogsCoveredSet.add(String(r.order_id)); }
-        if (String(r.source) === 'non_auction') nonAuctionMerch += (Number(r.uncaptured_gmv_cents) || 0) / 100;
-      }
-      if (vpage.length < PAGE) break;
-      vOffset += PAGE;
+    const { data: cogsRow, error: cerr } = await admin.rpc('lensed_product_stats_cogs_as', {
+      p_owner_user_ids: [data.user.id],
+      p_from: dateFrom,
+      p_to: dateTo,
+    });
+    const c = cogsRow as { snapshotCogsCents?: number; cogsCoveredOrders?: number; nonAuctionMerchCents?: number } | null;
+    if (cerr || !c) {
+      // Same contract as before: flag it rather than let a $0 COGS read as a healthy margin.
+      console.error('lensed_product_stats_cogs_as read failed:', cerr ?? 'no row returned');
+      cogsReadFailed = true;
+    } else {
+      snapshotCogs = (Number(c.snapshotCogsCents) || 0) / 100;
+      nonAuctionMerch = (Number(c.nonAuctionMerchCents) || 0) / 100;
+      cogsCoveredOrders = Number(c.cogsCoveredOrders) || 0;
     }
   }
-  const cogsCoveredOrders = cogsCoveredSet.size;
 
   return NextResponse.json({
     products: result,

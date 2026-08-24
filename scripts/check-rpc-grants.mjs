@@ -44,6 +44,11 @@ const SERVICE_ROLE_ONLY = new Set([
   // Owner-scoped host-performance twin (111) — bypasses RLS, caller asserts p_owner_user_ids.
   // Called ONLY via createAdminClient from /api/member/team/host-performance.
   'pnl_host_performance_as',
+  // Dashboard COGS aggregate (116) — reads pnl_order_grain, which reads synced_order_ids. That
+  // table has RLS DISABLED while `authenticated` holds SELECT, so an `authenticated` grant would
+  // make this a cross-tenant read of any owner's COGS. Called ONLY via createAdminClient from
+  // /api/tiktok/product-stats.
+  'lensed_product_stats_cogs_as',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
