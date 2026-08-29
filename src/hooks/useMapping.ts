@@ -2,7 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useUser } from './useUser';
-import type { Side } from '@/lib/mapping/shape';
+import type { SectionSide } from '@/lib/mapping/shape';
 
 const KEY = 'inventory-mapping';
 
@@ -22,7 +22,7 @@ export interface MappingSlot {
   rack_id: string;
   shelf_index: number;
   section_index: number;
-  side: Side;
+  side: SectionSide;
   slot_code: string;
   inventory_sku_id: string | null;
   is_active: boolean;
@@ -143,11 +143,11 @@ export function useDeleteRack() {
   });
 }
 
-/** Divide one shelf face once more. The section number is assigned server-side. */
+/** Divide one shelf once more. The section number is assigned server-side. */
 export function useAddSection() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (fields: { rack_id: string; shelf_index: number; side: Side }) => {
+    mutationFn: async (fields: { rack_id: string; shelf_index: number; side: SectionSide }) => {
       const res = await fetch('/api/inventory/mapping/slots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -169,6 +169,26 @@ export function useDeleteSection() {
         { method: 'DELETE' },
       );
       if (!res.ok) await readError(res, 'Failed to remove section');
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+/**
+ * Change which aisle(s) a section is picked from. Setting 'AB' is the "picked from both
+ * sides" action; it can be refused when the aisle being gained is already full.
+ */
+export function useSetSectionSide() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ slotId, side }: { slotId: string; side: SectionSide }) => {
+      const res = await fetch(`/api/inventory/mapping/slots/${slotId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ side }),
+      });
+      if (!res.ok) await readError(res, 'Failed to change the section side');
       return res.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),

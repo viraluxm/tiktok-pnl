@@ -1,39 +1,44 @@
-// A rack's shape: shelves are declared, sections are built up one at a time.
+// A rack's shape: shelves are declared, sections are added to a shelf one at a time.
 //
 // NO IMPORTS — shape.test.mjs transpiles this file standalone at runtime.
 //
-// A rack declares only how many SHELVES it has. How many sections sit on a given shelf face
-// is not a property of the rack at all — it is simply how many slot rows exist for that
-// (shelf, side). Real racks are not uniform grids: one side can hold 4 sections while the
-// other holds 6, and one shelf can be divided differently from the shelf above it.
+// A rack declares only how many SHELVES it has. A shelf is then divided into sections, and
+// each section is ONE physical space that carries which aisle(s) it is picked from. That is
+// the important distinction: reachability is a property of the space, not a second axis the
+// rack is divided along. Modelling it as two parallel per-face layouts made adding one
+// section look like it created a front and a back.
 //
-// Because sections are per-FACE, front/back pairing is not structural: section 3 of side A
-// is not necessarily behind section 3 of side B. "Picked from both sides" is therefore just
-// the same SKU assigned on each side, which deriveRoute already resolves by taking whichever
-// face the picker reaches first.
+// Asymmetric racks still work: a shelf can carry four 'A' sections and six 'B' sections.
+// They are simply one list you can see at once.
 
-export type Side = 'A' | 'B';
+/** A physical face of a rack — what the walking route stops at. Always exactly two. */
+export type RackSide = 'A' | 'B';
+
+/** Which aisle(s) a section is picked from. 'AB' is one space reachable from both. */
+export type SectionSide = 'A' | 'B' | 'AB';
 
 export const MIN_SHELVES = 2;
 export const MAX_SHELVES = 5;
 
 /**
- * Most sections one shelf face may be divided into. A UI constant, not a DB constraint —
- * raising it is a one-line change rather than another migration and another apply.
+ * Most sections one shelf can present to a SINGLE side. Counted per side rather than per
+ * shelf, so a shelf may hold up to six reachable from A and six from B — an 'AB' section
+ * counts toward both, because it occupies a pickable position in each aisle.
  *
- * There is deliberately NO minimum. A newly created rack starts with no sections at all and
- * you add them by clicking the face you are looking at, so zero is a normal state rather
- * than an invalid one.
+ * A UI constant, not a DB constraint: raising it is a one-line change rather than another
+ * migration and another apply. There is deliberately no minimum — a new rack starts with no
+ * sections and you add them by clicking, so zero is a normal state.
  */
-export const MAX_SECTIONS = 6;
+export const MAX_SECTIONS_PER_SIDE = 6;
 
-export const SIDES: Side[] = ['A', 'B'];
+export const RACK_SIDES: RackSide[] = ['A', 'B'];
+export const SECTION_SIDES: SectionSide[] = ['A', 'B', 'AB'];
 
 export interface SlotLike {
   id: string;
   shelf_index: number;
   section_index: number;
-  side: Side;
+  side: SectionSide;
   inventory_sku_id: string | null;
 }
 
@@ -46,47 +51,85 @@ export function shelfIndexes(shelfCount: number): number[] {
   return Array.from({ length: shelfCount }, (_, i) => i + 1);
 }
 
-/**
- * The sections on one shelf face, in physical left-to-right order.
- *
- * Generic so callers keep their own richer slot type (with `slot_code` and the rest) instead
- * of having it narrowed away to SlotLike and needing a cast back.
- */
-export function sectionsOn<T extends SlotLike>(slots: T[], shelf: number, side: Side): T[] {
+/** The rack faces a section can be picked from. */
+export function reachableFrom(side: SectionSide): RackSide[] {
+  return side === 'AB' ? ['A', 'B'] : [side];
+}
+
+export function isReachableFrom(side: SectionSide, face: RackSide): boolean {
+  return side === 'AB' || side === face;
+}
+
+/** Every section on a shelf, both sides together, in section order. */
+export function sectionsOn<T extends SlotLike>(slots: T[], shelf: number): T[] {
   return slots
-    .filter((s) => s.shelf_index === shelf && s.side === side)
+    .filter((s) => s.shelf_index === shelf)
     .sort((a, b) => a.section_index - b.section_index);
 }
 
+/** Sections on a shelf that a picker standing in the given aisle can actually reach. */
+export function sectionsFacing<T extends SlotLike>(slots: T[], shelf: number, face: RackSide): T[] {
+  return sectionsOn(slots, shelf).filter((s) => isReachableFrom(s.side, face));
+}
+
 /**
- * The section number a newly added section should take on this shelf face, or null when the
- * face is already at MAX_SECTIONS.
- *
- * Always max + 1, never "lowest unused". Deleting a section in the middle therefore leaves a
- * gap (S1, S3) rather than renumbering the survivors — renumbering would silently change the
- * printed address on labels that are already on the rack, which is exactly the relabelling
- * churn the permanent slot code exists to prevent.
+ * Whether another section can be added to this shelf for the given side. An 'AB' section
+ * occupies a position in BOTH aisles, so adding one requires room on each.
  */
-export function nextSectionIndex(slots: SlotLike[], shelf: number, side: Side): number | null {
-  const existing = sectionsOn(slots, shelf, side);
-  if (existing.length >= MAX_SECTIONS) return null;
-  return existing.reduce((max, s) => Math.max(max, s.section_index), 0) + 1;
+export function canAddSection(slots: SlotLike[], shelf: number, side: SectionSide): boolean {
+  return reachableFrom(side).every(
+    (face) => sectionsFacing(slots, shelf, face).length < MAX_SECTIONS_PER_SIDE,
+  );
+}
+
+/**
+ * The number a newly added section takes on this shelf, or null when it cannot be added.
+ *
+ * Always max + 1 across the whole shelf, never "lowest unused". Deleting a section in the
+ * middle therefore leaves a gap (S1, S3) rather than renumbering the survivors —
+ * renumbering would silently change the address printed on labels already on the rack,
+ * which is exactly the relabelling churn the permanent slot code exists to prevent.
+ */
+export function nextSectionIndex(
+  slots: SlotLike[],
+  shelf: number,
+  side: SectionSide,
+): number | null {
+  if (!canAddSection(slots, shelf, side)) return null;
+  return sectionsOn(slots, shelf).reduce((max, s) => Math.max(max, s.section_index), 0) + 1;
+}
+
+/**
+ * Whether a section's side may be changed to `next`.
+ *
+ * Widening to 'AB' can be blocked: the section already occupies a position in its current
+ * aisle, but the aisle it is gaining may already be full.
+ */
+export function canChangeSide(
+  slots: SlotLike[],
+  slot: SlotLike,
+  next: SectionSide,
+): boolean {
+  const gaining = reachableFrom(next).filter((f) => !isReachableFrom(slot.side, f));
+  return gaining.every(
+    (face) => sectionsFacing(slots, slot.shelf_index, face).length < MAX_SECTIONS_PER_SIDE,
+  );
 }
 
 export interface ShelfChangePlan {
   toDeleteIds: string[];
-  /** How many destroyed slots currently hold a SKU. Non-zero needs confirmation. */
+  /** How many destroyed sections currently hold a SKU. Non-zero needs confirmation. */
   assignedLost: number;
-  /** Distinct SKUs left with no slot anywhere on this rack after the change. */
+  /** Distinct SKUs left with no section anywhere on this rack after the change. */
   skusUnmapped: string[];
 }
 
 /**
- * What changing a rack's shelf count does to its slots.
+ * What changing a rack's shelf count does to its sections.
  *
- * Growing creates NOTHING — a new shelf arrives empty and you add sections to it by hand,
- * which is the whole point of dynamic sections. Only shrinking is destructive, and it
- * reports its cost so the UI can confirm before anything is lost.
+ * Growing creates NOTHING — a new shelf arrives empty and you divide it by hand. Only
+ * shrinking is destructive, and it reports its cost so the UI can confirm before anything
+ * is lost.
  */
 export function planShelfChange(existing: SlotLike[], newShelfCount: number): ShelfChangePlan {
   const doomed = existing.filter((s) => s.shelf_index > newShelfCount);
@@ -95,9 +138,8 @@ export function planShelfChange(existing: SlotLike[], newShelfCount: number): Sh
       .map((s) => s.inventory_sku_id!),
   );
 
-  // A SKU that still has a slot on a surviving shelf is not unmapped — reporting it would be
-  // a false alarm, and false alarms on a destructive confirmation just train people to click
-  // through it.
+  // A SKU that still has a section on a surviving shelf is not unmapped — a false alarm here
+  // just trains people to click through the confirmation.
   const skusUnmapped = Array.from(
     new Set(doomed.map((s) => s.inventory_sku_id).filter((id): id is string => !!id)),
   ).filter((id) => !surviving.has(id));
@@ -109,30 +151,9 @@ export function planShelfChange(existing: SlotLike[], newShelfCount: number): Sh
   };
 }
 
-/** Per-face section counts for a rack, for summary display. */
-export function faceCounts(
-  slots: SlotLike[],
-  shelfCount: number,
-): Array<{ shelf: number; side: Side; sections: number; filled: number }> {
-  const out: Array<{ shelf: number; side: Side; sections: number; filled: number }> = [];
-  for (const shelf of shelfIndexes(shelfCount)) {
-    for (const side of SIDES) {
-      const on = sectionsOn(slots, shelf, side);
-      out.push({
-        shelf,
-        side,
-        sections: on.length,
-        filled: on.filter((s) => s.inventory_sku_id).length,
-      });
-    }
-  }
-  return out;
-}
-
 /**
  * The next free rack name. Racks are auto-numbered R1, R2, R3… — there is no reason to make
- * someone name a rack, and free-text names drift out of sync with what is painted on the
- * floor.
+ * someone name a rack, and free text drifts out of sync with what is painted on the floor.
  *
  * Max + 1 rather than count + 1, so deleting R2 out of R1/R2/R3 yields R4 and never reissues
  * a name that might still be on a printed label or in someone's head.

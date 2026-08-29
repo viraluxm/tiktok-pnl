@@ -177,6 +177,27 @@ export function routePositionMap(
 }
 
 /**
+ * Walking position of a SECTION, given the rack it is on and which aisle(s) it is picked
+ * from.
+ *
+ * A section reachable from both aisles ('AB') lands at whichever of its rack's two stops the
+ * picker reaches FIRST — that is the entire payoff of double-siding a fast mover: it is
+ * never a detour, because the route takes the nearer face. Returns null when the rack has no
+ * stop (it is inactive, or not on the floor plan).
+ */
+export function sectionRoutePosition(
+  positions: Map<string, number>,
+  rackId: string,
+  side: 'A' | 'B' | 'AB',
+): number | null {
+  const faces: Side[] = side === 'AB' ? ['A', 'B'] : [side];
+  const found = faces
+    .map((f) => positions.get(`${rackId}:${f}`))
+    .filter((p): p is number => p != null);
+  return found.length ? Math.min(...found) : null;
+}
+
+/**
  * What the picker's device shows: rack, side and level. Deliberately stops short of the
  * section — once someone is at the right shelf they find the item by eye in about as long
  * as reading a section number would take, and a label that is roughly right survives a SKU

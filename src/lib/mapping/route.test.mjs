@@ -15,9 +15,8 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'route-')), 'route.mjs');
 writeFileSync(outFile, outputText);
-const { deriveRoute, routePositionMap, pickerLabel, slotAddress } = await import(
-  pathToFileURL(outFile).href
-);
+const { deriveRoute, routePositionMap, sectionRoutePosition, pickerLabel, slotAddress } =
+  await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -153,6 +152,38 @@ console.log('\nActive filtering and edge cases');
   // is_active is optional on the input type; absent must mean active, not excluded.
   const stops = deriveRoute([{ id: '1', name: 'R1', grid_row: 0, grid_col: 0, route_pos_a: null, route_pos_b: null }]);
   check('a rack with is_active absent is treated as active', stops.length === 2);
+}
+
+console.log('\nSection route positions');
+{
+  //   aisle 0:  R1A R2A          walked first, left-to-right
+  //   aisle 1:  R2B R1B          then back
+  const racks = [rack('1', 'R1', 0, 0), rack('2', 'R2', 0, 1)];
+  const m = routePositionMap(racks, 'top-left');
+  const posA = sectionRoutePosition(m, '1', 'A');
+  const posB = sectionRoutePosition(m, '1', 'B');
+  const posAB = sectionRoutePosition(m, '1', 'AB');
+
+  check('a single-sided section sits at its own face', posA === m.get('1:A') && posB === m.get('1:B'));
+  check('R1A comes before R1B in this layout', posA < posB, `${posA} < ${posB}`);
+  check('a double-sided section takes the NEARER face', posAB === Math.min(posA, posB),
+    `AB=${posAB} min(${posA},${posB})`);
+}
+{
+  // Reverse the route so R1B is reached before R1A, and the 'AB' answer must flip with it —
+  // proving it tracks the walking order rather than just preferring 'A'.
+  const racks = [rack('1', 'R1', 0, 0), rack('2', 'R2', 0, 1)];
+  const m = routePositionMap(racks, 'bottom-left');
+  const posA = sectionRoutePosition(m, '1', 'A');
+  const posB = sectionRoutePosition(m, '1', 'B');
+  check('walking the other way reverses which face is nearer', posB < posA, `${posB} < ${posA}`);
+  check("'AB' follows the walking order, it does not just prefer A",
+    sectionRoutePosition(m, '1', 'AB') === posB);
+}
+{
+  const m = routePositionMap([rack('1', 'R1', 0, 0)]);
+  check('a rack with no stop yields null', sectionRoutePosition(m, 'nope', 'A') === null);
+  check('and null for a double-sided section too', sectionRoutePosition(m, 'nope', 'AB') === null);
 }
 
 console.log('\nLookup map and labels');
