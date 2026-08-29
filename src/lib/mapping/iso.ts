@@ -255,6 +255,25 @@ export function layoutRack<T extends RackSectionLike>(
 export const RACK_DEPTH = 2 + ROW_GAP;
 
 /**
+ * Mirror a box so the rack is seen from its other side — what you get by walking around it.
+ *
+ * Both axes flip, because both reverse when you turn 180°: what was on your left is now on
+ * your right, and the row that was at the front is now at the back. Flipping only depth
+ * would show side B where side A used to be while leaving the sections in their original
+ * left-to-right order, which is the view from nowhere.
+ *
+ * `width` and `depth` are the rack's full extents, so a box's distance from one edge becomes
+ * its distance from the opposite one.
+ */
+export function flipBox<T extends Box>(b: T, width: number, depth: number): T {
+  return {
+    ...b,
+    x: width - (b.x + b.w),
+    z: depth - (b.z + b.d),
+  };
+}
+
+/**
  * Depth a section occupies, from which aisle(s) it is picked from.
  *
  * 'A' is the front row (nearest the viewer), 'B' the back row, and 'AB' is ONE box two rows

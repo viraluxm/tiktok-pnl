@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'iso-')), 'iso.mjs');
 writeFileSync(outFile, outputText);
-const { project, boxFaces, paintOrder, bounds, toPoints, depthFor, layoutShelf, layoutRack, ROW_GAP, ISO } =
+const { project, boxFaces, paintOrder, bounds, toPoints, depthFor, layoutShelf, layoutRack, flipBox, RACK_DEPTH, ROW_GAP, ISO } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -212,6 +212,45 @@ console.log('\nRack layout and occlusion');
   check('an upper-shelf box clears the lid of the one directly below',
     upperLowestY < lidCentreY,
     `upper bottom ${upperLowestY.toFixed(1)} vs lower lid ${lidCentreY.toFixed(1)}`);
+}
+
+console.log('\nFlipping to the other side');
+{
+  const W = 5;
+  const front = { x: 0, z: 1.53, w: 0.84, d: 0.84, baseY: 0, h: 30 };
+  const f = flipBox(front, W, RACK_DEPTH);
+  check('a front-row box becomes a back-row box', f.z < 1, `z ${front.z} → ${f.z.toFixed(2)}`);
+  check('a leftmost box becomes rightmost',
+    Math.abs(f.x - (W - 0.84)) < 1e-9, `x ${front.x} → ${f.x.toFixed(2)}`);
+  check('size is unchanged', f.w === front.w && f.d === front.d && f.h === front.h);
+}
+{
+  // Turning around twice is standing where you started.
+  const W = 5;
+  const b = { x: 1.2, z: 0.08, w: 0.84, d: 0.84, baseY: 40, h: 30 };
+  const twice = flipBox(flipBox(b, W, RACK_DEPTH), W, RACK_DEPTH);
+  check('flipping twice returns the original',
+    Math.abs(twice.x - b.x) < 1e-9 && Math.abs(twice.z - b.z) < 1e-9);
+}
+{
+  // Both axes must flip. Mirroring depth alone would show side B in side A's place while
+  // leaving the sections in their original left-to-right order — a view from nowhere.
+  const W = 5;
+  const left = { x: 0, z: 1.53, w: 0.84, d: 0.84, baseY: 0, h: 30 };
+  const right = { x: 3, z: 1.53, w: 0.84, d: 0.84, baseY: 0, h: 30 };
+  const fl = flipBox(left, W, RACK_DEPTH);
+  const fr = flipBox(right, W, RACK_DEPTH);
+  check('left/right order reverses when you walk around', fl.x > fr.x,
+    `left→${fl.x.toFixed(2)} right→${fr.x.toFixed(2)}`);
+}
+{
+  // A both-sides box spans the whole depth, so it must look identical from either side.
+  const W = 5;
+  const span = { x: 1, z: 0.08, w: 0.84, d: RACK_DEPTH - 0.16, baseY: 0, h: 30 };
+  const f = flipBox(span, W, RACK_DEPTH);
+  check('a spanning box keeps its depth when flipped',
+    Math.abs(f.z - span.z) < 1e-9 && Math.abs(f.d - span.d) < 1e-9,
+    `z ${span.z} → ${f.z.toFixed(2)}`);
 }
 
 console.log('\nSVG helpers');
