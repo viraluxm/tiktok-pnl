@@ -16,10 +16,11 @@ import {
   type MappingSlot,
   type MappingSku,
 } from '@/hooks/useMapping';
+import RackIsometric from './RackIsometric';
 import { deriveRoute, slotAddress, type StartCorner } from '@/lib/mapping/route';
 import {
-  sectionsOn, sectionsFacing, shelfIndexes, isReachableFrom,
-  MIN_SHELVES, MAX_SHELVES, MAX_SECTIONS_PER_SIDE,
+  canAddSection, isReachableFrom,
+  MIN_SHELVES, MAX_SHELVES,
   type SectionSide, type RackSide,
 } from '@/lib/mapping/shape';
 
@@ -48,7 +49,7 @@ const NEXT_SIDE: Record<SectionSide, SectionSide> = { A: 'B', B: 'AB', AB: 'A' }
 const SIDE_LABEL: Record<SectionSide, string> = { A: 'A', B: 'B', AB: 'A+B' };
 
 export default function MappingSection() {
-  const { data, isLoading, error } = useMapping();
+  const { data, isPending, error } = useMapping();
   const createRack = useCreateRack();
   const updateRack = useUpdateRack();
   const deleteRack = useDeleteRack();
@@ -135,7 +136,12 @@ export default function MappingSection() {
   const facesOnAisle = (aisleIndex: number) =>
     stops.filter((s) => s.aisle === aisleIndex).sort((a, b) => a.position - b.position);
 
-  if (isLoading) return <div className="p-4 text-sm text-tt-muted">Loading mapping…</div>;
+  // isPending, NOT isLoading. The query is `enabled: !!user`, and a DISABLED TanStack query
+  // reports isLoading === false while still having no data — so gating on isLoading rendered
+  // the whole tab from `undefined` during the first paint. That showed "0 racks" and, far
+  // worse, "Every active SKU has a section" when in fact nothing was mapped at all: an empty
+  // state that asserts the opposite of the truth. Gate on isPending and on data being present.
+  if (isPending || !data) return <div className="p-4 text-sm text-tt-muted">Loading mapping…</div>;
   if (error) {
     return (
       <div className="p-4 text-sm text-tt-red">
@@ -186,7 +192,7 @@ export default function MappingSection() {
           onEditSlot={(id) => { setEditingSlotId(id); setSkuSearch(''); }}
           onAddSection={(shelf) =>
             run(() => addSection.mutateAsync({ rack_id: selectedRack.id, shelf_index: shelf, side: 'A' }),
-              'Section added — click its A badge to change which aisle it faces.')
+              'Section added to the front row — click it to change which aisle it faces.')
           }
           onCycleSide={(slot) =>
             run(() => setSectionSide.mutateAsync({ slotId: slot.id, side: NEXT_SIDE[slot.side] }),
@@ -592,15 +598,12 @@ function RackView({
   const shelvesChanged = shelves !== rack.shelf_count;
   const shrinking = shelves < rack.shelf_count;
 
-  // Top shelf first, so the drawing matches the rack you are standing at.
-  const rows = shelfIndexes(rack.shelf_count).slice().reverse();
-
-  const faceCount = (face: RackSide) =>
-    slots.filter((s) => isReachableFrom(s.side, face)).length;
+  const faceCount = (face: RackSide) => slots.filter((s) => isReachableFrom(s.side, face)).length;
+  const selected = slots.find((s) => s.id === editingSlotId) ?? null;
 
   return (
     <section className="rounded-2xl border border-tt-border bg-tt-card p-4">
-      <header className="mb-3 flex flex-wrap items-center justify-between gap-3">
+      <header className="mb-2 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-baseline gap-3">
           <h3 className="text-base font-bold text-tt-text">Rack {rack.name}</h3>
           <span className="text-[11px] text-tt-muted">
@@ -611,61 +614,54 @@ function RackView({
         <button onClick={onClose} className="text-xs text-tt-muted underline cursor-pointer">Close</button>
       </header>
 
-      {/* ── the rack drawing ── */}
-      <div className="overflow-x-auto">
-        <div className="min-w-[32rem]">
-          <AisleEdge side="A" aisle={aisleA} count={faceCount('A')} position="top" />
+      {/* Back row first, because that is what the drawing shows furthest away. */}
+      <AisleEdge side="B" aisle={aisleB} count={faceCount('B')} position="top" />
 
-          <div className="space-y-1.5 rounded-xl border-2 border-tt-border bg-tt-card-hover/30 p-2">
-            {rows.map((shelf) => {
-              const sections = sectionsOn(slots, shelf);
-              const aFull = sectionsFacing(slots, shelf, 'A').length >= MAX_SECTIONS_PER_SIDE;
-              const bFull = sectionsFacing(slots, shelf, 'B').length >= MAX_SECTIONS_PER_SIDE;
-              return (
-                <div key={shelf} className="flex items-stretch gap-2">
-                  <div className="flex w-12 shrink-0 flex-col items-center justify-center rounded-lg bg-tt-card-hover py-2">
-                    <span className="text-xs font-bold text-tt-text">L{shelf}</span>
-                    <span className="text-[10px] tabular-nums text-tt-muted">{sections.length}</span>
-                  </div>
-                  <div className="flex flex-1 flex-wrap items-center gap-2 rounded-lg border border-tt-border/70 bg-tt-card p-2">
-                    {sections.map((slot) => (
-                      <SectionCard
-                        key={slot.id}
-                        slot={slot}
-                        sku={slot.inventory_sku_id ? skuById.get(slot.inventory_sku_id) ?? null : null}
-                        editing={slot.id === editingSlotId}
-                        busy={busy}
-                        onEdit={() => onEditSlot(slot.id)}
-                        onCycleSide={() => onCycleSide(slot)}
-                        onDelete={() => onDeleteSection(slot.id, false)}
-                      />
-                    ))}
-                    <button
-                      onClick={() => onAddSection(shelf)}
-                      disabled={busy || aFull}
-                      title={aFull
-                        ? `Side A of this shelf already has ${MAX_SECTIONS_PER_SIDE} sections`
-                        : 'Add a section to this shelf'}
-                      className="rounded-lg border border-dashed border-tt-border px-3 py-3 text-xs text-tt-muted hover:text-tt-text disabled:opacity-30 cursor-pointer"
-                    >
-                      {aFull && bFull ? 'shelf full' : '+ section'}
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      <RackIsometric
+        shelfCount={rack.shelf_count}
+        slots={slots}
+        skuById={skuById}
+        selectedSlotId={editingSlotId}
+        canAddToShelf={(shelf) => !busy && canAddSection(slots, shelf, 'A')}
+        onPickSection={(slot) => onEditSlot(slot.id)}
+        onAddSection={onAddSection}
+      />
 
-          <AisleEdge side="B" aisle={aisleB} count={faceCount('B')} position="bottom" />
+      <AisleEdge side="A" aisle={aisleA} count={faceCount('A')} position="bottom" />
+
+      {/* Controls for the section you clicked. They live in HTML rather than on the drawing:
+          small angled shapes are poor click targets, and a section needs three actions. */}
+      {selected ? (
+        <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-tt-cyan/50 bg-tt-cyan/5 px-3 py-2">
+          <span className="text-xs font-semibold text-tt-text">
+            S{selected.section_index} · shelf {selected.shelf_index}
+          </span>
+          <span className="font-mono text-[10px] text-tt-muted">{selected.slot_code}</span>
+          <span className="h-4 w-px bg-tt-border" />
+          <button
+            onClick={() => onCycleSide(selected)}
+            disabled={busy}
+            className="rounded-lg border border-tt-border px-2 py-1 text-xs font-bold text-tt-text disabled:opacity-40 cursor-pointer"
+          >
+            Picked from: {SIDE_LABEL[selected.side]} → {SIDE_LABEL[NEXT_SIDE[selected.side]]}
+          </button>
+          <button
+            onClick={() => onDeleteSection(selected.id, false)}
+            disabled={busy}
+            className="rounded-lg border border-tt-border px-2 py-1 text-xs text-tt-muted hover:text-tt-red disabled:opacity-40 cursor-pointer"
+          >
+            Remove section
+          </button>
+          <span className="text-[11px] text-tt-muted">Assign a SKU to it below.</span>
         </div>
-      </div>
-
-      <p className="mt-3 text-[11px] leading-relaxed text-tt-muted">
-        A section is one physical space. Click its <b>A</b> / <b>B</b> / <b>A+B</b> badge to set which
-        aisle it is picked from — <b className="text-tt-cyan">A+B</b> means reachable from both, and the
-        route then sends the picker to whichever face they reach first. Adding a section never creates
-        one on the far side.
-      </p>
+      ) : (
+        <p className="mt-3 text-[11px] leading-relaxed text-tt-muted">
+          Click a box to assign a SKU to it, or a dashed <b>+</b> to divide a shelf once more. Front
+          row is <b>side A</b>, back row is <b>side B</b>, and a{' '}
+          <b className="text-tt-cyan">teal box spanning both rows</b> is one space picked from either
+          aisle.
+        </p>
+      )}
 
       <div className="mt-4 flex flex-wrap items-end gap-3 border-t border-tt-border pt-3">
         <Field label={`Shelves (${MIN_SHELVES}–${MAX_SHELVES})`}>
@@ -717,65 +713,6 @@ function AisleEdge({
       <span>{aisle != null ? `opens onto aisle ${aisle + 1}` : 'not placed on the floor plan'}</span>
       <span className="h-px flex-1 bg-tt-border" />
       <span className="tabular-nums">{count} reachable</span>
-    </div>
-  );
-}
-
-function SectionCard({
-  slot, sku, editing, busy, onEdit, onCycleSide, onDelete,
-}: {
-  slot: MappingSlot;
-  sku: MappingSku | null;
-  editing: boolean;
-  busy: boolean;
-  onEdit: () => void;
-  onCycleSide: () => void;
-  onDelete: () => void;
-}) {
-  const facesA = isReachableFrom(slot.side, 'A');
-  const facesB = isReachableFrom(slot.side, 'B');
-  return (
-    <div
-      className={`group relative w-44 overflow-hidden rounded-lg border ${
-        editing ? 'border-tt-cyan bg-tt-cyan/10'
-          : sku ? 'border-tt-green/50 bg-tt-green/5'
-          : 'border-tt-border bg-tt-card'
-      }`}
-    >
-      {/* Accent on the edge facing each aisle this section is picked from. */}
-      <div className={`h-1 ${facesA ? 'bg-tt-cyan' : 'bg-transparent'}`} />
-      <div className="flex items-center gap-1.5 px-1.5 py-1">
-        <button
-          onClick={onCycleSide}
-          disabled={busy}
-          title="Which aisle is this section picked from? Click to change."
-          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold disabled:opacity-40 cursor-pointer ${
-            slot.side === 'AB' ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'
-          }`}
-        >
-          {SIDE_LABEL[slot.side]}
-        </button>
-        <button onClick={onEdit} className="flex min-w-0 flex-1 items-center gap-1.5 text-left cursor-pointer">
-          <span className="shrink-0 text-[10px] font-bold text-tt-muted">S{slot.section_index}</span>
-          {sku ? (
-            <>
-              <SkuThumb url={sku.thumbnail_url} />
-              <span className="min-w-0 flex-1 truncate text-[11px] text-tt-text">#{sku.sku_number}</span>
-            </>
-          ) : (
-            <span className="flex-1 text-[11px] text-tt-muted">empty</span>
-          )}
-        </button>
-        <button
-          onClick={onDelete}
-          disabled={busy}
-          title="Remove this section"
-          className="shrink-0 px-1 text-xs text-tt-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-tt-red disabled:opacity-30 cursor-pointer"
-        >
-          ✕
-        </button>
-      </div>
-      <div className={`h-1 ${facesB ? 'bg-tt-cyan' : 'bg-transparent'}`} />
     </div>
   );
 }
