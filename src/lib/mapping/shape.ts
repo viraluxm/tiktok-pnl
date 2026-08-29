@@ -1,111 +1,146 @@
-// A rack's physical shape, and what changing it does to the slots underneath.
+// A rack's shape: shelves are declared, sections are built up one at a time.
 //
 // NO IMPORTS — shape.test.mjs transpiles this file standalone at runtime.
 //
-// A rack of S shelves and N sections has S x N section positions and therefore S x N x 2
-// slots, because every position has a front and a back face reachable from different aisles.
+// A rack declares only how many SHELVES it has. How many sections sit on a given shelf face
+// is not a property of the rack at all — it is simply how many slot rows exist for that
+// (shelf, side). Real racks are not uniform grids: one side can hold 4 sections while the
+// other holds 6, and one shelf can be divided differently from the shelf above it.
 //
-// Reshaping is the one destructive operation in the Mapping UI: shrinking a rack destroys
-// slots, and a destroyed slot may have had a SKU on it. planReshape reports that cost up
-// front so the UI can require confirmation rather than discovering it afterwards.
+// Because sections are per-FACE, front/back pairing is not structural: section 3 of side A
+// is not necessarily behind section 3 of side B. "Picked from both sides" is therefore just
+// the same SKU assigned on each side, which deriveRoute already resolves by taking whichever
+// face the picker reaches first.
 
 export type Side = 'A' | 'B';
 
-/**
- * Bounds. The DB enforces only the MINIMUMS (CHECK constraints in migration 115) — the
- * maximums live here on purpose, because raising a constant is a one-line change while
- * raising a CHECK constraint is another migration and another silence-gated apply.
- */
 export const MIN_SHELVES = 2;
 export const MAX_SHELVES = 5;
-export const MIN_SECTIONS = 2;
+
+/**
+ * Most sections one shelf face may be divided into. A UI constant, not a DB constraint —
+ * raising it is a one-line change rather than another migration and another apply.
+ *
+ * There is deliberately NO minimum. A newly created rack starts with no sections at all and
+ * you add them by clicking the face you are looking at, so zero is a normal state rather
+ * than an invalid one.
+ */
 export const MAX_SECTIONS = 6;
 
 export const SIDES: Side[] = ['A', 'B'];
 
-export interface SlotPosition {
+export interface SlotLike {
+  id: string;
   shelf_index: number;
   section_index: number;
   side: Side;
-}
-
-export interface ExistingSlot extends SlotPosition {
-  id: string;
   inventory_sku_id: string | null;
-}
-
-export interface ReshapePlan {
-  toCreate: SlotPosition[];
-  toDeleteIds: string[];
-  /** How many slots being destroyed currently hold a SKU. Non-zero needs confirmation. */
-  assignedLost: number;
-  /** Distinct SKUs that would be left unmapped by this reshape. */
-  skusUnmapped: string[];
 }
 
 export function clampShelves(n: number): number {
   return Math.min(MAX_SHELVES, Math.max(MIN_SHELVES, Math.trunc(n)));
 }
 
-export function clampSections(n: number): number {
-  return Math.min(MAX_SECTIONS, Math.max(MIN_SECTIONS, Math.trunc(n)));
-}
-
-/** Total slots a rack of this shape holds — both faces of every section. */
-export function slotCount(shelfCount: number, sectionsPerShelf: number): number {
-  return shelfCount * sectionsPerShelf * SIDES.length;
+/** Shelf numbers for a rack, bottom (1) first. */
+export function shelfIndexes(shelfCount: number): number[] {
+  return Array.from({ length: shelfCount }, (_, i) => i + 1);
 }
 
 /**
- * Every slot position in a rack of this shape. Shelf 1 is the bottom and section 1 the
- * left, so the generated order reads the way someone standing at the rack would scan it.
+ * The sections on one shelf face, in physical left-to-right order.
+ *
+ * Generic so callers keep their own richer slot type (with `slot_code` and the rest) instead
+ * of having it narrowed away to SlotLike and needing a cast back.
  */
-export function slotPositions(shelfCount: number, sectionsPerShelf: number): SlotPosition[] {
-  const out: SlotPosition[] = [];
-  for (let shelf = 1; shelf <= shelfCount; shelf++) {
-    for (let section = 1; section <= sectionsPerShelf; section++) {
-      for (const side of SIDES) {
-        out.push({ shelf_index: shelf, section_index: section, side });
-      }
+export function sectionsOn<T extends SlotLike>(slots: T[], shelf: number, side: Side): T[] {
+  return slots
+    .filter((s) => s.shelf_index === shelf && s.side === side)
+    .sort((a, b) => a.section_index - b.section_index);
+}
+
+/**
+ * The section number a newly added section should take on this shelf face, or null when the
+ * face is already at MAX_SECTIONS.
+ *
+ * Always max + 1, never "lowest unused". Deleting a section in the middle therefore leaves a
+ * gap (S1, S3) rather than renumbering the survivors — renumbering would silently change the
+ * printed address on labels that are already on the rack, which is exactly the relabelling
+ * churn the permanent slot code exists to prevent.
+ */
+export function nextSectionIndex(slots: SlotLike[], shelf: number, side: Side): number | null {
+  const existing = sectionsOn(slots, shelf, side);
+  if (existing.length >= MAX_SECTIONS) return null;
+  return existing.reduce((max, s) => Math.max(max, s.section_index), 0) + 1;
+}
+
+export interface ShelfChangePlan {
+  toDeleteIds: string[];
+  /** How many destroyed slots currently hold a SKU. Non-zero needs confirmation. */
+  assignedLost: number;
+  /** Distinct SKUs left with no slot anywhere on this rack after the change. */
+  skusUnmapped: string[];
+}
+
+/**
+ * What changing a rack's shelf count does to its slots.
+ *
+ * Growing creates NOTHING — a new shelf arrives empty and you add sections to it by hand,
+ * which is the whole point of dynamic sections. Only shrinking is destructive, and it
+ * reports its cost so the UI can confirm before anything is lost.
+ */
+export function planShelfChange(existing: SlotLike[], newShelfCount: number): ShelfChangePlan {
+  const doomed = existing.filter((s) => s.shelf_index > newShelfCount);
+  const surviving = new Set(
+    existing.filter((s) => s.shelf_index <= newShelfCount && s.inventory_sku_id)
+      .map((s) => s.inventory_sku_id!),
+  );
+
+  // A SKU that still has a slot on a surviving shelf is not unmapped — reporting it would be
+  // a false alarm, and false alarms on a destructive confirmation just train people to click
+  // through it.
+  const skusUnmapped = Array.from(
+    new Set(doomed.map((s) => s.inventory_sku_id).filter((id): id is string => !!id)),
+  ).filter((id) => !surviving.has(id));
+
+  return {
+    toDeleteIds: doomed.map((s) => s.id),
+    assignedLost: doomed.filter((s) => s.inventory_sku_id).length,
+    skusUnmapped,
+  };
+}
+
+/** Per-face section counts for a rack, for summary display. */
+export function faceCounts(
+  slots: SlotLike[],
+  shelfCount: number,
+): Array<{ shelf: number; side: Side; sections: number; filled: number }> {
+  const out: Array<{ shelf: number; side: Side; sections: number; filled: number }> = [];
+  for (const shelf of shelfIndexes(shelfCount)) {
+    for (const side of SIDES) {
+      const on = sectionsOn(slots, shelf, side);
+      out.push({
+        shelf,
+        side,
+        sections: on.length,
+        filled: on.filter((s) => s.inventory_sku_id).length,
+      });
     }
   }
   return out;
 }
 
-const keyOf = (p: SlotPosition) => `${p.shelf_index}:${p.section_index}:${p.side}`;
-
 /**
- * Diff a rack's existing slots against a new shape.
+ * The next free rack name. Racks are auto-numbered R1, R2, R3… — there is no reason to make
+ * someone name a rack, and free-text names drift out of sync with what is painted on the
+ * floor.
  *
- * Slots that survive are left ALONE — not deleted and recreated — so their barcodes stay
- * valid and their SKU assignments stay put. Reprinting every label because a rack grew a
- * shelf would defeat the point of a permanent slot code.
+ * Max + 1 rather than count + 1, so deleting R2 out of R1/R2/R3 yields R4 and never reissues
+ * a name that might still be on a printed label or in someone's head.
  */
-export function planReshape(
-  existing: ExistingSlot[],
-  shelfCount: number,
-  sectionsPerShelf: number,
-): ReshapePlan {
-  const wanted = slotPositions(shelfCount, sectionsPerShelf);
-  const wantedKeys = new Set(wanted.map(keyOf));
-  const haveKeys = new Set(existing.map(keyOf));
-
-  const toCreate = wanted.filter((p) => !haveKeys.has(keyOf(p)));
-  const doomed = existing.filter((s) => !wantedKeys.has(keyOf(s)));
-
-  // A SKU is only really unmapped if it has no surviving slot — a double-sided SKU losing
-  // one face is still findable, so reporting it as lost would be a false alarm.
-  const survivingSkus = new Set(
-    existing.filter((s) => wantedKeys.has(keyOf(s)) && s.inventory_sku_id).map((s) => s.inventory_sku_id!),
-  );
-  const skusUnmapped = Array.from(
-    new Set(doomed.map((s) => s.inventory_sku_id).filter((id): id is string => !!id)),
-  ).filter((id) => !survivingSkus.has(id));
-
-  return {
-    toCreate,
-    toDeleteIds: doomed.map((s) => s.id),
-    assignedLost: doomed.filter((s) => s.inventory_sku_id).length,
-    skusUnmapped,
-  };
+export function nextRackName(existingNames: string[]): string {
+  const highest = existingNames.reduce((max, n) => {
+    const m = /^R(\d+)$/i.exec(n.trim());
+    return m ? Math.max(max, Number(m[1])) : max;
+  }, 0);
+  return `R${highest + 1}`;
 }

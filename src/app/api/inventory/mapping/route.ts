@@ -20,7 +20,7 @@ export async function GET() {
   const [racksRes, slotsRes, skusRes] = await Promise.all([
     supabase
       .from('pick_racks')
-      .select('id, name, grid_row, grid_col, shelf_count, sections_per_shelf, route_pos_a, route_pos_b, is_active')
+      .select('id, name, grid_row, grid_col, shelf_count, route_pos_a, route_pos_b, is_active')
       .eq('user_id', user.id)
       .order('grid_row')
       .order('grid_col'),

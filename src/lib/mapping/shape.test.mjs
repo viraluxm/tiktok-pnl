@@ -1,7 +1,6 @@
-// Proof for rack shape and reshaping — the one destructive operation in the Mapping UI.
-// Covers slot expansion (both faces of every section), bounds, and the reshape diff:
-// surviving slots must be left untouched so their barcodes and assignments hold, and the
-// cost of a shrink must be reported before it happens.
+// Proof for the dynamic-section rack model: sections are per (shelf, side) and built up one
+// at a time, growing a rack creates nothing, shrinking reports what it would destroy, and
+// section numbers never get reissued under printed labels.
 // Run:  node src/lib/mapping/shape.test.mjs
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,8 +16,8 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 const outFile = join(mkdtempSync(join(tmpdir(), 'shape-')), 'shape.mjs');
 writeFileSync(outFile, outputText);
 const {
-  slotPositions, slotCount, planReshape, clampShelves, clampSections,
-  MIN_SHELVES, MAX_SHELVES, MIN_SECTIONS, MAX_SECTIONS,
+  sectionsOn, nextSectionIndex, planShelfChange, faceCounts, nextRackName,
+  clampShelves, shelfIndexes, MIN_SHELVES, MAX_SHELVES, MAX_SECTIONS,
 } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -28,120 +27,111 @@ const check = (name, cond, extra = '') => {
   passed++;
 };
 
-// Build existing slots for a shape, optionally assigning SKUs by position key.
-const existingFor = (shelves, sections, assign = {}) =>
-  slotPositions(shelves, sections).map((p, i) => ({
-    ...p,
-    id: `slot-${i}`,
-    inventory_sku_id: assign[`${p.shelf_index}:${p.section_index}:${p.side}`] ?? null,
-  }));
+let seq = 0;
+const slot = (shelf, section, side, sku = null) =>
+  ({ id: `s${++seq}`, shelf_index: shelf, section_index: section, side, inventory_sku_id: sku });
 
-console.log('\nSlot expansion');
+console.log('\nSections are per (shelf, side)');
 {
-  // The user's own worked example: 2 shelves x 4 sections is 16 slots, not 8.
-  check('2 shelves x 4 sections = 16 slots', slotCount(2, 4) === 16, String(slotCount(2, 4)));
-  check('slotPositions agrees with slotCount', slotPositions(2, 4).length === 16);
-  const positions = slotPositions(2, 4);
-  check('every position has both faces',
-    positions.filter((p) => p.side === 'A').length === 8 &&
-    positions.filter((p) => p.side === 'B').length === 8);
-  check('positions are unique',
-    new Set(positions.map((p) => `${p.shelf_index}:${p.section_index}:${p.side}`)).size === 16);
-  check('shelves are 1-based', Math.min(...positions.map((p) => p.shelf_index)) === 1);
-  check('sections are 1-based', Math.min(...positions.map((p) => p.section_index)) === 1);
-}
-{
-  check('smallest legal rack is 2x2x2 = 8', slotCount(MIN_SHELVES, MIN_SECTIONS) === 8);
-  check('largest legal rack is 5x6x2 = 60', slotCount(MAX_SHELVES, MAX_SECTIONS) === 60);
+  // The case the old uniform-grid model could not express: side A wider than side B, and
+  // shelf 2 divided differently from shelf 1.
+  const slots = [
+    slot(1, 1, 'A'), slot(1, 2, 'A'), slot(1, 3, 'A'), slot(1, 4, 'A'),
+    slot(1, 1, 'B'), slot(1, 2, 'B'),
+    slot(2, 1, 'A'), slot(2, 2, 'A'), slot(2, 3, 'A'), slot(2, 4, 'A'), slot(2, 5, 'A'), slot(2, 6, 'A'),
+  ];
+  check('side A shelf 1 has 4 sections', sectionsOn(slots, 1, 'A').length === 4);
+  check('side B shelf 1 has 2 — different from side A', sectionsOn(slots, 1, 'B').length === 2);
+  check('side A shelf 2 has 6 — different from shelf 1', sectionsOn(slots, 2, 'A').length === 6);
+  check('side B shelf 2 has none yet', sectionsOn(slots, 2, 'B').length === 0);
+  check('sections come back in physical order',
+    sectionsOn(slots, 1, 'A').map((s) => s.section_index).join(',') === '1,2,3,4');
 }
 
-console.log('\nBounds');
+console.log('\nAdding sections');
 {
-  check('shelves clamp up to the minimum', clampShelves(1) === MIN_SHELVES);
-  check('shelves clamp down to the maximum', clampShelves(99) === MAX_SHELVES);
-  check('shelves pass through in range', clampShelves(3) === 3);
-  check('sections clamp up to the minimum', clampSections(0) === MIN_SECTIONS);
-  check('sections clamp down to the maximum', clampSections(99) === MAX_SECTIONS);
-  check('fractional input is truncated', clampShelves(3.9) === 3);
+  check('an empty face starts at section 1', nextSectionIndex([], 1, 'A') === 1);
+  const slots = [slot(1, 1, 'A'), slot(1, 2, 'A')];
+  check('the next section continues the face', nextSectionIndex(slots, 1, 'A') === 3);
+  check('the other side is counted independently', nextSectionIndex(slots, 1, 'B') === 1);
+  check('another shelf is counted independently', nextSectionIndex(slots, 2, 'A') === 1);
+}
+{
+  const full = Array.from({ length: MAX_SECTIONS }, (_, i) => slot(1, i + 1, 'A'));
+  check('a full face refuses another section', nextSectionIndex(full, 1, 'A') === null);
+  check('but its other side is still open', nextSectionIndex(full, 1, 'B') === 1);
+}
+{
+  // Deleting a middle section must NOT renumber the survivors — their addresses are already
+  // printed on labels sitting on the rack.
+  const afterDelete = [slot(1, 1, 'A'), slot(1, 3, 'A')];
+  check('a gap is preserved, not closed',
+    sectionsOn(afterDelete, 1, 'A').map((s) => s.section_index).join(',') === '1,3');
+  check('the next section goes above the gap, never reissuing S2',
+    nextSectionIndex(afterDelete, 1, 'A') === 4);
 }
 
-console.log('\nReshape — growing');
+console.log('\nShelf changes');
 {
-  const existing = existingFor(2, 2);
-  const plan = planReshape(existing, 3, 2);
-  check('growing creates only the new slots', plan.toCreate.length === 4, String(plan.toCreate.length));
-  check('growing destroys nothing', plan.toDeleteIds.length === 0);
-  check('growing loses no assignments', plan.assignedLost === 0);
-  check('new slots are all on the new shelf',
-    plan.toCreate.every((p) => p.shelf_index === 3));
+  const slots = [slot(1, 1, 'A'), slot(2, 1, 'A'), slot(3, 1, 'A')];
+  const grow = planShelfChange(slots, 5);
+  check('growing destroys nothing', grow.toDeleteIds.length === 0);
+  check('growing creates nothing — a new shelf arrives empty', grow.assignedLost === 0);
 }
 {
-  // Surviving slots must not be recreated — that is what keeps printed barcodes valid.
-  const existing = existingFor(2, 2);
-  const plan = planReshape(existing, 2, 4);
-  check('widening leaves existing slots untouched', plan.toDeleteIds.length === 0);
-  check('widening adds both faces of each new section', plan.toCreate.length === 8,
-    String(plan.toCreate.length));
-}
-
-console.log('\nReshape — shrinking');
-{
-  const existing = existingFor(3, 2);
-  const plan = planReshape(existing, 2, 2);
-  check('shrinking deletes the removed shelf', plan.toDeleteIds.length === 4,
-    String(plan.toDeleteIds.length));
-  check('shrinking creates nothing', plan.toCreate.length === 0);
-}
-{
-  // The cost that must be surfaced before the user confirms.
-  const existing = existingFor(3, 2, { '3:1:A': 'sku-a', '3:2:B': 'sku-b' });
-  const plan = planReshape(existing, 2, 2);
-  check('assigned slots being destroyed are counted', plan.assignedLost === 2,
-    String(plan.assignedLost));
+  const slots = [slot(1, 1, 'A'), slot(2, 1, 'A'), slot(3, 1, 'A', 'sku-a'), slot(3, 2, 'B', 'sku-b')];
+  const shrink = planShelfChange(slots, 2);
+  check('shrinking destroys the removed shelf', shrink.toDeleteIds.length === 2,
+    String(shrink.toDeleteIds.length));
+  check('assigned slots destroyed are counted', shrink.assignedLost === 2);
   check('the SKUs left unmapped are named',
-    plan.skusUnmapped.length === 2 && plan.skusUnmapped.includes('sku-a') && plan.skusUnmapped.includes('sku-b'),
-    plan.skusUnmapped.join(','));
+    shrink.skusUnmapped.includes('sku-a') && shrink.skusUnmapped.includes('sku-b'));
 }
 {
-  // A double-sided SKU losing ONE face is still findable — reporting it as unmapped would
-  // be a false alarm that trains people to click through the confirmation.
-  const existing = existingFor(3, 2, { '3:1:A': 'sku-x', '1:1:A': 'sku-x' });
-  const plan = planReshape(existing, 2, 2);
+  // A SKU also living on a surviving shelf is NOT unmapped — a false alarm here trains
+  // people to click through the confirmation.
+  const slots = [slot(1, 1, 'A', 'sku-x'), slot(3, 1, 'A', 'sku-x')];
+  const shrink = planShelfChange(slots, 2);
   check('a SKU with a surviving slot is not reported unmapped',
-    plan.skusUnmapped.length === 0, plan.skusUnmapped.join(','));
-  check('but the destroyed assignment is still counted', plan.assignedLost === 1);
+    shrink.skusUnmapped.length === 0, shrink.skusUnmapped.join(','));
+  check('but the destroyed assignment is still counted', shrink.assignedLost === 1);
 }
 {
-  // Same SKU on both faces of a doomed section: reported once, not twice.
-  const existing = existingFor(3, 2, { '3:1:A': 'sku-d', '3:1:B': 'sku-d' });
-  const plan = planReshape(existing, 2, 2);
-  check('an unmapped SKU is reported once', plan.skusUnmapped.length === 1,
-    plan.skusUnmapped.join(','));
-  check('both destroyed faces are counted', plan.assignedLost === 2);
+  // Same SKU on both faces of a doomed shelf: reported once.
+  const slots = [slot(3, 1, 'A', 'sku-d'), slot(3, 1, 'B', 'sku-d')];
+  const shrink = planShelfChange(slots, 2);
+  check('an unmapped SKU is reported once', shrink.skusUnmapped.length === 1);
+  check('both destroyed faces are counted', shrink.assignedLost === 2);
+}
+{
+  check('shelves clamp to the minimum', clampShelves(1) === MIN_SHELVES);
+  check('shelves clamp to the maximum', clampShelves(99) === MAX_SHELVES);
+  check('shelfIndexes is bottom-first', shelfIndexes(3).join(',') === '1,2,3');
 }
 
-console.log('\nReshape — no-op and mixed');
+console.log('\nFace summary');
 {
-  const existing = existingFor(3, 4);
-  const plan = planReshape(existing, 3, 4);
-  check('reshaping to the same shape is a no-op',
-    plan.toCreate.length === 0 && plan.toDeleteIds.length === 0 && plan.assignedLost === 0);
+  const slots = [slot(1, 1, 'A', 'sku-a'), slot(1, 2, 'A'), slot(1, 1, 'B')];
+  const fc = faceCounts(slots, 2);
+  check('every shelf face is represented', fc.length === 4, String(fc.length));
+  const a1 = fc.find((f) => f.shelf === 1 && f.side === 'A');
+  check('counts sections and fills per face', a1.sections === 2 && a1.filled === 1,
+    `${a1.sections}/${a1.filled}`);
+  const b2 = fc.find((f) => f.shelf === 2 && f.side === 'B');
+  check('an untouched face reports zero', b2.sections === 0 && b2.filled === 0);
 }
+
+console.log('\nAuto-naming');
 {
-  // Taller but narrower: creates and destroys in the same operation.
-  const existing = existingFor(2, 4, { '1:4:A': 'sku-w' });
-  const plan = planReshape(existing, 4, 2);
-  check('a mixed reshape both creates and deletes',
-    plan.toCreate.length > 0 && plan.toDeleteIds.length > 0,
-    `+${plan.toCreate.length} -${plan.toDeleteIds.length}`);
-  check('final slot count matches the new shape',
-    existing.length - plan.toDeleteIds.length + plan.toCreate.length === slotCount(4, 2));
-  check('the lost assignment is reported', plan.skusUnmapped.includes('sku-w'));
-}
-{
-  const plan = planReshape([], 2, 2);
-  check('a rack with no slots yet is fully created', plan.toCreate.length === 8);
-  check('and destroys nothing', plan.toDeleteIds.length === 0);
+  check('the first rack is R1', nextRackName([]) === 'R1');
+  check('names continue in sequence', nextRackName(['R1', 'R2']) === 'R3');
+  // Never reissue a name that may still be painted on a rack or printed on a label.
+  check('a deleted middle name is NOT reused', nextRackName(['R1', 'R3']) === 'R4');
+  check('order does not matter', nextRackName(['R3', 'R1']) === 'R4');
+  check('non-conforming names are ignored', nextRackName(['Back wall', 'R2']) === 'R3');
+  check('only-garbage names still start at R1', nextRackName(['Back wall']) === 'R1');
+  check('double digits sort numerically, not lexically',
+    nextRackName(['R9', 'R10']) === 'R11', nextRackName(['R9', 'R10']));
 }
 
 console.log(`\n${passed} checks passed\n`);

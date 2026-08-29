@@ -12,7 +12,6 @@ export interface MappingRack {
   grid_row: number;
   grid_col: number;
   shelf_count: number;
-  sections_per_shelf: number;
   route_pos_a: number | null;
   route_pos_b: number | null;
   is_active: boolean;
@@ -44,9 +43,9 @@ export interface MappingData {
 }
 
 /**
- * A 409 from the rack endpoints is not a failure — it is the server reporting what a
- * destructive reshape or delete would cost, so the UI can confirm it. The details ride on
- * the thrown error rather than being flattened into a message string.
+ * A 409 from these endpoints is not a failure — it is the server reporting what a
+ * destructive change would cost so the UI can confirm it. The details ride on the thrown
+ * error rather than being flattened into a message string.
  */
 export class NeedsConfirmation extends Error {
   assignedLost: number;
@@ -87,16 +86,11 @@ export function useMapping() {
   });
 }
 
+/** Create a rack. Shelves only — the name is assigned server-side, sections are added after. */
 export function useCreateRack() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (fields: {
-      name: string;
-      grid_row: number;
-      grid_col: number;
-      shelf_count: number;
-      sections_per_shelf: number;
-    }) => {
+    mutationFn: async (fields: { grid_row: number; grid_col: number; shelf_count: number }) => {
       const res = await fetch('/api/inventory/mapping/racks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -114,11 +108,9 @@ export function useUpdateRack() {
   return useMutation({
     mutationFn: async ({ id, ...fields }: {
       id: string;
-      name?: string;
       grid_row?: number;
       grid_col?: number;
       shelf_count?: number;
-      sections_per_shelf?: number;
       route_pos_a?: number | null;
       route_pos_b?: number | null;
       is_active?: boolean;
@@ -151,20 +143,48 @@ export function useDeleteRack() {
   });
 }
 
+/** Divide one shelf face once more. The section number is assigned server-side. */
+export function useAddSection() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (fields: { rack_id: string; shelf_index: number; side: Side }) => {
+      const res = await fetch('/api/inventory/mapping/slots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      });
+      if (!res.ok) await readError(res, 'Failed to add section');
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+export function useDeleteSection() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ slotId, confirm }: { slotId: string; confirm?: boolean }) => {
+      const res = await fetch(
+        `/api/inventory/mapping/slots/${slotId}${confirm ? '?confirm=1' : ''}`,
+        { method: 'DELETE' },
+      );
+      if (!res.ok) await readError(res, 'Failed to remove section');
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
 export function useAssignSlot() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ slotId, skuId, bothSides }: {
-      slotId: string;
-      skuId: string | null;
-      bothSides?: boolean;
-    }) => {
+    mutationFn: async ({ slotId, skuId }: { slotId: string; skuId: string | null }) => {
       const res = await fetch(`/api/inventory/mapping/slots/${slotId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inventory_sku_id: skuId, both_sides: !!bothSides }),
+        body: JSON.stringify({ inventory_sku_id: skuId }),
       });
-      if (!res.ok) await readError(res, 'Failed to assign slot');
+      if (!res.ok) await readError(res, 'Failed to assign section');
       return res.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
