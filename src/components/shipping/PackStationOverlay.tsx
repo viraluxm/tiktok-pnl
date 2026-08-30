@@ -361,29 +361,35 @@ export default function PackStationOverlay({
   }
 
   /**
-   * A section scan while picking is a PICK CONFIRMATION, not a new box.
+   * A section scan while picking confirms THE ITEM ON SCREEN, and nothing else.
    *
-   * Scanning a section that belongs to this box but is not the line on screen jumps to that
-   * line and counts it — picking out of order is normal and useful, not an error worth
-   * refusing.
+   * An earlier version accepted any section belonging to the box, jumping to that line and
+   * counting it, on the reasoning that picking out of order is normal. Two problems with that
+   * in use: the screen moved without being asked to, and — more importantly — the scan then
+   * confirmed something other than what the device had just told the picker to fetch, which
+   * is not really verification at all.
+   *
+   * Now the device names one section and that is the only one it accepts. The lines are in
+   * walking order, so following them IS the efficient path; anything else is a detour, and
+   * Next/Back are there for deliberately working ahead.
    */
   function confirmBySection(raw: string) {
     const code = normalizeSlotCode(raw);
-    const idx = pickLines.findIndex((l) => l.kind === 'sku' && l.slot_codes.includes(code));
-    if (idx === -1) {
-      flashScan('Wrong section — not in this order', 'error');
+    const current = pickLines[activeIdx];
+
+    // Anything that is not the item on screen gets ONE answer, whether it belongs to a later
+    // item, an already-picked one, or no item in this box at all. The picker's next move is
+    // identical in every case: scan the section the screen is asking for.
+    if (!current || current.kind !== 'sku' || !current.slot_codes.includes(code)) {
+      flashScan('Wrong section for this item', 'error');
       return;
     }
-    const l = pickLines[idx];
+
+    const idx = activeIdx;
+    const l = current;
     if ((counts[l.key] ?? 0) >= l.required_qty) {
-      // Says "already picked", NOT "wrong section" — because that IS the right section, it has
-      // just been done. Telling a picker they are at the wrong shelf for something already in
-      // their hand sends them hunting, or makes them grab a second unit. Wrong is a worse
-      // failure than redundant.
-      //
-      // It deliberately does NOT advance any more. Jumping to another item on a scan is
-      // motion the operator did not ask for, and on a device read at arm's length it is more
-      // disorienting than the message it was meant to save.
+      // The ON-SCREEN item is already fully grabbed — a double-scan. Still not an error, and
+      // still not "wrong section": this is the right place, it is just done.
       flashScan('Already picked', 'info');
       return;
     }

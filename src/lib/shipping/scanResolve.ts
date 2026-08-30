@@ -238,7 +238,7 @@ export async function attachLocations(
   const rackById = new Map<string, RackRow>(
     ((racks ?? []) as RackRow[]).map((r) => [String(r.id), r]),
   );
-  const byS = new Map<string, { label: string; position: number; codes: string[] }>();
+  const byS = new Map<string, { label: string; position: number; shelf: number; section: number; codes: string[] }>();
 
   for (const slot of slots ?? []) {
     const skuId = String(slot.inventory_sku_id);
@@ -249,7 +249,8 @@ export async function attachLocations(
     const prev = byS.get(skuId);
     const codes = [...(prev?.codes ?? []), String(slot.slot_code)];
     if (pos == null) {
-      byS.set(skuId, prev ? { ...prev, codes } : { label: '', position: Infinity, codes });
+      byS.set(skuId, prev ? { ...prev, codes }
+        : { label: '', position: Infinity, shelf: 0, section: 0, codes });
       continue;
     }
     // Includes the SECTION. Originally stopped at the level on the reasoning that a picker
@@ -262,8 +263,12 @@ export async function attachLocations(
       Number(slot.shelf_index),
       Number(slot.section_index),
     );
-    if (!prev || pos < prev.position) byS.set(skuId, { label, position: pos, codes });
-    else byS.set(skuId, { ...prev, codes });
+    if (!prev || pos < prev.position) {
+      byS.set(skuId, {
+        label, position: pos, codes,
+        shelf: Number(slot.shelf_index), section: Number(slot.section_index),
+      });
+    } else byS.set(skuId, { ...prev, codes });
   }
 
   return skus
@@ -271,10 +276,23 @@ export async function attachLocations(
       const loc = byS.get(s.inventory_sku_id);
       return { ...s, location_label: loc?.label || null, slot_codes: loc?.codes ?? [] };
     })
+    // Walking order, then order WITHIN a rack face.
+    //
+    // Route position is per rack-SIDE, so every item on R1A shares one position. Without the
+    // secondary keys they all tied and fell back to sku_number — which put a picker standing
+    // at R1A through L3 → L1 → L4, reintroducing at one rack exactly the zigzag the route
+    // ordering removes between racks.
+    //
+    // Section before shelf, because you walk ALONG a rack and reach up and down at each
+    // position — not up one whole shelf and back for the next.
     .sort((x, y) => {
-      const px = byS.get(x.inventory_sku_id)?.position ?? Infinity;
-      const py = byS.get(y.inventory_sku_id)?.position ?? Infinity;
+      const lx = byS.get(x.inventory_sku_id);
+      const ly = byS.get(y.inventory_sku_id);
+      const px = lx?.position ?? Infinity;
+      const py = ly?.position ?? Infinity;
       if (px !== py) return px - py;
+      if ((lx?.section ?? 0) !== (ly?.section ?? 0)) return (lx?.section ?? 0) - (ly?.section ?? 0);
+      if ((lx?.shelf ?? 0) !== (ly?.shelf ?? 0)) return (lx?.shelf ?? 0) - (ly?.shelf ?? 0);
       return (Number(x.sku_number) || 0) - (Number(y.sku_number) || 0);
     });
 }
