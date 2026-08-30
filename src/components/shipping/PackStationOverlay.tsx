@@ -376,14 +376,15 @@ export default function PackStationOverlay({
     }
     const l = pickLines[idx];
     if ((counts[l.key] ?? 0) >= l.required_qty) {
-      // Already done is NOT an error, and it is worth distinguishing from a wrong shelf: one
-      // means "go and find the right place", the other means "you are in the right place,
-      // move on". Collapsing them would send someone hunting for a mistake that does not
-      // exist. Better still, do the moving-on for them.
-      const nextIdx = firstUnpickedIdx(pickLines, counts);
-      const allDone = pickLines.every((x) => (counts[x.key] ?? 0) >= x.required_qty);
-      setActiveIdx(nextIdx);
-      flashScan(allDone ? 'Already done — box complete' : 'Already done — moved to the next item', 'info');
+      // Says "already picked", NOT "wrong section" — because that IS the right section, it has
+      // just been done. Telling a picker they are at the wrong shelf for something already in
+      // their hand sends them hunting, or makes them grab a second unit. Wrong is a worse
+      // failure than redundant.
+      //
+      // It deliberately does NOT advance any more. Jumping to another item on a scan is
+      // motion the operator did not ask for, and on a device read at arm's length it is more
+      // disorienting than the message it was meant to save.
+      flashScan('Already picked', 'info');
       return;
     }
     setActiveIdx(idx);
