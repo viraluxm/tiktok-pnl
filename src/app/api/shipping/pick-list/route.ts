@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { routePositionMap, sectionRoutePosition, pickerLabel } from '@/lib/mapping/route';
+import { attachLocations } from '@/lib/shipping/scanResolve';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
@@ -309,65 +309,17 @@ export async function POST(req: Request) {
       });
     }
   }
-  // 5b) WHERE each SKU lives, and therefore what order to walk them in.
+  // WHERE each SKU lives, and therefore what order to walk them in.
   //
-  // This is the whole point of the mapping work: pick lines used to come back ordered by
-  // sku_number, which is a catalogue identity with no relationship to the floor, so a
-  // multi-SKU box sent the picker back and forth. Now they come back in walking order.
-  //
-  // A SKU can sit in more than one section (both faces of a rack, or two places entirely).
-  // The picker is sent to whichever comes FIRST on the route, and every one of its slot codes
-  // is accepted as a scan — walking to the other face is not an error.
-  //
-  // NOTE the start corner is not persisted anywhere yet, so this uses the same 'top-left'
-  // default the Mapping tab opens with. If the owner changes it there, the picker's route is
-  // unaffected until that setting has somewhere to live. Flagged rather than hidden: the
-  // ORDER of stops is right either way, it is only which end you begin from that can differ.
-  const locBySku = new Map<string, { label: string; position: number; codes: string[] }>();
-  if (skuIds.length) {
-    const [{ data: racks }, { data: mapSlots }] = await Promise.all([
-      supabase
-        .from('pick_racks')
-        .select('id, name, grid_row, grid_col, route_pos_a, route_pos_b, is_active')
-        .eq('user_id', user.id),
-      supabase
-        .from('pick_slots')
-        .select('rack_id, shelf_index, section_index, side, slot_code, inventory_sku_id')
-        .eq('user_id', user.id)
-        .in('inventory_sku_id', skuIds),
-    ]);
-
-    const positions = routePositionMap(racks ?? []);
-    const rackById = new Map((racks ?? []).map((r) => [r.id as string, r]));
-
-    for (const slot of mapSlots ?? []) {
-      const skuId = slot.inventory_sku_id as string;
-      const rack = rackById.get(slot.rack_id as string);
-      if (!rack) continue;
-      const side = slot.side as 'A' | 'B' | 'AB';
-      const pos = sectionRoutePosition(positions, rack.id as string, side);
-      const prev = locBySku.get(skuId);
-      const codes = [...(prev?.codes ?? []), slot.slot_code as string];
-      // Nearest stop wins the label; every slot's code stays acceptable.
-      if (pos == null) {
-        locBySku.set(skuId, prev ? { ...prev, codes } : { label: '', position: Infinity, codes });
-        continue;
-      }
-      const label = pickerLabel(
-        rack.name as string,
-        side === 'AB' ? 'A' : side,
-        slot.shelf_index as number,
-      );
-      if (!prev || pos < prev.position) locBySku.set(skuId, { label, position: pos, codes });
-      else locBySku.set(skuId, { ...prev, codes });
-    }
-  }
-
-  const skus = skuIds
-    .map((id) => {
+  // Delegated to the SHARED helper in scanResolve so this route and /api/station/scan cannot
+  // drift. They already duplicate the aggregation above, and keeping this logic here too is
+  // precisely how the station login ended up with no location and the old sku_number order.
+  const skus = await attachLocations(
+    supabase,
+    [user.id],
+    skuIds.map((id) => {
       const a = agg.get(id)!;
       const inv = invById.get(id);
-      const loc = locBySku.get(id);
       return {
         inventory_sku_id: id,
         sku_number: a.sku_number,
@@ -376,21 +328,11 @@ export async function POST(req: Request) {
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
         shelf_out: a.short,
-        // null when the SKU has no section yet — the device shows no guidance rather than
-        // guessing, and these sort last.
-        location_label: loc?.label || null,
-        slot_codes: loc?.codes ?? [],
+        location_label: null,
+        slot_codes: [] as string[],
       };
-    })
-    // Walking order. Unmapped SKUs fall to the END and keep the old lowest-SKU#-first order
-    // among themselves, so a partly-mapped catalogue is strictly better than an unmapped one
-    // and never worse.
-    .sort((x, y) => {
-      const px = locBySku.get(x.inventory_sku_id)?.position ?? Infinity;
-      const py = locBySku.get(y.inventory_sku_id)?.position ?? Infinity;
-      if (px !== py) return px - py;
-      return (Number(x.sku_number) || 0) - (Number(y.sku_number) || 0);
-    });
+    }),
+  );
 
   // EXCLUDED (do-not-pack) orders, kept VISIBLE so screen ⟷ paper slip stays reconciled.
   const linesByOrder = new Map<string, string[]>();

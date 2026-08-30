@@ -15,7 +15,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isSlotCode, normalizeSlotCode } from '@/lib/mapping/slotCode';
 
-export interface PackStationEndpoints { boxes: string; scan: string; confirm: string }
+export interface PackStationEndpoints {
+  boxes: string;
+  scan: string;
+  confirm: string;
+  /**
+   * Where a lead's override goes. REQUIRED rather than defaulted, because the two logins are
+   * confined to different API namespaces and a silent default would work on one and 403 on the
+   * other — with the failure landing on the fulfilment station, which is the login the
+   * override actually exists for.
+   */
+  override: string;
+}
 
 interface BoxSku {
   inventory_sku_id: string;
@@ -350,7 +361,10 @@ export default function PackStationOverlay({
     if (!override || !box) return { ok: false, error: 'No line selected' };
     const line = override.line;
     try {
-      const res = await fetch('/api/shipping/pick-override', {
+      // Which endpoint depends on WHICH LOGIN is running the overlay: a station session is
+      // hard-confined to /api/station, so calling the shipping route there is a middleware 403
+      // before the handler ever runs.
+      const res = await fetch(endpoints.override, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
