@@ -71,6 +71,10 @@ interface Box {
 
 type Screen = 'ready' | 'alert' | 'pick' | 'finish' | 'empty';
 
+// Bound on the scan round-trip. Long enough for a slow warehouse connection, short enough
+// that a hung request cannot quietly kill the device for the rest of the shift.
+const SCAN_TIMEOUT_MS = 15_000;
+
 type PickLine =
   | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean; location_label: string | null; slot_codes: string[] }
   | { kind: 'catalog'; key: string; order_id: string; listing_name: string; seller_sku: string; required_qty: number };
@@ -292,11 +296,25 @@ export default function PackStationOverlay({
     // otherwise fire against the new box and confirm the previous one's group_key.
     cancelDoneTimer(); setJustDone(false);
     setLoading(true); setErr(null);
+    // A scan request that never settles used to leave `loading` true forever, and every
+    // subsequent scan was then dropped silently by the `if (loading) return` guard in onScan —
+    // the device looked completely dead with nothing on screen to explain it. Flaky warehouse
+    // wifi is enough to cause that. Bound it, and say so when it fires.
+    const ctl = new AbortController();
+    const timeout = setTimeout(() => ctl.abort(), SCAN_TIMEOUT_MS);
     try {
       const res = await fetch(endpoints.scan, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan }), signal: ctl.signal,
       });
-      const json = await res.json();
+      // A middleware bounce to /login returns HTML, not JSON, so this throws rather than
+      // yielding a useful error. Say "signed out" instead of a parse failure.
+      const json = await res.json().catch(() => null);
+      if (json === null) {
+        setErr('Signed out or unreachable — reload the page and sign in again.');
+        setScreen('ready');
+        return;
+      }
       if (!res.ok) {
         const t = json.parsed_tracking ? ` (tracking ${json.parsed_tracking})` : '';
         setErr(`No matching order for “${json.scanned_value ?? scan}”${t}`);
@@ -311,9 +329,15 @@ export default function PackStationOverlay({
       if (unbound) setScreen('alert');
       else if (lines.length === 0) setScreen('empty');
       else { setScreen('pick'); setActiveIdx(firstUnpickedIdx(lines, {})); }
-    } catch {
-      setErr('Network error loading the box'); setScreen('ready');
+    } catch (e) {
+      setErr(
+        (e as Error)?.name === 'AbortError'
+          ? `No response after ${Math.round(SCAN_TIMEOUT_MS / 1000)}s — check the connection and scan again.`
+          : 'Network error loading the box',
+      );
+      setScreen('ready');
     } finally {
+      clearTimeout(timeout);
       setLoading(false); focusInput();
     }
   }
@@ -344,9 +368,18 @@ export default function PackStationOverlay({
 
   function onScan() {
     const v = value.trim(); setValue('');
-    if (pickerModalOpen) return; // picker gate open → swallow the scan (value already cleared)
+    if (pickerModalOpen) {
+      // The gate is a full-screen modal, so it is usually obvious — but say it anyway, because
+      // a scan that vanishes with no acknowledgement is indistinguishable from a broken device.
+      setScanMsg('Choose who\'s picking first.');
+      return;
+    }
     focusInput();
-    if (!v || loading) return;
+    if (!v) return;
+    if (loading) {
+      setScanMsg('Still loading the last scan — one moment.');
+      return;
+    }
     // Prefix test, so a section label can never be mistaken for a shipping label and start a
     // new box mid-pick. See lib/mapping/slotCode.
     if (screen === 'pick' && isSlotCode(v)) { confirmBySection(v); return; }
