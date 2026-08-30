@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { isSlotCode, normalizeSlotCode } from '@/lib/mapping/slotCode';
 
 export interface PackStationEndpoints { boxes: string; scan: string; confirm: string }
 
@@ -226,6 +227,10 @@ export default function PackStationOverlay({
   const [err, setErr] = useState<string | null>(null);
   const [justDone, setJustDone] = useState(false);
   const [abandon, setAbandon] = useState<null | { scan: string | null }>(null);
+  // Transient feedback for a section scan that did not land (wrong section, not in this box).
+  const [scanMsg, setScanMsg] = useState<string | null>(null);
+  // A line the picker cannot scan — damaged label, unreachable — awaiting a lead's PIN.
+  const [override, setOverride] = useState<null | { line: PickLine }>(null);
   const [holding, setHolding] = useState(false);
   const [value, setValue] = useState('');
   // Picker gate opens on mount = the session starts by choosing who is packing.
@@ -302,18 +307,84 @@ export default function PackStationOverlay({
     }
   }
 
+  /**
+   * A section scan while picking is a PICK CONFIRMATION, not a new box.
+   *
+   * Scanning a section that belongs to this box but is not the line on screen jumps to that
+   * line and counts it — picking out of order is normal and useful, not an error worth
+   * refusing.
+   */
+  function confirmBySection(raw: string) {
+    const code = normalizeSlotCode(raw);
+    const idx = pickLines.findIndex((l) => l.kind === 'sku' && l.slot_codes.includes(code));
+    if (idx === -1) {
+      setScanMsg('That section is not in this order.');
+      return;
+    }
+    const l = pickLines[idx];
+    if ((counts[l.key] ?? 0) >= l.required_qty) {
+      setScanMsg(`${(l.kind === 'sku' && l.location_label) || 'That section'} is already complete.`);
+      return;
+    }
+    setActiveIdx(idx);
+    setScanMsg(null);
+    grab(l, 'scan');
+  }
+
   function onScan() {
     const v = value.trim(); setValue('');
     if (pickerModalOpen) return; // picker gate open → swallow the scan (value already cleared)
     focusInput();
     if (!v || loading) return;
+    // Prefix test, so a section label can never be mistaken for a shipping label and start a
+    // new box mid-pick. See lib/mapping/slotCode.
+    if (screen === 'pick' && isSlotCode(v)) { confirmBySection(v); return; }
     if (screen === 'pick' && anyPicked) { setAbandon({ scan: v }); return; }
     loadBox(v);
   }
 
+  // Lead-authorised bypass for a section that cannot be scanned — a damaged or unreachable
+  // label. Authorising and logging happen server-side; on success the line is counted as if
+  // scanned, and the override is on the record.
+  async function submitOverride(pin: string, reason: string) {
+    if (!override || !box) return { ok: false, error: 'No line selected' };
+    const line = override.line;
+    try {
+      const res = await fetch('/api/shipping/pick-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pin,
+          reason,
+          group_key: box.group_key,
+          inventory_sku_id: line.kind === 'sku' ? line.key : null,
+          picker_employee_id: pickerId || null,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: json.error || 'Could not authorise' };
+      setOverride(null);
+      setScanMsg(json.warning ? String(json.warning) : `Authorised by ${json.authorized_by}.`);
+      grab(line, 'override');
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Network error' };
+    }
+  }
+
   // ── pick actions ──
-  function grab(line: PickLine) {
+  //
+  // A line REQUIRES a section scan once its SKU has been mapped. Unmapped SKUs still pick by
+  // tap, which is what lets verification roll out gradually instead of blocking the floor on
+  // the day the first rack is drawn.
+  const requiresScan = (line: PickLine) => line.kind === 'sku' && line.slot_codes.length > 0;
+
+  function grab(line: PickLine, via: 'tap' | 'scan' | 'override' = 'tap') {
     if (!box) return;
+    if (via === 'tap' && requiresScan(line)) {
+      setScanMsg(`Scan the ${line.kind === 'sku' && line.location_label ? line.location_label : 'section'} label to confirm.`);
+      return;
+    }
     const have = counts[line.key] ?? 0;
     if (have >= line.required_qty) return;
     const next = have + 1;
@@ -413,6 +484,7 @@ export default function PackStationOverlay({
   const line = box && screen === 'pick' ? pickLines[activeIdx] ?? null : null;
   const have = line ? counts[line.key] ?? 0 : 0;
   const lineDone = line ? have >= line.required_qty : false;
+  const needsScan = line ? requiresScan(line) : false;
   // Display-only. Never ANDed into lineDone, grab(), or allComplete — a short item is still
   // grabbable, still navigable, and still lets the box complete.
   const lineShelfOut = !!(line && line.kind === 'sku' && line.shelf_out);
@@ -623,12 +695,27 @@ export default function PackStationOverlay({
               </div>
               {/* count */}
               <div className={`text-center font-extrabold ${lineDone ? 'text-tt-green' : 'text-tt-text'}`} style={{ fontSize: 'clamp(1.1rem, 4.5vw, 1.9rem)' }}>{have} / {line.required_qty} grabbed</div>
-              {/* grab */}
+              {/* grab — a mapped SKU is confirmed by SCANNING its section, not by tapping.
+                  The button stays as the affordance and says what to do; tapping it explains
+                  rather than silently doing nothing. An unmapped SKU still taps through, so
+                  the floor is never blocked on a rack that has not been drawn yet. */}
               <button onClick={() => grab(line)} disabled={lineDone}
-                className={`w-full rounded-2xl font-extrabold transition-opacity ${lineDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}
+                className={`w-full rounded-2xl font-extrabold transition-opacity ${
+                  lineDone ? 'bg-tt-card-hover text-tt-muted cursor-default'
+                    : needsScan ? 'bg-tt-card-hover text-tt-cyan border-2 border-tt-cyan cursor-pointer'
+                    : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}
                 style={{ padding: 'clamp(0.55rem, 1.9vh, 1rem) 0', fontSize: 'clamp(1rem, 4vw, 1.4rem)' }}>
-                {lineDone ? '✓ Complete' : 'Grab one'}
+                {lineDone ? '✓ Complete' : needsScan ? 'Scan the section label' : 'Grab one'}
               </button>
+              {needsScan && !lineDone && (
+                <button
+                  onClick={() => setOverride({ line })}
+                  className="w-full text-center text-tt-muted underline cursor-pointer"
+                  style={{ fontSize: 'clamp(0.7rem, 2.6vw, 0.9rem)' }}
+                >
+                  Can&apos;t scan it? Get a lead to override
+                </button>
+              )}
               {/* Back / info / Next */}
               <div className="flex items-center justify-between gap-2">
                 <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
@@ -791,6 +878,29 @@ export default function PackStationOverlay({
       </div>
 
       {/* abandon-confirm (mid-pick new label / scan) */}
+      {/* Section-scan feedback. A rejected scan must say WHY — a picker holding a scanner at a
+          label that does nothing has no way to tell a wrong section from a dead scanner. */}
+      {scanMsg && (
+        <div className="absolute inset-x-0 z-30 flex justify-center px-4" style={{ bottom: 'calc(env(safe-area-inset-bottom) + 5.5rem)' }}>
+          <button
+            onClick={() => setScanMsg(null)}
+            className="max-w-sm rounded-xl bg-tt-card border border-tt-cyan/70 px-4 py-2 text-center text-tt-text shadow-2xl cursor-pointer"
+            style={{ fontSize: 'clamp(0.85rem, 3.2vw, 1rem)' }}
+          >
+            {scanMsg}
+            <span className="ml-2 text-tt-muted underline">dismiss</span>
+          </button>
+        </div>
+      )}
+
+      {override && (
+        <OverrideDialog
+          line={override.line}
+          onCancel={() => setOverride(null)}
+          onSubmit={submitOverride}
+        />
+      )}
+
       {abandon && (
         <div className="absolute inset-0 bg-black/60 flex items-center justify-center p-6 z-30">
           <div className="bg-tt-card border border-tt-border rounded-2xl p-6 max-w-sm w-full text-center">
@@ -810,5 +920,79 @@ export default function PackStationOverlay({
       {pickerModal}
     </div>,
     document.body,
+  );
+}
+
+/**
+ * Lead-authorised bypass for a section that cannot be scanned.
+ *
+ * Deliberately asks for a REASON as well as the PIN. The reason is what makes the override
+ * log readable later — a column of "authorised" rows with no why tells you an override
+ * happened but nothing about whether the labels are failing, and label failures are exactly
+ * what this is meant to surface.
+ */
+function OverrideDialog({
+  line, onCancel, onSubmit,
+}: {
+  line: PickLine;
+  onCancel: () => void;
+  onSubmit: (pin: string, reason: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [pin, setPin] = useState('');
+  const [reason, setReason] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const where = line.kind === 'sku' ? (line.location_label ?? `#${line.sku_number ?? '?'}`) : 'this line';
+
+  return (
+    <div className="absolute inset-0 bg-black/70 flex items-center justify-center p-6 z-40">
+      <div className="bg-tt-card border border-tt-border rounded-2xl p-5 max-w-sm w-full">
+        <div className="text-lg font-bold text-tt-text">Override the scan</div>
+        <div className="mt-1 text-sm text-tt-muted">
+          A lead enters their PIN to confirm <b className="text-tt-text">{where}</b> without scanning it.
+          This is recorded.
+        </div>
+
+        <input
+          autoFocus
+          value={pin}
+          onChange={(e) => { setPin(e.target.value.replace(/\D/g, '').slice(0, 8)); setErr(null); }}
+          inputMode="numeric"
+          placeholder="Lead PIN"
+          className="mt-4 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-center text-2xl tracking-[0.4em] text-tt-text"
+        />
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="What's wrong? (e.g. label torn)"
+          className="mt-2 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-sm text-tt-text"
+        />
+
+        {err && <div className="mt-2 text-sm text-tt-red">{err}</div>}
+
+        <div className="mt-4 flex gap-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 rounded-xl border border-tt-border py-2 text-sm text-tt-muted cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={busy || pin.length < 4}
+            onClick={async () => {
+              setBusy(true);
+              setErr(null);
+              const r = await onSubmit(pin, reason);
+              setBusy(false);
+              if (!r.ok) setErr(r.error ?? 'Could not authorise');
+            }}
+            className="flex-1 rounded-xl bg-tt-green py-2 text-sm font-bold text-black disabled:opacity-40 cursor-pointer"
+          >
+            {busy ? 'Checking…' : 'Authorise'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
