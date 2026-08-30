@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import SkuThumb from '@/components/common/SkuThumb';
 import RackDetail from './RackDetail';
 import RackIsometric from './RackIsometric';
+import FloorPlan from './FloorPlan';
 import { deriveRoute, type StartCorner } from '@/lib/mapping/route';
 import { MIN_SHELVES, MAX_SHELVES, type SectionSide } from '@/lib/mapping/shape';
 import {
@@ -46,7 +47,6 @@ export default function MappingSection() {
   const [confirmAction, setConfirmAction] = useState<(() => void) | null>(null);
   const [adding, setAdding] = useState<{ row: number; col: number } | null>(null);
   const [newShelves, setNewShelves] = useState(3);
-  const [dragRackId, setDragRackId] = useState<string | null>(null);
 
   const racks = useMemo(() => data?.racks ?? [], [data]);
   const slots = useMemo(() => data?.slots ?? [], [data]);
@@ -67,22 +67,17 @@ export default function MappingSection() {
     () => new Set(slots.map((s) => s.inventory_sku_id).filter(Boolean) as string[]),
     [slots],
   );
+  /**
+   * SKUs still needing a home. Excludes anything with nothing on the shelf — the API already
+   * filters to active SKUs, and nagging about a SKU you have zero (or negative) of is noise
+   * that buries the ones actually worth walking out and placing.
+   */
   const unmappedSkus = useMemo(
-    () => skus.filter((s) => !assignedSkuIds.has(s.id)),
+    () => skus.filter((s) => !assignedSkuIds.has(s.id) && s.qty_on_hand > 0),
     [skus, assignedSkuIds],
   );
 
   const stops = useMemo(() => deriveRoute(racks, startCorner), [racks, startCorner]);
-  const stopByKey = useMemo(() => new Map(stops.map((s) => [`${s.rackId}:${s.side}`, s])), [stops]);
-  const occupiedRows = useMemo(
-    () => Array.from(new Set(racks.map((r) => r.grid_row))).sort((a, b) => a - b),
-    [racks],
-  );
-  const maxCol = useMemo(() => racks.reduce((m, r) => Math.max(m, r.grid_col), -1), [racks]);
-  const columns = useMemo(
-    () => Array.from({ length: Math.max(maxCol + 2, 3) }, (_, i) => i),
-    [maxCol],
-  );
 
   const selectedRack = racks.find((r) => r.id === selectedRackId) ?? null;
 
@@ -294,8 +289,8 @@ export default function MappingSection() {
             <div>
               <h3 className="text-sm font-semibold text-tt-text">Floor plan</h3>
               <p className="text-xs text-tt-muted">
-                Where each rack physically sits — drag one to move it. This is what the picking
-                route is worked out from.
+                Your warehouse from above. Racks touching side by side are in the same row; the
+                green lanes between rows are the aisles you walk. Drag a rack anywhere.
               </p>
             </div>
             <label className="flex items-center gap-2 text-xs text-tt-muted">
@@ -310,66 +305,16 @@ export default function MappingSection() {
             </label>
           </header>
 
-          <FloorPlanLegend />
-
-          <div className="space-y-1 overflow-x-auto rounded-2xl border border-tt-border bg-tt-card p-3">
-            {occupiedRows.map((row, i) => (
-              <div key={row}>
-                <AisleBand index={i} faces={stops.filter((x) => x.aisle === i)} />
-                <div className="flex gap-2 py-1">
-                  {columns.map((col) => {
-                    const rack = racks.find((r) => r.grid_row === row && r.grid_col === col);
-                    return rack ? (
-                      <RackCard
-                        key={col}
-                        rack={rack}
-                        slots={slotsByRack.get(rack.id) ?? []}
-                        stopA={stopByKey.get(`${rack.id}:A`)?.position}
-                        stopB={stopByKey.get(`${rack.id}:B`)?.position}
-                        onOpen={() => setSelectedRackId(rack.id)}
-                        onDragStart={() => setDragRackId(rack.id)}
-                      />
-                    ) : (
-                      <DropCell
-                        key={col}
-                        onDrop={() => {
-                          if (!dragRackId) return;
-                          const id = dragRackId;
-                          setDragRackId(null);
-                          run(() => updateRack.mutateAsync({ id, grid_row: row, grid_col: col }), 'Rack moved.');
-                        }}
-                        onAdd={() => setAdding({ row, col })}
-                      />
-                    );
-                  })}
-                </div>
-                {i === occupiedRows.length - 1 && (
-                  <AisleBand
-                    index={occupiedRows.length}
-                    faces={stops.filter((x) => x.aisle === occupiedRows.length)}
-                  />
-                )}
-              </div>
-            ))}
-
-            <div className="flex gap-2 border-t border-dashed border-tt-border pt-2">
-              {columns.map((col) => (
-                <DropCell
-                  key={col}
-                  hint="new row"
-                  onDrop={() => {
-                    if (!dragRackId) return;
-                    const id = dragRackId;
-                    setDragRackId(null);
-                    run(() => updateRack.mutateAsync({
-                      id, grid_row: (occupiedRows[occupiedRows.length - 1] ?? 0) + 1, grid_col: col,
-                    }), 'Rack moved to a new row.');
-                  }}
-                  onAdd={() => setAdding({ row: (occupiedRows[occupiedRows.length - 1] ?? -1) + 1, col })}
-                />
-              ))}
-            </div>
-          </div>
+          <FloorPlan
+            racks={racks}
+            slotsByRack={slotsByRack}
+            stops={stops}
+            onOpen={(id) => setSelectedRackId(id)}
+            onMove={(id, row, col) =>
+              run(() => updateRack.mutateAsync({ id, grid_row: row, grid_col: col }), 'Rack moved.')
+            }
+            onAddAt={(row, col) => setAdding({ row, col })}
+          />
         </section>
       )}
 
@@ -454,8 +399,9 @@ export default function MappingSection() {
         ) : (
           <>
             <p className="mb-2 text-xs text-tt-muted">
-              These sort <b>last</b> on the pick screen and fall back to SKU-number order until they
-              are placed — mapping is safe to do a few at a time.
+              In stock and with nowhere to live. These sort <b>last</b> on the pick screen and fall
+              back to SKU-number order until they are placed — mapping is safe to do a few at a
+              time. Out-of-stock and inactive SKUs are left out.
             </p>
             <div className="flex flex-wrap gap-2">
               {unmappedSkus.slice(0, 40).map((s) => (
@@ -491,7 +437,6 @@ function firstFreeCell(racks: MappingRack[]): { row: number; col: number } {
   }
   return { row: 0, col: 0 };
 }
-
 /* ── Pieces ──────────────────────────────────────────────────────────────── */
 
 function Tile({ label, value, tone }: { label: string; value: number | string; tone?: 'ok' | 'warn' }) {
@@ -504,115 +449,17 @@ function Tile({ label, value, tone }: { label: string; value: number | string; t
   );
 }
 
-// A small picture of the one rule the floor plan runs on. Explaining it in prose did not
-// land; two rows and the lane between them show it in one glance.
-function FloorPlanLegend() {
-  return (
-    <div className="mb-2 flex flex-wrap items-center gap-4 rounded-xl border border-tt-border/60 bg-tt-card/50 px-3 py-2">
-      <div className="shrink-0">
-        <div className="text-[10px] uppercase tracking-wide text-tt-muted">aisle</div>
-        <div className="my-0.5 flex items-center gap-1">
-          <span className="rounded bg-tt-card-hover px-2 py-1 text-[10px] font-bold text-tt-text">R1</span>
-          <span className="rounded bg-tt-card-hover px-2 py-1 text-[10px] font-bold text-tt-text">R3</span>
-        </div>
-        <div className="h-1 rounded bg-tt-green/40" />
-        <div className="my-0.5 flex items-center gap-1">
-          <span className="rounded bg-tt-card-hover px-2 py-1 text-[10px] font-bold text-tt-text">R2</span>
-          <span className="rounded bg-tt-card-hover px-2 py-1 text-[10px] font-bold text-tt-text">R4</span>
-        </div>
-        <div className="text-[10px] uppercase tracking-wide text-tt-muted">aisle</div>
-      </div>
-      <p className="min-w-48 flex-1 text-[11px] leading-relaxed text-tt-muted">
-        Racks in the same row sit side by side. The lane <b className="text-tt-green">between two rows is
-        an aisle</b>, and each rack shows one face to the lane above it (<b>side A</b>) and one to the
-        lane below (<b>side B</b>). So standing in the green aisle you can reach <b>R1&apos;s B side</b> and{' '}
-        <b>R2&apos;s A side</b> without moving — which is what the picking route is built from.
-      </p>
-    </div>
-  );
-}
-
 function EmptyFloor({ onAdd }: { onAdd: () => void }) {
   return (
     <div className="rounded-2xl border border-dashed border-tt-border bg-tt-card p-8 text-center">
       <p className="text-sm text-tt-text">No racks yet.</p>
       <p className="mx-auto mt-1 max-w-md text-xs text-tt-muted">
-        Add your racks and place them the way they physically sit. Aisles and the picking route are
-        worked out from that placement — you never set a walking order by hand.
+        Add your racks, then arrange them on the floor plan the way they physically sit. The aisles
+        and the picking route are worked out from that arrangement — you never set a walking order
+        by hand.
       </p>
       <button onClick={onAdd} className="mt-3 rounded-lg bg-tt-green px-3 py-1.5 text-sm font-bold text-black cursor-pointer">
         Add the first rack
-      </button>
-    </div>
-  );
-}
-
-function AisleBand({ index, faces }: { index: number; faces: { label: string; position: number }[] }) {
-  const ordered = faces.slice().sort((a, b) => a.position - b.position);
-  return (
-    <div className="flex items-center gap-2 rounded-lg bg-tt-card-hover/40 px-2 py-1">
-      <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-tt-muted">
-        Aisle {index + 1}
-      </span>
-      <span className="h-px flex-1 bg-tt-border" />
-      <span className="shrink-0 text-[11px] text-tt-muted">
-        {ordered.length ? `reach ${ordered.map((f) => f.label).join(' · ')}` : 'nothing reachable'}
-      </span>
-    </div>
-  );
-}
-
-function RackCard({
-  rack, slots, stopA, stopB, onOpen, onDragStart,
-}: {
-  rack: MappingRack;
-  slots: MappingSlot[];
-  stopA?: number;
-  stopB?: number;
-  onOpen: () => void;
-  onDragStart: () => void;
-}) {
-  const filled = slots.filter((s) => s.inventory_sku_id).length;
-  return (
-    <button
-      draggable
-      onDragStart={onDragStart}
-      onClick={onOpen}
-      className="w-36 shrink-0 rounded-xl border-2 border-tt-border bg-tt-card p-2 text-left transition-colors hover:border-tt-green/60 hover:bg-tt-card-hover cursor-grab active:cursor-grabbing"
-    >
-      <div className="text-[10px] text-tt-muted">
-        A side {stopA != null && <span className="text-tt-cyan">· stop {stopA + 1}</span>}
-      </div>
-      <div className="my-1 rounded-lg bg-tt-card-hover px-2 py-2 text-center">
-        <div className="text-lg font-extrabold text-tt-text">{rack.name}</div>
-        <div className="text-[11px] text-tt-muted">
-          {rack.shelf_count} shelves · {slots.length} sections
-        </div>
-        <div className={`text-[11px] tabular-nums ${slots.length > 0 && filled === slots.length ? 'text-tt-green' : 'text-tt-muted'}`}>
-          {slots.length === 0 ? 'no sections yet' : `${filled}/${slots.length} filled`}
-        </div>
-      </div>
-      <div className="text-right text-[10px] text-tt-muted">
-        {stopB != null && <span className="text-tt-cyan">stop {stopB + 1} · </span>}B side
-      </div>
-    </button>
-  );
-}
-
-function DropCell({ onDrop, onAdd, hint }: { onDrop: () => void; onAdd: () => void; hint?: string }) {
-  const [over, setOver] = useState(false);
-  return (
-    <div
-      onDragOver={(e) => { e.preventDefault(); setOver(true); }}
-      onDragLeave={() => setOver(false)}
-      onDrop={(e) => { e.preventDefault(); setOver(false); onDrop(); }}
-      className={`flex w-36 shrink-0 items-center justify-center rounded-xl border-2 border-dashed transition-colors ${
-        over ? 'border-tt-green bg-tt-green/10' : 'border-tt-border/60'
-      }`}
-      style={{ minHeight: '96px' }}
-    >
-      <button onClick={onAdd} className="text-xs text-tt-muted hover:text-tt-text cursor-pointer">
-        + {hint ?? 'rack'}
       </button>
     </div>
   );

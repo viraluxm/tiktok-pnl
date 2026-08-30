@@ -128,6 +128,7 @@ export default function RackDetail({
             search={search}
             setSearch={setSearch}
             anchor={anchor}
+            viewSide={viewSide}
             containerWidth={wrapWidth}
             busy={busy}
             onAssign={(skuId) => { onAssign(openSlot.id, skuId); close(); }}
@@ -215,13 +216,11 @@ export default function RackDetail({
   );
 }
 
-const SIDE_LABEL: Record<SectionSide, string> = { A: 'Side A only', B: 'Side B only', AB: 'Both aisles' };
-
 // Anchored over the box you clicked. Deliberately small: a section only has two decisions
 // (which SKU, and whether it is picked from both sides) plus its label, and all three belong
 // where you are already looking.
 function SectionPopover({
-  slot, rackName, sku, matches, search, setSearch, anchor, containerWidth, busy,
+  slot, rackName, sku, matches, search, setSearch, anchor, viewSide, containerWidth, busy,
   onAssign, onSetSide, onDelete, onClose,
 }: {
   slot: MappingSlot;
@@ -231,6 +230,7 @@ function SectionPopover({
   search: string;
   setSearch: (s: string) => void;
   anchor: Pt;
+  viewSide: RackSide;
   containerWidth: number;
   busy: boolean;
   onAssign: (skuId: string | null) => void;
@@ -269,21 +269,27 @@ function SectionPopover({
         <button onClick={onClose} className="shrink-0 text-xs text-tt-muted hover:text-tt-text cursor-pointer">✕</button>
       </div>
 
-      <div className="mb-2 flex flex-wrap gap-1">
-        {(['A', 'B', 'AB'] as SectionSide[]).map((s) => (
-          <button
-            key={s}
-            onClick={() => onSetSide(s)}
-            disabled={busy || s === slot.side}
-            className={`rounded-lg px-2 py-1 text-[11px] font-bold transition-colors cursor-pointer disabled:cursor-default ${
-              s === slot.side
-                ? (s === 'AB' ? 'bg-tt-cyan text-black' : 'bg-tt-green text-black')
-                : 'border border-tt-border text-tt-muted hover:text-tt-text'
-            }`}
-          >
-            {SIDE_LABEL[s]}
-          </button>
-        ))}
+      {/* The side a section sits on is a fact — you added it from that aisle. The only real
+          decision is whether it is ALSO reachable from the other one, so that is the only
+          control. Turning "both" off returns it to the side you are currently standing at,
+          which is unambiguous because that is the side you are looking at it from. */}
+      <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-tt-border px-2 py-1.5">
+        <span className="text-[11px] text-tt-muted">
+          Picked from{' '}
+          <b className="text-tt-text">
+            {slot.side === 'AB' ? 'both aisles' : `side ${slot.side}`}
+          </b>
+        </span>
+        <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-tt-muted cursor-pointer">
+          <input
+            type="checkbox"
+            checked={slot.side === 'AB'}
+            disabled={busy}
+            onChange={(e) => onSetSide(e.target.checked ? 'AB' : viewSide)}
+            className="cursor-pointer"
+          />
+          Both aisles
+        </label>
       </div>
 
       <input
