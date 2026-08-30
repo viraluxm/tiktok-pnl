@@ -248,6 +248,8 @@ export default function PackStationOverlay({
   const [override, setOverride] = useState<null | { line: PickLine }>(null);
   const [holding, setHolding] = useState(false);
   const [value, setValue] = useState('');
+  // Accumulates a wedge scanner's keystrokes between Enters, independent of what has focus.
+  const scanBufRef = useRef('');
   // Picker gate opens on mount = the session starts by choosing who is packing.
   const [pickerModalOpen, setPickerModalOpen] = useState(true);
 
@@ -368,6 +370,16 @@ export default function PackStationOverlay({
 
   function onScan() {
     const v = value.trim(); setValue('');
+    handleScan(v);
+  }
+
+  /**
+   * Handle one completed scan, wherever it came from.
+   *
+   * Split out from onScan because scans no longer arrive only through the hidden input — see
+   * the window-level listener below.
+   */
+  function handleScan(v: string) {
     if (pickerModalOpen) {
       // The gate is a full-screen modal, so it is usually obvious — but say it anyway, because
       // a scan that vanishes with no acknowledgement is indistinguishable from a broken device.
@@ -386,6 +398,43 @@ export default function PackStationOverlay({
     if (screen === 'pick' && anyPicked) { setAbandon({ scan: v }); return; }
     loadBox(v);
   }
+
+  // ── Scanner capture, at the WINDOW rather than a focused input ──────────────────────────
+  //
+  // The scanner is a keyboard wedge: it types the code then presses Enter. Relying on a hidden
+  // input holding focus is fragile on a touch device — tapping ANY control (Next, the item
+  // photo, a mode button) moves focus to it, and from then on every scan lands there instead.
+  // Enter just re-clicks the focused button, so the device looks completely dead while the
+  // scanner beeps happily. That is the reported "scanning does nothing", and it explains why
+  // the FIRST scan of a box works and later ones do not: the first happens before anyone has
+  // touched the screen.
+  //
+  // Capturing at the window removes the dependency on focus entirely. Keystrokes are ignored
+  // while the operator is deliberately typing in a real field (the override PIN, the SKU
+  // search) so those still behave normally.
+  useEffect(() => {
+    const inRealTextField = () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === inputRef.current) return false;
+      return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (inRealTextField()) return;
+      if (e.key === 'Enter') {
+        const v = scanBufRef.current.trim();
+        scanBufRef.current = '';
+        if (!v) return;
+        e.preventDefault();
+        setValue('');
+        handleScan(v);
+        return;
+      }
+      // Printable characters only; a scanner emits nothing else mid-code.
+      if (e.key.length === 1) scanBufRef.current += e.key;
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   // Lead-authorised bypass for a section that cannot be scanned — a damaged or unreachable
   // label. Authorising and logging happen server-side; on success the line is counted as if
@@ -558,7 +607,8 @@ export default function PackStationOverlay({
           document-level keydown capture with no focused field — not needed unless this fails.) */}
       <input
         ref={inputRef} value={value} onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onScan(); } }}
+        // No Enter handler: the window-level listener above owns scan completion, so keeping
+        // one here would double-fire whenever this input happens to hold focus.
         inputMode="none"
         disabled={pickerModalOpen}
         autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}

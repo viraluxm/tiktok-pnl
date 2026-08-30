@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { routePositionMap, sectionRoutePosition, pickerLabel } from '@/lib/mapping/route';
+import { routePositionMap, sectionRoutePosition, slotAddress } from '@/lib/mapping/route';
 
 // Shared scan → box resolution used by both /api/shipping/pick-list (the
 // operator-facing picker, scoped to the caller's own user_id) and
@@ -228,7 +228,7 @@ export async function attachLocations(
       .select('id, name, grid_row, grid_col, route_pos_a, route_pos_b, is_active')
       .in('user_id', userIds),
     db.from('pick_slots')
-      .select('rack_id, shelf_index, side, slot_code, inventory_sku_id')
+      .select('rack_id, shelf_index, section_index, side, slot_code, inventory_sku_id')
       .in('user_id', userIds)
       .in('inventory_sku_id', skuIds),
   ]);
@@ -252,7 +252,16 @@ export async function attachLocations(
       byS.set(skuId, prev ? { ...prev, codes } : { label: '', position: Infinity, codes });
       continue;
     }
-    const label = pickerLabel(String(rack.name), side === 'AB' ? 'A' : side, Number(slot.shelf_index));
+    // Includes the SECTION. Originally stopped at the level on the reasoning that a picker
+    // finds the item by eye once at the right shelf — but in use the section is what matches
+    // the printed label they are about to scan, so leaving it off made the screen and the
+    // label disagree.
+    const label = slotAddress(
+      String(rack.name),
+      side === 'AB' ? 'A' : side,
+      Number(slot.shelf_index),
+      Number(slot.section_index),
+    );
     if (!prev || pos < prev.position) byS.set(skuId, { label, position: pos, codes });
     else byS.set(skuId, { ...prev, codes });
   }

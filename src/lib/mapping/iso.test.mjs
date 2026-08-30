@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'iso-')), 'iso.mjs');
 writeFileSync(outFile, outputText);
-const { project, boxFaces, paintOrder, bounds, toPoints, depthFor, layoutShelf, layoutRack, flipBox, RACK_DEPTH, ROW_GAP, ISO } =
+const { project, boxFaces, paintOrder, bounds, toPoints, depthFor, layoutShelf, layoutRack, flipBox, nextFreeX, RACK_DEPTH, ROW_GAP, ISO } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -134,6 +134,45 @@ console.log('\nShelf layout');
 }
 {
   check('an empty shelf lays out to nothing', layoutShelf([]).length === 0);
+}
+
+console.log('\nWhere the next section goes');
+{
+  const sec = (i, side) => ({ section_index: i, side });
+  check('an empty shelf starts at 0', nextFreeX([], 'A') === 0 && nextFreeX([], 'B') === 0);
+  check('a plain A section advances only A',
+    nextFreeX([sec(1, 'A')], 'A') === 1 && nextFreeX([sec(1, 'A')], 'B') === 0);
+}
+{
+  // THE bug this fixes: a both-sides box advances BOTH rows, so a shelf holding one 'A' and
+  // one 'AB' occupies THREE positions across the two rows. Counting reachable sections gave 2
+  // and the add-a-section ghost was drawn underneath the spanning box.
+  const sec = (i, side) => ({ section_index: i, side });
+  const shelf = [sec(1, 'A'), sec(2, 'AB')];
+  check('a spanning box pushes the next A position clear', nextFreeX(shelf, 'A') === 2,
+    String(nextFreeX(shelf, 'A')));
+  check('…and the next B position too', nextFreeX(shelf, 'B') === 2, String(nextFreeX(shelf, 'B')));
+  check('which is past where the spanning box actually sits',
+    nextFreeX(shelf, 'A') > layoutShelf(shelf).find((p) => p.section.side === 'AB').x);
+}
+{
+  // Agreement with the real layout is the property that matters: the ghost must never land on
+  // an x that layoutShelf has already used for that row.
+  const sec = (i, side) => ({ section_index: i, side });
+  for (const shelf of [
+    [sec(1, 'AB'), sec(2, 'A'), sec(3, 'B')],
+    [sec(1, 'B'), sec(2, 'B'), sec(3, 'AB'), sec(4, 'A')],
+    [sec(1, 'A'), sec(2, 'A'), sec(3, 'A')],
+  ]) {
+    for (const side of ['A', 'B']) {
+      const used = layoutShelf(shelf)
+        .filter((p) => p.section.side === side || p.section.side === 'AB')
+        .map((p) => p.x);
+      const next = nextFreeX(shelf, side);
+      check(`ghost x never collides on side ${side} (${shelf.map((c) => c.side).join('/')})`,
+        !used.includes(next), `next=${next} used=[${used.join(',')}]`);
+    }
+  }
 }
 
 console.log('\nDepth ordering');

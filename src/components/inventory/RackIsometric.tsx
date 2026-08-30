@@ -3,10 +3,10 @@
 import { useMemo, useRef } from 'react';
 import {
   layoutRack, boxFaces, paintOrder, bounds, toPoints, flipBox,
-  ISO, GAP, ROW_GAP, BOX_LIFT, RACK_DEPTH,
+  ISO, GAP, ROW_GAP, BOX_LIFT, RACK_DEPTH, nextFreeX,
   type Box, type Pt,
 } from '@/lib/mapping/iso';
-import { sectionsFacing, type RackSide } from '@/lib/mapping/shape';
+import { sectionsOn, sectionsFacing, type RackSide } from '@/lib/mapping/shape';
 import type { MappingSlot, MappingSku } from '@/hooks/useMapping';
 
 // The rack, drawn as a rack.
@@ -131,7 +131,9 @@ export default function RackIsometric({
       .map((shelf) => ({
         shelf,
         box: {
-          x: sectionsFacing(slots, shelf, viewSide).length + GAP / 2,
+          // nextFreeX, not a count of reachable sections: a both-sides box advances BOTH rows,
+          // so counting gave a smaller x and the ghost was drawn underneath the spanning box.
+          x: nextFreeX(sectionsOn(slots, shelf), viewSide) + GAP / 2,
           z: viewSide === 'A' ? 1 + GAP / 2 + ROW_GAP : GAP / 2,
           w: 1 - GAP,
           d: 1 - GAP,

@@ -207,6 +207,28 @@ export function layoutShelf<T extends { section_index: number; side: 'A' | 'B' |
     });
 }
 
+/**
+ * The x a NEW section would take on this shelf face.
+ *
+ * Replays layoutShelf's counters rather than counting sections, because a both-sides section
+ * advances BOTH rows — so a shelf holding one 'A' and one 'AB' has three occupied positions
+ * across the two rows, not two. Counting reachable sections gave a smaller x and the
+ * add-a-section ghost was drawn underneath the spanning box.
+ */
+export function nextFreeX<T extends { section_index: number; side: 'A' | 'B' | 'AB' }>(
+  sections: T[],
+  side: 'A' | 'B',
+): number {
+  let nextA = 0;
+  let nextB = 0;
+  for (const s of sections.slice().sort((a, b) => a.section_index - b.section_index)) {
+    if (s.side === 'AB') { const x = Math.max(nextA, nextB); nextA = x + 1; nextB = x + 1; }
+    else if (s.side === 'A') nextA += 1;
+    else nextB += 1;
+  }
+  return side === 'A' ? nextA : nextB;
+}
+
 export interface RackBox<T> extends Box {
   section: T;
 }
