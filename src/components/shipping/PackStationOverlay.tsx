@@ -27,6 +27,13 @@ interface BoxSku {
   // with nothing on the shelf). A fact about the order, not a live inventory read: it is decided
   // once, when the bind draws short, and never changes. Older payloads omit it → not short.
   shelf_out?: boolean;
+  // Where this SKU lives, e.g. "R3A L2" — rack, side, level. Null when it has no section
+  // mapped yet; the screen then shows no guidance rather than guessing, and the line sorts
+  // last. Older payloads omit both fields.
+  location_label?: string | null;
+  // Every slot code that legitimately holds this SKU. More than one when it sits on both
+  // faces of a rack, or in two places — walking to the far face is not an error.
+  slot_codes?: string[];
 }
 interface MissingOrder { order_id: string; listing_name: string | null; seller_sku: string | null; }
 interface CatalogOrder { order_id: string; listing_name: string | null; seller_sku: string | null; qty: number; }
@@ -53,11 +60,11 @@ interface Box {
 type Screen = 'ready' | 'alert' | 'pick' | 'finish' | 'empty';
 
 type PickLine =
-  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean }
+  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean; location_label: string | null; slot_codes: string[] }
   | { kind: 'catalog'; key: string; order_id: string; listing_name: string; seller_sku: string; required_qty: number };
 
 const buildPickLines = (b: Box): PickLine[] => [
-  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true })),
+  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true, location_label: s.location_label ?? null, slot_codes: s.slot_codes ?? [] })),
   ...(b.catalog_orders ?? []).map((c): PickLine => ({ kind: 'catalog', key: `cat:${c.order_id}`, order_id: c.order_id, listing_name: c.listing_name || 'Catalog item', seller_sku: c.seller_sku || '', required_qty: c.qty || 1 })),
 ];
 
@@ -569,6 +576,20 @@ export default function PackStationOverlay({
                 </div>
               )}
               </div>
+              {/* WHERE it is. Pinned top-left of the hero and pointer-events-none so the whole
+                  area stays a tap target. Shown before anything else because it decides where
+                  the picker walks; absent when the SKU has no section, rather than guessing. */}
+              {line.kind === 'sku' && line.location_label && (
+                <div className="absolute top-0 left-0 p-2 pointer-events-none">
+                  <span
+                    className="inline-block rounded-lg bg-tt-cyan text-black font-extrabold tracking-wide shadow-lg"
+                    style={{ fontSize: 'clamp(1rem, 4.5vh, 2rem)', padding: '0.12em 0.45em' }}
+                  >
+                    {line.location_label}
+                  </span>
+                </div>
+              )}
+
               {/* Picker-reported out-of-stock band. pointer-events-none so the whole hero stays a
                   tap target for grab() — a flagged item is still grabbable if it turns up. */}
               {lineShelfOut && (
