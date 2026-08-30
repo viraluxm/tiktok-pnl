@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { verifyPin } from '@/lib/mapping/pin';
+import { verifySupervisorIsOwner } from '@/lib/kiosk/supervisor';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,6 +47,8 @@ export async function POST(req: Request) {
 
   let body: {
     pin?: string;
+    /** The account holder's own password, for the rare override no lead is present for. */
+    owner_password?: string;
     group_key?: string;
     inventory_sku_id?: string;
     slot_id?: string | null;
@@ -55,7 +58,10 @@ export async function POST(req: Request) {
   try { body = await req.json(); } catch { return NextResponse.json({ error: 'Expected JSON body' }, { status: 400 }); }
 
   const pin = typeof body.pin === 'string' ? body.pin.trim() : '';
-  if (!pin) return NextResponse.json({ error: 'A PIN is required.' }, { status: 400 });
+  const ownerPassword = typeof body.owner_password === 'string' ? body.owner_password : '';
+  if (!pin && !ownerPassword) {
+    return NextResponse.json({ error: 'A PIN is required.' }, { status: 400 });
+  }
 
   if (rateLimited(user.id)) {
     return NextResponse.json(
@@ -64,25 +70,45 @@ export async function POST(req: Request) {
     );
   }
 
-  // Only employees who have been GIVEN a PIN can authorise — having one is the authorisation.
-  const { data: authorisers, error: readErr } = await supabase
-    .from('employees')
-    .select('id, name, override_pin_hash')
-    .eq('user_id', user.id)
-    .not('override_pin_hash', 'is', null);
-  if (readErr) return NextResponse.json({ error: readErr.message }, { status: 500 });
+  // Two ways to authorise, and the log records which.
+  //
+  // A LEAD types their PIN — the everyday path. THE OWNER types their own account password,
+  // for the rare case where no lead is on the floor. The owner has no employees row (adding
+  // one would put them in payroll, since computePay takes the whole list), so the owner path
+  // records a name with no employee_id.
+  //
+  // verifySupervisorIsOwner establishes NO session: it signs in on a throwaway client with
+  // persistSession false and signs straight back out with scope 'local'. That matters on a
+  // station device — see CLAUDE.md on the capture extension's JWT, which a real sign-in here
+  // would clobber. The email comes from the session, never the request body, so this can only
+  // ever verify the account already signed in at this station.
+  let authorisedBy: { id: string | null; name: string } | null = null;
 
-  let authorisedBy: { id: string; name: string } | null = null;
-  for (const e of authorisers ?? []) {
-    if (await verifyPin(pin, e.override_pin_hash as string)) {
-      authorisedBy = { id: e.id as string, name: (e.name as string) ?? 'Unknown' };
-      break;
+  if (pin) {
+    // Only employees who have been GIVEN a PIN can authorise — having one is the authorisation.
+    const { data: authorisers, error: readErr } = await supabase
+      .from('employees')
+      .select('id, name, override_pin_hash')
+      .eq('user_id', user.id)
+      .not('override_pin_hash', 'is', null);
+    if (readErr) return NextResponse.json({ error: readErr.message }, { status: 500 });
+
+    for (const e of authorisers ?? []) {
+      if (await verifyPin(pin, e.override_pin_hash as string)) {
+        authorisedBy = { id: e.id as string, name: (e.name as string) ?? 'Unknown' };
+        break;
+      }
     }
+  } else if (user.email && await verifySupervisorIsOwner(user.email, ownerPassword, user.id)) {
+    authorisedBy = { id: null, name: `${user.email} (account holder)` };
   }
 
   if (!authorisedBy) {
     // Deliberately does not say whether any PINs exist, or how many.
-    return NextResponse.json({ error: 'That PIN was not recognised.' }, { status: 403 });
+    return NextResponse.json(
+      { error: pin ? 'That PIN was not recognised.' : 'That password was not recognised.' },
+      { status: 403 },
+    );
   }
 
   const { error: logErr } = await supabase.from('pick_overrides').insert({
@@ -94,6 +120,9 @@ export async function POST(req: Request) {
     picker_employee_id:
       typeof body.picker_employee_id === 'string' && body.picker_employee_id ? body.picker_employee_id : null,
     authorized_by_employee_id: authorisedBy.id,
+    // Snapshot, so deleting an employee later cannot anonymise an override they granted —
+    // and so an owner-authorised row is distinguishable from "we do not know". See 118.
+    authorized_by_name: authorisedBy.name,
     reason: typeof body.reason === 'string' ? body.reason.slice(0, 200) : null,
   });
 

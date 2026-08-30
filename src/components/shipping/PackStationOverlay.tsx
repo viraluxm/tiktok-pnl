@@ -346,7 +346,7 @@ export default function PackStationOverlay({
   // Lead-authorised bypass for a section that cannot be scanned — a damaged or unreachable
   // label. Authorising and logging happen server-side; on success the line is counted as if
   // scanned, and the override is on the record.
-  async function submitOverride(pin: string, reason: string) {
+  async function submitOverride(cred: { pin?: string; ownerPassword?: string }, reason: string) {
     if (!override || !box) return { ok: false, error: 'No line selected' };
     const line = override.line;
     try {
@@ -354,7 +354,8 @@ export default function PackStationOverlay({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          pin,
+          pin: cred.pin,
+          owner_password: cred.ownerPassword,
           reason,
           group_key: box.group_key,
           inventory_sku_id: line.kind === 'sku' ? line.key : null,
@@ -936,12 +937,20 @@ function OverrideDialog({
 }: {
   line: PickLine;
   onCancel: () => void;
-  onSubmit: (pin: string, reason: string) => Promise<{ ok: boolean; error?: string }>;
+  onSubmit: (
+    cred: { pin?: string; ownerPassword?: string },
+    reason: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
 }) {
+  // A lead's PIN is the everyday path. The owner's own account password is the fallback for
+  // when no lead is on the floor — rare, so it is behind a link rather than shown by default.
+  const [mode, setMode] = useState<'pin' | 'owner'>('pin');
   const [pin, setPin] = useState('');
+  const [ownerPassword, setOwnerPassword] = useState('');
   const [reason, setReason] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const ready = mode === 'pin' ? pin.length >= 4 : ownerPassword.length > 0;
 
   const where = line.kind === 'sku' ? (line.location_label ?? `#${line.sku_number ?? '?'}`) : 'this line';
 
@@ -954,14 +963,37 @@ function OverrideDialog({
           This is recorded.
         </div>
 
-        <input
-          autoFocus
-          value={pin}
-          onChange={(e) => { setPin(e.target.value.replace(/\D/g, '').slice(0, 8)); setErr(null); }}
-          inputMode="numeric"
-          placeholder="Lead PIN"
-          className="mt-4 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-center text-2xl tracking-[0.4em] text-tt-text"
-        />
+        {mode === 'pin' ? (
+          <input
+            autoFocus
+            value={pin}
+            onChange={(e) => { setPin(e.target.value.replace(/\D/g, '').slice(0, 8)); setErr(null); }}
+            inputMode="numeric"
+            placeholder="Lead PIN"
+            className="mt-4 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-center text-2xl tracking-[0.4em] text-tt-text"
+          />
+        ) : (
+          <input
+            autoFocus
+            type="password"
+            value={ownerPassword}
+            onChange={(e) => { setOwnerPassword(e.target.value); setErr(null); }}
+            placeholder="Account password"
+            className="mt-4 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-center text-lg text-tt-text"
+          />
+        )}
+
+        <button
+          onClick={() => {
+            setMode(mode === 'pin' ? 'owner' : 'pin');
+            setPin(''); setOwnerPassword(''); setErr(null);
+          }}
+          className="mt-2 w-full text-center text-xs text-tt-muted underline cursor-pointer"
+        >
+          {mode === 'pin'
+            ? 'No lead available? Use the account password'
+            : 'Use a lead PIN instead'}
+        </button>
         <input
           value={reason}
           onChange={(e) => setReason(e.target.value)}
@@ -979,11 +1011,14 @@ function OverrideDialog({
             Cancel
           </button>
           <button
-            disabled={busy || pin.length < 4}
+            disabled={busy || !ready}
             onClick={async () => {
               setBusy(true);
               setErr(null);
-              const r = await onSubmit(pin, reason);
+              const r = await onSubmit(
+                mode === 'pin' ? { pin } : { ownerPassword },
+                reason,
+              );
               setBusy(false);
               if (!r.ok) setErr(r.error ?? 'Could not authorise');
             }}
