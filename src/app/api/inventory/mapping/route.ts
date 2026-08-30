@@ -32,7 +32,7 @@ export async function GET() {
       .order('section_index'),
     supabase
       .from('inventory_skus')
-      .select('id, sku_number, title, barcode, thumbnail_path')
+      .select('id, sku_number, title, barcode, thumbnail_path, qty_on_hand')
       .eq('user_id', user.id)
       .eq('is_active', true)
       .order('sku_number'),
@@ -48,6 +48,9 @@ export async function GET() {
       sku_number: s.sku_number,
       title: s.title,
       barcode: s.barcode,
+      // Carried so the map can flag a section whose SKU has run out. Can be NEGATIVE — an
+      // oversell — which is still "nothing on the shelf" as far as a picker is concerned.
+      qty_on_hand: (s.qty_on_hand as number | null) ?? 0,
       thumbnail_url: path ? supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : null,
     };
   });

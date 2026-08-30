@@ -37,15 +37,22 @@ const FILL = {
   span: ['#2dd4bf', '#1fa89a', '#17847a'],
   ghost: ['#111827', '#0e141d', '#0b1017'],
   selected: ['#67e8f9', '#31b8cc', '#2494a6'],
+  // A section whose SKU has run out. Solid red rather than a pulse or glow: on a rack of
+  // twenty boxes, motion is noise — a flat colour is read instantly and stays readable in a
+  // screenshot or a printout.
+  outOfStock: ['#ef4444', '#c02f2f', '#992424'],
 } as const;
 
 function fillsFor(
-  slot: MappingSlot, hasSku: boolean, selected: boolean, viewSide: RackSide,
+  slot: MappingSlot, sku: MappingSku | null, selected: boolean, viewSide: RackSide,
 ): readonly string[] {
   if (selected) return FILL.selected;
-  if (slot.side === 'AB') return hasSku ? FILL.span : FILL.emptyNear;
+  // Out of stock outranks every other colour, including the both-sides teal: "there is
+  // nothing here" is more urgent than "you can reach this from either aisle".
+  if (sku && sku.qty_on_hand <= 0) return FILL.outOfStock;
+  if (slot.side === 'AB') return sku ? FILL.span : FILL.emptyNear;
   const near = slot.side === viewSide;
-  if (!hasSku) return near ? FILL.emptyNear : FILL.emptyFar;
+  if (!sku) return near ? FILL.emptyNear : FILL.emptyFar;
   return near ? FILL.skuNear : FILL.skuFar;
 }
 
@@ -84,6 +91,7 @@ function lidCentre(box: Box): Pt {
 
 export default function RackIsometric({
   shelfCount, slots, skuById, selectedSlotId, viewSide, canAddToShelf, onPickSection, onAddSection,
+  readOnly = false, maxHeightRem = 38,
 }: {
   shelfCount: number;
   slots: MappingSlot[];
@@ -95,6 +103,9 @@ export default function RackIsometric({
   /** Reports the clicked section plus where it sits, in container pixels, to anchor a popover. */
   onPickSection: (slot: MappingSlot, at: Pt) => void;
   onAddSection: (shelf: number) => void;
+  /** Gallery thumbnails: draw the rack, offer no interaction and no add-targets. */
+  readOnly?: boolean;
+  maxHeightRem?: number;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -115,7 +126,7 @@ export default function RackIsometric({
   // "+" targets sit in the row nearest the viewer, so adding always means "add to the side I
   // am standing at" rather than a fixed side the operator has to remember.
   const rawGhosts = useMemo(
-    () => Array.from({ length: shelfCount }, (_, i) => i + 1)
+    () => (readOnly ? [] : Array.from({ length: shelfCount }, (_, i) => i + 1))
       .filter(canAddToShelf)
       .map((shelf) => ({
         shelf,
@@ -128,7 +139,7 @@ export default function RackIsometric({
           h: ISO.BOX_H,
         } as Box,
       })),
-    [shelfCount, slots, viewSide, canAddToShelf],
+    [shelfCount, slots, viewSide, canAddToShelf, readOnly],
   );
 
   // Flipped inline rather than through a shared closure, so each memo's dependencies are the
@@ -193,7 +204,7 @@ export default function RackIsometric({
         ref={svgRef}
         viewBox={viewBox}
         className="block w-full"
-        style={{ maxHeight: '38rem' }}
+        style={{ maxHeight: `${maxHeightRem}rem` }}
         role="img"
         aria-label={`Rack with ${shelfCount} shelves and ${slots.length} sections, viewed from side ${viewSide}`}
       >
@@ -235,12 +246,12 @@ export default function RackIsometric({
             <g key={slot.id}>
               <Faces
                 box={item}
-                fills={fillsFor(slot, !!sku, selected, viewSide)}
+                fills={fillsFor(slot, sku, selected, viewSide)}
                 dashed={!sku && !selected}
-                onClick={() => onPickSection(slot, toContainerPx(c))}
+                onClick={readOnly ? undefined : () => onPickSection(slot, toContainerPx(c))}
                 title={
                   `S${slot.section_index} · ${slot.side === 'AB' ? 'both aisles' : `side ${slot.side}`}` +
-                  ` · ${sku ? `#${sku.sku_number} ${sku.title}` : 'empty'}`
+                  ` · ${sku ? `#${sku.sku_number} ${sku.title}${sku.qty_on_hand <= 0 ? ' — OUT OF STOCK' : ''}` : 'empty'}`
                 }
               />
               <text

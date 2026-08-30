@@ -247,8 +247,17 @@ function SectionPopover({
 
   return (
     <div
-      className="absolute z-20 rounded-xl border border-tt-cyan/70 bg-tt-card p-3 shadow-2xl"
-      style={{ width: WIDTH, left, top: anchor.y + 14, transform: 'translateX(-50%)' }}
+      className="absolute z-20 rounded-xl border border-tt-cyan/70 p-3 shadow-2xl"
+      style={{
+        width: WIDTH,
+        left,
+        top: anchor.y + 14,
+        transform: 'translateX(-50%)',
+        // Opaque on purpose. A translucent panel let the rack show through the SKU list and
+        // made both unreadable.
+        background: '#0a0e14',
+        boxShadow: '0 18px 50px rgba(0,0,0,.75)',
+      }}
     >
       <div className="mb-2 flex items-start justify-between gap-2">
         <div className="min-w-0">
@@ -285,25 +294,41 @@ function SectionPopover({
         className="mb-2 w-full rounded-lg border border-tt-border bg-tt-card px-2 py-1.5 text-sm text-tt-text"
       />
 
+      {sku && sku.qty_on_hand <= 0 && (
+        <p className="mb-2 rounded-lg border border-tt-red/60 bg-tt-red/10 px-2 py-1 text-[11px] text-tt-red">
+          <b>#{sku.sku_number} is out of stock</b> ({sku.qty_on_hand} on hand). This section shows red
+          on the rack until it is restocked.
+        </p>
+      )}
+
       <div className="max-h-48 space-y-1 overflow-y-auto">
-        {matches.slice(0, 40).map((s) => (
-          <button
-            key={s.id}
-            onClick={() => onAssign(s.id)}
-            disabled={busy}
-            className={`flex w-full items-center gap-2 rounded-lg border px-2 py-1 text-left disabled:opacity-40 cursor-pointer ${
-              s.id === slot.inventory_sku_id
-                ? 'border-tt-green bg-tt-green/10'
-                : 'border-transparent hover:bg-tt-card-hover'
-            }`}
-          >
-            <SkuThumb url={s.thumbnail_url} />
-            <span className="min-w-0 flex-1 truncate text-xs">
-              <b className="text-tt-text">#{s.sku_number}</b>
-              <span className="ml-1 text-tt-muted">{s.title}</span>
-            </span>
-          </button>
-        ))}
+        {matches.slice(0, 40).map((s) => {
+          const out = s.qty_on_hand <= 0;
+          return (
+            <button
+              key={s.id}
+              onClick={() => onAssign(s.id)}
+              disabled={busy}
+              title={out ? `#${s.sku_number} has ${s.qty_on_hand} on hand` : undefined}
+              className={`flex w-full items-center gap-2 rounded-lg border px-2 py-1 text-left disabled:opacity-40 cursor-pointer ${
+                s.id === slot.inventory_sku_id
+                  ? 'border-tt-green bg-tt-green/10'
+                  : 'border-transparent hover:bg-tt-card-hover'
+              }`}
+            >
+              <SkuThumb url={s.thumbnail_url} />
+              <span className="min-w-0 flex-1 truncate text-xs">
+                <b className="text-tt-text">#{s.sku_number}</b>
+                <span className="ml-1 text-tt-muted">{s.title}</span>
+              </span>
+              <span
+                className={`shrink-0 text-[10px] tabular-nums ${out ? 'font-bold text-tt-red' : 'text-tt-muted'}`}
+              >
+                {out ? `out (${s.qty_on_hand})` : s.qty_on_hand}
+              </span>
+            </button>
+          );
+        })}
         {matches.length === 0 && <p className="px-1 py-2 text-xs text-tt-muted">No SKU matches.</p>}
       </div>
 

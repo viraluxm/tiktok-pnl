@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import SkuThumb from '@/components/common/SkuThumb';
 import RackDetail from './RackDetail';
+import RackIsometric from './RackIsometric';
 import { deriveRoute, type StartCorner } from '@/lib/mapping/route';
 import { MIN_SHELVES, MAX_SHELVES, type SectionSide } from '@/lib/mapping/shape';
 import {
@@ -14,13 +15,13 @@ import {
 
 // Inventory → Mapping.
 //
-// Two screens, never both at once: the FLOOR PLAN (where every rack physically sits) and ONE
-// RACK (its shelves, sections and SKUs). Stacking them meant scrolling past a whole rack
-// drawing to reach the thing you were editing.
+// Two screens, never both at once: ALL RACKS and ONE RACK.
 //
-// The floor plan is the INPUT, not a picture of one — aisles and the picking route are
-// derived from where you put the racks, so there is no walking order to maintain separately
-// and get out of sync.
+// ALL RACKS leads with a gallery — every rack drawn, click one to open it — because that is
+// the actual navigation. Beneath it sits the FLOOR PLAN, which answers a different question:
+// where the racks physically sit. That matters because the floor plan is the INPUT to the
+// picking route, not a picture of one — aisles and walking order are derived from placement,
+// so there is no separate order to maintain and get out of sync.
 
 const CORNERS: { value: StartCorner; label: string }[] = [
   { value: 'top-left', label: 'Top-left' },
@@ -220,35 +221,101 @@ export default function MappingSection() {
 
       {banner}
 
+      {/* The gallery is the way in: every rack, drawn, click one to open it. The floor plan
+          below is a different job — it says where they SIT, which is what the route needs. */}
       <section>
-        <header className="mb-2 flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-tt-text">All racks</h3>
-            <p className="text-xs text-tt-muted">
-              Where each rack physically sits. Click one to lay out its shelves; drag it to move it.
-            </p>
-          </div>
-          <label className="flex items-center gap-2 text-xs text-tt-muted">
-            Route starts at
-            <select
-              value={startCorner}
-              onChange={(e) => setStartCorner(e.target.value as StartCorner)}
-              className="rounded-lg border border-tt-border bg-tt-card px-2 py-1 text-tt-text"
-            >
-              {CORNERS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-            </select>
-          </label>
-        </header>
-
-        <FloorPlanLegend />
+        <h3 className="text-sm font-semibold text-tt-text">All racks</h3>
+        <p className="mb-2 text-xs text-tt-muted">Click a rack to lay out its shelves and sections.</p>
 
         {racks.length === 0 ? (
-          <EmptyFloor onAdd={() => setAdding({ row: 0, col: 0 })} />
+          <EmptyFloor onAdd={() => setAdding(firstFreeCell(racks))} />
         ) : (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {racks.map((rack) => {
+              const rs = slotsByRack.get(rack.id) ?? [];
+              const filled = rs.filter((x) => x.inventory_sku_id).length;
+              const outOfStock = rs.filter((x) => {
+                const sk = x.inventory_sku_id ? skuById.get(x.inventory_sku_id) : null;
+                return sk && sk.qty_on_hand <= 0;
+              }).length;
+              return (
+                <button
+                  key={rack.id}
+                  onClick={() => setSelectedRackId(rack.id)}
+                  className="rounded-2xl border border-tt-border bg-tt-card p-3 text-left transition-colors hover:border-tt-green/60 hover:bg-tt-card-hover cursor-pointer"
+                >
+                  <div className="mb-1 flex items-baseline justify-between gap-2">
+                    <span className="text-lg font-extrabold text-tt-text">{rack.name}</span>
+                    <span className="text-[11px] text-tt-muted">
+                      {rack.shelf_count} shelves · {rs.length} sections
+                    </span>
+                  </div>
+                  <div className="pointer-events-none rounded-xl bg-tt-card-hover/30 py-1">
+                    <RackIsometric
+                      shelfCount={rack.shelf_count}
+                      slots={rs}
+                      skuById={skuById}
+                      selectedSlotId={null}
+                      viewSide="A"
+                      readOnly
+                      maxHeightRem={12}
+                      canAddToShelf={() => false}
+                      onPickSection={() => {}}
+                      onAddSection={() => {}}
+                    />
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className={rs.length > 0 && filled === rs.length ? 'text-tt-green' : 'text-tt-muted'}>
+                      {rs.length === 0 ? 'no sections yet' : `${filled}/${rs.length} filled`}
+                    </span>
+                    {outOfStock > 0 && (
+                      <span className="rounded bg-tt-red/15 px-1.5 py-0.5 font-bold text-tt-red">
+                        {outOfStock} out of stock
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+
+            <button
+              onClick={() => setAdding(firstFreeCell(racks))}
+              className="flex min-h-40 items-center justify-center rounded-2xl border-2 border-dashed border-tt-border/70 text-sm text-tt-muted hover:border-tt-green/60 hover:text-tt-text cursor-pointer"
+            >
+              + Add rack
+            </button>
+          </div>
+        )}
+      </section>
+
+      {racks.length > 0 && (
+        <section>
+          <header className="mb-2 flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-tt-text">Floor plan</h3>
+              <p className="text-xs text-tt-muted">
+                Where each rack physically sits — drag one to move it. This is what the picking
+                route is worked out from.
+              </p>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-tt-muted">
+              Route starts at
+              <select
+                value={startCorner}
+                onChange={(e) => setStartCorner(e.target.value as StartCorner)}
+                className="rounded-lg border border-tt-border bg-tt-card px-2 py-1 text-tt-text"
+              >
+                {CORNERS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+              </select>
+            </label>
+          </header>
+
+          <FloorPlanLegend />
+
           <div className="space-y-1 overflow-x-auto rounded-2xl border border-tt-border bg-tt-card p-3">
             {occupiedRows.map((row, i) => (
               <div key={row}>
-                <AisleBand index={i} faces={stops.filter((s) => s.aisle === i)} />
+                <AisleBand index={i} faces={stops.filter((x) => x.aisle === i)} />
                 <div className="flex gap-2 py-1">
                   {columns.map((col) => {
                     const rack = racks.find((r) => r.grid_row === row && r.grid_col === col);
@@ -279,7 +346,7 @@ export default function MappingSection() {
                 {i === occupiedRows.length - 1 && (
                   <AisleBand
                     index={occupiedRows.length}
-                    faces={stops.filter((s) => s.aisle === occupiedRows.length)}
+                    faces={stops.filter((x) => x.aisle === occupiedRows.length)}
                   />
                 )}
               </div>
@@ -303,8 +370,8 @@ export default function MappingSection() {
               ))}
             </div>
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
       {adding && (
         <section className="rounded-2xl border border-tt-cyan/60 bg-tt-card p-4">
@@ -409,6 +476,20 @@ export default function MappingSection() {
       </section>
     </div>
   );
+}
+
+/**
+ * First unoccupied cell, scanning left-to-right then down. Lets "Add rack" from the gallery
+ * place the rack without asking for coordinates — the floor plan is where you position it.
+ */
+function firstFreeCell(racks: MappingRack[]): { row: number; col: number } {
+  const taken = new Set(racks.map((r) => `${r.grid_row}:${r.grid_col}`));
+  for (let row = 0; row < 50; row++) {
+    for (let col = 0; col < 50; col++) {
+      if (!taken.has(`${row}:${col}`)) return { row, col };
+    }
+  }
+  return { row: 0, col: 0 };
 }
 
 /* ── Pieces ──────────────────────────────────────────────────────────────── */

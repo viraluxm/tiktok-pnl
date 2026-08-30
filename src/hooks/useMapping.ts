@@ -34,6 +34,8 @@ export interface MappingSku {
   title: string;
   barcode: string;
   thumbnail_url: string | null;
+  /** May be negative (oversell); <= 0 means nothing is on the shelf. */
+  qty_on_hand: number;
 }
 
 export interface MappingData {
