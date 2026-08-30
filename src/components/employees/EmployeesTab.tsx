@@ -15,6 +15,8 @@ import { useScheduleLinks, scheduleLinkUrl, type ScheduleLink } from '@/hooks/us
 import { ScheduleLinkButton, ScheduleLinkSection, LINK_WARNING, copyText } from './ScheduleLinkButton';
 import { BadgeButton } from './BadgeButton';
 import { useBadges, type ActiveBadge } from '@/hooks/useBadges';
+import { LeadPinButton } from './LeadPinButton';
+import { useOverridePins } from '@/hooks/useOverridePins';
 
 interface EmployeesTabProps {
   // The selected period, driven by the dashboard's global FiltersBar. Nulls = all time.
@@ -60,6 +62,8 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   // the same routes /admin/badges uses. The rotating QR is NOT provisioned per employee and has no
   // roster action — it's minted on demand from the schedule link.
   const { byEmployee: badges, issue: issueBadge, reissue: reissueBadge } = useBadges();
+  // Which employees can authorise a pick override. Having a PIN IS being a lead.
+  const { hasPin, setPin: setOverridePin } = useOverridePins();
 
   // Employee add/edit modal
   const [modalOpen, setModalOpen] = useState(false);
@@ -181,6 +185,8 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
           badges={badges}
           onIssueBadge={issueBadge}
           onReissueBadge={reissueBadge}
+          leadPins={hasPin}
+          onSetLeadPin={(employeeId, pin) => setOverridePin.mutateAsync({ employeeId, pin })}
           onCopyAll={copyAllLinks}
           linkWarn={linkWarn}
           onDismissWarn={() => setLinkWarn(false)}
@@ -326,6 +332,8 @@ function RosterView({
   badges,
   onIssueBadge,
   onReissueBadge,
+  leadPins,
+  onSetLeadPin,
   onCopyAll,
   linkWarn,
   onDismissWarn,
@@ -342,6 +350,9 @@ function RosterView({
   badges: Record<string, ActiveBadge>;
   onIssueBadge: (employeeId: string) => Promise<void>;
   onReissueBadge: (employeeId: string, badgeId: string) => Promise<void>;
+  /** Employees who can authorise a pick override. Having a PIN is being a lead. */
+  leadPins: Set<string>;
+  onSetLeadPin: (employeeId: string, pin: string | null) => Promise<unknown>;
   onCopyAll: () => Promise<boolean>;
   linkWarn: boolean;
   onDismissWarn: () => void;
@@ -425,6 +436,16 @@ function RosterView({
                     onMint={onMintLink}
                     onCreated={onLinkCreated}
                   />
+                  {e.role?.toLowerCase() === 'fulfillment' && (
+                    <span className="ml-2 inline-block">
+                      <LeadPinButton
+                        employeeId={e.id}
+                        employeeName={e.name}
+                        hasPin={leadPins.has(e.id)}
+                        onSet={onSetLeadPin}
+                      />
+                    </span>
+                  )}
                   <span className="ml-2 inline-block">
                     <BadgeButton
                       employeeId={e.id}
