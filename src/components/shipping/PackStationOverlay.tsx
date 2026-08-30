@@ -242,8 +242,11 @@ export default function PackStationOverlay({
   const [err, setErr] = useState<string | null>(null);
   const [justDone, setJustDone] = useState(false);
   const [abandon, setAbandon] = useState<null | { scan: string | null }>(null);
-  // Transient feedback for a section scan that did not land (wrong section, not in this box).
-  const [scanMsg, setScanMsg] = useState<string | null>(null);
+  // Transient feedback for a section scan. Toned, because "you are at the wrong shelf" and
+  // "this one is already done" call for opposite reactions and a picker reads this in about
+  // half a second.
+  const [scanMsg, setScanMsg] = useState<null | { text: string; tone: 'error' | 'info' }>(null);
+  const scanMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A line the picker cannot scan — damaged label, unreachable — awaiting a lead's PIN.
   const [override, setOverride] = useState<null | { line: PickLine }>(null);
   const [holding, setHolding] = useState(false);
@@ -345,6 +348,19 @@ export default function PackStationOverlay({
   }
 
   /**
+   * Show a scan result over the item for a beat, then clear it.
+   *
+   * Auto-dismissing on purpose: a picker holding a scanner in one hand and a box in the other
+   * should not have to tap anything to get back to work, and a message that needs dismissing
+   * is one that will still be on screen for the next scan.
+   */
+  function flashScan(text: string, tone: 'error' | 'info') {
+    if (scanMsgTimer.current) clearTimeout(scanMsgTimer.current);
+    setScanMsg({ text, tone });
+    scanMsgTimer.current = setTimeout(() => { setScanMsg(null); scanMsgTimer.current = null; }, 2600);
+  }
+
+  /**
    * A section scan while picking is a PICK CONFIRMATION, not a new box.
    *
    * Scanning a section that belongs to this box but is not the line on screen jumps to that
@@ -355,12 +371,19 @@ export default function PackStationOverlay({
     const code = normalizeSlotCode(raw);
     const idx = pickLines.findIndex((l) => l.kind === 'sku' && l.slot_codes.includes(code));
     if (idx === -1) {
-      setScanMsg('That section is not in this order.');
+      flashScan('Wrong section — not in this order', 'error');
       return;
     }
     const l = pickLines[idx];
     if ((counts[l.key] ?? 0) >= l.required_qty) {
-      setScanMsg(`${(l.kind === 'sku' && l.location_label) || 'That section'} is already complete.`);
+      // Already done is NOT an error, and it is worth distinguishing from a wrong shelf: one
+      // means "go and find the right place", the other means "you are in the right place,
+      // move on". Collapsing them would send someone hunting for a mistake that does not
+      // exist. Better still, do the moving-on for them.
+      const nextIdx = firstUnpickedIdx(pickLines, counts);
+      const allDone = pickLines.every((x) => (counts[x.key] ?? 0) >= x.required_qty);
+      setActiveIdx(nextIdx);
+      flashScan(allDone ? 'Already done — box complete' : 'Already done — moved to the next item', 'info');
       return;
     }
     setActiveIdx(idx);
@@ -383,13 +406,13 @@ export default function PackStationOverlay({
     if (pickerModalOpen) {
       // The gate is a full-screen modal, so it is usually obvious — but say it anyway, because
       // a scan that vanishes with no acknowledgement is indistinguishable from a broken device.
-      setScanMsg('Choose who\'s picking first.');
+      flashScan('Choose who\'s picking first.', 'error');
       return;
     }
     focusInput();
     if (!v) return;
     if (loading) {
-      setScanMsg('Still loading the last scan — one moment.');
+      flashScan('Still loading the last scan…', 'info');
       return;
     }
     // Prefix test, so a section label can never be mistaken for a shipping label and start a
@@ -461,7 +484,7 @@ export default function PackStationOverlay({
       const json = await res.json().catch(() => ({}));
       if (!res.ok) return { ok: false, error: json.error || 'Could not authorise' };
       setOverride(null);
-      setScanMsg(json.warning ? String(json.warning) : `Authorised by ${json.authorized_by}.`);
+      flashScan(json.warning ? String(json.warning) : `Authorised by ${json.authorized_by}`, 'info');
       grab(line, 'override');
       return { ok: true };
     } catch {
@@ -479,7 +502,10 @@ export default function PackStationOverlay({
   function grab(line: PickLine, via: 'tap' | 'scan' | 'override' = 'tap') {
     if (!box) return;
     if (via === 'tap' && requiresScan(line)) {
-      setScanMsg(`Scan the ${line.kind === 'sku' && line.location_label ? line.location_label : 'section'} label to confirm.`);
+      flashScan(
+        `Scan ${line.kind === 'sku' && line.location_label ? line.location_label : 'the section label'}`,
+        'info',
+      );
       return;
     }
     const have = counts[line.key] ?? 0;
@@ -760,6 +786,22 @@ export default function PackStationOverlay({
                 </div>
               )}
 
+              {/* Section-scan result, over the item and sized to be read at arm's length. It
+                  sits here rather than under the controls, where it collided with Back/Next and
+                  was too small to catch. pointer-events-none so the hero stays a tap target. */}
+              {scanMsg && (
+                <div className="absolute inset-0 flex items-center justify-center p-3 pointer-events-none">
+                  <div
+                    className={`w-full rounded-xl text-center font-extrabold tracking-wide shadow-2xl ${
+                      scanMsg.tone === 'error' ? 'bg-red-700/95 text-red-50' : 'bg-tt-cyan/95 text-black'
+                    }`}
+                    style={{ padding: '0.5em 0.6em', fontSize: 'clamp(1.05rem, 4.6vh, 2rem)' }}
+                  >
+                    {scanMsg.text}
+                  </div>
+                </div>
+              )}
+
               {/* Picker-reported out-of-stock band. pointer-events-none so the whole hero stays a
                   tap target for grab() — a flagged item is still grabbable if it turns up. */}
               {lineShelfOut && (
@@ -976,21 +1018,6 @@ export default function PackStationOverlay({
       </div>
 
       {/* abandon-confirm (mid-pick new label / scan) */}
-      {/* Section-scan feedback. A rejected scan must say WHY — a picker holding a scanner at a
-          label that does nothing has no way to tell a wrong section from a dead scanner. */}
-      {scanMsg && (
-        <div className="absolute inset-x-0 z-30 flex justify-center px-4" style={{ bottom: 'calc(env(safe-area-inset-bottom) + 5.5rem)' }}>
-          <button
-            onClick={() => setScanMsg(null)}
-            className="max-w-sm rounded-xl bg-tt-card border border-tt-cyan/70 px-4 py-2 text-center text-tt-text shadow-2xl cursor-pointer"
-            style={{ fontSize: 'clamp(0.85rem, 3.2vw, 1rem)' }}
-          >
-            {scanMsg}
-            <span className="ml-2 text-tt-muted underline">dismiss</span>
-          </button>
-        </div>
-      )}
-
       {override && (
         <OverrideDialog
           line={override.line}
