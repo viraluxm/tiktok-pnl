@@ -170,6 +170,13 @@ export type SkuBlock = {
   // if the box holds two orders for one SKU and only one was short, the box still cannot be
   // filled, so it warns. Display-only — it never gates grabbing, navigation, or completion.
   shelf_out: boolean;
+  /**
+   * Live stock. Distinct from shelf_out, which is a frozen fact about the ORDER (it could not
+   * be filled at bind time). This is what is on the shelf now, and may be negative on an
+   * oversell. Carried so the screen can say "in stock but not mapped" truthfully rather than
+   * implying it.
+   */
+  qty_on_hand: number;
   // Where this SKU lives, e.g. "R3A L2". Null when it has no section mapped yet — the device
   // then shows no guidance rather than guessing, and the line sorts last.
   location_label: string | null;
@@ -361,11 +368,11 @@ export async function assembleBox(
 
   // 5) Best-effort inventory enrichment (barcode + thumbnail) for pickable SKUs.
   const skuIds = [...agg.keys()];
-  const invById = new Map<string, { barcode: string | null; thumbnail_url: string | null }>();
+  const invById = new Map<string, { barcode: string | null; thumbnail_url: string | null; qty_on_hand: number }>();
   if (skuIds.length) {
     const { data: inv } = await db
       .from('inventory_skus')
-      .select('id, barcode, thumbnail_path')
+      .select('id, barcode, thumbnail_path, qty_on_hand')
       .in('user_id', userIds)
       .in('id', skuIds);
     for (const s of inv ?? []) {
@@ -373,6 +380,7 @@ export async function assembleBox(
       invById.set(String(s.id), {
         barcode: (s.barcode as string | null) ?? null,
         thumbnail_url: path ? db.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : null,
+        qty_on_hand: (s.qty_on_hand as number | null) ?? 0,
       });
     }
   }
@@ -390,6 +398,7 @@ export async function assembleBox(
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
         shelf_out: a.short,
+        qty_on_hand: inv?.qty_on_hand ?? 0,
         location_label: null,
         slot_codes: [],
       };
