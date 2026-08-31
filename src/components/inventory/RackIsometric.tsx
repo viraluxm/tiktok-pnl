@@ -2,7 +2,7 @@
 
 import { useMemo, useRef } from 'react';
 import {
-  layoutRack, boxFaces, paintOrder, bounds, toPoints, flipBox,
+  layoutRack, boxFaces, paintOrder, bounds, toPoints, flipBox, project,
   ISO, GAP, ROW_GAP, BOX_LIFT, RACK_DEPTH, nextFreeX,
   type Box, type Pt,
 } from '@/lib/mapping/iso';
@@ -91,7 +91,7 @@ function lidCentre(box: Box): Pt {
 
 export default function RackIsometric({
   shelfCount, slots, skuById, selectedSlotId, viewSide, canAddToShelf, onPickSection, onAddSection,
-  readOnly = false, maxHeightRem = 38,
+  onPickShelf, readOnly = false, maxHeightRem = 38,
 }: {
   shelfCount: number;
   slots: MappingSlot[];
@@ -103,6 +103,8 @@ export default function RackIsometric({
   /** Reports the clicked section plus where it sits, in container pixels, to anchor a popover. */
   onPickSection: (slot: MappingSlot, at: Pt) => void;
   onAddSection: (shelf: number) => void;
+  /** Clicking a level tab. Omitted in read-only mode. */
+  onPickShelf?: (shelf: number, at: Pt) => void;
   /** Gallery thumbnails: draw the rack, offer no interaction and no add-targets. */
   readOnly?: boolean;
   maxHeightRem?: number;
@@ -211,6 +213,33 @@ export default function RackIsometric({
         aria-label={`Rack with ${shelfCount} shelves and ${slots.length} sections, viewed from side ${viewSide}`}
       >
         {paintOrder(beams).map((b, i) => <Faces key={`beam${i}`} box={b} fills={FILL.beam} />)}
+
+        {/* Level tabs at the near-left end of each beam. The drawing had no level labels at
+            all, so there was no way to tell L2 from L3 and nothing to click to change the
+            rack's shelves. */}
+        {!readOnly && Array.from({ length: shelfCount }, (_, i) => i + 1).map((shelf) => {
+          const p = project(-0.15, RACK_DEPTH + 0.15, (shelf - 1) * ISO.LEVEL + 6, ISO);
+          return (
+            <g
+              key={`lvl${shelf}`}
+              onClick={onPickShelf ? () => onPickShelf(shelf, toContainerPx(p)) : undefined}
+              style={onPickShelf ? { cursor: 'pointer' } : undefined}
+            >
+              <title>{`Shelf L${shelf} — add or remove a shelf here`}</title>
+              <rect
+                x={p.x - 30} y={p.y - 11} width={26} height={20} rx={5}
+                fill="#1f2937" stroke="rgba(148,163,184,.45)"
+              />
+              <text
+                x={p.x - 17} y={p.y + 3} textAnchor="middle"
+                fontSize="11" fontWeight="700" fill="#94a3b8"
+                style={{ pointerEvents: 'none', userSelect: 'none' }}
+              >
+                L{shelf}
+              </text>
+            </g>
+          );
+        })}
         {paintOrder(posts).map((b, i) => <Faces key={`post${i}`} box={b} fills={FILL.post} />)}
 
         {paintOrder([

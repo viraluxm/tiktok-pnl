@@ -197,6 +197,38 @@ export function useSetSectionSide() {
   });
 }
 
+/** Insert a shelf above or below an existing one, renumbering everything that follows. */
+export function useInsertShelf() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (fields: { rackId: string; at: number; position: 'above' | 'below' }) => {
+      const res = await fetch(`/api/inventory/mapping/racks/${fields.rackId}/shelves`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ at: fields.at, position: fields.position }),
+      });
+      if (!res.ok) await readError(res, 'Failed to add the shelf');
+      return res.json() as Promise<{ new_shelf_index: number; labels_to_reprint: number }>;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+export function useRemoveShelf() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ rackId, at, confirm }: { rackId: string; at: number; confirm?: boolean }) => {
+      const res = await fetch(
+        `/api/inventory/mapping/racks/${rackId}/shelves?at=${at}${confirm ? '&confirm=1' : ''}`,
+        { method: 'DELETE' },
+      );
+      if (!res.ok) await readError(res, 'Failed to remove the shelf');
+      return res.json() as Promise<{ labels_to_reprint: number }>;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
 export function useAssignSlot() {
   const qc = useQueryClient();
   return useMutation({

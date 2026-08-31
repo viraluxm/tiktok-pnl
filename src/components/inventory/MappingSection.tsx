@@ -10,6 +10,7 @@ import { MIN_SHELVES, MAX_SHELVES, type SectionSide } from '@/lib/mapping/shape'
 import {
   useMapping, useCreateRack, useUpdateRack, useDeleteRack,
   useAddSection, useDeleteSection, useSetSectionSide, useAssignSlot,
+  useInsertShelf, useRemoveShelf,
   NeedsConfirmation,
   type MappingRack, type MappingSlot,
 } from '@/hooks/useMapping';
@@ -40,6 +41,8 @@ export default function MappingSection() {
   const deleteSection = useDeleteSection();
   const setSectionSide = useSetSectionSide();
   const assignSlot = useAssignSlot();
+  const insertShelf = useInsertShelf();
+  const removeShelf = useRemoveShelf();
 
   const [selectedRackId, setSelectedRackId] = useState<string | null>(null);
   const [startCorner, setStartCorner] = useState<StartCorner>('top-left');
@@ -124,7 +127,8 @@ export default function MappingSection() {
 
   const busy =
     updateRack.isPending || deleteRack.isPending || addSection.isPending ||
-    deleteSection.isPending || setSectionSide.isPending || assignSlot.isPending;
+    deleteSection.isPending || setSectionSide.isPending || assignSlot.isPending ||
+    insertShelf.isPending || removeShelf.isPending;
 
   const banner = msg ? (
     <div className="flex flex-wrap items-center gap-3 rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-sm text-tt-text">
@@ -178,13 +182,22 @@ export default function MappingSection() {
               () => deleteSection.mutateAsync({ slotId, confirm: true }),
             )
           }
-          onShelves={(n) =>
+          onInsertShelf={(at, position) =>
+            run(async () => {
+              const r = await insertShelf.mutateAsync({ rackId: selectedRack.id, at, position });
+              setMsg(
+                `Shelf added as L${r.new_shelf_index}.` +
+                (r.labels_to_reprint > 0
+                  ? ` ${r.labels_to_reprint} section label${r.labels_to_reprint === 1 ? '' : 's'} now show the wrong level — reprint them.`
+                  : ''),
+              );
+            }, 'Shelf added.')
+          }
+          onRemoveShelf={(at) =>
             run(
-              () => updateRack.mutateAsync({ id: selectedRack.id, shelf_count: n }),
-              'Shelves updated.',
-              () => updateRack.mutateAsync({
-                id: selectedRack.id, shelf_count: n, confirm_destructive: true,
-              }),
+              () => removeShelf.mutateAsync({ rackId: selectedRack.id, at }),
+              'Shelf removed.',
+              () => removeShelf.mutateAsync({ rackId: selectedRack.id, at, confirm: true }),
             )
           }
           onDeleteRack={() =>

@@ -116,6 +116,73 @@ export function canChangeSide(
   );
 }
 
+export interface ShelfInsertPlan {
+  /** The number the new shelf will take. */
+  newShelfIndex: number;
+  /** Existing shelves at or above this index shift up by one. */
+  shiftFrom: number;
+  /** Slots whose shelf_index changes — their printed level is now wrong. */
+  renumbered: SlotLike[];
+}
+
+/**
+ * Insert a shelf above or below an existing one.
+ *
+ * Shelf numbers are ORDINAL — L1 is the bottom — so a shelf cannot be inserted without
+ * renumbering everything above it. That is not an implementation quirk; it is what physically
+ * happens. Add a shelf below L3 and the shelf that was L3 is now the fourth one up, even
+ * though it never moved.
+ *
+ * The consequence is real and worth surfacing rather than hiding: every printed label above
+ * the insertion point shows a level that is no longer true. The BARCODES still resolve — they
+ * encode an opaque slot id, not the address — so picking keeps working; it is the human
+ * caption that goes stale. `renumbered` is exactly the set that needs reprinting.
+ */
+export function planShelfInsert(
+  slots: SlotLike[],
+  at: number,
+  position: 'above' | 'below',
+): ShelfInsertPlan {
+  const newShelfIndex = position === 'above' ? at + 1 : at;
+  return {
+    newShelfIndex,
+    shiftFrom: newShelfIndex,
+    renumbered: slots.filter((s) => s.shelf_index >= newShelfIndex),
+  };
+}
+
+export interface ShelfRemovePlan {
+  toDeleteIds: string[];
+  assignedLost: number;
+  skusUnmapped: string[];
+  /** Shelves above the removed one shift DOWN by one. */
+  shiftFrom: number;
+  renumbered: SlotLike[];
+}
+
+/**
+ * Remove one shelf, wherever it sits.
+ *
+ * Destroys that shelf's sections and closes the gap, so — like insertion — everything above
+ * renumbers and its printed captions go stale.
+ */
+export function planShelfRemove(slots: SlotLike[], shelf: number): ShelfRemovePlan {
+  const doomed = slots.filter((s) => s.shelf_index === shelf);
+  const surviving = new Set(
+    slots.filter((s) => s.shelf_index !== shelf && s.inventory_sku_id)
+      .map((s) => s.inventory_sku_id!),
+  );
+  return {
+    toDeleteIds: doomed.map((s) => s.id),
+    assignedLost: doomed.filter((s) => s.inventory_sku_id).length,
+    skusUnmapped: Array.from(
+      new Set(doomed.map((s) => s.inventory_sku_id).filter((id): id is string => !!id)),
+    ).filter((id) => !surviving.has(id)),
+    shiftFrom: shelf + 1,
+    renumbered: slots.filter((s) => s.shelf_index > shelf),
+  };
+}
+
 export interface ShelfChangePlan {
   toDeleteIds: string[];
   /** How many destroyed sections currently hold a SKU. Non-zero needs confirmation. */

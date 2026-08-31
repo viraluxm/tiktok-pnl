@@ -19,7 +19,8 @@ import type { MappingRack, MappingSlot, MappingSku } from '@/hooks/useMapping';
 
 export default function RackDetail({
   rack, slots, skus, skuById, busy,
-  onBack, onAddSection, onAssign, onSetSide, onDeleteSection, onShelves, onDeleteRack,
+  onBack, onAddSection, onAssign, onSetSide, onDeleteSection, onInsertShelf, onRemoveShelf,
+  onDeleteRack,
 }: {
   rack: MappingRack;
   slots: MappingSlot[];
@@ -31,7 +32,8 @@ export default function RackDetail({
   onAssign: (slotId: string, skuId: string | null) => void;
   onSetSide: (slotId: string, side: SectionSide) => void;
   onDeleteSection: (slotId: string) => void;
-  onShelves: (n: number, confirmDestructive?: boolean) => void;
+  onInsertShelf: (at: number, position: 'above' | 'below') => void;
+  onRemoveShelf: (at: number) => void;
   onDeleteRack: () => void;
 }) {
   const [viewSide, setViewSide] = useState<RackSide>('A');
@@ -41,12 +43,10 @@ export default function RackDetail({
   // at click time is what the clamp needs, and reading refs mid-render is not allowed.
   const [wrapWidth, setWrapWidth] = useState(0);
   const [search, setSearch] = useState('');
-  const [shelves, setShelves] = useState(rack.shelf_count);
+  const [shelfMenu, setShelfMenu] = useState<null | { shelf: number; at: Pt }>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   const openSlot = slots.find((s) => s.id === openSlotId) ?? null;
-  const shelvesChanged = shelves !== rack.shelf_count;
-  const shrinking = shelves < rack.shelf_count;
   const filled = slots.filter((s) => s.inventory_sku_id).length;
 
   const matches = useMemo(() => {
@@ -60,6 +60,7 @@ export default function RackDetail({
   }, [skus, search]);
 
   const close = () => { setOpenSlotId(null); setSearch(''); };
+  const closeShelf = () => setShelfMenu(null);
 
   return (
     <section className="rounded-2xl border border-tt-border bg-tt-card p-4">
@@ -117,7 +118,26 @@ export default function RackDetail({
             setSearch('');
           }}
           onAddSection={(shelf) => onAddSection(shelf, viewSide)}
+          onPickShelf={(shelf, at) => {
+            close();
+            setShelfMenu({ shelf, at });
+            setWrapWidth(wrapRef.current?.clientWidth ?? 0);
+          }}
         />
+
+        {shelfMenu && (
+          <ShelfMenu
+            shelf={shelfMenu.shelf}
+            anchor={shelfMenu.at}
+            containerWidth={wrapWidth}
+            shelfCount={rack.shelf_count}
+            sectionsOnShelf={slots.filter((s) => s.shelf_index === shelfMenu.shelf).length}
+            busy={busy}
+            onInsert={(position) => { onInsertShelf(shelfMenu.shelf, position); closeShelf(); }}
+            onRemove={() => { onRemoveShelf(shelfMenu.shelf); closeShelf(); }}
+            onClose={closeShelf}
+          />
+        )}
 
         {openSlot && (
           <SectionPopover
@@ -146,47 +166,11 @@ export default function RackDetail({
         aisle.
       </p>
 
-      <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-tt-border pt-3">
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] text-tt-muted">Shelves ({MIN_SHELVES}–{MAX_SHELVES})</span>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setShelves(Math.max(MIN_SHELVES, shelves - 1))}
-              disabled={shelves <= MIN_SHELVES}
-              className="h-8 w-8 rounded-lg border border-tt-border text-tt-text disabled:opacity-30 cursor-pointer"
-            >
-              −
-            </button>
-            <span className="w-8 text-center text-sm font-bold tabular-nums text-tt-text">{shelves}</span>
-            <button
-              onClick={() => setShelves(Math.min(MAX_SHELVES, shelves + 1))}
-              disabled={shelves >= MAX_SHELVES}
-              className="h-8 w-8 rounded-lg border border-tt-border text-tt-text disabled:opacity-30 cursor-pointer"
-            >
-              +
-            </button>
-          </div>
-        </label>
-        {shelvesChanged && (
-          <>
-            <button
-              onClick={() => onShelves(shelves)}
-              disabled={busy}
-              className="rounded-lg bg-tt-green px-3 py-1.5 text-sm font-bold text-black disabled:opacity-40 cursor-pointer"
-            >
-              {shrinking ? `Remove down to ${shelves}` : `Add up to ${shelves}`}
-            </button>
-            {shrinking && (
-              <button
-                onClick={() => onShelves(shelves, true)}
-                disabled={busy}
-                className="rounded-lg border border-tt-red px-3 py-1.5 text-sm font-bold text-tt-red disabled:opacity-40 cursor-pointer"
-              >
-                Remove anyway
-              </button>
-            )}
-          </>
-        )}
+      <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-tt-border pt-3">
+        <span className="text-[11px] text-tt-muted">
+          {rack.shelf_count} shelves · tap an <b className="text-tt-text">L</b> tab on the rack to
+          add or remove one
+        </span>
         <span className="flex-1" />
         {slots.length > 0 && (
           <button
@@ -363,6 +347,108 @@ function SectionPopover({
           Remove section
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Add or remove a shelf, anchored to the level tab you tapped.
+ *
+ * Says up front how many printed labels the change invalidates. Shelf numbers are ordinal, so
+ * inserting below L3 makes the old L3 into L4 — the barcodes still resolve, but the human
+ * caption on every label above the insertion point is now wrong. Discovering that at the rack
+ * with a stack of stale labels is much worse than being told here.
+ */
+function ShelfMenu({
+  shelf, anchor, containerWidth, shelfCount, sectionsOnShelf, busy,
+  onInsert, onRemove, onClose,
+}: {
+  shelf: number;
+  anchor: Pt;
+  containerWidth: number;
+  shelfCount: number;
+  sectionsOnShelf: number;
+  busy: boolean;
+  onInsert: (position: 'above' | 'below') => void;
+  onRemove: () => void;
+  onClose: () => void;
+}) {
+  const WIDTH = 290;
+  const left = containerWidth
+    ? Math.min(Math.max(anchor.x, WIDTH / 2 + 8), containerWidth - WIDTH / 2 - 8)
+    : anchor.x;
+
+  const atMax = shelfCount >= MAX_SHELVES;
+  const atMin = shelfCount <= MIN_SHELVES;
+  // Inserting ABOVE L{shelf} renumbers the shelves above it; BELOW renumbers this one too.
+  const staleAbove = shelfCount - shelf;
+  const staleBelow = shelfCount - shelf + 1;
+
+  return (
+    <div
+      className="absolute z-20 rounded-xl border border-tt-cyan/70 p-3 shadow-2xl"
+      style={{
+        width: WIDTH, left, top: anchor.y + 14, transform: 'translateX(-50%)',
+        background: '#0a0e14', boxShadow: '0 18px 50px rgba(0,0,0,.75)',
+      }}
+    >
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div>
+          <div className="text-sm font-bold text-tt-text">Shelf L{shelf}</div>
+          <div className="text-[11px] text-tt-muted">
+            {sectionsOnShelf} section{sectionsOnShelf === 1 ? '' : 's'}
+          </div>
+        </div>
+        <button onClick={onClose} className="shrink-0 text-xs text-tt-muted hover:text-tt-text cursor-pointer">✕</button>
+      </div>
+
+      <div className="space-y-1.5">
+        <button
+          onClick={() => onInsert('above')}
+          disabled={busy || atMax}
+          className="w-full rounded-lg border border-tt-border px-2 py-2 text-left text-xs text-tt-text disabled:opacity-40 cursor-pointer"
+        >
+          <b>Add a shelf above</b> this one
+          <span className="block text-[10px] text-tt-muted">
+            becomes L{shelf + 1}
+            {staleAbove > 0 && ` · ${staleAbove} shelf${staleAbove === 1 ? '' : 'ves'} renumber`}
+          </span>
+        </button>
+        <button
+          onClick={() => onInsert('below')}
+          disabled={busy || atMax}
+          className="w-full rounded-lg border border-tt-border px-2 py-2 text-left text-xs text-tt-text disabled:opacity-40 cursor-pointer"
+        >
+          <b>Add a shelf below</b> this one
+          <span className="block text-[10px] text-tt-muted">
+            becomes L{shelf} · {staleBelow} shelf{staleBelow === 1 ? '' : 'ves'} renumber
+          </span>
+        </button>
+      </div>
+
+      {atMax && (
+        <p className="mt-2 text-[10px] text-tt-muted">
+          A rack holds at most {MAX_SHELVES} shelves.
+        </p>
+      )}
+
+      <button
+        onClick={onRemove}
+        disabled={busy || atMin}
+        className="mt-2 w-full rounded-lg border border-tt-red px-2 py-2 text-left text-xs text-tt-red disabled:opacity-40 cursor-pointer"
+      >
+        <b>Remove this shelf</b>
+        <span className="block text-[10px] opacity-80">
+          {atMin
+            ? `a rack needs at least ${MIN_SHELVES} shelves`
+            : `${sectionsOnShelf} section${sectionsOnShelf === 1 ? '' : 's'} destroyed${staleAbove > 0 ? ` · ${staleAbove} shelf${staleAbove === 1 ? '' : 'ves'} renumber` : ''}`}
+        </span>
+      </button>
+
+      <p className="mt-2 text-[10px] leading-relaxed text-tt-muted">
+        Renumbered shelves keep working — the barcodes are permanent — but their printed labels
+        will show the wrong level until reprinted.
+      </p>
     </div>
   );
 }

@@ -17,6 +17,7 @@ const outFile = join(mkdtempSync(join(tmpdir(), 'shape-')), 'shape.mjs');
 writeFileSync(outFile, outputText);
 const {
   sectionsOn, sectionsFacing, reachableFrom, isReachableFrom, canAddSection, canChangeSide,
+  planShelfInsert, planShelfRemove,
   nextSectionIndex, planShelfChange, nextRackName, clampShelves, shelfIndexes,
   MIN_SHELVES, MAX_SHELVES, MAX_SECTIONS_PER_SIDE,
 } = await import(pathToFileURL(outFile).href);
@@ -158,6 +159,52 @@ console.log('\nShelf changes');
   check('shelves clamp to the minimum', clampShelves(1) === MIN_SHELVES);
   check('shelves clamp to the maximum', clampShelves(99) === MAX_SHELVES);
   check('shelfIndexes is bottom-first', shelfIndexes(3).join(',') === '1,2,3');
+}
+
+console.log('\nInserting and removing a shelf mid-rack');
+{
+  const slots = [sec(1, 1, 'A'), sec(2, 1, 'A'), sec(3, 1, 'A')];
+  const above = planShelfInsert(slots, 2, 'above');
+  check('inserting ABOVE L2 makes the new shelf L3', above.newShelfIndex === 3);
+  check('only L3 and up renumber',
+    above.renumbered.length === 1 && above.renumbered.every((x) => x.shelf_index >= 3),
+    String(above.renumbered.length));
+}
+{
+  const slots = [sec(1, 1, 'A'), sec(2, 1, 'A'), sec(3, 1, 'A')];
+  const below = planShelfInsert(slots, 2, 'below');
+  check('inserting BELOW L2 makes the new shelf L2', below.newShelfIndex === 2);
+  check('L2 and up renumber — two shelves', below.renumbered.length === 2,
+    String(below.renumbered.length));
+}
+{
+  // The two extremes bound the reprint cost: at the bottom every label goes stale, at the top
+  // none do. That range is exactly what the UI has to warn about.
+  const slots = [sec(1, 1, 'A'), sec(2, 1, 'A'), sec(3, 1, 'A')];
+  check('below the bottom shelf renumbers every shelf',
+    planShelfInsert(slots, 1, 'below').renumbered.length === 3);
+  check('above the top shelf renumbers none',
+    planShelfInsert(slots, 3, 'above').renumbered.length === 0);
+}
+{
+  const slots = [sec(1, 1, 'A', 'sku-a'), sec(2, 1, 'A', 'sku-b'), sec(3, 1, 'A')];
+  const rm = planShelfRemove(slots, 2);
+  check('removing L2 destroys only its sections', rm.toDeleteIds.length === 1);
+  check('and reports the assignment lost',
+    rm.assignedLost === 1 && rm.skusUnmapped.includes('sku-b'));
+  check('shelves above L2 renumber down', rm.renumbered.length === 1 && rm.shiftFrom === 3);
+}
+{
+  // Same false-alarm rule as everywhere else: a SKU still on a surviving shelf is not lost.
+  const slots = [sec(1, 1, 'A', 'sku-x'), sec(2, 1, 'A', 'sku-x')];
+  const rm = planShelfRemove(slots, 2);
+  check('a SKU with a surviving section is not reported unmapped', rm.skusUnmapped.length === 0);
+  check('but the destroyed assignment is still counted', rm.assignedLost === 1);
+}
+{
+  const slots = [sec(1, 1, 'A'), sec(2, 1, 'A'), sec(3, 1, 'A')];
+  check('removing the TOP shelf renumbers nothing',
+    planShelfRemove(slots, 3).renumbered.length === 0);
 }
 
 console.log('\nAuto-naming');
