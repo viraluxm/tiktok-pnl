@@ -782,14 +782,28 @@ export default function PackStationOverlay({
               {/* WHERE it is. Pinned top-left of the hero and pointer-events-none so the whole
                   area stays a tap target. Shown before anything else because it decides where
                   the picker walks; absent when the SKU has no section, rather than guessing. */}
-              {line.kind === 'sku' && line.location_label && (
+              {line.kind === 'sku' && (
                 <div className="absolute top-0 left-0 p-2 pointer-events-none">
-                  <span
-                    className="inline-block rounded-lg bg-tt-cyan text-black font-extrabold tracking-wide shadow-lg"
-                    style={{ fontSize: 'clamp(1rem, 4.5vh, 2rem)', padding: '0.12em 0.45em' }}
-                  >
-                    {line.location_label}
-                  </span>
+                  {line.location_label ? (
+                    <span
+                      className="inline-block rounded-lg bg-tt-cyan text-black font-extrabold tracking-wide shadow-lg"
+                      style={{ fontSize: 'clamp(1rem, 4.5vh, 2rem)', padding: '0.12em 0.45em' }}
+                    >
+                      {line.location_label}
+                    </span>
+                  ) : (
+                    // An unmapped SKU has no home yet, so there is no location to show. Say that
+                    // rather than leaving a hole where the badge normally is: a picker who has
+                    // learned to look there will otherwise read the blank as a fault and go
+                    // hunting for a location that does not exist. These also sort LAST and are
+                    // still grabbed by tapping, so nothing about them blocks the box.
+                    <span
+                      className="inline-block rounded-lg bg-black/60 text-tt-muted font-bold tracking-wide"
+                      style={{ fontSize: 'clamp(0.7rem, 2.6vh, 1rem)', padding: '0.2em 0.5em' }}
+                    >
+                      No location — find as usual
+                    </span>
+                  )}
                 </div>
               )}
 
