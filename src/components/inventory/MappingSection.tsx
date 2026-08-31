@@ -47,6 +47,7 @@ export default function MappingSection() {
   const [confirmAction, setConfirmAction] = useState<(() => void) | null>(null);
   const [adding, setAdding] = useState<{ row: number; col: number } | null>(null);
   const [newShelves, setNewShelves] = useState(3);
+  const [showUnmapped, setShowUnmapped] = useState(false);
 
   const racks = useMemo(() => data?.racks ?? [], [data]);
   const slots = useMemo(() => data?.slots ?? [], [data]);
@@ -394,35 +395,50 @@ export default function MappingSection() {
         </section>
       )}
 
+      {/* A count and a way in — not 194 cards. The number is the useful part day to day; the
+          list only matters when you are actually about to place some, and printing all of it
+          buried the picking route and the floor plan above it. */}
       <section>
-        <h3 className="mb-1 text-sm font-semibold text-tt-text">
-          Unmapped SKUs {unmappedSkus.length > 0 && <span className="text-tt-muted">({unmappedSkus.length})</span>}
-        </h3>
+        <div className="flex flex-wrap items-center gap-3">
+          <h3 className="text-sm font-semibold text-tt-text">
+            Unmapped SKUs{' '}
+            <span className={unmappedSkus.length > 0 ? 'text-tt-red' : 'text-tt-green'}>
+              {unmappedSkus.length}
+            </span>
+          </h3>
+          {unmappedSkus.length > 0 && (
+            <button
+              onClick={() => setShowUnmapped((v) => !v)}
+              className="rounded-lg border border-tt-border px-2 py-1 text-xs text-tt-text hover:bg-tt-card-hover cursor-pointer"
+            >
+              {showUnmapped ? 'Hide' : 'View all'}
+            </button>
+          )}
+        </div>
+
         {unmappedSkus.length === 0 ? (
-          <p className="text-xs text-tt-green">Every active SKU has a section.</p>
+          <p className="mt-1 text-xs text-tt-green">Every active SKU has a section.</p>
         ) : (
-          <>
-            <p className="mb-2 text-xs text-tt-muted">
-              Active SKUs with nowhere to live. These sort <b>last</b> on the pick screen and fall
-              back to SKU-number order until they are placed — mapping is safe to do a few at a
-              time. Inactive SKUs are left out; on-hand count is not used to filter, because
-              here it runs negative on items that ship every day.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {unmappedSkus.slice(0, 40).map((s) => (
-                <span key={s.id} className="flex items-center gap-2 rounded-lg border border-tt-border bg-tt-card px-2 py-1">
-                  <SkuThumb url={s.thumbnail_url} />
-                  <span className="text-xs">
-                    <b className="text-tt-text">#{s.sku_number}</b>
-                    <span className="ml-1 text-tt-muted">{s.title}</span>
-                  </span>
+          <p className="mt-1 text-xs text-tt-muted">
+            Active SKUs with nowhere to live. These sort <b>last</b> on the pick screen and fall
+            back to SKU-number order until they are placed — mapping is safe to do a few at a
+            time. Inactive SKUs are left out; on-hand count is not used to filter, because here
+            it runs negative on items that ship every day.
+          </p>
+        )}
+
+        {showUnmapped && unmappedSkus.length > 0 && (
+          <div className="mt-2 flex max-h-80 flex-wrap gap-2 overflow-y-auto rounded-xl border border-tt-border bg-tt-card p-2">
+            {unmappedSkus.map((s) => (
+              <span key={s.id} className="flex items-center gap-2 rounded-lg border border-tt-border bg-tt-card px-2 py-1">
+                <SkuThumb url={s.thumbnail_url} />
+                <span className="text-xs">
+                  <b className="text-tt-text">#{s.sku_number}</b>
+                  <span className="ml-1 text-tt-muted">{s.title}</span>
                 </span>
-              ))}
-              {unmappedSkus.length > 40 && (
-                <span className="self-center text-xs text-tt-muted">+ {unmappedSkus.length - 40} more</span>
-              )}
-            </div>
-          </>
+              </span>
+            ))}
+          </div>
         )}
       </section>
     </div>

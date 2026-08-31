@@ -39,8 +39,6 @@ interface BoxSku {
   // with nothing on the shelf). A fact about the order, not a live inventory read: it is decided
   // once, when the bind draws short, and never changes. Older payloads omit it → not short.
   shelf_out?: boolean;
-  /** Live stock. Older payloads omit it → treated as unknown, so the badge stays neutral. */
-  qty_on_hand?: number;
   // Where this SKU lives, e.g. "R3A L2" — rack, side, level. Null when it has no section
   // mapped yet; the screen then shows no guidance rather than guessing, and the line sorts
   // last. Older payloads omit both fields.
@@ -78,11 +76,11 @@ type Screen = 'ready' | 'alert' | 'pick' | 'finish' | 'empty';
 const SCAN_TIMEOUT_MS = 15_000;
 
 type PickLine =
-  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean; qty_on_hand: number | null; location_label: string | null; slot_codes: string[] }
+  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean; location_label: string | null; slot_codes: string[] }
   | { kind: 'catalog'; key: string; order_id: string; listing_name: string; seller_sku: string; required_qty: number };
 
 const buildPickLines = (b: Box): PickLine[] => [
-  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true, qty_on_hand: s.qty_on_hand ?? null, location_label: s.location_label ?? null, slot_codes: s.slot_codes ?? [] })),
+  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true, location_label: s.location_label ?? null, slot_codes: s.slot_codes ?? [] })),
   ...(b.catalog_orders ?? []).map((c): PickLine => ({ kind: 'catalog', key: `cat:${c.order_id}`, order_id: c.order_id, listing_name: c.listing_name || 'Catalog item', seller_sku: c.seller_sku || '', required_qty: c.qty || 1 })),
 ];
 
@@ -805,16 +803,16 @@ export default function PackStationOverlay({
                     // location that does not exist. These sort LAST and are still grabbed by
                     // tapping, so nothing about them blocks the box.
                     //
-                    // "In stock" is only claimed when qty_on_hand actually says so. An older
-                    // payload omits it entirely, and asserting stock we have not been told
-                    // about would be worse than saying less.
+                    // Says nothing about stock. On-hand counts here run negative on items that
+                    // ship every day, so any stock claim from this screen would be wrong about
+                    // half the catalogue. Stock has exactly one voice — the OUT OF STOCK band —
+                    // and this badge is suppressed whenever that band is up, so the slot always
+                    // carries exactly one message.
                     <span
                       className="inline-block rounded-lg bg-black/60 text-tt-muted font-bold tracking-wide"
-                      style={{ fontSize: 'clamp(0.75rem, 2.8vh, 1.05rem)', padding: '0.2em 0.5em' }}
+                      style={{ fontSize: 'clamp(0.8rem, 3vh, 1.1rem)', padding: '0.2em 0.5em' }}
                     >
-                      {line.qty_on_hand != null && line.qty_on_hand > 0
-                        ? 'In stock · not mapped'
-                        : 'Not mapped'}
+                      Unmapped
                     </span>
                   )}
                 </div>

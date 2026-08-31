@@ -294,11 +294,11 @@ export async function POST(req: Request) {
 
   // 5) Best-effort inventory enrichment (barcode for item-verify + thumbnail) for pickable SKUs.
   const skuIds = [...agg.keys()];
-  const invById = new Map<string, { barcode: string | null; thumbnail_url: string | null; qty_on_hand: number }>();
+  const invById = new Map<string, { barcode: string | null; thumbnail_url: string | null }>();
   if (skuIds.length) {
     const { data: inv } = await supabase
       .from('inventory_skus')
-      .select('id, barcode, thumbnail_path, qty_on_hand')
+      .select('id, barcode, thumbnail_path')
       .eq('user_id', user.id)
       .in('id', skuIds);
     for (const s of inv ?? []) {
@@ -306,7 +306,6 @@ export async function POST(req: Request) {
       invById.set(String(s.id), {
         barcode: (s.barcode as string | null) ?? null,
         thumbnail_url: path ? supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : null,
-        qty_on_hand: (s.qty_on_hand as number | null) ?? 0,
       });
     }
   }
@@ -329,7 +328,6 @@ export async function POST(req: Request) {
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
         shelf_out: a.short,
-        qty_on_hand: inv?.qty_on_hand ?? 0,
         location_label: null,
         slot_codes: [] as string[],
       };
