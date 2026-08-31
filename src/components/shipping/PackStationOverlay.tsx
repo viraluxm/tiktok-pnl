@@ -784,7 +784,12 @@ export default function PackStationOverlay({
               {/* WHERE it is. Pinned top-left of the hero and pointer-events-none so the whole
                   area stays a tap target. Shown before anything else because it decides where
                   the picker walks; absent when the SKU has no section, rather than guessing. */}
-              {line.kind === 'sku' && (
+              {/* Suppressed entirely while the OUT OF STOCK band is up. That band is the one
+                  thing worth reading on a short item, and a second badge beside it either
+                  competes for attention or — when the SKU is short at bind but still shows
+                  stock on hand — flatly contradicts it. Out of stock wins; not-mapped can
+                  wait. */}
+              {line.kind === 'sku' && !lineShelfOut && (
                 <div className="absolute top-0 left-0 p-2 pointer-events-none">
                   {line.location_label ? (
                     <span

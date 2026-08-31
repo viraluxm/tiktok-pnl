@@ -68,12 +68,16 @@ export default function MappingSection() {
     [slots],
   );
   /**
-   * SKUs still needing a home. Excludes anything with nothing on the shelf — the API already
-   * filters to active SKUs, and nagging about a SKU you have zero (or negative) of is noise
-   * that buries the ones actually worth walking out and placing.
+   * Active SKUs still needing a home.
+   *
+   * This DELIBERATELY does not filter on qty_on_hand, despite that seeming obviously right.
+   * In this catalogue on-hand counts run negative on things that ship constantly: 194 of 386
+   * active SKUs sit at or below zero, and 170 of those sold in the last fortnight — the hair
+   * dryer reads -9 and moved 611 units. Filtering them out hid almost every SKU that actually
+   * needs a shelf. Negative here means the count is wrong, not that the shelf is empty.
    */
   const unmappedSkus = useMemo(
-    () => skus.filter((s) => !assignedSkuIds.has(s.id) && s.qty_on_hand > 0),
+    () => skus.filter((s) => !assignedSkuIds.has(s.id)),
     [skus, assignedSkuIds],
   );
 
@@ -399,9 +403,10 @@ export default function MappingSection() {
         ) : (
           <>
             <p className="mb-2 text-xs text-tt-muted">
-              In stock and with nowhere to live. These sort <b>last</b> on the pick screen and fall
+              Active SKUs with nowhere to live. These sort <b>last</b> on the pick screen and fall
               back to SKU-number order until they are placed — mapping is safe to do a few at a
-              time. Out-of-stock and inactive SKUs are left out.
+              time. Inactive SKUs are left out; on-hand count is not used to filter, because
+              here it runs negative on items that ship every day.
             </p>
             <div className="flex flex-wrap gap-2">
               {unmappedSkus.slice(0, 40).map((s) => (
