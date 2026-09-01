@@ -138,8 +138,18 @@ export default function BadgeKiosk() {
   const handleScan = useCallback(
     async (raw: string) => {
       if (overlayRef.current || lockedRef.current) return; // ignore scans while a modal is open or idle-locked
-      const badge = raw.trim().toUpperCase();
-      if (!badge) return;
+      // Normalise ONLY a badge code. BADGE_ALPHABET is uppercase-only by design, so folding case
+      // there is free and absorbs a scanner configured to emit lower case.
+      //
+      // A rotating QR clock code is NOT case-foldable: its nonce is randomBytes(16).base64url,
+      // which is case-SENSITIVE, so uppercasing it produces a value matching no clock_codes row —
+      // the consume updates nothing and the station shows "Code not recognized". The server
+      // already branches on the LNS1 prefix and passes such a code through untouched
+      // (api/kiosk/scan); this mirrors that branch, which is the layer where the case was
+      // previously being destroyed before the server ever saw it.
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      const badge = trimmed.startsWith('LNS1') ? trimmed : trimmed.toUpperCase();
       if (dismissTimer.current) clearTimeout(dismissTimer.current);
       setStatus('pending');
       setResult(null);
