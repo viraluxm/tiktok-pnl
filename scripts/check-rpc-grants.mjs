@@ -44,6 +44,17 @@ const SERVICE_ROLE_ONLY = new Set([
   // Owner-scoped host-performance twin (111) — bypasses RLS, caller asserts p_owner_user_ids.
   // Called ONLY via createAdminClient from /api/member/team/host-performance.
   'pnl_host_performance_as',
+  // Owner-scoped P&L reads (089), same posture as pnl_host_performance_as: they bypass RLS and
+  // take the owner set as a PARAMETER, so the route — not the database — is the boundary. Both
+  // are reached only through requireMemberScope(), which hands back a service-role client after
+  // resolving ownerIds, and /api/member/pnl/show-hourly additionally 403s a foreign session_id
+  // before calling (a foreign id would otherwise return zero rows, indistinguishable from a
+  // quiet show).
+  //
+  // These MUST NOT be granted to `authenticated`. The grant the check was asking for would let
+  // any signed-in user call them directly with someone else's p_owner_user_ids and read that
+  // owner's P&L. They were missing from this list, not from the database.
+  'pnl_by_show_as', 'pnl_show_hourly_as',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
