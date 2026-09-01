@@ -21,6 +21,7 @@ import PersonAvatar from './PersonAvatar';
 import MonthGridView, { MAX_AVATARS } from './MonthGridView';
 import DayPeopleModal from './DayPeopleModal';
 import PendingConfirmModal from './PendingConfirmModal';
+import TimeOffQueue, { useTimeOff } from './TimeOffQueue';
 import DayAddShiftModal from './DayAddShiftModal';
 import ShiftEditorModal, { type EditorIntent } from './ShiftEditorModal';
 import { makeEditorHandlers } from './editorHandlers';
@@ -58,6 +59,8 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   const [roleFilter, setRoleFilter] = useState<RoleFilterValue>('all');
   const [openDate, setOpenDate] = useState<string | null>(null);
   const [showPending, setShowPending] = useState(false);
+  const [showTimeOff, setShowTimeOff] = useState(false);
+  const { rows: timeOffRows, reload: reloadTimeOff, pending: timeOffPending } = useTimeOff();
   const [addOnDate, setAddOnDate] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
 
@@ -228,6 +231,16 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
               {monthPending} to confirm
             </button>
           )}
+          {timeOffPending.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowTimeOff(true)}
+              title="Review time-off requests"
+              className="rounded-full bg-tt-cyan/15 px-2.5 py-0.5 text-[10px] font-bold text-tt-cyan transition-colors hover:bg-tt-cyan/25"
+            >
+              {timeOffPending.length} time-off
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -305,6 +318,15 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           onClose={() => setAddOnDate(null)}
           onCreateScheduled={createScheduled}
           onCreateWorked={createWorked}
+        />
+      )}
+
+      {showTimeOff && (
+        <TimeOffQueue
+          rows={timeOffRows}
+          employees={employees}
+          onClose={() => setShowTimeOff(false)}
+          onChanged={reloadTimeOff}
         />
       )}
 
