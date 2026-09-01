@@ -695,7 +695,25 @@ export default function PackStationOverlay({
                 <span className="mr-2" aria-hidden>⚠</span>{err}
               </div>
             )}
-            <div className="mt-10 text-sm text-tt-muted break-words">{pickedCount} {pickedCount === 1 ? 'box' : 'boxes'} picked today</div>
+            {/* The day's count, loud.
+                It lives on the READY screen rather than during a pick on purpose: this is the
+                beat right after finishing a box, when the number has just gone up and there is
+                nothing competing for the screen. Putting it over the item mid-pick would fight
+                the thing the picker actually needs to look at. */}
+            <div className="mt-8 flex flex-col items-center">
+              <div
+                className={`font-extrabold leading-none tabular-nums ${pickedCount > 0 ? 'text-tt-green' : 'text-tt-muted'}`}
+                style={{ fontSize: 'clamp(3.5rem, 20vh, 9rem)' }}
+              >
+                {pickedCount}
+              </div>
+              <div
+                className="mt-1 font-bold uppercase tracking-[0.2em] text-tt-muted"
+                style={{ fontSize: 'clamp(0.7rem, 2.4vh, 1.05rem)' }}
+              >
+                {pickedCount === 1 ? 'box' : 'boxes'} picked today
+              </div>
+            </div>
           </div>
         )}
 
