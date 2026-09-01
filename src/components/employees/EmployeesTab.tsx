@@ -5,15 +5,14 @@ import { fmt } from '@/lib/calculations';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
 import type { Employee, EmployeeStatus } from '@/types';
 import PerformanceView from './PerformanceView';
-import { AspHitBadge, BelowBreakEvenBadge } from './HostPerformanceBadges';
 import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
 import ShiftsView from './ShiftsView';
 import PayView from './PayView';
-import { Field, StatusBadge, titleCase, ROLE_PRESETS, STATUSES } from './shared';
-import MobileDataCard from '@/components/ui/MobileDataCard';
+import { Field, titleCase, ROLE_PRESETS, STATUSES } from './shared';
+import RosterGrid from './RosterGrid';
+import EmployeeDetailModal from './EmployeeDetailModal';
 import { useScheduleLinks, scheduleLinkUrl, type ScheduleLink } from '@/hooks/useScheduleLinks';
-import { ScheduleLinkButton, ScheduleLinkSection, LINK_WARNING, copyText } from './ScheduleLinkButton';
-import { BadgeButton } from './BadgeButton';
+import { ScheduleLinkSection, LINK_WARNING, copyText } from './ScheduleLinkButton';
 import { useBadges, type ActiveBadge } from '@/hooks/useBadges';
 
 interface EmployeesTabProps {
@@ -350,6 +349,7 @@ function RosterView({
   onDelete: (e: Employee) => void;
 }) {
   const [copiedAll, setCopiedAll] = useState(false);
+  const [detail, setDetail] = useState<Employee | null>(null);
   const anyLinks = employees.some((e) => e.status === 'active' && links[e.id]);
 
   async function handleCopyAll() {
@@ -388,135 +388,24 @@ function RosterView({
           <button onClick={onDismissWarn} className="shrink-0 text-tt-yellow/70 hover:text-tt-yellow text-xs">Dismiss</button>
         </div>
       )}
-      <div className="hidden md:block overflow-x-auto">
-        <table className="w-full border-collapse">
-          <thead>
-            <tr className="border-b border-tt-border">
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Name</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Role</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Status</th>
-              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hourly Rate</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hire Date</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Probation Ends</th>
-              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">ASP Hit (7d)</th>
-              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Below Break-even (14d)</th>
-              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {employees.map((e) => (
-              <tr key={e.id} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
-                <td className="px-5 py-3 text-[13px] text-tt-text">{e.name}</td>
-                <td className="px-5 py-3 text-xs text-tt-muted">{titleCase(e.role)}</td>
-                <td className="px-5 py-3"><StatusBadge status={e.status} /></td>
-                <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(e.hourly_rate)}</td>
-                <td className="px-5 py-3 text-xs text-tt-muted">{e.hire_date || '—'}</td>
-                <td className="px-5 py-3 text-xs text-tt-muted">{e.probation_end_date || '—'}</td>
-                <td className="px-5 py-3 text-center">
-                  {e.role?.toLowerCase() === 'host' ? <AspHitBadge agg={hostPerf[e.id]} /> : null}
-                </td>
-                <td className="px-5 py-3 text-center">
-                  {e.role?.toLowerCase() === 'host' ? <BelowBreakEvenBadge agg={hostPerf[e.id]} /> : null}
-                </td>
-                <td className="px-5 py-3 text-center whitespace-nowrap">
-                  <ScheduleLinkButton
-                    employeeId={e.id}
-                    token={links[e.id]?.token ?? null}
-                    onMint={onMintLink}
-                    onCreated={onLinkCreated}
-                  />
-                  <span className="ml-2 inline-block">
-                    <BadgeButton
-                      employeeId={e.id}
-                      badge={badges[e.id] ?? null}
-                      onIssue={onIssueBadge}
-                      onReissue={onReissueBadge}
-                    />
-                  </span>
-                  <button
-                    onClick={() => onEdit(e)}
-                    className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => onDelete(e)}
-                    className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
-                  >
-                    Remove
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {employees.length === 0 && (
-              <tr>
-                <td colSpan={9} className="px-5 py-12 text-center text-tt-muted text-sm">
-                  {isLoading ? 'Loading…' : 'No employees yet — add your first team member'}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <RosterGrid employees={employees} isLoading={isLoading} onOpen={setDetail} />
 
-      {/* Mobile card list — same rows + handlers as the desktop table above */}
-      <div className="md:hidden p-4 flex flex-col gap-3">
-        {employees.map((e) => {
-          const isHost = e.role?.toLowerCase() === 'host';
-          return (
-            <MobileDataCard
-              key={e.id}
-              title={e.name}
-              subtitle={titleCase(e.role)}
-              badge={<StatusBadge status={e.status} />}
-              stats={[
-                { label: 'Hourly Rate', value: fmt(e.hourly_rate) },
-                { label: 'Hire Date', value: e.hire_date || '—' },
-                { label: 'Probation Ends', value: e.probation_end_date || '—' },
-                ...(isHost
-                  ? [
-                      { label: 'ASP Hit (7d)', value: <AspHitBadge agg={hostPerf[e.id]} /> },
-                      { label: 'Below Break-even (14d)', value: <BelowBreakEvenBadge agg={hostPerf[e.id]} /> },
-                    ]
-                  : []),
-              ]}
-              actions={
-                <>
-                  <ScheduleLinkButton
-                    employeeId={e.id}
-                    token={links[e.id]?.token ?? null}
-                    onMint={onMintLink}
-                    onCreated={onLinkCreated}
-                  />
-                  <BadgeButton
-                    employeeId={e.id}
-                    badge={badges[e.id] ?? null}
-                    onIssue={onIssueBadge}
-                    onReissue={onReissueBadge}
-                  />
-                  <button
-                    onClick={() => onEdit(e)}
-                    className="flex items-center justify-center rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => onDelete(e)}
-                    className="flex items-center justify-center rounded-lg text-xs font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
-                  >
-                    Remove
-                  </button>
-                </>
-              }
-            />
-          );
-        })}
-        {employees.length === 0 && (
-          <div className="px-1 py-12 text-center text-tt-muted text-sm">
-            {isLoading ? 'Loading…' : 'No employees yet — add your first team member'}
-          </div>
-        )}
-      </div>
+      {detail && (
+        <EmployeeDetailModal
+          employee={detail}
+          hostAgg={hostPerf[detail.id]}
+          link={links[detail.id]}
+          badge={badges[detail.id] ?? null}
+          hourlyRate={fmt(detail.hourly_rate)}
+          onClose={() => setDetail(null)}
+          onMintLink={onMintLink}
+          onLinkCreated={onLinkCreated}
+          onIssueBadge={onIssueBadge}
+          onReissueBadge={onReissueBadge}
+          onEdit={onEdit}
+          onDelete={onDelete}
+        />
+      )}
     </div>
   );
 }
