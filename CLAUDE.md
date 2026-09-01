@@ -116,19 +116,40 @@ Claude may apply **Class A** directly via the Management API, following the reci
 reporting before/after. **Class B is user-applied by hand.** Claude writes the migration file
 either way — the repo file under `supabase/migrations/` remains the only record, since this DB
 has no ledger.
-### `shift_rules` is a PAYROLL surface, not only a scheduling one
+### `shift_rules` is NOT a pay input — punches are the only one
 
-`shift_rules` is on the data-write exempt list above (no live-show reader), but **exempt from
-the write gate does NOT mean low-stakes — it moves money.** PayView projects **active**
-recurring rules into pay at read time (`generateRecurringShifts` → `computePay` in
-`src/lib/employees.ts` / `PayView.tsx`), so scheduled hours become **pay owed** the moment a
-rule exists — independent of the past-materializer and of `SHIFT_MATERIALIZE_WRITE_ENABLED`.
-A recurring day with no punch pays full scheduled hours (manual/recurring shifts have no
-`confirmed_at` gate; the only no-show handling is a manual `shift_exceptions` `'skip'`), and
-it does **not** dedup against time-clock punches (the suppression set keys on `source_rule_id`,
-which punches lack) → double-pay where both exist. **Any write to `shift_rules`
-(insert / activate / edit times/days) requires checking the pay path (PayView / computePay),
-not just the scheduling path.** (This is why the Aug-2026 rule seed had to be deactivated.)
+**Superseded warning.** This section used to say that PayView projects active recurring rules
+into pay at read time, so a rule created pay owed the moment it existed, double-paying against
+any punch on the same day. **That was true before Deploy C and is no longer true.** It kept
+producing a wrong double-pay warning long after the code changed, so it is corrected here.
+
+Pay comes from real `shifts` rows only. Verified on `main`:
+
+- `PayView.tsx` calls `computePay(employees, periodShifts)` — the recurring projection
+  (`periodGenerated`) is computed but passed **only** to the display column, rendered as
+  "Scheduled Xh · Paid Yh" so a gap is visible instead of silently paid.
+- `isPayableShift()` in `src/lib/employees.ts` is the single choke point:
+
+      if (isOpenShift(s)) return false;              // indeterminate hours
+      if (s.source_rule_id != null) return false;    // materialized from a rule = plan, never pay
+      if (s.source === 'time_clock' && s.confirmed_at == null) return false;
+
+  That middle guard is what neutralises BOTH writers of rule-derived rows at once — the
+  past-materializer cron and `freezeRulePast` on rule delete/deactivate. **Do not remove it**
+  without moving the guarantee somewhere else; it is the whole reason a rule cannot pay anyone.
+
+So creating, activating or editing a `shift_rule` does **not** create pay owed. What it does
+affect:
+
+- **the schedule shown** — rule projections are most of what the calendar renders as
+  "Scheduled", and what the `/s/[token]` clock gate validates a punch against;
+- **history, retroactively** — projections are computed at read time from *active* rules, so
+  deactivating a rule blanks the scheduled span on PAST days too, taking every clocked-vs-
+  scheduled delta with it. Materialize the past into `shift_instances` first if that context
+  matters.
+
+(The Aug-2026 rule seed was deactivated under the old, then-correct understanding. Its removal
+is not evidence that rules pay — under today's code they do not.)
 
 ### Deploy risk classes (the gate above is about DATABASE writes, not all deploys)
 
