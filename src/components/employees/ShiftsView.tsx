@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { enterFullscreen } from '@/lib/fullscreen';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import { employeeHasActiveRules } from '@/lib/schedule/scheduledSpan';
@@ -105,13 +106,16 @@ export default function ShiftsView({
   // denied), THEN navigate — so it's part of the user gesture (not a delayed effect on the
   // destination route, which browsers can reject). Client-side push keeps the same document,
   // so fullscreen persists into the kiosk. If denied, we still navigate (kiosk fallback covers it).
-  // The badge kiosk lives at /kiosk and is reachable ONLY by the dedicated `timeclock` login —
-  // every /api/kiosk/* route re-checks app_metadata.role and 403s anyone else, including an
-  // admin. So this cannot open it; it points at the setup surface instead, where badges are
-  // issued and the kiosk is enabled. The old tap-a-name kiosk at /dashboard/time-clock runs
-  // inside the ADMIN session, which is why the warehouse tablet must not use it.
-  function openBadgeSetup() {
-    router.push('/admin/badges');
+  // The IN-USE time clock. Deliberately still /dashboard/time-clock (the tap-a-name kiosk):
+  // it is what the warehouse runs every day, and the badge/link rollout is still being trialled.
+  // Do not repoint this until that trial is done and the replacement is actually adopted.
+  //
+  // It could not point at /kiosk in any case — every /api/kiosk/* route re-checks
+  // app_metadata.role and 403s an admin, so the badge kiosk is reachable only by the dedicated
+  // `timeclock` login on the warehouse machine.
+  async function openTimeClock() {
+    await enterFullscreen();
+    router.push('/dashboard/time-clock');
   }
 
   async function saveEditing() {
@@ -136,16 +140,16 @@ export default function ShiftsView({
 
   return (
     <div className="space-y-6">
-      {/* Badge/kiosk setup. The List view is gone — the calendar is the only shift surface now,
-          so there is nothing to toggle between. */}
+      {/* Open the in-use time clock. The List view is gone — the calendar is the only shift
+          surface now, so there is nothing to toggle between. */}
       <div className="flex items-center justify-between gap-3">
         <button
           type="button"
-          onClick={openBadgeSetup}
+          onClick={openTimeClock}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors cursor-pointer"
         >
           <span className="w-1.5 h-1.5 rounded-full bg-tt-cyan" />
-          Badges &amp; Kiosk
+          Open Time Clock
         </button>
         <TeamScheduleLinkButton />
       </div>
