@@ -17,7 +17,7 @@ const outFile = join(mkdtempSync(join(tmpdir(), 'shape-')), 'shape.mjs');
 writeFileSync(outFile, outputText);
 const {
   sectionsOn, sectionsFacing, reachableFrom, isReachableFrom, canAddSection, canChangeSide,
-  planShelfInsert, planShelfRemove,
+  planShelfInsert, planShelfRemove, canInsertShelf,
   nextSectionIndex, planShelfChange, nextRackName, clampShelves, shelfIndexes,
   MIN_SHELVES, MAX_SHELVES, MAX_SECTIONS_PER_SIDE,
 } = await import(pathToFileURL(outFile).href);
@@ -205,6 +205,36 @@ console.log('\nInserting and removing a shelf mid-rack');
   const slots = [sec(1, 1, 'A'), sec(2, 1, 'A'), sec(3, 1, 'A')];
   check('removing the TOP shelf renumbers nothing',
     planShelfRemove(slots, 3).renumbered.length === 0);
+}
+
+console.log('\nNothing goes below L1');
+{
+  // The bottom shelf sits on the floor, so there is no space under it. Enforcing this also
+  // means L1 can never be renumbered — its printed labels stay correct forever.
+  check('below L1 is refused', canInsertShelf(4, 1, 'below').ok === false);
+  check('and says why', /floor/i.test(canInsertShelf(4, 1, 'below').reason ?? ''),
+    canInsertShelf(4, 1, 'below').reason);
+  check('ABOVE L1 is fine', canInsertShelf(4, 1, 'above').ok === true);
+  check('below any higher shelf is fine', canInsertShelf(4, 2, 'below').ok === true);
+}
+{
+  check('a full rack refuses either direction',
+    canInsertShelf(MAX_SHELVES, 2, 'above').ok === false &&
+    canInsertShelf(MAX_SHELVES, 2, 'below').ok === false);
+  check('a shelf that does not exist is refused', canInsertShelf(4, 9, 'above').ok === false);
+}
+{
+  // The payoff of the L1 rule: no legal insertion can ever renumber the bottom shelf.
+  const slots = [sec(1, 1, 'A'), sec(2, 1, 'A'), sec(3, 1, 'A')];
+  const legal = [];
+  for (let at = 1; at <= 3; at++) {
+    for (const pos of ['above', 'below']) {
+      if (canInsertShelf(3, at, pos).ok) legal.push(planShelfInsert(slots, at, pos));
+    }
+  }
+  check('no legal insert ever renumbers L1',
+    legal.every((p) => p.renumbered.every((x) => x.shelf_index > 1)),
+    `${legal.length} legal insertions checked`);
 }
 
 console.log('\nAuto-naming');

@@ -6,7 +6,7 @@ import RackIsometric from './RackIsometric';
 import { slotAddress } from '@/lib/mapping/route';
 import { printSectionLabels } from '@/lib/mapping/slotLabel';
 import {
-  canAddSection, MIN_SHELVES, MAX_SHELVES,
+  canAddSection, canInsertShelf, MIN_SHELVES, MAX_SHELVES,
   type SectionSide, type RackSide,
 } from '@/lib/mapping/shape';
 import type { Pt } from '@/lib/mapping/iso';
@@ -378,7 +378,8 @@ function ShelfMenu({
     ? Math.min(Math.max(anchor.x, WIDTH / 2 + 8), containerWidth - WIDTH / 2 - 8)
     : anchor.x;
 
-  const atMax = shelfCount >= MAX_SHELVES;
+  const canAbove = canInsertShelf(shelfCount, shelf, 'above');
+  const canBelow = canInsertShelf(shelfCount, shelf, 'below');
   const atMin = shelfCount <= MIN_SHELVES;
   // Inserting ABOVE L{shelf} renumbers the shelves above it; BELOW renumbers this one too.
   const staleAbove = shelfCount - shelf;
@@ -405,7 +406,7 @@ function ShelfMenu({
       <div className="space-y-1.5">
         <button
           onClick={() => onInsert('above')}
-          disabled={busy || atMax}
+          disabled={busy || !canAbove.ok}
           className="w-full rounded-lg border border-tt-border px-2 py-2 text-left text-xs text-tt-text disabled:opacity-40 cursor-pointer"
         >
           <b>Add a shelf above</b> this one
@@ -416,17 +417,19 @@ function ShelfMenu({
         </button>
         <button
           onClick={() => onInsert('below')}
-          disabled={busy || atMax}
+          disabled={busy || !canBelow.ok}
           className="w-full rounded-lg border border-tt-border px-2 py-2 text-left text-xs text-tt-text disabled:opacity-40 cursor-pointer"
         >
           <b>Add a shelf below</b> this one
           <span className="block text-[10px] text-tt-muted">
-            becomes L{shelf} · {staleBelow} shelf{staleBelow === 1 ? '' : 'ves'} renumber
+            {canBelow.ok
+              ? `becomes L${shelf} · ${staleBelow} shelf${staleBelow === 1 ? '' : 'ves'} renumber`
+              : canBelow.reason}
           </span>
         </button>
       </div>
 
-      {atMax && (
+      {!canAbove.ok && shelfCount >= MAX_SHELVES && (
         <p className="mt-2 text-[10px] text-tt-muted">
           A rack holds at most {MAX_SHELVES} shelves.
         </p>

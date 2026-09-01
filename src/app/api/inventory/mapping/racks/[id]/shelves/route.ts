@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import {
-  planShelfInsert, planShelfRemove, MIN_SHELVES, MAX_SHELVES, type SlotLike,
+  planShelfInsert, planShelfRemove, canInsertShelf, MIN_SHELVES, type SlotLike,
 } from '@/lib/mapping/shape';
 
 export const dynamic = 'force-dynamic';
@@ -70,15 +70,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const at = Math.trunc(Number(body.at));
   const position = body.position === 'below' ? 'below' : 'above';
-  if (!Number.isFinite(at) || at < 1 || at > rack.shelf_count) {
+  if (!Number.isFinite(at)) {
     return NextResponse.json({ error: 'That shelf does not exist.' }, { status: 400 });
   }
-  if (rack.shelf_count >= MAX_SHELVES) {
-    return NextResponse.json(
-      { error: `A rack holds at most ${MAX_SHELVES} shelves.` },
-      { status: 409 },
-    );
-  }
+  // Shared with the UI so the two cannot disagree — and enforced HERE because the UI is not
+  // the boundary. Notably: nothing goes below L1.
+  const allowed = canInsertShelf(rack.shelf_count, at, position);
+  if (!allowed.ok) return NextResponse.json({ error: allowed.reason }, { status: 409 });
 
   const plan = planShelfInsert(slots, at, position);
 

@@ -116,6 +116,26 @@ export function canChangeSide(
   );
 }
 
+/**
+ * Whether a shelf can be inserted at this position.
+ *
+ * Nothing goes below L1. The bottom shelf sits at floor level, so there is no physical space
+ * beneath it — and refusing this has a useful side effect: L1 can never be renumbered, so the
+ * bottom shelf's printed labels are permanently correct.
+ */
+export function canInsertShelf(
+  shelfCount: number,
+  at: number,
+  position: 'above' | 'below',
+): { ok: true } | { ok: false; reason: string } {
+  if (shelfCount >= MAX_SHELVES) return { ok: false, reason: `A rack holds at most ${MAX_SHELVES} shelves.` };
+  if (at < 1 || at > shelfCount) return { ok: false, reason: 'That shelf does not exist.' };
+  if (position === 'below' && at === 1) {
+    return { ok: false, reason: 'Nothing goes below L1 — it sits on the floor.' };
+  }
+  return { ok: true };
+}
+
 export interface ShelfInsertPlan {
   /** The number the new shelf will take. */
   newShelfIndex: number;
