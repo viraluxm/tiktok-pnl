@@ -93,6 +93,12 @@ export type EmployeeStatus = 'active' | 'probation' | 'former';
 // values are allowed.
 export type EmployeeRole = 'host' | 'fulfillment' | 'manager' | 'support' | 'other';
 
+// Fulfillment sub-type (migration 121). NULL/absent = unset. DISPLAY AND GROUPING ONLY —
+// nothing in the app gates on it, so a 'packer' remains a fully eligible picker. `role` stays
+// 'fulfillment' for all of them; see the migration header for why splitting `role` would
+// silently break picker attribution.
+export type FulfillmentTrackValue = 'picker' | 'packer' | 'flex';
+
 export interface Employee {
   id: string;
   user_id: string;
@@ -100,6 +106,7 @@ export interface Employee {
   role: string;
   status: EmployeeStatus;
   hourly_rate: number;
+  fulfillment_track?: FulfillmentTrackValue | null;
   hire_date: string | null;
   probation_end_date: string | null;
   store_id?: string | null;

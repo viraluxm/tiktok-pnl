@@ -35,6 +35,7 @@ const EMPTY_FORM: EmployeeInput = {
   hourly_rate: 0,
   hire_date: null,
   probation_end_date: null,
+  fulfillment_track: null,
 };
 
 export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
@@ -83,6 +84,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
       hourly_rate: e.hourly_rate,
       hire_date: e.hire_date,
       probation_end_date: e.probation_end_date,
+      fulfillment_track: e.fulfillment_track ?? null,
     });
     setFormError(null);
     setModalOpen(true);
@@ -224,7 +226,13 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                 <Field label="Role">
                   <select
                     value={form.role}
-                    onChange={(e) => setForm({ ...form, role: e.target.value })}
+                    onChange={(e) => setForm({
+                      ...form,
+                      role: e.target.value,
+                      // Leaving fulfillment clears the track — a host must never carry
+                      // 'packer', which would show up as a phantom bucket on the cost roll-up.
+                      fulfillment_track: e.target.value === 'fulfillment' ? form.fulfillment_track : null,
+                    })}
                     className="w-full bg-white/5 border border-tt-border rounded-xl px-4 py-2.5 text-sm text-tt-text focus:outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
                   >
                     {ROLE_PRESETS.map((r) => (
@@ -244,6 +252,33 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                   </select>
                 </Field>
               </div>
+
+              {/* Fulfillment sub-type. Only offered for role 'fulfillment' — it is meaningless
+                  on a host, and a stray value would create a phantom bucket on the cost
+                  roll-up. DISPLAY AND GROUPING ONLY: nothing gates on it, so a Packer stays a
+                  fully eligible picker and a wrong setting can never lock anyone out of
+                  picking mid-shift (migration 121). */}
+              {form.role === 'fulfillment' && (
+                <Field label="Fulfillment Track">
+                  <select
+                    value={form.fulfillment_track ?? ''}
+                    onChange={(e) => setForm({
+                      ...form,
+                      fulfillment_track: (e.target.value || null) as EmployeeInput['fulfillment_track'],
+                    })}
+                    className="w-full bg-white/5 border border-tt-border rounded-xl px-4 py-2.5 text-sm text-tt-text focus:outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
+                  >
+                    <option value="" className="bg-tt-card text-tt-text">Unset</option>
+                    <option value="picker" className="bg-tt-card text-tt-text">Picker</option>
+                    <option value="packer" className="bg-tt-card text-tt-text">Packer</option>
+                    <option value="flex" className="bg-tt-card text-tt-text">Flex — picks, packs, or floats</option>
+                  </select>
+                  <p className="mt-1.5 text-[11px] text-tt-muted">
+                    Groups the fulfillment cost report. Does not restrict anything — every
+                    fulfillment employee can still be credited with a pick.
+                  </p>
+                </Field>
+              )}
 
               <Field label="Hourly Rate ($)">
                 <input

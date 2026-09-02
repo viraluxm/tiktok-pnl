@@ -12,6 +12,9 @@ export interface EmployeeInput {
   hourly_rate: number;
   hire_date: string | null;
   probation_end_date: string | null;
+  // Only meaningful when role === 'fulfillment'; null otherwise. The DB check constraint
+  // (migration 121) accepts NULL | picker | packer | flex and rejects anything else.
+  fulfillment_track: Employee['fulfillment_track'];
 }
 
 export function useEmployees() {
