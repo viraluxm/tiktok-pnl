@@ -104,7 +104,7 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
                 ) : s.status === 'claimed' ? (
                   <span className="text-xs text-tt-green">Picked up</span>
                 ) : releasableNow ? (
-                  <ReleaseButton token={token} instanceId={s.id} periodEnd={periodEndLabel} atCap={atCap} />
+                  <ReleaseButton token={token} instanceId={s.id} periodEnd={periodEndLabel} atCap={atCap} dropsUsed={drops.drops} dropCap={DROP_CAP} />
                 ) : null}
               </div>
             </div>

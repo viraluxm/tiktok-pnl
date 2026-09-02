@@ -21,42 +21,100 @@ export function ReleaseButton({
   instanceId,
   periodEnd,
   atCap,
+  dropsUsed,
+  dropCap,
 }: {
   token: string;
   instanceId: string;
   periodEnd: string; // 'Mon, Aug 24' — shown on the confirm step
-  atCap: boolean; // already at 2 net drops this period
+  atCap: boolean; // already at the cap this pay period
+  dropsUsed: number;
+  dropCap: number;
 }) {
   const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  async function onClick() {
-    const warn = atCap
-      ? '⚠ You are already at 2 drops this pay period. Releasing this shift risks a write-up.\n\n'
-      : '';
-    if (!window.confirm(`${warn}Release this shift? Your pay period ends ${periodEnd}. It will go to the open board for a teammate to pick up.`)) {
-      return;
-    }
+  // Replaces a window.confirm. A native confirm cannot collect the reason, and it stated the
+  // consequence only AT the cap — so a worker on their first drop was told nothing and a worker
+  // on their second was warned about a write-up that never actually arrived, because the cap was
+  // not enforced anywhere. Both are now true statements: the position is always shown, and the
+  // server refuses past the cap (routing to a manager rather than hard-blocking into a no-show).
+  async function submit() {
+    if (!reason.trim()) { setErr('Please say why you cannot work this shift.'); return; }
     setBusy(true);
     setErr(null);
-    const { ok, data } = await post(`/s/${token}/release`, { instanceId });
+    const { ok, data } = await post(`/s/${token}/release`, { instanceId, reason: reason.trim() });
     setBusy(false);
-    if (ok) router.refresh();
+    if (ok) { setOpen(false); setReason(''); router.refresh(); }
     else setErr(String(data.error ?? 'Could not release'));
   }
 
+  const remaining = Math.max(0, dropCap - dropsUsed);
+
   return (
-    <div className="flex flex-col items-end gap-1">
+    <>
       <button
-        onClick={onClick}
-        disabled={busy}
-        className="rounded-md border border-tt-border px-3 py-1.5 text-xs font-medium text-tt-text hover:bg-tt-card-hover disabled:opacity-50"
+        onClick={() => { setOpen(true); setErr(null); }}
+        className="rounded-md border border-tt-border px-3 py-1.5 text-xs font-medium text-tt-text hover:bg-tt-card-hover"
       >
-        {busy ? 'Releasing…' : 'Release'}
+        Release
       </button>
-      {err && <span className="text-[11px] text-tt-red">{err}</span>}
-    </div>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 sm:items-center sm:p-8"
+          onClick={() => !busy && setOpen(false)}
+          role="dialog" aria-modal="true" aria-label="Release this shift"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-t-2xl border border-tt-border bg-tt-card p-4 sm:rounded-2xl"
+          >
+            <h2 className="text-base font-semibold text-tt-text">Release this shift</h2>
+
+            {/* Always state where they stand, not only at the cap. */}
+            <p className={`mt-1 text-xs ${atCap ? 'text-tt-red' : 'text-tt-muted'}`}>
+              {atCap
+                ? `You have used all ${dropCap} drops this pay period. A manager has to release this one for you.`
+                : `This will be drop ${dropsUsed + 1} of ${dropCap} this pay period${remaining <= 1 ? ' — your last one.' : '.'}`}
+            </p>
+            <p className="mt-1 text-xs text-tt-muted">
+              Pay period ends {periodEnd}. It goes to the open board for a teammate to pick up — if you
+              claim one of theirs in the same period, this drop cancels out.
+            </p>
+
+            <label className="mt-3 block text-[10px] uppercase tracking-wide text-tt-muted">
+              Why can&apos;t you work it? <span className="text-tt-red">*</span>
+              <textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                maxLength={300}
+                rows={3}
+                disabled={atCap}
+                placeholder="e.g. doctor&apos;s appointment I couldn&apos;t move"
+                className="mt-1 w-full resize-none rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text placeholder:text-tt-muted/60 disabled:opacity-50"
+              />
+            </label>
+
+            {err && <p className="mt-2 text-xs text-tt-red">{err}</p>}
+
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button" onClick={() => setOpen(false)} disabled={busy}
+                className="flex-1 rounded-lg border border-tt-border py-2.5 text-sm font-semibold text-tt-muted disabled:opacity-40"
+              >Cancel</button>
+              <button
+                type="button" onClick={submit} disabled={busy || atCap || !reason.trim()}
+                className="flex-1 rounded-lg bg-tt-red py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+              >{busy ? 'Releasing…' : 'Release'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

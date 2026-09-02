@@ -42,6 +42,10 @@ const CONFLICT_CODES = new Set(['ALREADY_CLAIMED', 'NOT_RELEASABLE']);
 const BAD_REQUEST_CODES = new Set([
   'NOT_YOUR_SHIFT', 'TOO_LATE', 'WRONG_ROLE', 'OWN_RELEASE', 'ALREADY_WORKING_THAT_DAY',
   'NOT_FOUND', 'NO_TEMPLATES', 'TEMPLATE_UNAVAILABLE',
+  // Release guards. Both MUST be listed: an unlisted code falls through to a bare 500 whose body
+  // is "Something went wrong", which would hide the one thing the worker needs to read — that a
+  // reason is required, or that they are at the cap and should contact a manager.
+  'REASON_REQUIRED', 'DROP_CAP_REACHED',
 ]);
 export function scheduleErrorResponse(e: unknown): NextResponse {
   const code = (e as { code?: string })?.code;
