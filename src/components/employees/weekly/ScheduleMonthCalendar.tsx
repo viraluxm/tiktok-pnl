@@ -21,7 +21,7 @@ import PersonAvatar from './PersonAvatar';
 import MonthGridView, { MAX_AVATARS } from './MonthGridView';
 import DayPeopleModal from './DayPeopleModal';
 import PendingConfirmModal from './PendingConfirmModal';
-import TimeOffQueue, { useTimeOff } from './TimeOffQueue';
+import TimeOffQueue, { useTimeOff, indexTimeOffByDate } from './TimeOffQueue';
 import DayAddShiftModal from './DayAddShiftModal';
 import ShiftEditorModal, { type EditorIntent } from './ShiftEditorModal';
 import { makeEditorHandlers } from './editorHandlers';
@@ -61,6 +61,9 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   const [showPending, setShowPending] = useState(false);
   const [showTimeOff, setShowTimeOff] = useState(false);
   const { rows: timeOffRows, reload: reloadTimeOff, pending: timeOffPending } = useTimeOff();
+  // Pending + approved days, so the grid shows who is asking to be off BEFORE the period is built —
+  // which is the whole point of asking early. Denied days are excluded: that person is working.
+  const timeOffByDate = useMemo(() => indexTimeOffByDate(timeOffRows), [timeOffRows]);
   const [addOnDate, setAddOnDate] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
 
@@ -231,14 +234,18 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
               {monthPending} to confirm
             </button>
           )}
-          {timeOffPending.length > 0 && (
+          {timeOffRows.length > 0 && (
             <button
               type="button"
               onClick={() => setShowTimeOff(true)}
               title="Review time-off requests"
-              className="rounded-full bg-tt-cyan/15 px-2.5 py-0.5 text-[10px] font-bold text-tt-cyan transition-colors hover:bg-tt-cyan/25"
+              className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold transition-colors ${
+                timeOffPending.length > 0
+                  ? 'bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25'
+                  : 'bg-white/5 text-tt-muted hover:bg-white/10'
+              }`}
             >
-              {timeOffPending.length} time-off
+              {timeOffPending.length > 0 ? `${timeOffPending.length} time-off` : 'Time off'}
             </button>
           )}
         </div>
@@ -267,12 +274,17 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
         peak={peak}
         onOpenDay={setOpenDate}
         onAddDay={setAddOnDate}
+        timeOffByDate={timeOffByDate}
+        onOpenTimeOff={() => setShowTimeOff(true)}
       />
 
       {/* Mobile agenda — same model, days with people only */}
       <div className="space-y-2 md:hidden">
-        {grid.days.filter((d) => isInMonth(d, anchor) && (byDate.get(d)?.headcount ?? 0) > 0).map((d) => {
-          const cell = byDate.get(d)!;
+        {grid.days
+          .filter((d) => isInMonth(d, anchor) && ((byDate.get(d)?.headcount ?? 0) > 0 || timeOffByDate.has(d)))
+          .map((d) => {
+          const cell = byDate.get(d) ?? { date: d, people: [], headcount: 0, pendingCount: 0, openCount: 0 };
+          const off = timeOffByDate.get(d) ?? [];
           return (
             <button
               key={d} type="button" onClick={() => setOpenDate(d)}
@@ -292,6 +304,13 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
                   </span>
                 )}
               </span>
+              {off.length > 0 && (
+                <span
+                  className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                    off.some((r) => r.status === 'pending') ? 'bg-tt-cyan/20 text-tt-cyan' : 'bg-white/10 text-tt-muted'
+                  }`}
+                >🌴 {off.length}</span>
+              )}
               {cell.pendingCount > 0 && (
                 <span className="shrink-0 rounded bg-tt-yellow/20 px-1.5 py-0.5 text-[10px] font-bold text-tt-yellow">{cell.pendingCount}!</span>
               )}

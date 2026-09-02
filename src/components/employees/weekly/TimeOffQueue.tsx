@@ -30,6 +30,35 @@ function fmt(iso: string): string {
   });
 }
 
+/** Inclusive [start, end] expanded to the individual days it covers. */
+export function timeOffDays(r: Pick<TimeOffRow, 'start_date' | 'end_date'>): string[] {
+  const out: string[] = [];
+  const [y, m, d] = r.start_date.split('-').map(Number);
+  const cur = new Date(Date.UTC(y, m - 1, d));
+  while (cur.toISOString().slice(0, 10) <= r.end_date) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+    if (out.length > 60) break; // a request cannot legally span this far; guard a bad row
+  }
+  return out;
+}
+
+/**
+ * date -> requests touching it. Only PENDING and APPROVED are mapped: a denied request means the
+ * person is working, so marking their day would say the opposite of what happened.
+ */
+export function indexTimeOffByDate(rows: TimeOffRow[]): Map<string, TimeOffRow[]> {
+  const m = new Map<string, TimeOffRow[]>();
+  for (const r of rows) {
+    if (r.status === 'denied') continue;
+    for (const d of timeOffDays(r)) {
+      const arr = m.get(d);
+      if (arr) arr.push(r); else m.set(d, [r]);
+    }
+  }
+  return m;
+}
+
 export function useTimeOff() {
   const [rows, setRows] = useState<TimeOffRow[]>([]);
   // A bump forces a refetch after a decision. setRows lands in the promise callback, not in the

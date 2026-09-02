@@ -8,6 +8,7 @@ import {
 import { WEEKDAY_LABELS, isInMonth, parseYMD, formatTime12 } from '@/lib/weeklySchedule';
 import PersonAvatar from './PersonAvatar';
 import HoverCard, { type HoverPayload } from './HoverCard';
+import type { TimeOffRow } from './TimeOffQueue';
 
 // PRESENTATION ONLY — takes an already-built day model and draws it. Split from
 // ScheduleMonthCalendar (which owns the queries) so the grid can be rendered from fixtures.
@@ -66,7 +67,7 @@ const EMPTY_DAY = (date: string): CalendarDay => ({
 });
 
 function DayCell({
-  day, inMonth, isToday, isPayday, level, onOpenDay, onAddDay, onHover,
+  day, inMonth, isToday, isPayday, level, onOpenDay, onAddDay, onHover, timeOff, onOpenTimeOff,
 }: {
   day: CalendarDay;
   inMonth: boolean;
@@ -76,6 +77,8 @@ function DayCell({
   onOpenDay: (date: string) => void;
   onAddDay: (date: string) => void;
   onHover: (h: HoverPayload | null) => void;
+  timeOff?: TimeOffRow[];
+  onOpenTimeOff?: () => void;
 }) {
   const shown = day.people.slice(0, MAX_AVATARS);
   const more = day.people.length - shown.length;
@@ -97,6 +100,20 @@ function DayCell({
         <div className="flex items-center gap-1">
           {isPayday && (
             <span className="rounded bg-tt-green/15 px-1 text-[8px] font-bold uppercase tracking-wide text-tt-green" title="Payday">pay</span>
+          )}
+          {timeOff && timeOff.length > 0 && (
+            // Its own click target: opening the queue from the day is the whole point of showing
+            // it here, and it must not fall through to "open this day" / "add a shift".
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onOpenTimeOff?.(); }}
+              title={timeOff.map((r) => `${r.status === 'pending' ? 'Requested off' : 'Off'} · ${r.reason ?? 'no reason given'}`).join('\n')}
+              className={`rounded px-1 text-[9px] font-bold tabular-nums ${
+                timeOff.some((r) => r.status === 'pending')
+                  ? 'bg-tt-cyan/20 text-tt-cyan hover:bg-tt-cyan/35'
+                  : 'bg-white/10 text-tt-muted hover:bg-white/20'
+              }`}
+            >🌴{timeOff.length > 1 ? timeOff.length : ''}</button>
           )}
           {day.pendingCount > 0 && (
             <span
@@ -140,7 +157,7 @@ function DayCell({
 }
 
 export default function MonthGridView({
-  days, byDate, anchor, todayISO, payAnchor, peak, onOpenDay, onAddDay,
+  days, byDate, anchor, todayISO, payAnchor, peak, onOpenDay, onAddDay, timeOffByDate, onOpenTimeOff,
 }: {
   days: string[];
   byDate: Map<string, CalendarDay>;
@@ -150,6 +167,9 @@ export default function MonthGridView({
   peak: number;
   onOpenDay: (date: string) => void;
   onAddDay: (date: string) => void;
+  /** date -> pending/approved time-off touching it. Absent on surfaces that don't load it. */
+  timeOffByDate?: Map<string, TimeOffRow[]>;
+  onOpenTimeOff?: () => void;
 }) {
   const [hover, setHover] = useState<HoverPayload | null>(null);
   return (
@@ -172,6 +192,7 @@ export default function MonthGridView({
                     isPayday={isPaydayISO(d, payAnchor)}
                     level={densityLevel(cell.headcount, peak)}
                     onOpenDay={onOpenDay} onAddDay={onAddDay} onHover={setHover}
+                    timeOff={timeOffByDate?.get(d)} onOpenTimeOff={onOpenTimeOff}
                   />
                 );
               })}
