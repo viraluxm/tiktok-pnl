@@ -13,6 +13,13 @@ export const dynamic = 'force-dynamic';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// PostgREST caps a single response at 1000 rows server-side, silently — no error, no marker,
+// just a short array. A busy fulfillment day exceeds that: 2026-08-31 completed 1,159 boxes and
+// this route reported exactly 1000 of them (2,705 SKUs instead of 3,181), which understated
+// Orders, Boxes and Average Pick Time and would have divided real labor cost by a truncated
+// box count. So every verifications read is PAGED to exhaustion rather than issued once.
+const PAGE_SIZE = 1000;
+
 // GET: daily fulfillment performance + unit economics for ONE fulfillment day (America/Los_Angeles).
 //   ?date=YYYY-MM-DD  (defaults to the fulfillment day in progress)
 //
@@ -49,17 +56,27 @@ export async function GET(req: Request) {
   const startISO = new Date(startMs).toISOString();
   const endISO = new Date(endMs).toISOString();
 
-  // Completed-box events for the day. RLS scopes to this account; the (user_id, verified_at)
-  // index (migration 066) serves this range scan.
-  const { data: rows, error } = await supabase
-    .from('shipment_verifications')
-    .select('group_key, picker_employee_id, picker_name_snapshot, pick_started_at, order_ids, verified_at')
-    .gte('verified_at', startISO)
-    .lt('verified_at', endISO)
-    .order('verified_at', { ascending: true });
-  if (error) {
-    console.error('[team/fulfillment-performance] verifications error:', error);
-    return NextResponse.json({ error: 'Failed to load picker performance' }, { status: 500 });
+  // Completed-box events for the day, read to EXHAUSTION (see PAGE_SIZE — a single response is
+  // capped at 1000 rows and a busy day exceeds it). RLS scopes to this account; the
+  // (user_id, verified_at) index (migration 066) serves this range scan, and ordering by
+  // verified_at makes the pages a stable, non-overlapping partition of the window.
+  const rows: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data: page, error } = await supabase
+      .from('shipment_verifications')
+      .select('group_key, picker_employee_id, picker_name_snapshot, pick_started_at, order_ids, verified_at')
+      .gte('verified_at', startISO)
+      .lt('verified_at', endISO)
+      .order('verified_at', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) {
+      console.error('[team/fulfillment-performance] verifications error:', error);
+      return NextResponse.json({ error: 'Failed to load picker performance' }, { status: 500 });
+    }
+    rows.push(...(page ?? []));
+    // A short page is the last page. aggregateFulfillmentDay de-dupes by group_key, so even if
+    // a concurrent insert shifted the window mid-scan a repeated box could not be double-counted.
+    if (!page || page.length < PAGE_SIZE) break;
   }
 
   // Employees: name + role + status for the roster, plus hourly_rate and fulfillment_track for
