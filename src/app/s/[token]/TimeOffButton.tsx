@@ -81,7 +81,10 @@ export default function TimeOffButton({ token }: { token: string }) {
     void load();
   }
 
-  const pendingCount = requests.filter((r) => r.status === 'pending').length;
+  // Three bands, in the order a worker reads them: ask → what is still open → what was answered.
+  const pending = requests.filter((r) => r.status === 'pending');
+  const decided = requests.filter((r) => r.status !== 'pending');
+  const pendingCount = pending.length;
 
   return (
     <>
@@ -155,12 +158,43 @@ export default function TimeOffButton({ token }: { token: string }) {
               </button>
             </div>
 
-            {requests.length > 0 && (
+            {pending.length > 0 && (
               <div className="mt-5">
-                <h3 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-tt-muted">Your requests</h3>
+                <h3 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-tt-muted">
+                  Waiting on a manager
+                </h3>
                 <div className="space-y-1.5">
-                  {requests.map((r) => (
-                    <div key={r.id} className="rounded-xl border border-tt-border bg-white/[0.02] px-3 py-2">
+                  {pending.map((r) => (
+                    <div key={r.id} className="rounded-xl border border-tt-yellow/30 bg-tt-yellow/[0.04] px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[13px] font-semibold text-tt-text">
+                          {fmt(r.start_date)}{r.end_date !== r.start_date && ` – ${fmt(r.end_date)}`}
+                        </span>
+                        <span className="shrink-0 rounded-full border border-tt-yellow/50 px-2 py-0.5 text-[10px] font-bold text-tt-yellow">
+                          Pending
+                        </span>
+                      </div>
+                      {r.reason && <div className="mt-0.5 text-[11px] text-tt-muted">{r.reason}</div>}
+                      <button
+                        type="button" onClick={() => withdraw(r.id)} disabled={busy}
+                        className="mt-1 text-[11px] font-semibold text-tt-muted underline disabled:opacity-40"
+                      >Withdraw</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Decided requests sit LAST: they are a record, not something to act on, so they must
+                never push the form or the still-open requests down the sheet. */}
+            {decided.length > 0 && (
+              <div className="mt-5">
+                <h3 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-tt-muted">
+                  Answered
+                </h3>
+                <div className="space-y-1.5">
+                  {decided.map((r) => (
+                    <div key={r.id} className="rounded-xl border border-tt-border px-3 py-2 opacity-80">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[13px] font-semibold text-tt-text">
                           {fmt(r.start_date)}{r.end_date !== r.start_date && ` – ${fmt(r.end_date)}`}
@@ -170,12 +204,8 @@ export default function TimeOffButton({ token }: { token: string }) {
                         </span>
                       </div>
                       {r.reason && <div className="mt-0.5 text-[11px] text-tt-muted">{r.reason}</div>}
-                      {r.decision_note && <div className="mt-0.5 text-[11px] text-tt-muted">Manager: {r.decision_note}</div>}
-                      {r.status === 'pending' && (
-                        <button
-                          type="button" onClick={() => withdraw(r.id)} disabled={busy}
-                          className="mt-1 text-[11px] font-semibold text-tt-muted underline disabled:opacity-40"
-                        >Withdraw</button>
+                      {r.decision_note && (
+                        <div className="mt-0.5 text-[11px] text-tt-muted">Manager: {r.decision_note}</div>
                       )}
                     </div>
                   ))}
