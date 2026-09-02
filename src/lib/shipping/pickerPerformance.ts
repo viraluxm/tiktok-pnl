@@ -191,6 +191,20 @@ export interface PickerDayStats {
   boxes_completed: number;    // count of distinct completed boxes
   avg_pick_ms: number | null;         // mean of VALID box durations; null when none countable
   active_pick_ms: number | null;      // sum of VALID box durations; null when none countable
+  /**
+   * DO NOT DISPLAY THIS AS A PICK RATE. Removed from the fulfillment view 2026-09-02.
+   *
+   * `pick_started_at` does not mark when picking began — it is stamped near CONFIRM time, so
+   * the walking and gathering happen before the timestamp exists and the window captures only
+   * the per-item scanning inside the box. Verified on raw 2026-09-01 rows: 2-7s "durations"
+   * with 40-300s gaps BETWEEN boxes. The view was rendering 216, 275 and 314 orders/hour
+   * beside honest $/box figures, and had previously put one picker at 297 boxes/hour off
+   * 0.21 "active hours".
+   *
+   * For a real rate use a WALL-CLOCK denominator: boxes ÷ (shift span), or boxes ÷ (span minus
+   * gaps > 15 min). Kept on the payload as a diagnostic only; `avg_pick_ms` / `active_pick_ms`
+   * carry the same caveat and are shown as durations, not rates.
+   */
   orders_per_active_hour: number | null; // orders ÷ active hours; null when active is 0/none
   valid_duration_count: number;       // boxes with a valid duration (transparency)
   // Internal diagnostics — NOT surfaced in the primary UI (legacy gap/session logic):

@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useFulfillmentPerformance } from '@/hooks/useFulfillmentPerformance';
 import {
-  SHOP_TIMEZONE, zonedDayKey, addDaysISO, formatPickDuration, formatRate,
+  SHOP_TIMEZONE, zonedDayKey, addDaysISO, formatPickDuration,
 } from '@/lib/shipping/pickerPerformance';
 import {
   subtotalByTrack, formatCentsPerUnit, formatDollars, formatHours, formatTrack,
@@ -64,7 +64,7 @@ function SummaryCard({ label, value, provisional = false, note }: {
 
 const COLS = [
   'Picker', 'SKUs', 'Boxes', 'Paid Hours', '$ / Box', '$ / SKU',
-  'Average Pick Time', 'Active Picking Time', 'Orders / Active Hour',
+  'Average Pick Time', 'Active Picking Time',
 ];
 
 function Cell({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {
@@ -98,7 +98,7 @@ function PickerRow({ p }: { p: PickerCostRow }) {
   const idle = p.on_clock && p.boxes_completed === 0;
 
   return (
-    <div className={`grid grid-cols-2 sm:grid-cols-9 gap-x-4 gap-y-1.5 items-center px-4 py-2.5 rounded-xl border bg-tt-card ${idle ? 'border-tt-yellow/40' : 'border-tt-border'}`}>
+    <div className={`grid grid-cols-2 sm:grid-cols-8 gap-x-4 gap-y-1.5 items-center px-4 py-2.5 rounded-xl border bg-tt-card ${idle ? 'border-tt-yellow/40' : 'border-tt-border'}`}>
       <div className="col-span-2 sm:col-span-1 min-w-0">
         <div className="font-semibold text-tt-text truncate" title={p.name}>{p.name}</div>
         <div className="mt-0.5"><TrackChip track={p.fulfillment_track} /></div>
@@ -110,7 +110,6 @@ function PickerRow({ p }: { p: PickerCostRow }) {
       <Cell label="$ / SKU" value={perSku.text} muted={perSku.provisional} />
       <Cell label="Average Pick Time" value={formatPickDuration(p.avg_pick_ms)} />
       <Cell label="Active Picking Time" value={formatPickDuration(p.active_pick_ms)} />
-      <Cell label="Orders / Active Hour" value={formatRate(p.orders_per_active_hour)} />
     </div>
   );
 }
@@ -278,7 +277,7 @@ export default function FulfillmentPerformance() {
 
           {/* Column header (desktop) */}
           {rows.length > 0 && (
-            <div className="hidden sm:grid grid-cols-9 gap-x-4 px-4 pb-1 text-[10px] uppercase tracking-wide text-tt-muted">
+            <div className="hidden sm:grid grid-cols-8 gap-x-4 px-4 pb-1 text-[10px] uppercase tracking-wide text-tt-muted">
               {COLS.map((h) => <div key={h}>{h}</div>)}
             </div>
           )}
@@ -291,7 +290,7 @@ export default function FulfillmentPerformance() {
 
             {/* Unassigned completed boxes (historical / unattributed) */}
             {unassigned && (
-              <div className="grid grid-cols-2 sm:grid-cols-9 gap-x-4 gap-y-1.5 items-center px-4 py-2.5 rounded-xl border border-dashed border-tt-border bg-tt-card/50">
+              <div className="grid grid-cols-2 sm:grid-cols-8 gap-x-4 gap-y-1.5 items-center px-4 py-2.5 rounded-xl border border-dashed border-tt-border bg-tt-card/50">
                 <div className="col-span-2 sm:col-span-1 font-semibold text-tt-muted">Unassigned</div>
                 <Cell label="SKUs" value={String(unassigned.orders_picked)} muted />
                 <Cell label="Boxes" value={String(unassigned.boxes_completed)} muted />
@@ -300,7 +299,6 @@ export default function FulfillmentPerformance() {
                 <Cell label="$ / SKU" value="—" muted />
                 <Cell label="Average Pick Time" value="—" muted />
                 <Cell label="Active Picking Time" value="—" muted />
-                <Cell label="Orders / Active Hour" value="—" muted />
               </div>
             )}
           </div>
