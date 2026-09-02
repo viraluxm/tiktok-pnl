@@ -9,8 +9,13 @@ export const dynamic = 'force-dynamic';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-// GET: daily fulfillment-picker performance for ONE business day (America/Los_Angeles).
-//   ?date=YYYY-MM-DD  (defaults to today in the shop timezone)
+// GET: daily fulfillment-picker performance for ONE fulfillment day (America/Los_Angeles).
+//   ?date=YYYY-MM-DD  (defaults to the fulfillment day in progress)
+//
+// A fulfillment day runs local 04:00 → 04:00 (SHIFT_DAY_START_HOUR), NOT midnight → midnight.
+// The night crew works ~17:00–01:00, so a midnight boundary split every night shift into two
+// partial days and reported the tail of one shift alongside the head of the next. All day
+// math goes through zonedDayKey / zonedDayRangeUtcMs, which own that boundary.
 //
 // Reads ONLY the selected day's shipment_verifications for this account (RLS auto-scopes to
 // the caller — single-account model). Employee rows are read name-only (id, name, role,

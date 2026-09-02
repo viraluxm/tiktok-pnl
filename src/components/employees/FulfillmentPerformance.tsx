@@ -9,6 +9,9 @@ import {
 // Team → Performance → Fulfillment: a simple daily SUMMARY per picker (never individual
 // scans). Read-only. No rankings, grades, charts, or leaderboards — Phase 1 scope.
 
+// The fulfillment day currently in progress. Note this is NOT always the current calendar
+// date: zonedDayKey uses the 4:00 AM boundary, so between midnight and 4:00 AM this returns
+// the PREVIOUS date — which is correct, the night crew is still on that shift day.
 function todayISO(): string {
   return zonedDayKey(Date.now(), SHOP_TIMEZONE);
 }
@@ -92,6 +95,13 @@ export default function FulfillmentPerformance() {
         />
         <span className="text-sm text-tt-muted ml-1">{dayLabel(day)}</span>
       </div>
+
+      {/* A fulfillment day runs 4:00 AM → 4:00 AM, not midnight → midnight, so the night crew's
+          17:00–01:00 shift stays on ONE day instead of being split in half. Stated explicitly
+          because it is otherwise surprising: at 2:00 AM, "Today" is still the previous date. */}
+      <p className="text-xs text-tt-muted">
+        A fulfillment day runs 4:00 AM – 4:00 AM Pacific, so overnight shifts count as one day.
+      </p>
 
       {isLoading && <div className="text-sm text-tt-muted">Loading picker performance…</div>}
       {isError && <div className="text-sm text-tt-red">Failed to load picker performance.</div>}
