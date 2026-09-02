@@ -618,6 +618,11 @@ export default function PackStationOverlay({
   // Display-only. Never ANDed into lineDone, grab(), or allComplete — a short item is still
   // grabbable, still navigable, and still lets the box complete.
   const lineShelfOut = !!(line && line.kind === 'sku' && line.shelf_out);
+  // "Unmapped" is only worth saying when SOMETHING in this box is mapped. On a box where
+  // nothing has a location — every box, until mapping is under way — a badge on every single
+  // line is pure noise: there is no expectation of a location to explain the absence of. This
+  // is what keeps the screen identical to today's while the catalogue is still unmapped.
+  const anyMapped = pickLines.some((l) => l.kind === 'sku' && !!l.location_label);
 
   // ── focus-mode overlay — portalled to <body> so it escapes any transformed ancestor and fills
   // the whole dynamic viewport at z-[200], above app chrome. Safe under SSR (mounts client-side). ──
@@ -814,7 +819,7 @@ export default function PackStationOverlay({
                     >
                       {line.location_label}
                     </span>
-                  ) : (
+                  ) : anyMapped ? (
                     // An unmapped SKU has no home yet, so there is no location to show. Say that
                     // rather than leaving a hole where the badge normally is: a picker who has
                     // learned to look there reads a blank as a fault and goes hunting for a
@@ -832,7 +837,7 @@ export default function PackStationOverlay({
                     >
                       Unmapped
                     </span>
-                  )}
+                  ) : null}
                 </div>
               )}
 

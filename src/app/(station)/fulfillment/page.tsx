@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import PackStationOverlay from '@/components/shipping/PackStationOverlay';
 
@@ -41,6 +41,19 @@ export default function FulfillmentPage() {
     const m = getCookie(MODE_COOKIE);
     if (m === 'pick' || m === 'pack') setMode(m);
   }, []);
+
+  // The day's count comes from shipment_verifications, not a local tally, so a mid-shift
+  // reload or a device swap does not reset it to zero. Re-read whenever the picker changes
+  // (the number is per-person) and after every confirmed box.
+  const refreshPicked = useCallback(() => {
+    const q = pickerId ? `?picker=${encodeURIComponent(pickerId)}` : '';
+    fetch(`/api/station/picked-today${q}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && typeof d.picked_today === 'number') setPickedCount(d.picked_today); })
+      .catch(() => { /* a counter is never worth surfacing an error for */ });
+  }, [pickerId]);
+
+  useEffect(() => { refreshPicked(); }, [refreshPicked]);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +117,7 @@ export default function FulfillmentPage() {
         pickerId={pickerId}
         onPickerChange={setPickerId}
         pickedCount={pickedCount}
-        onBoxPicked={() => setPickedCount((n) => n + 1)}
+        onBoxPicked={() => { setPickedCount((n) => n + 1); refreshPicked(); }}
         onExit={() => { /* always-on: exit returns to scan-ready in the overlay; nothing to unmount */ }}
       />
       {/* Current-mode chip, portalled above the overlay (z-[205] > overlay z-[200]). Plain text,

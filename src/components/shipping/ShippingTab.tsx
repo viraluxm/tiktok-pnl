@@ -58,6 +58,18 @@ export default function ShippingTab() {
   // Picker gate: who is packing. Held here (not in the overlay) so the selection persists across
   // enter/exit of the overlay, matching prior behavior.
   const [pickerId, setPickerId] = useState('');
+
+  // Read the day's count from shipment_verifications rather than tallying locally, so it
+  // survives a reload. Per-picker, because the number is a person's own work.
+  const refreshPickedToday = useCallback(() => {
+    const q = pickerId ? `?picker=${encodeURIComponent(pickerId)}` : '';
+    fetch(`/api/shipping/picked-today${q}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && typeof d.picked_today === 'number') setPickedToday(d.picked_today); })
+      .catch(() => { /* a counter is never worth surfacing an error for */ });
+  }, [pickerId]);
+
+  useEffect(() => { refreshPickedToday(); }, [refreshPickedToday]);
   const { data: storesData } = useStores();
   const activeStore = storesData?.activeStore ?? 'all';
   // Eligible pickers: role 'fulfillment' AND status active/probation (no hosts, no former).
@@ -362,7 +374,7 @@ export default function ShippingTab() {
           )}
         </div>
         {err && <div className="mt-4 text-sm text-tt-red">{err}</div>}
-        {pickedToday > 0 && <div className="mt-6 text-sm text-tt-muted">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked this session</div>}
+        {pickedToday > 0 && <div className="mt-6 text-sm text-tt-muted">{pickedToday} {pickedToday === 1 ? 'box' : 'boxes'} picked today</div>}
       </div>
     );
   }
@@ -376,7 +388,7 @@ export default function ShippingTab() {
       pickerId={pickerId}
       onPickerChange={setPickerId}
       pickedCount={pickedToday}
-      onBoxPicked={() => setPickedToday((n) => n + 1)}
+      onBoxPicked={() => { setPickedToday((n) => n + 1); refreshPickedToday(); }}
       onBoxChange={handleBoxChange}
       // A deliberate exit ends the session — there is nothing to resume.
       onExit={() => { clearResume(); setResume(null); exitFullscreen(); setFocus(false); }}
