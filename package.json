@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check:rpc-grants": "node scripts/check-rpc-grants.mjs"
+    "check:rpc-grants": "node scripts/check-rpc-grants.mjs",
+    "test": "node scripts/run-unit-tests.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.8.0",
