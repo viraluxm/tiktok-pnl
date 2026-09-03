@@ -8,13 +8,15 @@
  * order count inside a box IS the unit/SKU count. `orders_picked` and "SKUs picked" are the
  * same number, and the field keeps the name the rest of the pipeline uses.
  *
- * WHY BOTH, AND WHY $/BOX IS THE HONEST ONE
- * Picking cost is fundamentally PER BOX — one label, one walk, one pack. $/SKU only falls
- * because bundling amortizes that fixed cost over more units: between mid-August and
- * 2026-09-02, boxes/paid-hour stayed flat (14.9 → 14.3) while SKUs/paid-hour rose 15%
- * (44.1 → 50.6) purely because orders-per-box went 2.95 → 3.54. So $/SKU will keep drifting
- * down as combine settings deepen and will make a flat crew look like it is improving.
- * Both are surfaced; $/box is the one to judge people on.
+ * HOW THE TWO RELATE — both are first-class, neither is a substitute
+ *   $/SKU = $/box ÷ SKUs per box
+ * $/box tracks the work the crew controls; $/SKU tracks what it costs to move a unit, which
+ * also moves with the TikTok combine settings. Between mid-August and 2026-09-02, boxes per
+ * paid hour stayed flat (14.9 → 14.3) while SKUs per paid hour rose 15% (44.1 → 50.6), purely
+ * because orders-per-box went 2.95 → 3.54. So a change in $/SKU can come from bundling, from
+ * crew speed, or from both, and the two figures have to be read together to tell which.
+ * Neither is presented as the "real" one — accuracy of both is the requirement, which is what
+ * the payable/pending/live split, the true unit count, and the DataQuality flags are all for.
  *
  * PURITY / TESTING
  * All math here is pure. The two value-imports are reused VERBATIM and never reimplemented:
@@ -93,8 +95,27 @@ export interface EmployeeDayCost {
   payable_cents: number;
   pending_hours: number;   // would be payable but for manager confirmation (suspect excluded)
   pending_cents: number;
+  live_hours: number;      // STILL CLOCKED IN — elapsed so far, minus breaks taken. No shifts
+  live_cents: number;      // row exists yet, so without this the day reads "—" until clock-out.
   suspect_hours: number;   // unconfirmed punches over MAX_PLAUSIBLE_PUNCH_HOURS — a forgotten
   suspect_punches: number; // clock-out. Held OUT of the projection, reported so it is visible.
+}
+
+/**
+ * An in-progress punch, straight off `employee_time_entries` with `clocked_out_at IS NULL`.
+ *
+ * WHY THIS EXISTS: a `shifts` row is not written until CLOCK-OUT (verified — the one currently
+ * open time entry has `shift_id = null`). So for the whole working day there are no hours to
+ * divide by, and both \$/box and \$/SKU render "—" until the crew punches out. The figures only
+ * appeared in testing because the day crew had already left at 14:01.
+ *
+ * `break_minutes_so_far` covers breaks CLOSED during this punch plus any break still running,
+ * so a picker sitting on lunch does not accrue paid minutes.
+ */
+export interface OpenPunch {
+  employee_id: string;
+  clocked_in_at: string;
+  break_minutes_so_far?: number;
 }
 
 /**
@@ -115,6 +136,8 @@ export function employeeCostForDay(
   shifts: ReadonlyArray<CostShift>,
   dayISO: string,
   tz: string = SHOP_TIMEZONE,
+  openPunches: ReadonlyArray<OpenPunch> = [],
+  nowMs: number = Date.now(),
 ): Map<string, EmployeeDayCost> {
   const byId = new Map(employees.map((e) => [e.id, e]));
   const out = new Map<string, EmployeeDayCost>();
@@ -124,7 +147,8 @@ export function employeeCostForDay(
     if (!b) {
       b = {
         employee_id: id, payable_hours: 0, payable_cents: 0,
-        pending_hours: 0, pending_cents: 0, suspect_hours: 0, suspect_punches: 0,
+        pending_hours: 0, pending_cents: 0, live_hours: 0, live_cents: 0,
+        suspect_hours: 0, suspect_punches: 0,
       };
       out.set(id, b);
     }
@@ -165,6 +189,34 @@ export function employeeCostForDay(
     }
   }
 
+  // ── IN-PROGRESS punches: hours worked so far, for the day currently running ──
+  // Bucketed through the SAME zonedDayKey boundary as everything else, so a night-crew punch
+  // that started at 17:00 counts on that shift day rather than the next one.
+  for (const p of openPunches) {
+    const emp = byId.get(p.employee_id);
+    if (!emp) continue;
+    if ((emp.role ?? '').trim().toLowerCase() !== 'fulfillment') continue;
+    const startMs = Date.parse(p.clocked_in_at);
+    if (!Number.isFinite(startMs)) continue;
+    if (zonedDayKey(startMs, tz) !== dayISO) continue;
+
+    const elapsedH = (nowMs - startMs) / 3_600_000;
+    const hours = elapsedH - (p.break_minutes_so_far ?? 0) / 60;
+    if (!(hours > 0)) continue; // clock skew, or entirely on break
+
+    const rate = Number(emp.hourly_rate) || 0;
+    const b = bucket(emp.id);
+    if (hours > MAX_PLAUSIBLE_PUNCH_HOURS) {
+      // Already open longer than any real shift — somebody never clocked out. Same treatment
+      // as a closed runaway punch: reported, never projected.
+      b.suspect_hours += hours;
+      b.suspect_punches += 1;
+    } else {
+      b.live_hours += hours;
+      b.live_cents += Math.round(hours * rate * 100);
+    }
+  }
+
   return out;
 }
 
@@ -183,6 +235,8 @@ export interface CostBlock {
   payable_cents: number;
   pending_hours: number;
   pending_cents: number;
+  live_hours: number;       // still on the clock right now
+  live_cents: number;
   suspect_hours: number;    // forgotten clock-outs, excluded from every figure below
   suspect_punches: number;
   cost_per_box_cents: number | null;
@@ -191,13 +245,18 @@ export interface CostBlock {
   cost_per_order_cents_projected: number | null;
 }
 
+// `orders` here is the SKU/unit count — the true denominator for $/SKU (see PickerCostRow).
 function costBlock(c: EmployeeDayCost, boxes: number, orders: number): CostBlock {
-  const totalCents = c.payable_cents + c.pending_cents;
+  // The projection spans everything that will become payable: confirmed hours, hours awaiting
+  // confirmation, and hours still being worked. Suspect hours are deliberately absent.
+  const totalCents = c.payable_cents + c.pending_cents + c.live_cents;
   return {
     payable_hours: c.payable_hours,
     payable_cents: c.payable_cents,
     pending_hours: c.pending_hours,
     pending_cents: c.pending_cents,
+    live_hours: c.live_hours,
+    live_cents: c.live_cents,
     suspect_hours: c.suspect_hours,
     suspect_punches: c.suspect_punches,
     cost_per_box_cents: perUnitCents(c.payable_cents, boxes),
@@ -209,7 +268,8 @@ function costBlock(c: EmployeeDayCost, boxes: number, orders: number): CostBlock
 
 const ZERO_COST: EmployeeDayCost = {
   employee_id: '', payable_hours: 0, payable_cents: 0,
-  pending_hours: 0, pending_cents: 0, suspect_hours: 0, suspect_punches: 0,
+  pending_hours: 0, pending_cents: 0, live_hours: 0, live_cents: 0,
+  suspect_hours: 0, suspect_punches: 0,
 };
 
 // The day's TOTAL completed work, attributed or not — the correct crew denominator.
@@ -218,26 +278,148 @@ export interface DayTotals {
   orders_picked: number;
 }
 
-// A picker row plus its track and its cost. Extends the existing, unit-tested PickerDayStats
-// rather than replacing it, so every KPI already on the view keeps its exact meaning.
+// A box as this module needs it, straight off shipment_verifications. Raw boxes (not just the
+// aggregated PickerDayStats) are required for two accuracy jobs the aggregate cannot do:
+// counting true UNITS, and checking each completion against the picker's punch window.
+export interface CostBox {
+  picker_employee_id: string | null;
+  picker_name_snapshot: string | null;
+  order_ids: string[];
+  verified_at: string;
+}
+
+// A punch window to test a completion against. `end: null` = still clocked in.
+export interface PunchWindow {
+  employee_id: string;
+  start: string;
+  end: string | null;
+}
+
+/**
+ * The picker-grouping key.
+ *
+ * MIRRORS aggregateFulfillmentDay's grouping EXACTLY — employee id when present, else the name
+ * snapshot (which survives rename and deletion), else nothing. Kept as one exported function
+ * so the mirroring is testable rather than a coincidence; pickCostEconomics.test.mjs asserts
+ * all three cases against the aggregate's own output.
+ */
+export function pickerKey(b: { picker_employee_id: string | null; picker_name_snapshot: string | null }): string | null {
+  const id = b.picker_employee_id ?? null;
+  if (id) return `id:${id}`;
+  const snap = (b.picker_name_snapshot ?? '').trim() || null;
+  return snap ? `name:${snap}` : null;
+}
+
+// Same key, derived from an already-aggregated row.
+function rowKey(r: PickerDayStats): string | null {
+  return pickerKey({ picker_employee_id: r.picker_employee_id, picker_name_snapshot: r.name });
+}
+
+/**
+ * True SKU (unit) count for a set of boxes.
+ *
+ * $/SKU divides by UNITS, so counting `order_ids.length` is only right while every order holds
+ * exactly one unit. Over 2026-08-18..09-02 that held perfectly — 48,809 order refs in verified
+ * boxes summed to exactly 48,809 units — but 139 of 148,647 orders since July carry units > 1,
+ * so the moment one lands in a box the array length undercounts and $/SKU reads high. An order
+ * missing from the map counts as 1: the fallback matches the overwhelmingly common case and
+ * never silently zeroes a box.
+ */
+export function skuCount(orderIds: ReadonlyArray<string>, unitsByOrderId?: ReadonlyMap<string, number>): number {
+  const seen = new Set(orderIds);
+  if (!unitsByOrderId) return seen.size;
+  let units = 0;
+  for (const id of seen) units += unitsByOrderId.get(id) ?? 1;
+  return units;
+}
+
+/**
+ * How many completions fall OUTSIDE every punch window of the picker credited with them.
+ *
+ * A box completed with no matching punch means the boxes are counted but the hours behind them
+ * are not, so $/box reads too cheap. This is punch discipline, not a code bug — it cannot be
+ * corrected here, only surfaced. Recent days are clean (0.0-0.2% since 08-26) but it spikes:
+ * 26.8% on 08-18, 14.9% on 08-29, 8.1% on 08-25.
+ *
+ * A box with no attributable picker is not counted as outside — there is no punch to compare to.
+ */
+export function countBoxesOutsidePunch(
+  boxes: ReadonlyArray<CostBox>,
+  windows: ReadonlyArray<PunchWindow>,
+  nowMs: number = Date.now(),
+): { examined: number; outside: number } {
+  const byEmployee = new Map<string, { s: number; e: number }[]>();
+  for (const w of windows) {
+    const s = Date.parse(w.start);
+    if (!Number.isFinite(s)) continue;
+    const e = w.end == null ? nowMs : Date.parse(w.end);
+    if (!Number.isFinite(e)) continue;
+    const list = byEmployee.get(w.employee_id) ?? [];
+    list.push({ s, e });
+    byEmployee.set(w.employee_id, list);
+  }
+
+  let examined = 0;
+  let outside = 0;
+  for (const b of boxes) {
+    if (!b.picker_employee_id) continue; // nothing to compare against
+    const t = Date.parse(b.verified_at);
+    if (!Number.isFinite(t)) continue;
+    examined += 1;
+    const list = byEmployee.get(b.picker_employee_id) ?? [];
+    if (!list.some((w) => t >= w.s && t <= w.e)) outside += 1;
+  }
+  return { examined, outside };
+}
+
+// What the day's inputs are worth trusting. Reported so a figure built on bad data is labelled
+// rather than either hidden or presented as clean.
+export interface DataQuality {
+  boxes_examined: number;         // attributable boxes checked against a punch
+  boxes_outside_punch: number;    // …of those, completed with no matching punch
+  shifts_examined: number;        // fulfillment shifts on the day
+  shifts_with_break: number;      // …of those, with any unpaid break recorded
+}
+
+// A picker row plus its track, its true SKU count, and its cost. Extends the existing,
+// unit-tested PickerDayStats rather than replacing it, so every KPI already on the view keeps
+// its exact meaning — `orders_picked` stays ORDERS; `skus_picked` is the unit count.
 export interface PickerCostRow extends PickerDayStats {
   fulfillment_track: FulfillmentTrack | null;
-  on_clock: boolean;  // had a fulfillment punch on this day (payable or pending)
+  on_clock: boolean;    // had a fulfillment punch on this day (payable, pending or live)
+  skus_picked: number;  // TRUE units — the $/SKU denominator
   cost: CostBlock;
 }
 
 export interface FulfillmentEconomics {
   rows: PickerCostRow[];
   cost: CostBlock;              // crew-wide, over ALL fulfillment hours on the clock that day
+  skus_picked: number;          // crew-wide true unit count
   unproductive_hours: number;   // hours by on-clock fulfillment staff who completed ZERO boxes
   unproductive_cents: number;   // …and what those hours cost. Explains the crew $/box.
-  suspect_hours: number;        // unconfirmed punches past MAX_PLAUSIBLE_PUNCH_HOURS…
+  suspect_hours: number;        // punches past MAX_PLAUSIBLE_PUNCH_HOURS…
   suspect_punches: number;      // …excluded from the projection, surfaced so they get fixed.
+  quality: DataQuality;
+}
+
+export interface EconomicsInput {
+  pickers: ReadonlyArray<PickerDayStats>;
+  costByEmployee: ReadonlyMap<string, EmployeeDayCost>;
+  nameById?: Record<string, string>;
+  trackById?: Record<string, FulfillmentTrack | null>;
+  /** Raw boxes — needed for true SKU counts and the off-clock check. */
+  boxes?: ReadonlyArray<CostBox>;
+  unitsByOrderId?: ReadonlyMap<string, number>;
+  punchWindows?: ReadonlyArray<PunchWindow>;
+  /** The day's TOTAL completed work incl. unassigned — the crew denominator. */
+  dayTotals?: DayTotals;
+  breakStats?: { shifts: number; withBreak: number };
+  nowMs?: number;
 }
 
 /**
- * Merge cost + track onto the day's picker rows, and add rows for people who were ON THE CLOCK
- * but completed no boxes.
+ * Merge cost, track and true SKU counts onto the day's picker rows, and add rows for people who
+ * were ON THE CLOCK but completed no boxes.
  *
  * That last part is the point. aggregateFulfillmentDay() only ever emits pickers that produced
  * a verification row, so somebody who clocked a full shift and completed nothing is invisible
@@ -251,20 +433,35 @@ export interface FulfillmentEconomics {
  * write no rows anywhere, so they read as zero too. The row is a question to ask, not a verdict
  * — which is also why 'packer' and 'flex' exist as tracks.
  */
-export function buildFulfillmentEconomics(
-  pickers: ReadonlyArray<PickerDayStats>,
-  costByEmployee: ReadonlyMap<string, EmployeeDayCost>,
-  nameById: Record<string, string> = {},
-  trackById: Record<string, FulfillmentTrack | null> = {},
-  dayTotals?: DayTotals,
-): FulfillmentEconomics {
+export function buildFulfillmentEconomics(input: EconomicsInput): FulfillmentEconomics {
+  const {
+    pickers, costByEmployee, nameById = {}, trackById = {},
+    boxes, unitsByOrderId, punchWindows, dayTotals, breakStats,
+    nowMs = Date.now(),
+  } = input;
+
+  // True unit counts per picker, using the SAME grouping rule as the aggregate.
+  const skusByKey = new Map<string, number>();
+  let skuTotal = 0;
+  for (const b of boxes ?? []) {
+    const n = skuCount(b.order_ids ?? [], unitsByOrderId);
+    skuTotal += n;
+    const k = pickerKey(b);
+    if (k) skusByKey.set(k, (skusByKey.get(k) ?? 0) + n);
+  }
+  const hasBoxes = (boxes?.length ?? 0) > 0;
+
   const rows: PickerCostRow[] = pickers.map((p) => {
     const c = (p.picker_employee_id && costByEmployee.get(p.picker_employee_id)) || ZERO_COST;
+    const k = rowKey(p);
+    // Fall back to the order count when raw boxes were not supplied.
+    const skus = hasBoxes && k != null ? (skusByKey.get(k) ?? 0) : p.orders_picked;
     return {
       ...p,
       fulfillment_track: (p.picker_employee_id && trackById[p.picker_employee_id]) || null,
-      on_clock: c.payable_hours > 0 || c.pending_hours > 0,
-      cost: costBlock(c, p.boxes_completed, p.orders_picked),
+      on_clock: c.payable_hours > 0 || c.pending_hours > 0 || c.live_hours > 0,
+      skus_picked: skus,
+      cost: costBlock(c, p.boxes_completed, skus),
     };
   });
 
@@ -272,7 +469,7 @@ export function buildFulfillmentEconomics(
   const seen = new Set(pickers.map((p) => p.picker_employee_id).filter((id): id is string => !!id));
   for (const [id, c] of costByEmployee) {
     if (seen.has(id)) continue;
-    if (c.payable_hours <= 0 && c.pending_hours <= 0) continue;
+    if (c.payable_hours <= 0 && c.pending_hours <= 0 && c.live_hours <= 0) continue;
     rows.push({
       picker_employee_id: id,
       name: nameById[id] || 'Unknown employee',
@@ -287,6 +484,7 @@ export function buildFulfillmentEconomics(
       median_gap_ms: null,
       fulfillment_track: trackById[id] ?? null,
       on_clock: true,
+      skus_picked: 0,
       cost: costBlock(c, 0, 0),
     });
   }
@@ -305,6 +503,8 @@ export function buildFulfillmentEconomics(
     crew.payable_cents += c.payable_cents;
     crew.pending_hours += c.pending_hours;
     crew.pending_cents += c.pending_cents;
+    crew.live_hours += c.live_hours;
+    crew.live_cents += c.live_cents;
     crew.suspect_hours += c.suspect_hours;
     crew.suspect_punches += c.suspect_punches;
   }
@@ -313,26 +513,36 @@ export function buildFulfillmentEconomics(
   // rows. Unassigned boxes (no picker id and no name snapshot) were still picked by somebody
   // who was on the clock, so charging every paid hour against only the attributed boxes
   // overstates the crew rate. On 2026-08-31 that was 26 unassigned boxes out of 1,159 — the
-  // difference between $1.53/box (correct) and $1.57/box. `dayTotals` comes from
-  // aggregateFulfillmentDay's summary, which counts attributed + unassigned.
+  // difference between $1.53/box (correct) and $1.57/box.
   const crewBoxes = dayTotals?.boxes_completed ?? rows.reduce((s, r) => s + r.boxes_completed, 0);
-  const crewOrders = dayTotals?.orders_picked ?? rows.reduce((s, r) => s + r.orders_picked, 0);
+  const crewSkus = hasBoxes ? skuTotal : (dayTotals?.orders_picked ?? rows.reduce((s, r) => s + r.skus_picked, 0));
 
   let unproductiveHours = 0;
   let unproductiveCents = 0;
   for (const r of rows) {
     if (r.boxes_completed > 0) continue;
-    unproductiveHours += r.cost.payable_hours + r.cost.pending_hours;
-    unproductiveCents += r.cost.payable_cents + r.cost.pending_cents;
+    unproductiveHours += r.cost.payable_hours + r.cost.pending_hours + r.cost.live_hours;
+    unproductiveCents += r.cost.payable_cents + r.cost.pending_cents + r.cost.live_cents;
   }
+
+  const off = boxes && punchWindows
+    ? countBoxesOutsidePunch(boxes, punchWindows, nowMs)
+    : { examined: 0, outside: 0 };
 
   return {
     rows,
-    cost: costBlock(crew, crewBoxes, crewOrders),
+    cost: costBlock(crew, crewBoxes, crewSkus),
+    skus_picked: crewSkus,
     unproductive_hours: unproductiveHours,
     unproductive_cents: unproductiveCents,
     suspect_hours: crew.suspect_hours,
     suspect_punches: crew.suspect_punches,
+    quality: {
+      boxes_examined: off.examined,
+      boxes_outside_punch: off.outside,
+      shifts_examined: breakStats?.shifts ?? 0,
+      shifts_with_break: breakStats?.withBreak ?? 0,
+    },
   };
 }
 
@@ -342,7 +552,7 @@ export interface TrackSubtotal {
   track: FulfillmentTrack | null;
   people: number;
   boxes_completed: number;
-  orders_picked: number;
+  orders_picked: number; // TRUE unit (SKU) count for the bucket
   cost: CostBlock;
 }
 
@@ -370,10 +580,12 @@ export function subtotalByTrack(rows: ReadonlyArray<PickerCostRow>): TrackSubtot
       agg.payable_cents += r.cost.payable_cents;
       agg.pending_hours += r.cost.pending_hours;
       agg.pending_cents += r.cost.pending_cents;
+      agg.live_hours += r.cost.live_hours;
+      agg.live_cents += r.cost.live_cents;
       agg.suspect_hours += r.cost.suspect_hours;
       agg.suspect_punches += r.cost.suspect_punches;
       boxes += r.boxes_completed;
-      orders += r.orders_picked;
+      orders += r.skus_picked; // TRUE units — matches the $/SKU denominator on the rows
     }
 
     out.push({

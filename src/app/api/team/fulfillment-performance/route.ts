@@ -6,7 +6,9 @@ import {
 } from '@/lib/shipping/pickerPerformance';
 import {
   buildFulfillmentEconomics, employeeCostForDay, isFulfillmentTrack,
-  type CostShift, type CostEmployee, type FulfillmentTrack,
+  shiftFulfillmentDay,
+  type CostShift, type CostEmployee, type FulfillmentTrack, type OpenPunch,
+  type CostBox, type PunchWindow,
 } from '@/lib/shipping/pickCostEconomics';
 
 export const dynamic = 'force-dynamic';
@@ -104,6 +106,52 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Failed to load fulfillment hours' }, { status: 500 });
   }
 
+  // IN-PROGRESS punches. A `shifts` row is only written at CLOCK-OUT, so without this the
+  // whole working day has zero hours to divide by and both cost figures render "—" until the
+  // crew punches out. Read the open entries and count elapsed time as live hours.
+  const { data: openEntries, error: openErr } = await supabase
+    .from('employee_time_entries')
+    .select('id, employee_id, clocked_in_at')
+    .is('clocked_out_at', null);
+  if (openErr) {
+    console.error('[team/fulfillment-performance] open time entries error:', openErr);
+    return NextResponse.json({ error: 'Failed to load fulfillment hours' }, { status: 500 });
+  }
+
+  // Breaks belonging to those open punches — closed ones AND any still running, so somebody
+  // sitting on lunch does not accrue paid minutes into the live figure.
+  const openEntryIds = (openEntries ?? []).map((e) => e.id as string);
+  let breakRows: Record<string, unknown>[] = [];
+  if (openEntryIds.length > 0) {
+    const { data: brk, error: brkErr } = await supabase
+      .from('employee_time_breaks')
+      .select('time_entry_id, started_at, ended_at')
+      .in('time_entry_id', openEntryIds);
+    if (brkErr) {
+      console.error('[team/fulfillment-performance] breaks error:', brkErr);
+      return NextResponse.json({ error: 'Failed to load fulfillment hours' }, { status: 500 });
+    }
+    breakRows = brk ?? [];
+  }
+
+  const nowMs = Date.now();
+  const breakMinutesByEntry = new Map<string, number>();
+  for (const b of breakRows) {
+    const startMs = Date.parse(String(b.started_at));
+    if (!Number.isFinite(startMs)) continue;
+    const endRaw = b.ended_at as string | null;
+    const endMs = endRaw ? Date.parse(endRaw) : nowMs; // null = break still running
+    if (!Number.isFinite(endMs) || endMs <= startMs) continue;
+    const id = String(b.time_entry_id);
+    breakMinutesByEntry.set(id, (breakMinutesByEntry.get(id) ?? 0) + (endMs - startMs) / 60_000);
+  }
+
+  const openPunches: OpenPunch[] = (openEntries ?? []).map((e) => ({
+    employee_id: String(e.employee_id),
+    clocked_in_at: String(e.clocked_in_at),
+    break_minutes_so_far: breakMinutesByEntry.get(String(e.id)) ?? 0,
+  }));
+
   const nameById: Record<string, string> = {};
   const trackById: Record<string, FulfillmentTrack | null> = {};
   const costEmployees: CostEmployee[] = [];
@@ -133,19 +181,87 @@ export async function GET(req: Request) {
 
   const result = aggregateFulfillmentDay(events, nameById);
 
+  const boxes: CostBox[] = events.map((e) => ({
+    picker_employee_id: e.picker_employee_id,
+    picker_name_snapshot: e.picker_name_snapshot,
+    order_ids: e.order_ids,
+    verified_at: e.verified_at,
+  }));
+
+  // TRUE unit counts. $/SKU divides by UNITS, and an order can hold more than one (139 of
+  // 148,647 since July do), so the length of order_ids is not a safe denominator. Read the
+  // day's orders in chunks — an `in()` list of a few thousand ids exceeds the URL limit — and
+  // page each chunk, since the 1000-row cap applies here too.
+  const allOrderIds = [...new Set(boxes.flatMap((b) => b.order_ids))];
+  const unitsByOrderId = new Map<string, number>();
+  const ID_CHUNK = 200;
+  for (let i = 0; i < allOrderIds.length; i += ID_CHUNK) {
+    const chunk = allOrderIds.slice(i, i + ID_CHUNK);
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data: page, error: unitErr } = await supabase
+        .from('synced_order_ids')
+        .select('order_id, units')
+        .in('order_id', chunk)
+        .range(from, from + PAGE_SIZE - 1);
+      if (unitErr) {
+        console.error('[team/fulfillment-performance] units error:', unitErr);
+        return NextResponse.json({ error: 'Failed to load SKU counts' }, { status: 500 });
+      }
+      for (const r of page ?? []) {
+        unitsByOrderId.set(String(r.order_id), Math.max(1, Number(r.units) || 1));
+      }
+      if (!page || page.length < PAGE_SIZE) break;
+    }
+  }
+
   const costByEmployee = employeeCostForDay(
     costEmployees,
     (shiftRows ?? []) as unknown as CostShift[],
     day,
     SHOP_TIMEZONE,
+    openPunches,
+    nowMs,
   );
+
+  // Punch windows for the off-clock check — closed punches from `shifts`, plus the open ones
+  // (end null = still running). A box completed outside every window means its hours are
+  // missing from the numerator, so $/box reads too cheap; that is surfaced, not corrected.
+  const fulfillmentIds = new Set(costEmployees.filter((e) => e.role === 'fulfillment').map((e) => e.id));
+  const punchWindows: PunchWindow[] = [];
+  let shiftsExamined = 0;
+  let shiftsWithBreak = 0;
+  for (const sh of (shiftRows ?? []) as unknown as CostShift[]) {
+    if (!fulfillmentIds.has(sh.employee_id)) continue;
+    if (sh.clock_in_at && sh.clock_out_at) {
+      punchWindows.push({ employee_id: sh.employee_id, start: sh.clock_in_at, end: sh.clock_out_at });
+    }
+    if (shiftFulfillmentDay(sh, SHOP_TIMEZONE) !== day) continue;
+    shiftsExamined += 1;
+    if ((sh.break_minutes ?? 0) > 0) shiftsWithBreak += 1;
+  }
+  for (const op of openPunches) {
+    if (!fulfillmentIds.has(op.employee_id)) continue;
+    punchWindows.push({ employee_id: op.employee_id, start: op.clocked_in_at, end: null });
+  }
+
   // result.summary counts attributed + UNASSIGNED boxes; passing it makes the crew denominator
   // the day's total completed work, so paid hours are not charged against only the attributed
   // boxes (which overstated the crew rate — see buildFulfillmentEconomics).
-  const economics = buildFulfillmentEconomics(
-    result.pickers, costByEmployee, nameById, trackById,
-    { boxes_completed: result.summary.boxes_completed, orders_picked: result.summary.orders_picked },
-  );
+  const economics = buildFulfillmentEconomics({
+    pickers: result.pickers,
+    costByEmployee,
+    nameById,
+    trackById,
+    boxes,
+    unitsByOrderId,
+    punchWindows,
+    dayTotals: {
+      boxes_completed: result.summary.boxes_completed,
+      orders_picked: result.summary.orders_picked,
+    },
+    breakStats: { shifts: shiftsExamined, withBreak: shiftsWithBreak },
+    nowMs,
+  });
 
   return NextResponse.json({
     day,
@@ -157,9 +273,11 @@ export async function GET(req: Request) {
     // `rows` is that list plus track, cost, and the on-clock-but-zero-boxes people.
     rows: economics.rows,
     cost: economics.cost,
+    skus_picked: economics.skus_picked,
     unproductive_hours: economics.unproductive_hours,
     unproductive_cents: economics.unproductive_cents,
     suspect_hours: economics.suspect_hours,
     suspect_punches: economics.suspect_punches,
+    quality: economics.quality,
   });
 }

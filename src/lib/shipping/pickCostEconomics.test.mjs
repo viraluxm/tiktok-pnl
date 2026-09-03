@@ -30,6 +30,7 @@ function transpile(srcRel, outName, rewrites = {}) {
 }
 const employeesUrl = transpile('../employees.ts', 'employees.mjs');
 const perfUrl = transpile('./pickerPerformance.ts', 'pickerPerformance.mjs');
+const { aggregateFulfillmentDay } = await import(perfUrl);
 const costUrl = transpile('./pickCostEconomics.ts', 'pickCostEconomics.mjs', {
   "'@/lib/employees'": `'${employeesUrl}'`,
   "'@/lib/shipping/pickerPerformance'": `'${perfUrl}'`,
@@ -38,6 +39,7 @@ const {
   FULFILLMENT_TRACKS, isFulfillmentTrack, shiftFulfillmentDay, employeeCostForDay,
   perUnitCents, buildFulfillmentEconomics, subtotalByTrack, formatCentsPerUnit, formatDollars,
   formatHours, formatTrack, MAX_PLAUSIBLE_PUNCH_HOURS,
+  pickerKey, skuCount, countBoxesOutsidePunch,
 } = await import(costUrl);
 
 let passed = 0;
@@ -187,7 +189,7 @@ console.log('real day: 2026-09-02 day shift (all punches unconfirmed, 2 of 5 zer
   const TRACKS = { alex: 'picker', jeralynn: 'picker', blake: 'flex', joseph: 'packer', carlos: null };
 
   const cost = employeeCostForDay(EMP, SHIFTS, '2026-09-02', 'America/Los_Angeles');
-  const econ = buildFulfillmentEconomics(PICKERS, cost, NAMES, TRACKS);
+  const econ = buildFulfillmentEconomics({ pickers: PICKERS, costByEmployee: cost, nameById: NAMES, trackById: TRACKS });
 
   check('rows examined', econ.rows.length === 5, `${econ.rows.length} rows (3 picked + 2 on-clock zero-box)`);
   check('zero-box on-clock people GET a row', econ.rows.some((r) => r.name === 'Joseph')
@@ -331,14 +333,14 @@ console.log('forgotten clock-outs must not poison the projection (real 2026-08-3
     `${dbl.pending_hours.toFixed(2)}h pending over 2 punches`);
 
   // With the runaway excluded, the projection reflects the 24.08 plausible hours only.
-  const econ = buildFulfillmentEconomics(
-    [{
+  const econ = buildFulfillmentEconomics({
+    pickers: [{
       picker_employee_id: 'good', name: 'good', is_unassigned: false,
       orders_picked: 300, boxes_completed: 100,
       avg_pick_ms: null, active_pick_ms: null, orders_per_active_hour: null,
       valid_duration_count: 0, sessions: 1, median_gap_ms: null,
     }],
-    cost, { good: 'good', runaway: 'runaway', double: 'double' }, {});
+    costByEmployee: cost, nameById: { good: 'good', runaway: 'runaway', double: 'double' } });
   check('crew suspect surfaced for the UI',
     econ.suspect_punches === 1 && near(econ.suspect_hours, 47.15, 0.02));
   check('crew projection excludes the runaway (24.08h, not 71.2h)',
@@ -383,9 +385,9 @@ console.log('crew denominator must include UNASSIGNED boxes (real 2026-08-31 gap
     valid_duration_count: 0, sessions: 1, median_gap_ms: null,
   }];
 
-  const withoutTotals = buildFulfillmentEconomics(attributed, cost, { F1: 'F1' }, {});
-  const withTotals = buildFulfillmentEconomics(attributed, cost, { F1: 'F1' }, {},
-    { boxes_completed: 1159, orders_picked: 3181 });
+  const withoutTotals = buildFulfillmentEconomics({ pickers: attributed, costByEmployee: cost, nameById: { F1: 'F1' } });
+  const withTotals = buildFulfillmentEconomics({ pickers: attributed, costByEmployee: cost, nameById: { F1: 'F1' },
+    dayTotals: { boxes_completed: 1159, orders_picked: 3181 } });
 
   check('rows compared', withoutTotals.rows.length === 1 && withTotals.rows.length === 1);
   check('attributed-only denominator reads $1.57/box (the BUG)',
@@ -411,14 +413,14 @@ console.log('confirmed day: both figures present and equal');
   const EMP = [{ id: 'F1', role: 'fulfillment', hourly_rate: RATE }];
   const SHIFTS = [punch('F1', '2026-08-31', '06:00', '14:00', { confirmed: true })]; // 8h × $22 = $176
   const cost = employeeCostForDay(EMP, SHIFTS, '2026-08-31', 'America/Los_Angeles');
-  const econ = buildFulfillmentEconomics(
-    [{
+  const econ = buildFulfillmentEconomics({
+    pickers: [{
       picker_employee_id: 'F1', name: 'F1', is_unassigned: false,
       orders_picked: 400, boxes_completed: 100,
       avg_pick_ms: null, active_pick_ms: null, orders_per_active_hour: null,
       valid_duration_count: 0, sessions: 1, median_gap_ms: null,
     }],
-    cost, { F1: 'F1' }, { F1: 'picker' });
+    costByEmployee: cost, nameById: { F1: 'F1' }, trackById: { F1: 'picker' } });
 
   const r = econ.rows[0];
   check('confirmed $/box = $176 / 100 = $1.76', near(r.cost.cost_per_box_cents, 176), `${r.cost.cost_per_box_cents}c`);
@@ -433,11 +435,172 @@ console.log('confirmed day: both figures present and equal');
 console.log('empty day');
 // ─────────────────────────────────────────────────────────────────────────────
 {
-  const econ = buildFulfillmentEconomics([], new Map(), {}, {});
+  const econ = buildFulfillmentEconomics({ pickers: [], costByEmployee: new Map() });
   check('no rows', econ.rows.length === 0);
   check('all rates null, no crash',
     econ.cost.cost_per_box_cents === null && econ.cost.cost_per_order_cents_projected === null);
   check('zero unproductive', econ.unproductive_hours === 0 && econ.unproductive_cents === 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log('LIVE hours: cost must not read "—" for the whole working day');
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  // A `shifts` row is only written at CLOCK-OUT (verified: the one open time entry has
+  // shift_id = null). So mid-shift there are no hours and both figures rendered "—" all day.
+  const EMP = [
+    { id: 'F1', role: 'fulfillment', hourly_rate: RATE },
+    { id: 'H1', role: 'host', hourly_rate: 25 },
+  ];
+  const NOW = Date.parse('2026-09-02T17:00:00Z');            // 10:00 PT — mid day shift
+  const OPEN = [{ employee_id: 'F1', clocked_in_at: '2026-09-02T13:15:00Z' }]; // in at 06:15 PT
+  const stat = {
+    picker_employee_id: 'F1', name: 'F1', is_unassigned: false,
+    orders_picked: 100, boxes_completed: 40,
+    avg_pick_ms: null, active_pick_ms: null, orders_per_active_hour: null,
+    valid_duration_count: 0, sessions: 1, median_gap_ms: null,
+  };
+
+  // BEFORE: no shifts row, no open punch passed → nothing to divide by.
+  const blind = employeeCostForDay(EMP, [], '2026-09-02', 'America/Los_Angeles');
+  check('without open punches the day has ZERO hours (the bug)', blind.size === 0);
+  const blindEcon = buildFulfillmentEconomics({ pickers: [stat], costByEmployee: blind });
+  check('…so $/box renders as null (the "—" a manager saw all day)',
+    blindEcon.cost.cost_per_box_cents_projected === null);
+
+  // AFTER: the open punch supplies 3.75h of live hours.
+  const live = employeeCostForDay(EMP, [], '2026-09-02', 'America/Los_Angeles', OPEN, NOW);
+  const f1 = live.get('F1');
+  check('open punch → 3.75h live', near(f1.live_hours, 3.75), `${f1.live_hours}h`);
+  check('live is NOT payable and NOT pending (payroll gate untouched)',
+    f1.payable_hours === 0 && f1.pending_hours === 0);
+  const econ = buildFulfillmentEconomics({ pickers: [stat], costByEmployee: live });
+  check('projected $/box now computable mid-shift',
+    near(econ.cost.cost_per_box_cents_projected, 3.75 * RATE * 100 / 40, 0.5),
+    `${(econ.cost.cost_per_box_cents_projected / 100).toFixed(3)}`);
+  check('confirmed $/box still null — nothing is confirmed yet',
+    econ.cost.cost_per_box_cents === null);
+  check('crew live hours surfaced for the banner', near(econ.cost.live_hours, 3.75));
+
+  // Breaks taken so far are subtracted, so lunch does not bill.
+  const withBreak = employeeCostForDay(EMP, [],
+    '2026-09-02', 'America/Los_Angeles',
+    [{ ...OPEN[0], break_minutes_so_far: 30 }], NOW);
+  check('break_minutes_so_far subtracted from live hours',
+    near(withBreak.get('F1').live_hours, 3.25), `${withBreak.get('F1').live_hours}h`);
+
+  // A host's open punch is not picking labour.
+  const hostOpen = employeeCostForDay(EMP, [], '2026-09-02', 'America/Los_Angeles',
+    [{ employee_id: 'H1', clocked_in_at: '2026-09-02T13:15:00Z' }], NOW);
+  check('host open punch ignored', hostOpen.size === 0);
+
+  // An open punch already past the plausible cap is a missed clock-out, not live work.
+  const stale = employeeCostForDay(EMP, [], '2026-09-02', 'America/Los_Angeles',
+    [{ employee_id: 'F1', clocked_in_at: '2026-09-02T11:00:00Z' }],
+    Date.parse('2026-09-03T09:00:00Z')); // 22h open
+  check('open punch past 18h → suspect, not live',
+    stale.get('F1').suspect_punches === 1 && stale.get('F1').live_hours === 0,
+    `${stale.get('F1').suspect_hours.toFixed(1)}h suspect`);
+
+  // A punch that started on a DIFFERENT fulfillment day does not leak in.
+  const other = employeeCostForDay(EMP, [], '2026-09-01', 'America/Los_Angeles', OPEN, NOW);
+  check('open punch bucketed by the 04:00 boundary, not "today"', other.size === 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log('$/SKU denominator is TRUE UNITS, not the order count');
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  check('no map → falls back to distinct order count', skuCount(['a', 'b', 'b']) === 2);
+  const units = new Map([['a', 1], ['b', 3]]);
+  check('with a units map → sums units', skuCount(['a', 'b'], units) === 4);
+  check('order missing from the map counts as 1 (never zeroes a box)',
+    skuCount(['a', 'zz'], units) === 2);
+  check('duplicate ids inside one box are de-duped', skuCount(['b', 'b'], units) === 3);
+
+  // End to end: a box holding one 3-unit order must divide by 3, not by 1.
+  const EMP = [{ id: 'F1', role: 'fulfillment', hourly_rate: RATE }];
+  const cost = employeeCostForDay(EMP,
+    [punch('F1', '2026-09-02', '06:00', '14:00', { confirmed: true })], // 8h = $176
+    '2026-09-02', 'America/Los_Angeles');
+  const boxes = [{ picker_employee_id: 'F1', picker_name_snapshot: 'F1', order_ids: ['a'], verified_at: '2026-09-02T15:00:00Z' }];
+  const stat = {
+    picker_employee_id: 'F1', name: 'F1', is_unassigned: false,
+    orders_picked: 1, boxes_completed: 1,
+    avg_pick_ms: null, active_pick_ms: null, orders_per_active_hour: null,
+    valid_duration_count: 0, sessions: 1, median_gap_ms: null,
+  };
+  const byOrders = buildFulfillmentEconomics({ pickers: [stat], costByEmployee: cost, boxes });
+  const byUnits = buildFulfillmentEconomics({
+    pickers: [stat], costByEmployee: cost, boxes, unitsByOrderId: new Map([['a', 3]]) });
+  check('order count gives $176/SKU (overstated)', near(byOrders.rows[0].cost.cost_per_order_cents, 17600, 1));
+  check('true units give $58.67/SKU', near(byUnits.rows[0].cost.cost_per_order_cents, 17600 / 3, 1));
+  check('skus_picked reports 3, orders_picked still reports 1',
+    byUnits.rows[0].skus_picked === 3 && byUnits.rows[0].orders_picked === 1);
+  check('crew SKU total uses true units', byUnits.skus_picked === 3);
+  check('$/box is unaffected by the unit count',
+    byOrders.rows[0].cost.cost_per_box_cents === byUnits.rows[0].cost.cost_per_box_cents);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log('pickerKey MIRRORS aggregateFulfillmentDay grouping (drift guard)');
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  // The SKU roll-up groups boxes itself, so its key rule must match the aggregate's exactly.
+  // Driven off the aggregate's OWN output rather than an assumed shape.
+  const ev = (gk, id, snap) => ({
+    group_key: gk, picker_employee_id: id, picker_name_snapshot: snap,
+    pick_started_at: null, verified_at: '2026-09-02T15:00:00Z', order_ids: [gk],
+  });
+  const events = [ev('b1', 'E1', 'Alex'), ev('b2', null, 'Ghost'), ev('b3', null, null), ev('b4', 'E1', 'Renamed')];
+  const agg = aggregateFulfillmentDay(events, { E1: 'Alex' });
+
+  check('aggregate produced the groups to compare', agg.pickers.length === 2 && !!agg.unassigned,
+    `${agg.pickers.length} pickers + unassigned`);
+  check('id wins over snapshot', pickerKey(ev('x', 'E1', 'Renamed')) === 'id:E1');
+  check('snapshot used when id is null', pickerKey(ev('x', null, 'Ghost')) === 'name:Ghost');
+  check('neither → null (unassigned, matches the aggregate)', pickerKey(ev('x', null, null)) === null);
+  check('id-keyed boxes collapse to ONE group, exactly as the aggregate did',
+    new Set(events.filter((e) => e.picker_employee_id).map(pickerKey)).size === 1
+    && agg.pickers.filter((p) => p.picker_employee_id === 'E1').length === 1);
+  check('unassigned box excluded from every picker key, as the aggregate excludes it',
+    agg.unassigned.boxes_completed === 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log('off-clock boxes are surfaced (cannot be corrected, only flagged)');
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const box = (id, at) => ({ picker_employee_id: id, picker_name_snapshot: null, order_ids: ['o' + at], verified_at: at });
+  const boxes = [
+    box('F1', '2026-09-02T14:00:00Z'), // inside
+    box('F1', '2026-09-02T20:00:00Z'), // inside
+    box('F1', '2026-09-02T23:00:00Z'), // OUTSIDE — after clock-out
+    box(null, '2026-09-02T14:00:00Z'), // unattributable → not examined
+  ];
+  const windows = [{ employee_id: 'F1', start: '2026-09-02T13:15:00Z', end: '2026-09-02T21:00:00Z' }];
+  const r = countBoxesOutsidePunch(boxes, windows);
+  check('examined only attributable boxes', r.examined === 3, `${r.examined} of ${boxes.length}`);
+  check('one box outside the punch', r.outside === 1);
+
+  // An OPEN window runs to now, so live work is not miscounted as off-clock.
+  const openW = [{ employee_id: 'F1', start: '2026-09-02T13:15:00Z', end: null }];
+  const rOpen = countBoxesOutsidePunch(boxes, openW, Date.parse('2026-09-03T00:00:00Z'));
+  check('open punch window counts to now → nothing outside', rOpen.outside === 0);
+
+  // A picker with no punch at all: every box is outside.
+  const rNone = countBoxesOutsidePunch(boxes, []);
+  check('no punches → every attributable box is outside', rNone.outside === 3 && rNone.examined === 3);
+
+  // Quality passthrough onto the result.
+  const econ = buildFulfillmentEconomics({
+    pickers: [], costByEmployee: new Map(), boxes, punchWindows: windows,
+    breakStats: { shifts: 5, withBreak: 0 },
+  });
+  check('quality carries the off-clock counts',
+    econ.quality.boxes_examined === 3 && econ.quality.boxes_outside_punch === 1);
+  check('quality carries the break counts',
+    econ.quality.shifts_examined === 5 && econ.quality.shifts_with_break === 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

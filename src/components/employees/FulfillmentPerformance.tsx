@@ -89,9 +89,10 @@ function TrackChip({ track }: { track: FulfillmentTrack | null }) {
 }
 
 function PickerRow({ p }: { p: PickerCostRow }) {
-  const perBox = costFigure(p.cost.cost_per_box_cents, p.cost.cost_per_box_cents_projected, p.cost.pending_hours);
-  const perSku = costFigure(p.cost.cost_per_order_cents, p.cost.cost_per_order_cents_projected, p.cost.pending_hours);
-  const hours = p.cost.payable_hours + p.cost.pending_hours;
+  const prov = p.cost.pending_hours + p.cost.live_hours;
+  const perBox = costFigure(p.cost.cost_per_box_cents, p.cost.cost_per_box_cents_projected, prov);
+  const perSku = costFigure(p.cost.cost_per_order_cents, p.cost.cost_per_order_cents_projected, prov);
+  const hours = p.cost.payable_hours + prov;
 
   // On the clock all shift, zero boxes. NOT proof of idleness — packing, receiving, restocking
   // and cleanup write no rows anywhere, so they read as zero too. Flagged, never judged.
@@ -103,7 +104,7 @@ function PickerRow({ p }: { p: PickerCostRow }) {
         <div className="font-semibold text-tt-text truncate" title={p.name}>{p.name}</div>
         <div className="mt-0.5"><TrackChip track={p.fulfillment_track} /></div>
       </div>
-      <Cell label="SKUs" value={String(p.orders_picked)} muted={idle} />
+      <Cell label="SKUs" value={String(p.skus_picked)} muted={idle} />
       <Cell label="Boxes" value={String(p.boxes_completed)} muted={idle} />
       <Cell label="Paid Hours" value={formatHours(hours)} />
       <Cell label="$ / Box" value={perBox.text} muted={perBox.provisional} />
@@ -125,9 +126,10 @@ function TrackSubtotals({ rows }: { rows: PickerCostRow[] }) {
       <div className="text-[10px] uppercase tracking-wide text-tt-muted mb-1.5 px-1">By track</div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
         {subs.map((s) => {
-          const perBox = costFigure(s.cost.cost_per_box_cents, s.cost.cost_per_box_cents_projected, s.cost.pending_hours);
-          const perSku = costFigure(s.cost.cost_per_order_cents, s.cost.cost_per_order_cents_projected, s.cost.pending_hours);
-          const hours = s.cost.payable_hours + s.cost.pending_hours;
+          const prov = s.cost.pending_hours + s.cost.live_hours;
+          const perBox = costFigure(s.cost.cost_per_box_cents, s.cost.cost_per_box_cents_projected, prov);
+          const perSku = costFigure(s.cost.cost_per_order_cents, s.cost.cost_per_order_cents_projected, prov);
+          const hours = s.cost.payable_hours + prov;
           return (
             <div key={s.track ?? 'unset'} className="rounded-xl border border-tt-border bg-tt-card px-3.5 py-3">
               <div className="flex items-center justify-between gap-2">
@@ -169,12 +171,22 @@ export default function FulfillmentPerformance() {
   const hasAnything = rows.length > 0 || !!unassigned;
 
   const pendingHours = cost?.pending_hours ?? 0;
-  const crewPerBox = costFigure(cost?.cost_per_box_cents ?? null, cost?.cost_per_box_cents_projected ?? null, pendingHours);
-  const crewPerSku = costFigure(cost?.cost_per_order_cents ?? null, cost?.cost_per_order_cents_projected ?? null, pendingHours);
+  const provisionalHours = pendingHours + (cost?.live_hours ?? 0);
+  const crewPerBox = costFigure(cost?.cost_per_box_cents ?? null, cost?.cost_per_box_cents_projected ?? null, provisionalHours);
+  const crewPerSku = costFigure(cost?.cost_per_order_cents ?? null, cost?.cost_per_order_cents_projected ?? null, provisionalHours);
   const crewHours = (cost?.payable_hours ?? 0) + pendingHours;
   const crewCents = (cost?.payable_cents ?? 0) + (cost?.pending_cents ?? 0);
   const unproductiveHours = data?.unproductive_hours ?? 0;
   const unproductiveCents = data?.unproductive_cents ?? 0;
+  const liveHours = cost?.live_hours ?? 0;
+  const crewSkus = data?.skus_picked ?? 0;
+  const quality = data?.quality;
+  // 2% floor: below that it is a stray re-confirm, not a punch-discipline problem worth a banner.
+  const offClockPct = quality && quality.boxes_examined > 0
+    ? (100 * quality.boxes_outside_punch) / quality.boxes_examined
+    : 0;
+  // Only a warning when there WERE shifts and none of them recorded a break.
+  const noBreaksRecorded = !!quality && quality.shifts_examined > 0 && quality.shifts_with_break === 0;
 
   return (
     <div>
@@ -219,7 +231,7 @@ export default function FulfillmentPerformance() {
         <>
           {/* Summary cards */}
           <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-5 mt-4">
-            <SummaryCard label="SKUs Picked" value={String(summary?.orders_picked ?? 0)} />
+            <SummaryCard label="SKUs Picked" value={String(crewSkus)} />
             <SummaryCard label="Boxes Completed" value={String(summary?.boxes_completed ?? 0)} />
             <SummaryCard label="Active Pickers" value={String(summary?.active_pickers ?? 0)} />
             <SummaryCard
@@ -232,16 +244,19 @@ export default function FulfillmentPerformance() {
               label="$ / SKU"
               value={crewPerSku.text}
               provisional={crewPerSku.provisional}
-              note="Falls as bundling deepens — judge people on $ / Box"
+              note={crewSkus > 0 ? `${crewSkus.toLocaleString()} units picked` : undefined}
             />
             <SummaryCard label="Average Pick Time" value={formatPickDuration(summary?.avg_pick_ms ?? null)} />
           </div>
 
           {/* Pending-confirmation banner. Without this, a "~" figure looks like a rounding
               quirk rather than "a manager has not confirmed these punches yet". */}
-          {pendingHours > 0 && (
+          {(pendingHours > 0 || liveHours > 0) && (
             <div className="mb-4 rounded-xl border border-tt-yellow/40 bg-tt-yellow/5 px-4 py-2.5 text-xs text-tt-text">
-              <span className="font-semibold">{formatHours(pendingHours)}h awaiting manager confirmation.</span>{' '}
+              <span className="font-semibold">
+                {liveHours > 0 && <>{formatHours(liveHours)}h still on the clock{pendingHours > 0 ? ', ' : '. '}</>}
+                {pendingHours > 0 && <>{formatHours(pendingHours)}h awaiting manager confirmation. </>}
+              </span>
               Figures marked <span className="tabular-nums">~</span> include those hours as a projection —
               payroll pays only confirmed hours, so the settled cost may differ.
             </div>
@@ -270,6 +285,29 @@ export default function FulfillmentPerformance() {
                 {formatHours(unproductiveHours)}h ({formatDollars(unproductiveCents)}) on the clock completed no boxes.
               </span>{' '}
               Packing, receiving, restocking and cleanup write no rows, so they also read as zero here.
+            </div>
+          )}
+
+          {/* DATA QUALITY — warn on the day, keep showing the figures. Both of these are
+              data-entry problems that cannot be corrected here, only surfaced: without the
+              warning a day like 08-18 (27% of boxes with no matching punch) reports a
+              too-cheap $/box with nothing indicating why. */}
+          {(offClockPct >= 2 || noBreaksRecorded) && (
+            <div className="mb-4 rounded-xl border border-tt-yellow/40 bg-tt-yellow/5 px-4 py-2.5 text-xs text-tt-text">
+              <span className="font-semibold">Cost on this day is understated.</span>{' '}
+              {offClockPct >= 2 && (
+                <>
+                  {quality!.boxes_outside_punch} of {quality!.boxes_examined} boxes
+                  ({offClockPct.toFixed(0)}%) were completed with no matching punch, so the hours
+                  behind them are missing from the cost.{' '}
+                </>
+              )}
+              {noBreaksRecorded && (
+                <>
+                  No unpaid break was recorded on any of the {quality!.shifts_examined} shifts, so
+                  paid hours may be overstated.{' '}
+                </>
+              )}
             </div>
           )}
 
