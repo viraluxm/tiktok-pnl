@@ -62,7 +62,7 @@ export default function RosterGrid({
                 key={e.id}
                 type="button"
                 onClick={() => onOpen(e)}
-                title={`${e.name} — ${titleCase(e.role)}`}
+                title={`${e.name} — ${titleCase(e.role)}${e.fulfillment_track ? ` · ${titleCase(e.fulfillment_track)}` : ''}`}
                 className={`flex flex-col items-center rounded-xl border border-tt-border bg-white/[0.02] p-3 text-center transition-colors hover:border-tt-cyan/40 hover:bg-tt-card-hover ${
                   e.status === 'former' ? 'opacity-50' : ''
                 }`}
@@ -72,6 +72,10 @@ export default function RosterGrid({
                 <span className="mt-0.5 flex items-center gap-1 text-[10px] text-tt-muted">
                   <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusDot(e.status)}`} aria-hidden />
                   {e.status === 'active' ? titleCase(e.role) : titleCase(e.status)}
+                  {/* Fulfillment sub-type (migration 121). Display only — never a gate. */}
+                  {e.status === 'active' && e.fulfillment_track && (
+                    <span className="text-tt-cyan">· {titleCase(e.fulfillment_track)}</span>
+                  )}
                 </span>
               </button>
             ))}

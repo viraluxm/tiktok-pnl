@@ -53,7 +53,12 @@ export default function EmployeeDetailModal({
             <PersonAvatar name={employee.name} state="confirmed" size="lg" />
             <div>
               <h3 className="text-base font-semibold text-tt-text">{employee.name}</h3>
-              <p className="text-xs text-tt-muted">{titleCase(employee.role)}</p>
+              <p className="text-xs text-tt-muted">
+                {titleCase(employee.role)}
+                {employee.fulfillment_track && (
+                  <span className="text-tt-cyan"> · {titleCase(employee.fulfillment_track)}</span>
+                )}
+              </p>
             </div>
           </div>
           <button

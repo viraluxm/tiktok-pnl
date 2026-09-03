@@ -179,17 +179,57 @@ console.log('aggregateFulfillmentDay');
   check('empty day → no pickers, null avg', day.pickers.length === 0 && day.unassigned === null && day.summary.avg_pick_ms === null && day.summary.active_pickers === 0);
 }
 
-// ── 6. Business-day (America/Los_Angeles) bounds — midnight + DST ────────────────
+// ── 6. Fulfillment-day (America/Los_Angeles) bounds — 04:00 boundary + DST ───────
+// The day boundary is local SHIFT_DAY_START_HOUR (04:00), NOT midnight, so the night crew's
+// 17:00→01:00 shift stays on ONE key instead of being split across two calendar days.
 console.log('timezone day math');
 const HOUR = 60 * MIN;
 check('addDaysISO basic', addDaysISO('2026-07-15', 1) === '2026-07-16');
 check('normal summer PT day = 24h', (() => { const r = zonedDayRangeUtcMs('2026-07-15'); return r.endMs - r.startMs === 24 * HOUR; })());
-check('PT summer midnight = 07:00 UTC', zonedDayStartUtcMs('2026-07-15') === Date.UTC(2026, 6, 15, 7, 0, 0));
-check('spring-forward day (2026-03-08) = 23h', (() => { const r = zonedDayRangeUtcMs('2026-03-08'); return r.endMs - r.startMs === 23 * HOUR; })());
-check('fall-back day (2026-11-01) = 25h', (() => { const r = zonedDayRangeUtcMs('2026-11-01'); return r.endMs - r.startMs === 25 * HOUR; })());
+check('PT summer 04:00 = 11:00 UTC', zonedDayStartUtcMs('2026-07-15') === Date.UTC(2026, 6, 15, 11, 0, 0));
+// DST: with an 04:00 boundary the short/long window is the one CONTAINING the 02:00 clock
+// change — i.e. the fulfillment day that STARTS the day before the calendar transition.
+// (Under the old midnight boundary these were 2026-03-08 and 2026-11-01.)
+check('spring-forward window (2026-03-07) = 23h', (() => { const r = zonedDayRangeUtcMs('2026-03-07'); return r.endMs - r.startMs === 23 * HOUR; })());
+check('fall-back window (2026-10-31) = 25h', (() => { const r = zonedDayRangeUtcMs('2026-10-31'); return r.endMs - r.startMs === 25 * HOUR; })());
+// The transition calendar-days themselves are now ordinary 24h windows.
+check('spring-forward calendar day (2026-03-08) = 24h', (() => { const r = zonedDayRangeUtcMs('2026-03-08'); return r.endMs - r.startMs === 24 * HOUR; })());
+check('fall-back calendar day (2026-11-01) = 24h', (() => { const r = zonedDayRangeUtcMs('2026-11-01'); return r.endMs - r.startMs === 24 * HOUR; })());
 check('tzOffsetMs summer = -7h', tzOffsetMs(Date.UTC(2026, 6, 15, 12, 0, 0)) === -7 * HOUR);
-check('06:59 UTC → previous PT day', zonedDayKey(Date.UTC(2026, 6, 15, 6, 59, 0)) === '2026-07-14');
-check('07:01 UTC → this PT day', zonedDayKey(Date.UTC(2026, 6, 15, 7, 1, 0)) === '2026-07-15');
+
+// Boundary: local 03:59 belongs to the PREVIOUS fulfillment day, 04:01 to this one.
+// (PDT = UTC-7, so local 03:59 on Jul 15 is 10:59 UTC.)
+check('03:59 PT → previous fulfillment day', zonedDayKey(Date.UTC(2026, 6, 15, 10, 59, 0)) === '2026-07-14');
+check('04:01 PT → this fulfillment day', zonedDayKey(Date.UTC(2026, 6, 15, 11, 1, 0)) === '2026-07-15');
+
+// The regression this boundary exists to prevent: a night shift running 17:00 → 01:00 must
+// land on ONE key. Under the old midnight boundary the 00:30 tail fell on the NEXT day.
+check('night shift 18:00 start → shift day', zonedDayKey(Date.UTC(2026, 6, 16, 1, 0, 0)) === '2026-07-15');
+check('night shift 00:30 tail → SAME shift day', zonedDayKey(Date.UTC(2026, 6, 16, 7, 30, 0)) === '2026-07-15');
+check('night shift start+tail share a key',
+  zonedDayKey(Date.UTC(2026, 6, 16, 1, 0, 0)) === zonedDayKey(Date.UTC(2026, 6, 16, 7, 30, 0)));
+
+// A day-crew shift (06:00–14:00) is unaffected by the shifted boundary.
+check('day shift 06:00 → same calendar day', zonedDayKey(Date.UTC(2026, 6, 15, 13, 0, 0)) === '2026-07-15');
+check('day shift 13:00 → same calendar day', zonedDayKey(Date.UTC(2026, 6, 15, 20, 0, 0)) === '2026-07-15');
+
+// zonedDayKey must agree with zonedDayRangeUtcMs: an instant's key is the day whose
+// [start, end) window contains it. Checked at both edges of a day.
+check('key/range agree at day start', (() => {
+  const r = zonedDayRangeUtcMs('2026-07-15');
+  return zonedDayKey(r.startMs) === '2026-07-15' && zonedDayKey(r.endMs - 1) === '2026-07-15';
+})());
+check('range end belongs to next day', zonedDayKey(zonedDayRangeUtcMs('2026-07-15').endMs) === '2026-07-16');
+
+// Same agreement across both DST transitions, where the window is 23h / 25h.
+check('key/range agree across spring-forward', (() => {
+  const r = zonedDayRangeUtcMs('2026-03-07');
+  return zonedDayKey(r.startMs) === '2026-03-07' && zonedDayKey(r.endMs - 1) === '2026-03-07';
+})());
+check('key/range agree across fall-back', (() => {
+  const r = zonedDayRangeUtcMs('2026-10-31');
+  return zonedDayKey(r.startMs) === '2026-10-31' && zonedDayKey(r.endMs - 1) === '2026-10-31';
+})());
 
 // ── 7. formatters ────────────────────────────────────────────────────────────────
 console.log('formatters');

@@ -21,6 +21,19 @@
 // this business boundary — NOT browser-local, NOT UTC.
 export const SHOP_TIMEZONE = 'America/Los_Angeles';
 
+// The local hour at which one fulfillment "day" ends and the next begins.
+//
+// NOT midnight. The warehouse runs two shifts — a day crew roughly 06:00–14:00 and a night
+// crew roughly 17:00–01:00 — so a midnight boundary cuts every night shift in half and
+// reports it as two partial days: the tail of one shift and the head of the NEXT night's
+// shift land in the same bucket, which both understates night-crew shift length and
+// manufactures a ~16h "gap" between the two fragments.
+//
+// 04:00 sits inside the genuine dead zone (measured 01:00–05:00 PT carries <0.05% of box
+// completions), so no real shift straddles it. It is also safely clear of the US Pacific
+// DST transition at 02:00–03:00, so local 04:00 exists on every calendar day of the year.
+export const SHIFT_DAY_START_HOUR = 4;
+
 // Maximum plausible single-box pick duration. A box whose (verified_at − pick_started_at)
 // exceeds this is treated as INVALID (walked away, a re-confirm long after load, a clock
 // anomaly, etc.) and excluded from Average Pick Time / Active Picking Time / Orders-per-hour.
@@ -49,11 +62,11 @@ export function tzOffsetMs(utcMs: number, tz: string = SHOP_TIMEZONE): number {
   return asUTC - utcMs;
 }
 
-// The UTC instant (ms) of local midnight (00:00) of the given calendar day in `tz`.
-// Two-pass to stay correct across DST transitions.
+// The UTC instant (ms) at which the given fulfillment day STARTS in `tz` — local
+// SHIFT_DAY_START_HOUR (04:00), not midnight. Two-pass to stay correct across DST.
 export function zonedDayStartUtcMs(dayISO: string, tz: string = SHOP_TIMEZONE): number {
   const [y, m, d] = dayISO.split('-').map(Number);
-  const naive = Date.UTC(y, m - 1, d, 0, 0, 0);
+  const naive = Date.UTC(y, m - 1, d, SHIFT_DAY_START_HOUR, 0, 0);
   const off1 = tzOffsetMs(naive, tz);
   let start = naive - off1;
   const off2 = tzOffsetMs(start, tz);
@@ -61,14 +74,20 @@ export function zonedDayStartUtcMs(dayISO: string, tz: string = SHOP_TIMEZONE): 
   return start;
 }
 
-// [startMs, endMs) UTC bounds of the given business-day in `tz`. Length is 23/24/25h on DST.
+// [startMs, endMs) UTC bounds of the given fulfillment day in `tz` — local 04:00 of `dayISO`
+// up to local 04:00 of the next day. Length is 23/24/25h on DST, same as a midnight day.
 export function zonedDayRangeUtcMs(dayISO: string, tz: string = SHOP_TIMEZONE): { startMs: number; endMs: number } {
   return { startMs: zonedDayStartUtcMs(dayISO, tz), endMs: zonedDayStartUtcMs(addDaysISO(dayISO, 1), tz) };
 }
 
-// The calendar-day key ('YYYY-MM-DD') that an instant falls on in `tz`. en-CA formats as ISO.
+// The fulfillment-day key ('YYYY-MM-DD') an instant belongs to in `tz`. An instant before
+// local SHIFT_DAY_START_HOUR belongs to the PREVIOUS calendar day, so a night shift that
+// crosses midnight stays on one key. Reads the shifted wall-clock via UTC accessors.
 export function zonedDayKey(utcMs: number, tz: string = SHOP_TIMEZONE): string {
-  return new Date(utcMs).toLocaleDateString('en-CA', { timeZone: tz });
+  const localMs = utcMs + tzOffsetMs(utcMs, tz);
+  const shifted = new Date(localMs - SHIFT_DAY_START_HOUR * 3_600_000);
+  const p2 = (n: number): string => String(n).padStart(2, '0');
+  return `${shifted.getUTCFullYear()}-${p2(shifted.getUTCMonth() + 1)}-${p2(shifted.getUTCDate())}`;
 }
 
 // Add whole calendar days to an ISO day string ('YYYY-MM-DD'), DST-independent (date-only math).
@@ -172,6 +191,20 @@ export interface PickerDayStats {
   boxes_completed: number;    // count of distinct completed boxes
   avg_pick_ms: number | null;         // mean of VALID box durations; null when none countable
   active_pick_ms: number | null;      // sum of VALID box durations; null when none countable
+  /**
+   * DO NOT DISPLAY THIS AS A PICK RATE. Removed from the fulfillment view 2026-09-02.
+   *
+   * `pick_started_at` does not mark when picking began — it is stamped near CONFIRM time, so
+   * the walking and gathering happen before the timestamp exists and the window captures only
+   * the per-item scanning inside the box. Verified on raw 2026-09-01 rows: 2-7s "durations"
+   * with 40-300s gaps BETWEEN boxes. The view was rendering 216, 275 and 314 orders/hour
+   * beside honest $/box figures, and had previously put one picker at 297 boxes/hour off
+   * 0.21 "active hours".
+   *
+   * For a real rate use a WALL-CLOCK denominator: boxes ÷ (shift span), or boxes ÷ (span minus
+   * gaps > 15 min). Kept on the payload as a diagnostic only; `avg_pick_ms` / `active_pick_ms`
+   * carry the same caveat and are shown as durations, not rates.
+   */
   orders_per_active_hour: number | null; // orders ÷ active hours; null when active is 0/none
   valid_duration_count: number;       // boxes with a valid duration (transparency)
   // Internal diagnostics — NOT surfaced in the primary UI (legacy gap/session logic):
