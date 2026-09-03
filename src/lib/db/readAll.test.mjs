@@ -1,0 +1,132 @@
+// Proof for the paged reader. The bug it exists to prevent is a SHORT read that looks
+// complete, so most of these assert that it either returns everything or throws — never
+// something plausible in between.
+// Run:  node src/lib/db/readAll.test.mjs
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+import ts from 'typescript';
+
+const srcPath = fileURLToPath(new URL('./readAll.ts', import.meta.url));
+const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+});
+const outFile = join(mkdtempSync(join(tmpdir(), 'readall-')), 'readAll.mjs');
+writeFileSync(outFile, outputText);
+const { readAllPaged, PAGE_SIZE } = await import(pathToFileURL(outFile).href);
+
+let passed = 0;
+const check = (name, cond, extra = '') => {
+  assert.ok(cond, `FAIL: ${name} ${extra}`);
+  console.log(`  ✓ ${name}${extra ? ` — ${extra}` : ''}`);
+  passed++;
+};
+
+/** A fake table of `total` rows that honours its range argument, and counts requests. */
+function fakeTable(total) {
+  const calls = [];
+  const q = (from, to) => {
+    calls.push([from, to]);
+    const rows = [];
+    for (let i = from; i <= to && i < total; i++) rows.push({ i });
+    return Promise.resolve({ data: rows, error: null });
+  };
+  return { q, calls };
+}
+
+console.log('\nExhaustion');
+{
+  const { q, calls } = fakeTable(0);
+  const rows = await readAllPaged(q, 'empty');
+  check('an empty table returns nothing in one request', rows.length === 0 && calls.length === 1);
+}
+{
+  const { q, calls } = fakeTable(10);
+  const rows = await readAllPaged(q, 'small');
+  check('a short first page ends immediately', rows.length === 10 && calls.length === 1);
+}
+{
+  // The exact case that broke fulfillment performance: 1,159 rows read as 1000.
+  const { q, calls } = fakeTable(1159);
+  const rows = await readAllPaged(q, 'the 2026-08-31 case');
+  check('1,159 rows are ALL returned, not 1000', rows.length === 1159, `got ${rows.length}`);
+  check('…across two requests', calls.length === 2);
+  check('…and they are contiguous and complete',
+    rows.every((r, i) => r.i === i));
+}
+{
+  // A total that is an exact multiple must still make one more request to prove the end. A
+  // full page is indistinguishable from a truncated one.
+  const { q, calls } = fakeTable(PAGE_SIZE);
+  const rows = await readAllPaged(q, 'exact multiple');
+  check('an exactly-full page is followed by a confirming request',
+    rows.length === PAGE_SIZE && calls.length === 2, `${calls.length} requests`);
+}
+{
+  const { q, calls } = fakeTable(PAGE_SIZE * 3);
+  const rows = await readAllPaged(q, 'three full pages');
+  check('three full pages need a fourth request to confirm',
+    rows.length === PAGE_SIZE * 3 && calls.length === 4, `${calls.length} requests`);
+}
+{
+  const t = fakeTable(2500);
+  await readAllPaged(t.q, 'ranges');
+  check('requested ranges tile the table without gaps or overlap',
+    t.calls.every(([from, to], n) => from === n * PAGE_SIZE && to === n * PAGE_SIZE + PAGE_SIZE - 1),
+    t.calls.map(([f, to]) => `${f}-${to}`).join(' '));
+}
+
+console.log('\nFails loud, never short');
+{
+  let threw = false;
+  try {
+    await readAllPaged(() => Promise.resolve({ data: null, error: { message: 'boom' } }), 'err');
+  } catch (e) { threw = /boom/.test(e.message); }
+  check('a query error THROWS rather than returning nothing', threw);
+}
+{
+  // The dangerous shape: page 1 succeeds, page 2 fails. Returning page 1 would be a
+  // plausible-looking partial read — exactly the bug this helper exists to prevent.
+  let n = 0;
+  let threw = false;
+  try {
+    await readAllPaged((from, to) => {
+      n++;
+      if (n === 1) {
+        const rows = [];
+        for (let i = from; i <= to; i++) rows.push({ i });
+        return Promise.resolve({ data: rows, error: null });
+      }
+      return Promise.resolve({ data: null, error: { message: 'page 2 died' } });
+    }, 'mid-read failure');
+  } catch (e) { threw = /page 2 died/.test(e.message); }
+  check('a failure AFTER a good page throws, discarding the partial', threw);
+}
+{
+  let threw = false;
+  try {
+    // A builder that ignores its range returns a full page forever.
+    await readAllPaged(() => {
+      const rows = [];
+      for (let i = 0; i < PAGE_SIZE; i++) rows.push({ i });
+      return Promise.resolve({ data: rows, error: null });
+    }, 'runaway');
+  } catch (e) { threw = /exceeded/.test(e.message) && /ignoring its range/.test(e.message); }
+  check('a builder that ignores its range hits the ceiling and throws', threw);
+}
+{
+  let msg = '';
+  try {
+    await readAllPaged(() => Promise.resolve({ data: null, error: { message: 'x' } }), 'my-label');
+  } catch (e) { msg = e.message; }
+  check('the label is in the error, so the failing read is identifiable',
+    msg.includes('my-label'), msg);
+}
+{
+  const rows = await readAllPaged(() => Promise.resolve({ data: null, error: null }), 'null data');
+  check('null data with no error is treated as an empty page, not a crash', rows.length === 0);
+}
+
+console.log(`\n${passed} checks passed\n`);

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { readAllPaged } from '@/lib/db/readAll';
 import { inChunks } from '@/lib/supabase/inChunks';
 
 export const dynamic = 'force-dynamic';
@@ -25,11 +26,19 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .eq('id', id).eq('user_id', user.id).maybeSingle();
   if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
 
-  // Bound auction items for this session.
-  const { data: items } = await supabase
-    .from('live_auction_items')
-    .select('id, client_idempotency_key, status, sequence')
-    .eq('user_id', user.id).eq('session_id', id).order('sequence', { ascending: true });
+  // Bound auction items for this session. PAGED — a single PostgREST response is capped at
+  // 1000 rows silently, and the largest show in the last 30 days holds 1,049. An export that
+  // drops rows past 1000 is the worst case in this sweep: the file looks complete and gets
+  // used elsewhere.
+  const items = await readAllPaged(
+    (from, to) => supabase
+      .from('live_auction_items')
+      .select('id, client_idempotency_key, status, sequence')
+      .eq('user_id', user.id).eq('session_id', id)
+      .order('sequence', { ascending: true })
+      .range(from, to),
+    'live/export items',
+  );
   const itemRows = items ?? [];
   const itemIds = itemRows.map((i) => i.id);
 
@@ -58,13 +67,20 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   }
 
   // Capture window = this session's lifetime (open session → through now).
-  let capQ = supabase
-    .from('capture_events')
-    .select('order_id, buyer_username, selling_price_cents, is_payment_successful')
-    .eq('user_id', user.id)
-    .gte('created_at', session.started_at);
-  if (session.ended_at) capQ = capQ.lte('created_at', session.ended_at);
-  const { data: caps } = await capQ;
+  // PAGED and ORDERED. `created_at` is the window's own filter column, so sorting on it uses
+  // the same index the range scan does and makes the pages a stable partition.
+  const caps = await readAllPaged(
+    (from, to) => {
+      let q = supabase
+        .from('capture_events')
+        .select('order_id, buyer_username, selling_price_cents, is_payment_successful')
+        .eq('user_id', user.id)
+        .gte('created_at', session.started_at);
+      if (session.ended_at) q = q.lte('created_at', session.ended_at);
+      return q.order('created_at', { ascending: true }).range(from, to);
+    },
+    'live/export captures',
+  );
   const capByOrder = new Map<string, Record<string, unknown>>();
   for (const c of caps ?? []) { const k = String(c.order_id); if (!capByOrder.has(k)) capByOrder.set(k, c); }
 

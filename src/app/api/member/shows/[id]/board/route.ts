@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
 import { resolveOwnedSession } from '@/lib/member/shows';
 import { inChunks } from '@/lib/supabase/inChunks';
+import { readAllPaged } from '@/lib/db/readAll';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,14 +25,21 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { session, ownerUserId } = owned;
 
   // NOTE: expected_price_cents is NOT selected (cost-derived; excluded from the shows scope).
-  const { data: items, error } = await admin
-    .from('live_auction_items')
-    .select('id, sequence, status, is_bundle, sold_price_cents, buyer_handle, client_idempotency_key, closed_at, created_at')
-    .eq('session_id', id)
-    .eq('user_id', ownerUserId)
-    .order('sequence', { ascending: true });
-  if (error) {
-    console.error('[member/shows/board] items error:', error);
+  // PAGED. Mirrors the owner-side board: a single response is capped at 1000 rows silently,
+  // and the largest show in the last 30 days holds 1,049 items.
+  const items = await readAllPaged(
+    (from, to) => admin
+      .from('live_auction_items')
+      .select('id, sequence, status, is_bundle, sold_price_cents, buyer_handle, client_idempotency_key, closed_at, created_at')
+      .eq('session_id', id)
+      .eq('user_id', ownerUserId)
+      .order('sequence', { ascending: true })
+      .range(from, to),
+    'member/shows/board items',
+  ).catch((e: unknown) => e as Error);
+
+  if (items instanceof Error) {
+    console.error('[member/shows/board] items error:', items);
     return NextResponse.json({ error: 'Failed to load log' }, { status: 500 });
   }
 
@@ -164,12 +172,21 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const sessionStoreId = (session.store_id as string | null) ?? null;
   if (room && startIso) {
     const endIso = (session.ended_at as string | null) ?? new Date().toISOString();
-    const { data: caps, error: capUnionErr } = await admin.from('capture_events')
-      .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at')
-      .eq('user_id', ownerUserId).eq('room_id', room).gte('ordered_at', startIso).lte('ordered_at', endIso);
-    if (capUnionErr) {
-      console.error('[member/shows/board] unbound-capture union error:', capUnionErr);
+    // PAGED and ORDERED — it was neither.
+    const capsOrErr = await readAllPaged(
+      (from, to) => admin.from('capture_events')
+        .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at')
+        .eq('user_id', ownerUserId).eq('room_id', room)
+        .gte('ordered_at', startIso).lte('ordered_at', endIso)
+        .order('ordered_at', { ascending: true })
+        .range(from, to),
+      'member/shows/board room captures',
+    ).catch((e: unknown) => e as Error);
+
+    if (capsOrErr instanceof Error) {
+      console.error('[member/shows/board] unbound-capture union error:', capsOrErr);
     } else {
+      const caps = capsOrErr;
       const capUnbound = (caps ?? []).filter((c) => {
         const oid = String(c.order_id ?? '');
         return oid && oid !== '0' && !boundOrderIdSet.has(oid) && c.is_payment_successful !== false;
