@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'readall-')), 'readAll.mjs');
 writeFileSync(outFile, outputText);
-const { readAllPaged, PAGE_SIZE } = await import(pathToFileURL(outFile).href);
+const { readAllPaged, readPages, PAGE_SIZE } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -24,11 +24,21 @@ const check = (name, cond, extra = '') => {
   passed++;
 };
 
-/** A fake table of `total` rows that honours its range argument, and counts requests. */
+/**
+ * A fake table of `total` rows that honours its range argument and counts requests.
+ *
+ * Crucially it REJECTS an unsatisfiable range (start beyond end) the way PostgREST does. An
+ * earlier version just returned an empty array, which made it more forgiving than reality —
+ * and a fake more forgiving than reality is how the clamped-range outage got past its tests in
+ * the first place.
+ */
 function fakeTable(total) {
   const calls = [];
   const q = (from, to) => {
     calls.push([from, to]);
+    if (from > to) {
+      return Promise.resolve({ data: null, error: { message: 'Requested range not satisfiable' } });
+    }
     const rows = [];
     for (let i = from; i <= to && i < total; i++) rows.push({ i });
     return Promise.resolve({ data: rows, error: null });
@@ -127,6 +137,62 @@ console.log('\nFails loud, never short');
 {
   const rows = await readAllPaged(() => Promise.resolve({ data: null, error: null }), 'null data');
   check('null data with no error is treated as an empty page, not a crash', rows.length === 0);
+}
+
+console.log('\nreadPages — a bounded read, and the outage it exists to prevent');
+{
+  // THE REGRESSION. A caller with an exact-multiple budget used to express it by clamping the
+  // range, which made the final page exactly full, which made readAllPaged request the next
+  // page at `range(1000, 999)` — rejected by PostgREST as "Requested range not satisfiable".
+  // readAllPaged threw, and the sync cron's status phase died on every store having examined
+  // nothing. Reproduced here against the real failure mode.
+  const { q } = fakeTable(5000);
+  let threw = null;
+  try {
+    await readAllPaged((from, to) => q(from, Math.min(to, 1000 - 1)), 'clamped-range');
+  } catch (e) { threw = e.message; }
+  check('the old clamped-range shape DOES break',
+    threw !== null && /not satisfiable/.test(threw), String(threw).slice(0, 70));
+}
+{
+  // The same budget via readPages: stops cleanly, no out-of-range request.
+  const t = fakeTable(5000);
+  const r = await readPages(t.q, 'bounded', 1);
+  check('readPages stops at its page cap without an extra request',
+    r.rows.length === PAGE_SIZE && t.calls.length === 1, `${r.rows.length} rows, ${t.calls.length} calls`);
+  check('…and every requested range is satisfiable',
+    t.calls.every(([from, to]) => to >= from));
+  check('…and it SAYS the result is partial', r.reachedCap === true);
+}
+{
+  const t = fakeTable(5000);
+  const r = await readPages(t.q, 'bounded', 3);
+  check('a 3-page cap reads 3 pages', r.rows.length === 3 * PAGE_SIZE && r.reachedCap === true);
+  check('rows are contiguous from the start', r.rows.every((row, i) => row.i === i));
+}
+{
+  // Finishing inside the budget must NOT be reported as capped, or a caller cannot tell
+  // "there may be more" from "that was everything".
+  const r = await readPages(fakeTable(1500).q, 'bounded', 5);
+  check('finishing early reports reachedCap false',
+    r.rows.length === 1500 && r.reachedCap === false, `${r.rows.length}`);
+}
+{
+  const r = await readPages(fakeTable(0).q, 'bounded', 5);
+  check('an empty table is not "capped"', r.rows.length === 0 && r.reachedCap === false);
+}
+{
+  const t = fakeTable(5000);
+  const r = await readPages(t.q, 'bounded', 0);
+  check('a zero cap reads nothing and issues no request',
+    r.rows.length === 0 && t.calls.length === 0 && r.reachedCap === true);
+}
+{
+  let threw = false;
+  try {
+    await readPages(() => Promise.resolve({ data: null, error: { message: 'db down' } }), 'bounded', 3);
+  } catch (e) { threw = /db down/.test(e.message) && /bounded/.test(e.message); }
+  check('a query error still THROWS — a bounded read is partial by budget, not by failure', threw);
 }
 
 console.log(`\n${passed} checks passed\n`);

@@ -70,3 +70,51 @@ export async function readAllPaged<T>(
     'The query builder is probably ignoring its range argument.',
   );
 }
+
+export interface BoundedRead<T> {
+  rows: T[];
+  /** True when the page cap stopped the read, so `rows` is a DELIBERATE partial. */
+  reachedCap: boolean;
+}
+
+/**
+ * Read at most `maxPages` pages. Unlike readAllPaged, this may return a PARTIAL result — by
+ * design, for a caller with a fixed budget — and says so via `reachedCap`.
+ *
+ * WHY THIS EXISTS. A bounded caller previously expressed its budget by clamping the range:
+ *
+ *     .range(from, Math.min(to, calls * PAGE_SIZE - 1))
+ *
+ * That looks equivalent and is not. When the budget is an exact multiple of PAGE_SIZE the
+ * final page comes back exactly full, readAllPaged correctly treats a full page as "there may
+ * be more" and requests the next one — whose range is `(1000, 999)`, a start beyond its end.
+ * PostgREST rejects that as "Requested range not satisfiable", readAllPaged throws rather than
+ * return a partial, and the caller dies having examined nothing.
+ *
+ * That shipped, and it broke the sync cron's status phase on every store: the phase went from
+ * refreshing the wrong 1,000 orders to refreshing none. The lesson is that a budget belongs in
+ * the PAGE COUNT, never in the range arithmetic — so this function owns it, and callers no
+ * longer do range maths at all.
+ */
+export async function readPages<T>(
+  makeQuery: (from: number, to: number) => PromiseLike<PagedResult<T>>,
+  label: string,
+  maxPages: number,
+): Promise<BoundedRead<T>> {
+  const cap = Math.max(0, Math.trunc(maxPages));
+  const rows: T[] = [];
+  if (cap === 0) return { rows, reachedCap: true };
+
+  for (let page = 0; page < cap; page++) {
+    const from = page * PAGE_SIZE;
+    const { data, error } = await makeQuery(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`${label}: bounded read failed at offset ${from}: ${error.message}`);
+    const got = data ?? [];
+    rows.push(...got);
+    // A short page proves exhaustion — the read finished inside its budget.
+    if (got.length < PAGE_SIZE) return { rows, reachedCap: false };
+  }
+  // Every page was full and the cap is spent. There may or may not be more; either way this
+  // read stops here WITHOUT issuing the out-of-range request that caused the outage.
+  return { rows, reachedCap: true };
+}
