@@ -46,8 +46,8 @@ state is **unverified** against the repo — inspect the live schema before writ
 or applying a migration. Prefix collisions and gaps exist and are real skip/
 double-apply hazards, not cosmetic. Number a new migration above the highest
 claimed prefix (check tracked files, untracked working-tree files, and branches);
-do not backfill gaps. Claude writes migration files but does **not** apply them —
-the user applies by hand, gated on write-activity silence (below).
+do not backfill gaps. Claude writes the migration file; who **applies** it depends on its
+lock footprint — Class A vs Class B below.
 
 ### `create or replace`: rebuild from live `prosrc`, never hand-copy
 
@@ -60,59 +60,100 @@ applying** — the diff must show *only* the intended change (comments included)
 reconstruct the body from memory or an older migration file. (This caught real comment
 drift in the 097 kiosk-instants fix.)
 
-## Write-activity silence gate
+## Deploy/write gate — classify by LOCK FOOTPRINT, not by silence
 
-Gate covered writes on **write-activity silence** — **not** on `live_sessions.status
-= 'live'`. That flag is unreliable and must not be used as a safety interlock.
+**The operation is continuously live.** Shows run essentially every day, and there is no
+longer a reliable ~15-minute quiet window. A gate that can never be satisfied does not get
+followed carefully — it gets skipped by habit, including on the one change where it actually
+mattered. So writes are gated on what they **lock**, not on whether a show is running.
 
-Silence = both of these more than ~15 minutes stale, **checked and reported before
-the first write**:
+`live_sessions.status = 'live'` remains unreliable and must **never** be used as an interlock.
+
+**Always check and report before the first write** — as evidence for the record, no longer as
+a veto:
 - the latest `capture_events` write, and
 - `live_sessions.last_seen_at`.
 
-**What the gate covers — DATABASE writes only:**
-- schema migrations, **especially any that modify a shared function or trigger** (those
-  change behaviour for every concurrent reader/writer the instant they land), and
-- any write (insert/update/delete/backfill/seed) to a table **in the capture or
-  order-sync path** — the tables read or written during a live show.
+### Class A — may proceed during a live show
 
-**What the gate does NOT cover: web-only Vercel deploys.** The business runs live
-essentially 24/7, so a genuine write-quiet window may never arrive; gating application
-deploys on it made the gate unopenable in practice and simply blocked shipping. Deploys
-are governed by the risk classes below (additive code ships freely; auth/session/extension
-changes need a reviewed diff), **not** by write-activity silence. The capture path writes
-to PostgREST directly and does not route through Next.js, so a Vercel deploy cannot
-interrupt a show in progress. Still check and report the gate for any DB write in the
-same unit of work.
+Additive changes using **NEW object names** that neither rewrite an existing table nor replace
+a live function: `create table`, `create index concurrently`, new RPCs, and `add column` that
+is **nullable with no default** (catalog-only in PG11+).
 
-Weekends are not automatically quiet — shows run on Sundays.
+Required recipe, every time:
+- each statement group in **its own transaction** with `set local lock_timeout = '3s'`, so a
+  contended lock **aborts** the change instead of queueing in front of the capture path;
+- md5 the `prosrc` of every function referencing the affected tables **before and after**, and
+  confirm byte-identity;
+- confirm `capture_events` kept landing across the window;
+- report all of the above.
 
-**Exempt (NOT gated):** the scheduling tables — `shift_rules`, `shift_instances`,
-`shift_claims`, `employee_access_tokens`, `attendance_events`. Nothing reads them during
-a live show; their rows carry future dates; a transactional swap is consistent for any
-concurrent reader. Writes here may proceed regardless of show activity (still report the
-check result for the record).
+**"Additive" still touches live tables.** A foreign key takes `SHARE ROW EXCLUSIVE` on the
+*referenced* table, and `inventory_skus` IS written mid-show by `lensed_log_auction` /
+`lensed_log_auction_status_transition`. `lock_timeout` is what makes that safe — not the
+absence of a show. Never skip it.
 
-Any table **not** on the exempt list stays gated. **Adding a table to the exempt list
-requires the user's explicit approval** — do not extend it on your own judgment.
+### Class B — still needs a genuine window and the user's explicit approval
 
-### `shift_rules` is a PAYROLL surface, not only a scheduling one
+- anything that **rewrites** a table (type changes, `set not null` on a populated column)
+- dropping or altering a column on a capture / order-sync table
+- `create or replace` or `drop` on a function the live path calls (see the `prosrc` rule above)
+- **data** writes: backfills, seeds, bulk update/delete against capture or order-sync tables
+- anything expected to hold `ACCESS EXCLUSIVE` on a hot table for more than an instant
 
-`shift_rules` is on the exempt list above (no live-show reader), but **exempt from the
-write-silence gate does NOT mean low-stakes — it moves money.** PayView projects **active**
-recurring rules into pay at read time (`generateRecurringShifts` → `computePay` in
-`src/lib/employees.ts` / `PayView.tsx`), so scheduled hours become **pay owed** the moment a
-rule exists — independent of the past-materializer and of `SHIFT_MATERIALIZE_WRITE_ENABLED`.
-A recurring day with no punch pays full scheduled hours (manual/recurring shifts have no
-`confirmed_at` gate; the only no-show handling is a manual `shift_exceptions` `'skip'`), and
-it does **not** dedup against time-clock punches (the suppression set keys on `source_rule_id`,
-which punches lack) → double-pay where both exist. **Any write to `shift_rules`
-(insert / activate / edit times/days) requires checking the pay path (PayView / computePay),
-not just the scheduling path.** (This is why the Aug-2026 rule seed had to be deactivated.)
+For Class B the old silence rule still applies in spirit: get a real quiet window, or take the
+interruption knowingly and say so first.
 
-### Deploy risk classes (the silence gate is about DATA writes, not all deploys)
+**Exempt from Class B data-write gating:** the scheduling tables — `shift_rules`,
+`shift_instances`, `shift_claims`, `employee_access_tokens`, `attendance_events`. Nothing reads
+them during a live show; their rows carry future dates; a transactional swap is consistent for
+any concurrent reader. **Adding a table to this list requires the user's explicit approval** —
+do not extend it on your own judgment.
 
-The write-silence gate above governs **database writes** — migrations and writes to
+### Who applies
+
+Claude may apply **Class A** directly via the Management API, following the recipe above and
+reporting before/after. **Class B is user-applied by hand.** Claude writes the migration file
+either way — the repo file under `supabase/migrations/` remains the only record, since this DB
+has no ledger.
+### `shift_rules` is NOT a pay input — punches are the only one
+
+**Superseded warning.** This section used to say that PayView projects active recurring rules
+into pay at read time, so a rule created pay owed the moment it existed, double-paying against
+any punch on the same day. **That was true before Deploy C and is no longer true.** It kept
+producing a wrong double-pay warning long after the code changed, so it is corrected here.
+
+Pay comes from real `shifts` rows only. Verified on `main`:
+
+- `PayView.tsx` calls `computePay(employees, periodShifts)` — the recurring projection
+  (`periodGenerated`) is computed but passed **only** to the display column, rendered as
+  "Scheduled Xh · Paid Yh" so a gap is visible instead of silently paid.
+- `isPayableShift()` in `src/lib/employees.ts` is the single choke point:
+
+      if (isOpenShift(s)) return false;              // indeterminate hours
+      if (s.source_rule_id != null) return false;    // materialized from a rule = plan, never pay
+      if (s.source === 'time_clock' && s.confirmed_at == null) return false;
+
+  That middle guard is what neutralises BOTH writers of rule-derived rows at once — the
+  past-materializer cron and `freezeRulePast` on rule delete/deactivate. **Do not remove it**
+  without moving the guarantee somewhere else; it is the whole reason a rule cannot pay anyone.
+
+So creating, activating or editing a `shift_rule` does **not** create pay owed. What it does
+affect:
+
+- **the schedule shown** — rule projections are most of what the calendar renders as
+  "Scheduled", and what the `/s/[token]` clock gate validates a punch against;
+- **history, retroactively** — projections are computed at read time from *active* rules, so
+  deactivating a rule blanks the scheduled span on PAST days too, taking every clocked-vs-
+  scheduled delta with it. Materialize the past into `shift_instances` first if that context
+  matters.
+
+(The Aug-2026 rule seed was deactivated under the old, then-correct understanding. Its removal
+is not evidence that rules pay — under today's code they do not.)
+
+### Deploy risk classes (the gate above is about DATABASE writes, not all deploys)
+
+The lock-footprint gate above governs **database writes** — migrations and writes to
 capture / order-sync-path tables. Vercel **deploys** are governed separately, by what the
 change can reach:
 
@@ -122,7 +163,7 @@ change can reach:
 - **Auth middleware, session handling, or the extension token path** (app-wide blast radius —
   a wrong `middleware.ts` matcher bounces users to `/login`; session changes can clobber the
   capture extension's JWT): the **diff must be reviewed by the user first.** Once reviewed and
-  approved, these do **not** need a write-silence window — the extension's capture path does
+  approved, these do **not** need a quiet window — the extension's capture path does
   not route through Next.js, so a reviewed deploy is safe during a show. Smoke-test immediately
   after, rollback ready.
 

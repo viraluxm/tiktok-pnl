@@ -15,7 +15,7 @@ import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
-import MobileDataCard from '@/components/ui/MobileDataCard';
+import PayGrid, { type PayTile } from './PayGrid';
 
 // Pay sub-tab role filter (ported from PR #69). 'all' = everyone (default); others match
 // employees.role. Purely display — narrows which payroll rows show; no new calc/query.
@@ -68,6 +68,15 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   const filteredPay = useMemo(
     () => (payRole === 'all' ? pay : pay.filter((p) => p.employee.role?.toLowerCase() === payRole)),
     [pay, payRole],
+  );
+  const tiles = useMemo<PayTile[]>(
+    () => filteredPay.map((p) => ({
+      employee: p.employee,
+      hours: p.hours,
+      pay: p.pay,
+      scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
+    })),
+    [filteredPay, plannedHoursByEmployee],
   );
   const totals = useMemo(
     () =>
@@ -139,106 +148,41 @@ export default function PayView({ employees }: { employees: Employee[] }) {
           </div>
         </div>
       </div>
-      <div className="hidden md:block overflow-x-auto">
-        <table className="w-full border-collapse">
-          <thead>
-            <tr className="border-b border-tt-border">
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Employee</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Role</th>
-              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hourly Rate</th>
-              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Scheduled (period)</th>
-              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Paid Hours (period)</th>
-              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Pay Owed (period)</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filteredPay.map(({ employee, hours, pay: owed }) => {
-              const sched = plannedHoursByEmployee.get(employee.id) ?? 0;
-              return (
-              <tr key={employee.id} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
-                <td className="px-5 py-3 text-[13px] text-tt-text">{employee.name}</td>
-                <td className="px-5 py-3 text-xs text-tt-muted">{titleCase(employee.role)}</td>
-                <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(employee.hourly_rate)}</td>
-                <td className="px-5 py-3 text-[13px] text-tt-muted text-right tabular-nums">{sched > 0 ? fmtHours(sched) : '—'}</td>
-                <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmtHours(hours)}</td>
-                <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(owed)}</td>
-              </tr>
-              );
-            })}
-            {filteredPay.length === 0 && (
-              <tr>
-                <td colSpan={6} className="px-5 py-12 text-center text-tt-muted text-sm">
-                  {pay.length === 0
-                    ? 'No employees yet'
-                    : payRole === 'all'
-                      ? 'No pay in this period'
-                      : `No ${titleCase(payRole)} staff in this period`}
-                </td>
-              </tr>
-            )}
-          </tbody>
-          {filteredPay.length > 0 && (
-            <tfoot>
-              <tr className="border-t border-tt-border">
-                <td className="px-5 py-3 text-[13px] font-semibold text-tt-text" colSpan={3}>Total{payRole !== 'all' ? ` · ${titleCase(payRole)}` : ''} for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}</td>
-                <td className="px-5 py-3 text-[13px] font-semibold text-tt-muted text-right tabular-nums">{fmtHours(totals.scheduled)}</td>
-                <td className="px-5 py-3 text-[13px] font-semibold text-tt-text text-right tabular-nums">{fmtHours(totals.hours)}</td>
-                <td className="px-5 py-3 text-[13px] font-semibold text-tt-green text-right tabular-nums">{fmt(totals.pay)}</td>
-              </tr>
-            </tfoot>
-          )}
-        </table>
-      </div>
-
-      {/* Mobile card list — same rows + values as the desktop table above */}
-      <div className="md:hidden p-4 flex flex-col gap-3">
-        {filteredPay.map(({ employee, hours, pay: owed }) => {
-          const sched = plannedHoursByEmployee.get(employee.id) ?? 0;
-          return (
-          <MobileDataCard
-            key={employee.id}
-            title={employee.name}
-            subtitle={titleCase(employee.role)}
-            stats={[
-              { label: 'Hourly Rate', value: fmt(employee.hourly_rate) },
-              { label: 'Scheduled (period)', value: sched > 0 ? fmtHours(sched) : '—' },
-              { label: 'Paid Hours (period)', value: fmtHours(hours) },
-              {
-                label: 'Pay Owed (period)',
-                value: <span className="text-tt-green font-semibold">{fmt(owed)}</span>,
-                wide: true,
-              },
-            ]}
-          />
-          );
-        })}
-        {filteredPay.length === 0 && (
-          <div className="px-1 py-12 text-center text-tt-muted text-sm">
-            {pay.length === 0
-              ? 'No employees yet'
-              : payRole === 'all'
-                ? 'No pay in this period'
-                : `No ${titleCase(payRole)} staff in this period`}
-          </div>
-        )}
-        {filteredPay.length > 0 && (
-          <div className="rounded-2xl border border-tt-border bg-white/[0.03] p-4">
+      {/* Totals lead. They are the number the pay run is actually built around, so they belong
+          above the people rather than buried under 41 tiles. */}
+      {tiles.length > 0 && (
+        <div className="flex flex-wrap items-end justify-between gap-4 border-b border-tt-border px-6 py-4">
+          <div>
             <div className="text-[11px] uppercase tracking-wide text-tt-muted">
               Total{payRole !== 'all' ? ` · ${titleCase(payRole)}` : ''} for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}
             </div>
-            <div className="mt-2 flex items-center justify-between gap-4">
-              <div>
-                <div className="text-[11px] text-tt-muted">Hours</div>
-                <div className="text-sm font-semibold text-tt-text tabular-nums">{fmtHours(totals.hours)}</div>
-              </div>
-              <div className="text-right">
-                <div className="text-[11px] text-tt-muted">Pay owed</div>
-                <div className="text-sm font-semibold text-tt-green tabular-nums">{fmt(totals.pay)}</div>
-              </div>
+            <div className="mt-1 text-3xl font-bold tabular-nums text-tt-green">{fmt(totals.pay)}</div>
+          </div>
+          <div className="flex gap-6 text-right">
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-tt-muted">Paid hours</div>
+              <div className="mt-1 text-lg font-semibold tabular-nums text-tt-text">{fmtHours(totals.hours)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-tt-muted">Scheduled</div>
+              <div className="mt-1 text-lg font-semibold tabular-nums text-tt-muted">{fmtHours(totals.scheduled)}</div>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      <PayGrid
+        rows={tiles}
+        fmt={fmt}
+        fmtHours={fmtHours}
+        emptyMessage={
+          pay.length === 0
+            ? 'No employees yet'
+            : payRole === 'all'
+              ? 'No pay in this period'
+              : `No ${titleCase(payRole)} staff in this period`
+        }
+      />
     </div>
   );
 }

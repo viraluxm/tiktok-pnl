@@ -15,6 +15,7 @@ import { DROP_CAP } from '@/lib/schedule/drops';
 import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate, isOvernight } from '@/lib/schedule/format';
 import { ReleaseButton, ClaimButton } from './parts';
 import { ClockControls } from './ClockControls';
+import TimeOffButton from './TimeOffButton';
 import { ScheduleAutoRefresh } from './ScheduleAutoRefresh';
 
 export const dynamic = 'force-dynamic';
@@ -48,8 +49,9 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
   if (scheduleIsEmpty({ myShifts: myShifts.length, board: board.length, pending: pendingClaims.length })) {
     return (
       <Shell>
-        <header className="mb-6">
+        <header className="mb-6 flex items-start justify-between gap-3">
           <h1 className="text-xl font-semibold text-tt-text">{employee.name}</h1>
+          <TimeOffButton token={token} />
         </header>
         <Empty>Nothing scheduled right now.</Empty>
       </Shell>
@@ -140,13 +142,16 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
 
   return (
     <Shell>
-      <header className="mb-6">
+      <header className="mb-6 flex items-start justify-between gap-3">
+        <div>
         <h1 className="text-xl font-semibold text-tt-text">{employee.name}</h1>
         <p className="mt-1 text-sm text-tt-muted">Pay period ends {periodEndLabel}</p>
         <p className={`mt-1 text-sm font-medium ${atCap ? 'text-tt-red' : 'text-tt-muted'}`}>
           {drops.drops} of {DROP_CAP} drops used
           {drops.excused > 0 ? ` · ${drops.excused} excused` : ''}
         </p>
+      </div>
+        <TimeOffButton token={token} />
       </header>
 
       {/* An in-flight OT claim leads (the viewer just filed it and wants to see it landed), then:

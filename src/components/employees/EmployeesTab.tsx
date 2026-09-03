@@ -5,17 +5,15 @@ import { fmt } from '@/lib/calculations';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
 import type { Employee, EmployeeStatus } from '@/types';
 import PerformanceView from './PerformanceView';
-import { AspHitBadge, BelowBreakEvenBadge } from './HostPerformanceBadges';
 import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
 import ShiftsView from './ShiftsView';
 import PayView from './PayView';
-import { Field, StatusBadge, titleCase, ROLE_PRESETS, STATUSES } from './shared';
-import MobileDataCard from '@/components/ui/MobileDataCard';
+import { Field, titleCase, ROLE_PRESETS, STATUSES } from './shared';
+import RosterGrid from './RosterGrid';
+import EmployeeDetailModal from './EmployeeDetailModal';
 import { useScheduleLinks, scheduleLinkUrl, type ScheduleLink } from '@/hooks/useScheduleLinks';
-import { ScheduleLinkButton, ScheduleLinkSection, LINK_WARNING, copyText } from './ScheduleLinkButton';
-import { BadgeButton } from './BadgeButton';
+import { ScheduleLinkSection, LINK_WARNING, copyText } from './ScheduleLinkButton';
 import { useBadges, type ActiveBadge } from '@/hooks/useBadges';
-import { LeadPinButton } from './LeadPinButton';
 import { useOverridePins } from '@/hooks/useOverridePins';
 
 interface EmployeesTabProps {
@@ -38,6 +36,7 @@ const EMPTY_FORM: EmployeeInput = {
   hourly_rate: 0,
   hire_date: null,
   probation_end_date: null,
+  fulfillment_track: null,
 };
 
 export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
@@ -88,6 +87,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
       hourly_rate: e.hourly_rate,
       hire_date: e.hire_date,
       probation_end_date: e.probation_end_date,
+      fulfillment_track: e.fulfillment_track ?? null,
     });
     setFormError(null);
     setModalOpen(true);
@@ -231,7 +231,13 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                 <Field label="Role">
                   <select
                     value={form.role}
-                    onChange={(e) => setForm({ ...form, role: e.target.value })}
+                    onChange={(e) => setForm({
+                      ...form,
+                      role: e.target.value,
+                      // Leaving fulfillment clears the track — a host must never carry
+                      // 'packer', which would show up as a phantom bucket on the cost roll-up.
+                      fulfillment_track: e.target.value === 'fulfillment' ? form.fulfillment_track : null,
+                    })}
                     className="w-full bg-white/5 border border-tt-border rounded-xl px-4 py-2.5 text-sm text-tt-text focus:outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
                   >
                     {ROLE_PRESETS.map((r) => (
@@ -251,6 +257,33 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
                   </select>
                 </Field>
               </div>
+
+              {/* Fulfillment sub-type. Only offered for role 'fulfillment' — it is meaningless
+                  on a host, and a stray value would create a phantom bucket on the cost
+                  roll-up. DISPLAY AND GROUPING ONLY: nothing gates on it, so a Packer stays a
+                  fully eligible picker and a wrong setting can never lock anyone out of
+                  picking mid-shift (migration 121). */}
+              {form.role === 'fulfillment' && (
+                <Field label="Fulfillment Track">
+                  <select
+                    value={form.fulfillment_track ?? ''}
+                    onChange={(e) => setForm({
+                      ...form,
+                      fulfillment_track: (e.target.value || null) as EmployeeInput['fulfillment_track'],
+                    })}
+                    className="w-full bg-white/5 border border-tt-border rounded-xl px-4 py-2.5 text-sm text-tt-text focus:outline-none focus:ring-1 focus:ring-tt-cyan/50 appearance-none"
+                  >
+                    <option value="" className="bg-tt-card text-tt-text">Unset</option>
+                    <option value="picker" className="bg-tt-card text-tt-text">Picker</option>
+                    <option value="packer" className="bg-tt-card text-tt-text">Packer</option>
+                    <option value="flex" className="bg-tt-card text-tt-text">Flex — picks, packs, or floats</option>
+                  </select>
+                  <p className="mt-1.5 text-[11px] text-tt-muted">
+                    Groups the fulfillment cost report. Does not restrict anything — every
+                    fulfillment employee can still be credited with a pick.
+                  </p>
+                </Field>
+              )}
 
               <Field label="Hourly Rate ($)">
                 <input
@@ -361,6 +394,7 @@ function RosterView({
   onDelete: (e: Employee) => void;
 }) {
   const [copiedAll, setCopiedAll] = useState(false);
+  const [detail, setDetail] = useState<Employee | null>(null);
   const anyLinks = employees.some((e) => e.status === 'active' && links[e.id]);
 
   async function handleCopyAll() {
@@ -399,145 +433,26 @@ function RosterView({
           <button onClick={onDismissWarn} className="shrink-0 text-tt-yellow/70 hover:text-tt-yellow text-xs">Dismiss</button>
         </div>
       )}
-      <div className="hidden md:block overflow-x-auto">
-        <table className="w-full border-collapse">
-          <thead>
-            <tr className="border-b border-tt-border">
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Name</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Role</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Status</th>
-              <th className="text-right px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hourly Rate</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Hire Date</th>
-              <th className="text-left px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Probation Ends</th>
-              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">ASP Hit (7d)</th>
-              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Below Break-even (14d)</th>
-              <th className="text-center px-5 py-3 text-[11px] text-tt-muted uppercase tracking-wide font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {employees.map((e) => (
-              <tr key={e.id} className="border-b border-[rgba(255,255,255,0.04)] hover:bg-tt-card-hover transition-colors">
-                <td className="px-5 py-3 text-[13px] text-tt-text">{e.name}</td>
-                <td className="px-5 py-3 text-xs text-tt-muted">{titleCase(e.role)}</td>
-                <td className="px-5 py-3"><StatusBadge status={e.status} /></td>
-                <td className="px-5 py-3 text-[13px] text-tt-text text-right tabular-nums">{fmt(e.hourly_rate)}</td>
-                <td className="px-5 py-3 text-xs text-tt-muted">{e.hire_date || '—'}</td>
-                <td className="px-5 py-3 text-xs text-tt-muted">{e.probation_end_date || '—'}</td>
-                <td className="px-5 py-3 text-center">
-                  {e.role?.toLowerCase() === 'host' ? <AspHitBadge agg={hostPerf[e.id]} /> : null}
-                </td>
-                <td className="px-5 py-3 text-center">
-                  {e.role?.toLowerCase() === 'host' ? <BelowBreakEvenBadge agg={hostPerf[e.id]} /> : null}
-                </td>
-                <td className="px-5 py-3 text-center whitespace-nowrap">
-                  <ScheduleLinkButton
-                    employeeId={e.id}
-                    token={links[e.id]?.token ?? null}
-                    onMint={onMintLink}
-                    onCreated={onLinkCreated}
-                  />
-                  {e.role?.toLowerCase() === 'fulfillment' && (
-                    <span className="ml-2 inline-block">
-                      <LeadPinButton
-                        employeeId={e.id}
-                        employeeName={e.name}
-                        hasPin={leadPins.has(e.id)}
-                        onSet={onSetLeadPin}
-                      />
-                    </span>
-                  )}
-                  <span className="ml-2 inline-block">
-                    <BadgeButton
-                      employeeId={e.id}
-                      badge={badges[e.id] ?? null}
-                      onIssue={onIssueBadge}
-                      onReissue={onReissueBadge}
-                    />
-                  </span>
-                  <button
-                    onClick={() => onEdit(e)}
-                    className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => onDelete(e)}
-                    className="ml-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
-                  >
-                    Remove
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {employees.length === 0 && (
-              <tr>
-                <td colSpan={9} className="px-5 py-12 text-center text-tt-muted text-sm">
-                  {isLoading ? 'Loading…' : 'No employees yet — add your first team member'}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <RosterGrid employees={employees} isLoading={isLoading} onOpen={setDetail} />
 
-      {/* Mobile card list — same rows + handlers as the desktop table above */}
-      <div className="md:hidden p-4 flex flex-col gap-3">
-        {employees.map((e) => {
-          const isHost = e.role?.toLowerCase() === 'host';
-          return (
-            <MobileDataCard
-              key={e.id}
-              title={e.name}
-              subtitle={titleCase(e.role)}
-              badge={<StatusBadge status={e.status} />}
-              stats={[
-                { label: 'Hourly Rate', value: fmt(e.hourly_rate) },
-                { label: 'Hire Date', value: e.hire_date || '—' },
-                { label: 'Probation Ends', value: e.probation_end_date || '—' },
-                ...(isHost
-                  ? [
-                      { label: 'ASP Hit (7d)', value: <AspHitBadge agg={hostPerf[e.id]} /> },
-                      { label: 'Below Break-even (14d)', value: <BelowBreakEvenBadge agg={hostPerf[e.id]} /> },
-                    ]
-                  : []),
-              ]}
-              actions={
-                <>
-                  <ScheduleLinkButton
-                    employeeId={e.id}
-                    token={links[e.id]?.token ?? null}
-                    onMint={onMintLink}
-                    onCreated={onLinkCreated}
-                  />
-                  <BadgeButton
-                    employeeId={e.id}
-                    badge={badges[e.id] ?? null}
-                    onIssue={onIssueBadge}
-                    onReissue={onReissueBadge}
-                  />
-                  <button
-                    onClick={() => onEdit(e)}
-                    className="flex items-center justify-center rounded-lg text-xs font-semibold bg-tt-cyan/15 text-tt-cyan hover:bg-tt-cyan/25 transition-colors"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => onDelete(e)}
-                    className="flex items-center justify-center rounded-lg text-xs font-semibold bg-tt-red/15 text-tt-red hover:bg-tt-red/25 transition-colors"
-                  >
-                    Remove
-                  </button>
-                </>
-              }
-            />
-          );
-        })}
-        {employees.length === 0 && (
-          <div className="px-1 py-12 text-center text-tt-muted text-sm">
-            {isLoading ? 'Loading…' : 'No employees yet — add your first team member'}
-          </div>
-        )}
-      </div>
+      {detail && (
+        <EmployeeDetailModal
+          employee={detail}
+          hostAgg={hostPerf[detail.id]}
+          link={links[detail.id]}
+          badge={badges[detail.id] ?? null}
+          hourlyRate={fmt(detail.hourly_rate)}
+          onClose={() => setDetail(null)}
+          onMintLink={onMintLink}
+          onLinkCreated={onLinkCreated}
+          onIssueBadge={onIssueBadge}
+          onReissueBadge={onReissueBadge}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          hasOverridePin={leadPins.has(detail.id)}
+          onSetOverridePin={onSetLeadPin}
+        />
+      )}
     </div>
   );
 }
