@@ -5,7 +5,7 @@ import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { getOrgId } from '@/lib/org';
 import { syncConnection } from '@/lib/tiktok/syncCore';
-import { readAllPaged } from '@/lib/db/readAll';
+import { readAllPaged, readPages } from '@/lib/db/readAll';
 import { planStatusRefresh, type OpenOrder } from '@/lib/tiktok/statusRefreshPlan';
 
 export const dynamic = 'force-dynamic';
@@ -68,20 +68,27 @@ async function refreshStatuses(admin: Admin, conn: Conn, write: boolean, started
   // Now: two PAGED reads from opposite ends, merged by planStatusRefresh. Most of the budget
   // goes to the newest orders, where transitions actually happen; a deliberate slice goes to
   // the oldest so no part of the open set is ever unreachable.
-  const readEnd = (ascending: boolean, calls: number) => readAllPaged<OpenOrder & { status: string }>(
+  // The budget lives in the PAGE COUNT, not in range arithmetic. Clamping the range instead
+  // (`Math.min(to, calls * CHUNK - 1)`) made an exact-multiple budget return a full final page,
+  // which made readAllPaged request `range(1000, 999)` — rejected as "Requested range not
+  // satisfiable" — and killed this phase on every store. See readPages.
+  const readEnd = (ascending: boolean, calls: number) => readPages<OpenOrder & { status: string }>(
     (from, to) => admin.from('synced_order_ids')
       .select('order_id, status, order_created_at')
       .eq('user_id', userId).eq('store_id', storeId).in('status', CORE_OPEN)
       .order('order_created_at', { ascending, nullsFirst: false })
       .order('order_id', { ascending: true })
-      .range(from, Math.min(to, calls * CHUNK - 1)),
+      .range(from, to),
     `sync-orders status ${ascending ? 'backlog' : 'recent'} ${storeId}`,
+    Math.max(1, Math.ceil((calls * CHUNK) / 1000)),
   );
 
-  const [recentRows, backlogRows] = await Promise.all([
+  const [recentRead, backlogRead] = await Promise.all([
     readEnd(false, STATUS_CALLS_RECENT),
     readEnd(true, STATUS_CALLS_BACKLOG),
   ]);
+  const recentRows = recentRead.rows;
+  const backlogRows = backlogRead.rows;
 
   // Total open count for an honest "not reached this run" figure. A server-side count returns
   // no rows, so it is immune to the very cap that caused this bug.
