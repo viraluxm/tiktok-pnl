@@ -106,6 +106,13 @@ export default function ShiftsView({
   // denied), THEN navigate — so it's part of the user gesture (not a delayed effect on the
   // destination route, which browsers can reject). Client-side push keeps the same document,
   // so fullscreen persists into the kiosk. If denied, we still navigate (kiosk fallback covers it).
+  // The IN-USE time clock. Deliberately still /dashboard/time-clock (the tap-a-name kiosk):
+  // it is what the warehouse runs every day, and the badge/link rollout is still being trialled.
+  // Do not repoint this until that trial is done and the replacement is actually adopted.
+  //
+  // It could not point at /kiosk in any case — every /api/kiosk/* route re-checks
+  // app_metadata.role and 403s an admin, so the badge kiosk is reachable only by the dedicated
+  // `timeclock` login on the warehouse machine.
   async function openTimeClock() {
     await enterFullscreen();
     router.push('/dashboard/time-clock');
@@ -133,8 +140,8 @@ export default function ShiftsView({
 
   return (
     <div className="space-y-6">
-      {/* Open the full-screen time-clock kiosk. The List view is gone — the calendar is the
-          only shift surface now, so there is nothing to toggle between. */}
+      {/* Open the in-use time clock. The List view is gone — the calendar is the only shift
+          surface now, so there is nothing to toggle between. */}
       <div className="flex items-center justify-between gap-3">
         <button
           type="button"
