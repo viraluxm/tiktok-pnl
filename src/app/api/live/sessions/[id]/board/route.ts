@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { readAllPaged } from '@/lib/db/readAll';
 import { inChunks } from '@/lib/supabase/inChunks';
 
 export const dynamic = 'force-dynamic';
@@ -21,15 +22,25 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .maybeSingle();
   if (!session) return NextResponse.json({ error: 'Session not found' }, { status: 404 });
 
-  const { data: items, error } = await supabase
-    .from('live_auction_items')
-    .select('id, sequence, status, is_bundle, expected_price_cents, sold_price_cents, buyer_handle, client_idempotency_key, closed_at, created_at')
-    .eq('session_id', id)
-    .eq('user_id', user.id)
-    .order('sequence', { ascending: true });
+  // PAGED: a single PostgREST response is capped at 1000 rows, silently. The largest show in
+  // the last 30 days holds 1,049 auction items and the 95th percentile is 793 — so the biggest
+  // boards were already rendering 1000 of them with nothing to say so. Ordering by `sequence`
+  // makes the pages a stable, non-overlapping partition.
+  // No explicit type argument: letting inference flow from the select keeps the exact row
+  // type the un-paged version had.
+  const items = await readAllPaged(
+    (from, to) => supabase
+      .from('live_auction_items')
+      .select('id, sequence, status, is_bundle, expected_price_cents, sold_price_cents, buyer_handle, client_idempotency_key, closed_at, created_at')
+      .eq('session_id', id)
+      .eq('user_id', user.id)
+      .order('sequence', { ascending: true })
+      .range(from, to),
+    'live/board items',
+  ).catch((e: unknown) => e as Error);
 
-  if (error) {
-    console.error('[live/board] items error:', error);
+  if (items instanceof Error) {
+    console.error('[live/board] items error:', items);
     return NextResponse.json({ error: 'Failed to load log' }, { status: 500 });
   }
 
@@ -236,12 +247,24 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (room && startIso) {
     const endIso = (session.ended_at as string | null) ?? new Date().toISOString();
     // Captures for THIS ROOM + window. No store filter here (capture store_id is unreliable/NULL).
-    const { data: caps, error: capUnionErr } = await supabase.from('capture_events')
-      .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at')
-      .eq('user_id', user.id).eq('room_id', room).gte('ordered_at', startIso).lte('ordered_at', endIso);
-    if (capUnionErr) {
-      console.error('[live/board] unbound-capture union error:', capUnionErr);
+    // PAGED, and now ORDERED. This read was neither: a long show exceeds 1000 captures, and
+    // without a deterministic sort the pages themselves could have repeated or skipped rows —
+    // corrupting the very read paging is meant to make whole. `ordered_at` is the window's own
+    // filter column, so it sorts on the same index the range scan uses.
+    const capsOrErr = await readAllPaged(
+      (from, to) => supabase.from('capture_events')
+        .select('order_id, selling_price_cents, product_name, platform_sku_ref, buyer_username, is_payment_successful, ordered_at, created_at')
+        .eq('user_id', user.id).eq('room_id', room)
+        .gte('ordered_at', startIso).lte('ordered_at', endIso)
+        .order('ordered_at', { ascending: true })
+        .range(from, to),
+      'live/board room captures',
+    ).catch((e: unknown) => e as Error);
+
+    if (capsOrErr instanceof Error) {
+      console.error('[live/board] unbound-capture union error:', capsOrErr);
     } else {
+      const caps = capsOrErr;
       const capUnbound = (caps ?? []).filter((c) => {
         const oid = String(c.order_id ?? '');
         return oid && oid !== '0' && !boundOrderIdSet.has(oid) && c.is_payment_successful !== false;

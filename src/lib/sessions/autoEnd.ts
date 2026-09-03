@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/admin';
+import { readAllPaged } from '@/lib/db/readAll';
 
 // TIMEOUT AUTO-ENDER — shared core (verified logic, moved here verbatim from the
 // admin route so the manual POST and the scheduled cron call the SAME code path).
@@ -86,16 +87,35 @@ export async function autoEndSessions(opts: { write: boolean }): Promise<AutoEnd
     const upper = nextStart.get(s.id) ?? null;
     // Ordered capture timestamps in [started_at, next_session_start | ∞), scoped by
     // user (+ store when known). Only created_at is needed.
-    let q = admin
-      .from('capture_events')
-      .select('created_at')
-      .eq('user_id', s.user_id)
-      .gte('created_at', s.started_at)
-      .order('created_at', { ascending: true });
-    if (s.store_id) q = q.eq('store_id', s.store_id);
-    if (upper) q = q.lt('created_at', upper);
-    const { data: caps, error: cErr } = await q;
-    if (cErr) throw new Error(`capture read failed: ${cErr.message}`);
+    //
+    // PAGED. This read was unbounded, and PostgREST silently caps a response at 1000 rows —
+    // which here was the worst possible truncation. Ordered ASCENDING, a short read drops the
+    // most RECENT captures: precisely the ones that prove a session is still running. The gap
+    // logic below would then see the stream stop early and auto-end a LIVE show, shortening
+    // its duration and the host hours derived from it.
+    //
+    // A busy show already reaches this: the largest in the last 30 days holds 1,049 auction
+    // items, and at 5x volume most shows would.
+    //
+    // The builder is rebuilt per page rather than reused with a fresh .range(): reusing one
+    // instance would rely on .range() mutating it in place, and a builder that quietly kept
+    // its first range would return page 1 forever.
+    const caps = await readAllPaged(
+      (from, to) => {
+        let q = admin
+          .from('capture_events')
+          .select('created_at')
+          .eq('user_id', s.user_id)
+          .gte('created_at', s.started_at)
+          .order('created_at', { ascending: true });
+        if (s.store_id) q = q.eq('store_id', s.store_id);
+        if (upper) q = q.lt('created_at', upper);
+        return q.range(from, to);
+      },
+      `autoEnd captures for session ${s.id}`,
+    ).catch((e: unknown) => {
+      throw new Error(`capture read failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
 
     // HYBRID: last_seen_at (heartbeat) is the primary tab-alive signal when present.
     const hasHeartbeat = !!s.last_seen_at;

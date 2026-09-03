@@ -36,8 +36,18 @@ function makeAdmin(fixture) {
       select: () => self, eq: () => self, gte: () => self, lt: () => self,
       is: () => self, in: (_c, v) => { self._in = v; return self; },
       order: () => self,
+      // .range() is HONOURED, not swallowed. A mock that ignored it would return the full set
+      // on page 1 and make paging look correct no matter how it was written — hiding exactly
+      // the truncation this exists to prevent.
+      range: (from, to) => { self._range = [from, to]; return self; },
       update: (patch) => { self._patch = patch; return self; },
-      then: (res, rej) => Promise.resolve(resolver(self)).then(res, rej),
+      then: (res, rej) => Promise.resolve(resolver(self)).then((r) => {
+        if (self._range && r && Array.isArray(r.data)) {
+          const [from, to] = self._range;
+          return { ...r, data: r.data.slice(from, to + 1) };
+        }
+        return r;
+      }).then(res, rej),
     };
     return self;
   }
@@ -65,12 +75,28 @@ function makeAdmin(fixture) {
 
 // autoEnd reads captures per-session; a single shared list is enough because the fixture uses
 // one closable session with captures and the others are shaped by their own rows.
+/**
+ * The paged reader autoEnd now depends on. Transpiled from the REAL source rather than
+ * stubbed, so the exhaustion behaviour under test is the one that actually ships — a stub
+ * here would hide the very truncation the paging was added to prevent.
+ */
+function transpileReadAll() {
+  const srcPath = fileURLToPath(new URL('../db/readAll.ts', import.meta.url));
+  const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  });
+  const out = join(dir, 'readAll.mjs');
+  writeFileSync(out, outputText);
+  return pathToFileURL(out).href;
+}
+
 function transpileAutoEnd(adminUrl) {
   const srcPath = fileURLToPath(new URL('./autoEnd.ts', import.meta.url));
   let { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   });
   outputText = outputText.split("'@/lib/supabase/admin'").join(`'${adminUrl}'`);
+  outputText = outputText.split("'@/lib/db/readAll'").join(`'${transpileReadAll()}'`);
   const out = join(dir, 'autoEnd.mjs');
   writeFileSync(out, outputText);
   return pathToFileURL(out).href;
@@ -209,6 +235,35 @@ async function run() {
   }
 
   console.log('');
+  // ── 8. MORE THAN 1000 CAPTURES: the read must not truncate ───────────────────────────
+  //
+  // The regression this guards. PostgREST silently caps a response at 1000 rows, and this read
+  // is ordered ASCENDING — so a truncated read drops the most RECENT captures, the very ones
+  // proving a show is still live. autoEnd would then judge the session on a stale tail.
+  //
+  // Asserted on the reported CAPTURE COUNT rather than on whether the session closed. The
+  // close decision runs through AUTO_END_MINUTES, IDLE_THRESHOLD_MIN and the multi-live guard,
+  // so a fixture tuned to flip it is fragile and — as an earlier version of this test proved by
+  // passing with the truncation deliberately reintroduced — can easily assert nothing at all.
+  // The count is the truncation, directly.
+  {
+    delete process.env.SEGMENT_CLOSE_WRITE_ENABLED;
+    const TOTAL = 1200;
+    const many = Array.from({ length: TOTAL }, (_, i) => ({
+      created_at: iso(SESSION_START + i * MIN),
+    }));
+    const { autoEndSessions } = await load(baseFixture({ capturesFor: () => many }));
+    const res = await autoEndSessions({ nowMs: SESSION_START + (TOTAL + 1) * MIN });
+    const all = [
+      ...(res.would_close ?? []), ...(res.still_active ?? []),
+      ...(res.multi_live ?? []), ...(res.no_captures ?? []),
+    ];
+    const row = all.find((r) => r.id === SESS_CLOSE);
+    ok(`8) all ${TOTAL} captures are read, not 1000`,
+      !!row && row.captures === TOTAL,
+      row ? `reported ${row.captures}` : 'session missing from the dry run');
+  }
+
   console.log(fail === 0 ? `ALL PASS: ${pass} passed, 0 failed` : `FAILED: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 }

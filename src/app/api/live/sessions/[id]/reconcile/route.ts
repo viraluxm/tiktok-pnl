@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { readAllPaged } from '@/lib/db/readAll';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
@@ -86,11 +87,19 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   // 105002 safety net for both fetchStatuses passes: refresh once + retry.
   const onExpired = async () => (await refreshConnection(admin, connRow)).accessToken;
 
-  // Bound orders for this session.
-  const { data: items } = await supabase
-    .from('live_auction_items')
-    .select('client_idempotency_key, status')
-    .eq('user_id', user.id).eq('session_id', id);
+  // Bound orders for this session. PAGED, and now ORDERED — it was neither. Without a
+  // deterministic sort the pages could repeat or skip rows, corrupting the very read paging is
+  // meant to make whole. Reconcile decides which orders count as bound, so a short read here
+  // would silently under-report them.
+  const items = await readAllPaged(
+    (from, to) => supabase
+      .from('live_auction_items')
+      .select('client_idempotency_key, status')
+      .eq('user_id', user.id).eq('session_id', id)
+      .order('id', { ascending: true })
+      .range(from, to),
+    'live/reconcile items',
+  );
   const bound = (items ?? []).filter((i) => i.client_idempotency_key);
   const boundIds = [...new Set(bound.map((i) => String(i.client_idempotency_key)))];
 
@@ -114,13 +123,18 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   // time-scoped so a bound-sold order's price ALWAYS resolves for the revenue sum (a capture
   // with a null/odd room_id must never zero out this show's own revenue). room_id is selected
   // here and applied ONLY to the unbound derivation (Part B) below.
-  let capQ = supabase
-    .from('capture_events')
-    .select('order_id, buyer_username, selling_price_cents, room_id')
-    .eq('user_id', user.id)
-    .gte('created_at', session.started_at);
-  if (session.ended_at) capQ = capQ.lte('created_at', session.ended_at);
-  const { data: caps } = await capQ;
+  const caps = await readAllPaged(
+    (from, to) => {
+      let q = supabase
+        .from('capture_events')
+        .select('order_id, buyer_username, selling_price_cents, room_id')
+        .eq('user_id', user.id)
+        .gte('created_at', session.started_at);
+      if (session.ended_at) q = q.lte('created_at', session.ended_at);
+      return q.order('created_at', { ascending: true }).range(from, to);
+    },
+    'live/reconcile captures',
+  );
   const cap = new Map<string, { price: number; buyer: string }>();
   for (const c of caps ?? []) {
     const k = String(c.order_id);
