@@ -5,6 +5,8 @@ import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { getOrgId } from '@/lib/org';
 import { syncConnection } from '@/lib/tiktok/syncCore';
+import { readAllPaged } from '@/lib/db/readAll';
+import { planStatusRefresh, type OpenOrder } from '@/lib/tiktok/statusRefreshPlan';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -29,6 +31,11 @@ export const maxDuration = 300;
 const TIME_BUDGET_MS = 240_000;   // shared across all phases + stores, < maxDuration
 const CHUNK = 50;                 // getOrderById max ids/call
 const CALL_CAP_STATUS = 120;      // getOrderById calls/run, status phase
+// Split of CALL_CAP_STATUS between the newest open orders and the oldest. See
+// lib/tiktok/statusRefreshPlan.ts: selecting oldest-first left everything past the row cap
+// PERMANENTLY unrefreshed, and inverting it would only move the blind spot to the tail.
+const STATUS_CALLS_RECENT = 100;
+const STATUS_CALLS_BACKLOG = 20;
 const CALL_CAP_TRACKING = 120;    // getOrderById calls/run, tracking phase
 const MAX_RL_RETRIES = 3;
 const CORE_OPEN = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'ON_HOLD', 'PARTIALLY_SHIPPING'];
@@ -45,17 +52,55 @@ async function detailWithBackoff(token: string, cipher: string, ids: string[]): 
   }
 }
 
-// ── Phase B: refresh open-order statuses (oldest-open-first), one store ──
+// ── Phase B: refresh open-order statuses (newest-first + an oldest slice), one store ──
 async function refreshStatuses(admin: Admin, conn: Conn, write: boolean, started: number) {
   const { store_id: storeId, user_id: userId } = conn;
   const fresh = await getFreshToken(admin, conn, { skewMinutes: 30 });
   const token = fresh.accessToken as string, cipher = (fresh.shopCipher ?? conn.shop_cipher) as string;
   let calls = 0, examined = 0, wouldUpdate = 0, updated = 0, error: string | null = null;
-  const { data: rows } = await admin.from('synced_order_ids')
-    .select('order_id, status').eq('user_id', userId).eq('store_id', storeId).in('status', CORE_OPEN)
-    .order('order_created_at', { ascending: true, nullsFirst: false }).limit(CALL_CAP_STATUS * CHUNK);
-  const stored = new Map((rows ?? []).map((r) => [String(r.order_id), String(r.status)]));
-  const ids = [...stored.keys()];
+  // WAS: one read, `order_created_at` ascending, `.limit(CALL_CAP_STATUS * CHUNK)` = 6,000.
+  // Two defects compounded. PostgREST clamps a response to 1000 rows, so that limit silently
+  // yielded the oldest 1,000 — and Snore has 13,014 open orders, meaning 12,014 were never
+  // refreshed at all. Not eventually: never, because every run re-selected the same oldest
+  // 1,000. Today's orders are the newest, so they sat permanently in the blind spot while the
+  // oldest 1,000 — measured to be unchanging — were re-polled every 30 minutes.
+  //
+  // Now: two PAGED reads from opposite ends, merged by planStatusRefresh. Most of the budget
+  // goes to the newest orders, where transitions actually happen; a deliberate slice goes to
+  // the oldest so no part of the open set is ever unreachable.
+  const readEnd = (ascending: boolean, calls: number) => readAllPaged<OpenOrder & { status: string }>(
+    (from, to) => admin.from('synced_order_ids')
+      .select('order_id, status, order_created_at')
+      .eq('user_id', userId).eq('store_id', storeId).in('status', CORE_OPEN)
+      .order('order_created_at', { ascending, nullsFirst: false })
+      .order('order_id', { ascending: true })
+      .range(from, Math.min(to, calls * CHUNK - 1)),
+    `sync-orders status ${ascending ? 'backlog' : 'recent'} ${storeId}`,
+  );
+
+  const [recentRows, backlogRows] = await Promise.all([
+    readEnd(false, STATUS_CALLS_RECENT),
+    readEnd(true, STATUS_CALLS_BACKLOG),
+  ]);
+
+  // Total open count for an honest "not reached this run" figure. A server-side count returns
+  // no rows, so it is immune to the very cap that caused this bug.
+  const { count: openTotal } = await admin.from('synced_order_ids')
+    .select('order_id', { count: 'exact', head: true })
+    .eq('user_id', userId).eq('store_id', storeId).in('status', CORE_OPEN);
+
+  const stored = new Map<string, string>();
+  for (const r of [...recentRows, ...backlogRows]) stored.set(String(r.order_id), String(r.status));
+
+  const plan = planStatusRefresh(
+    [...recentRows, ...backlogRows].map((r) => ({
+      order_id: String(r.order_id),
+      order_created_at: r.order_created_at ?? null,
+    })),
+    { chunk: CHUNK, recentCalls: STATUS_CALLS_RECENT, backlogCalls: STATUS_CALLS_BACKLOG },
+  );
+  const ids = plan.ids;
+  const notReached = Math.max(0, (openTotal ?? 0) - ids.length);
   try {
     for (let i = 0; i < ids.length; i += CHUNK) {
       if (overBudget(started) || calls >= CALL_CAP_STATUS) break;
@@ -73,7 +118,16 @@ async function refreshStatuses(admin: Admin, conn: Conn, write: boolean, started
       examined += Math.min(CHUNK, ids.length - i); if (error) break; await sleep(80);
     }
   } catch (e) { error = String(e); }
-  return { store_id: storeId, calls, examined, would_update: wouldUpdate, updated, error };
+  return {
+    store_id: storeId, calls, examined, would_update: wouldUpdate, updated, error,
+    // Surfaced so a growing blind spot is visible in the run log rather than inferred months
+    // later from a number that looked wrong.
+    open_total: openTotal ?? null,
+    planned: ids.length,
+    recent: plan.recentCount,
+    backlog: plan.backlogCount,
+    not_reached: notReached,
+  };
 }
 
 // ── Phase C: fill/correct tracking on the pack-ready set (AWAITING_COLLECTION first), one store ──
