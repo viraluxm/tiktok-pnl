@@ -71,9 +71,26 @@ export function planStatusRefresh(open: OpenOrder[], opts: RefreshPlanOptions): 
   const recentBudget = Math.max(0, recentCalls) * Math.max(0, chunk);
   const backlogBudget = Math.max(0, backlogCalls) * Math.max(0, chunk);
 
+  // DEDUPE FIRST. The caller assembles this list from two reads — newest-end and oldest-end —
+  // and on any store smaller than the combined budget those reads return the SAME rows twice.
+  // Deduplicating only between the halves (below) was not enough: the duplicates were already
+  // inside the recent half, so a batch went to getOrderById containing the same id twice and
+  // TikTok rejected the whole call with 98001004 "Wrong order id".
+  //
+  // That killed the status phase outright on Lux viral (11 open orders, 22 planned) and partway
+  // through Toysfordeals (2,981 open, 3,981 planned), while the two stores large enough for the
+  // halves not to overlap ran clean. `planned` exceeding the open total is the signature.
+  const seen = new Set<string>();
+  const unique: OpenOrder[] = [];
+  for (const o of open) {
+    if (seen.has(o.order_id)) continue;
+    seen.add(o.order_id);
+    unique.push(o);
+  }
+
   // Newest first. Ties broken by order_id so a run is deterministic and two runs over
   // unchanged data request the same thing — which makes the logs comparable.
-  const newestFirst = open
+  const newestFirst = unique
     .slice()
     .sort((a, b) => createdMs(b) - createdMs(a) || a.order_id.localeCompare(b.order_id));
 
@@ -93,6 +110,6 @@ export function planStatusRefresh(open: OpenOrder[], opts: RefreshPlanOptions): 
     ids: [...recent.map((o) => o.order_id), ...backlog.map((o) => o.order_id)],
     recentCount: recent.length,
     backlogCount: backlog.length,
-    skipped: Math.max(0, open.length - recent.length - backlog.length),
+    skipped: Math.max(0, unique.length - recent.length - backlog.length),
   };
 }

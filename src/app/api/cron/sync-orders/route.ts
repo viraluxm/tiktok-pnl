@@ -58,6 +58,10 @@ async function refreshStatuses(admin: Admin, conn: Conn, write: boolean, started
   const fresh = await getFreshToken(admin, conn, { skewMinutes: 30 });
   const token = fresh.accessToken as string, cipher = (fresh.shopCipher ?? conn.shop_cipher) as string;
   let calls = 0, examined = 0, wouldUpdate = 0, updated = 0, error: string | null = null;
+  // Batches that getOrderById refused. Recorded and stepped over rather than fatal: one
+  // unrecoverable order id must not cost a store its entire status refresh.
+  let failedCalls = 0;
+  let firstCallError: string | null = null;
   // WAS: one read, `order_created_at` ascending, `.limit(CALL_CAP_STATUS * CHUNK)` = 6,000.
   // Two defects compounded. PostgREST clamps a response to 1000 rows, so that limit silently
   // yielded the oldest 1,000 — and Snore has 13,014 open orders, meaning 12,014 were never
@@ -111,7 +115,19 @@ async function refreshStatuses(admin: Admin, conn: Conn, write: boolean, started
   try {
     for (let i = 0; i < ids.length; i += CHUNK) {
       if (overBudget(started) || calls >= CALL_CAP_STATUS) break;
-      const got = await detailWithBackoff(token, cipher, ids.slice(i, i + CHUNK)); calls++;
+      let got: Record<string, unknown>[];
+      try {
+        got = await detailWithBackoff(token, cipher, ids.slice(i, i + CHUNK));
+      } catch (e) {
+        // A single rejected batch is skipped, not fatal. TikTok fails the WHOLE call when any
+        // one id in it is bad, so letting that propagate meant one dead order stopped every
+        // remaining chunk for the store.
+        failedCalls++;
+        if (!firstCallError) firstCallError = String(e).slice(0, 200);
+        calls++;
+        continue;
+      }
+      calls++;
       for (const o of got) {
         const id = String(o.id); const from = stored.get(id); if (from === undefined) continue;
         const to = String(o.status || '').toUpperCase(); if (!to || to === from) continue;
@@ -143,6 +159,10 @@ async function fillTracking(admin: Admin, conn: Conn, write: boolean, started: n
   const fresh = await getFreshToken(admin, conn, { skewMinutes: 30 });
   const token = fresh.accessToken as string, cipher = (fresh.shopCipher ?? conn.shop_cipher) as string;
   let calls = 0, examined = 0, wouldFill = 0, filled = 0, wouldCorrect = 0, corrected = 0, noLabel = 0, error: string | null = null;
+  // Same isolation as phase B: this loop calls getOrderById in chunks too, so one bad id would
+  // otherwise end the store's tracking fill as well.
+  let failedCalls = 0;
+  let firstCallError: string | null = null;
   const { data: rows } = await admin.from('synced_order_ids')
     .select('order_id, tracking_number, auto_combine_group_id, status')
     .eq('user_id', userId).eq('store_id', storeId).in('status', CORE_OPEN)
@@ -154,7 +174,19 @@ async function fillTracking(admin: Admin, conn: Conn, write: boolean, started: n
   try {
     for (let i = 0; i < ids.length; i += CHUNK) {
       if (overBudget(started) || calls >= CALL_CAP_TRACKING) break;
-      const got = await detailWithBackoff(token, cipher, ids.slice(i, i + CHUNK)); calls++;
+      let got: Record<string, unknown>[];
+      try {
+        got = await detailWithBackoff(token, cipher, ids.slice(i, i + CHUNK));
+      } catch (e) {
+        // A single rejected batch is skipped, not fatal. TikTok fails the WHOLE call when any
+        // one id in it is bad, so letting that propagate meant one dead order stopped every
+        // remaining chunk for the store.
+        failedCalls++;
+        if (!firstCallError) firstCallError = String(e).slice(0, 200);
+        calls++;
+        continue;
+      }
+      calls++;
       for (const o of got) {
         const id = String(o.id); const trk = o.tracking_number ? String(o.tracking_number).trim() : '';
         if (!trk) { noLabel++; continue; }
@@ -173,7 +205,7 @@ async function fillTracking(admin: Admin, conn: Conn, write: boolean, started: n
       examined += Math.min(CHUNK, ids.length - i); await sleep(80);
     }
   } catch (e) { error = String(e); }
-  return { store_id: storeId, calls, examined, would_fill: wouldFill, filled, would_correct: wouldCorrect, corrected, no_label: noLabel, error };
+  return { store_id: storeId, failed_calls: failedCalls, first_call_error: firstCallError, calls, examined, would_fill: wouldFill, filled, would_correct: wouldCorrect, corrected, no_label: noLabel, error };
 }
 
 // GET, not POST: Vercel cron jobs invoke the endpoint with a GET request (matches every other cron
