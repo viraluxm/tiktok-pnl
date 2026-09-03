@@ -1,0 +1,36 @@
+name: Unit tests
+
+# Runs every `src/**/*.test.mjs`.
+#
+# Added because employees.materialize.test.mjs failed on main for weeks unnoticed: nothing ran
+# these files, only the RPC-grant workflow was wired up. Because `assert.ok` throws, that one
+# stale assertion aborted the file after 3 of 17 checks and silently dropped three further
+# scenarios — including the payroll history and no-show handling its own header called "the
+# fragile part".
+#
+# Needs no secrets: these tests are pure and hit no network and no database. That is also why
+# this runs on PUSH to main as well as on pull requests — it is cheap enough to guard the
+# branch itself, not just the way in.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `npm ci`, not `npm install`: several test files transpile a .ts source at runtime via
+      # the `typescript` devDep, so the lockfile's exact version is what they compile against.
+      - run: npm ci
+
+      - name: Run the unit test suite
+        run: npm run test
