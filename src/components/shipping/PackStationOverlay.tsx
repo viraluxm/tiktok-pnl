@@ -13,8 +13,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { isSlotCode, normalizeSlotCode } from '@/lib/mapping/slotCode';
 
-export interface PackStationEndpoints { boxes: string; scan: string; confirm: string }
+export interface PackStationEndpoints {
+  boxes: string;
+  scan: string;
+  confirm: string;
+  /**
+   * Where a lead's override goes. REQUIRED rather than defaulted, because the two logins are
+   * confined to different API namespaces and a silent default would work on one and 403 on the
+   * other — with the failure landing on the fulfilment station, which is the login the
+   * override actually exists for.
+   */
+  override: string;
+}
 
 interface BoxSku {
   inventory_sku_id: string;
@@ -27,6 +39,13 @@ interface BoxSku {
   // with nothing on the shelf). A fact about the order, not a live inventory read: it is decided
   // once, when the bind draws short, and never changes. Older payloads omit it → not short.
   shelf_out?: boolean;
+  // Where this SKU lives, e.g. "R3A L2" — rack, side, level. Null when it has no section
+  // mapped yet; the screen then shows no guidance rather than guessing, and the line sorts
+  // last. Older payloads omit both fields.
+  location_label?: string | null;
+  // Every slot code that legitimately holds this SKU. More than one when it sits on both
+  // faces of a rack, or in two places — walking to the far face is not an error.
+  slot_codes?: string[];
 }
 interface MissingOrder { order_id: string; listing_name: string | null; seller_sku: string | null; }
 interface CatalogOrder { order_id: string; listing_name: string | null; seller_sku: string | null; qty: number; }
@@ -52,12 +71,16 @@ interface Box {
 
 type Screen = 'ready' | 'alert' | 'pick' | 'finish' | 'empty';
 
+// Bound on the scan round-trip. Long enough for a slow warehouse connection, short enough
+// that a hung request cannot quietly kill the device for the rest of the shift.
+const SCAN_TIMEOUT_MS = 15_000;
+
 type PickLine =
-  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean }
+  | { kind: 'sku'; key: string; sku_number: number | null; title: string; barcode: string | null; thumbnail_url: string | null; required_qty: number; shelf_out: boolean; location_label: string | null; slot_codes: string[] }
   | { kind: 'catalog'; key: string; order_id: string; listing_name: string; seller_sku: string; required_qty: number };
 
 const buildPickLines = (b: Box): PickLine[] => [
-  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true })),
+  ...b.skus.map((s): PickLine => ({ kind: 'sku', key: s.inventory_sku_id, sku_number: s.sku_number, title: s.title, barcode: s.barcode, thumbnail_url: s.thumbnail_url, required_qty: s.required_qty, shelf_out: s.shelf_out === true, location_label: s.location_label ?? null, slot_codes: s.slot_codes ?? [] })),
   ...(b.catalog_orders ?? []).map((c): PickLine => ({ kind: 'catalog', key: `cat:${c.order_id}`, order_id: c.order_id, listing_name: c.listing_name || 'Catalog item', seller_sku: c.seller_sku || '', required_qty: c.qty || 1 })),
 ];
 
@@ -219,8 +242,17 @@ export default function PackStationOverlay({
   const [err, setErr] = useState<string | null>(null);
   const [justDone, setJustDone] = useState(false);
   const [abandon, setAbandon] = useState<null | { scan: string | null }>(null);
+  // Transient feedback for a section scan. Toned, because "you are at the wrong shelf" and
+  // "this one is already done" call for opposite reactions and a picker reads this in about
+  // half a second.
+  const [scanMsg, setScanMsg] = useState<null | { text: string; tone: 'error' | 'info' }>(null);
+  const scanMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A line the picker cannot scan — damaged label, unreachable — awaiting a lead's PIN.
+  const [override, setOverride] = useState<null | { line: PickLine }>(null);
   const [holding, setHolding] = useState(false);
   const [value, setValue] = useState('');
+  // Accumulates a wedge scanner's keystrokes between Enters, independent of what has focus.
+  const scanBufRef = useRef('');
   // Picker gate opens on mount = the session starts by choosing who is packing.
   const [pickerModalOpen, setPickerModalOpen] = useState(true);
 
@@ -269,11 +301,25 @@ export default function PackStationOverlay({
     // otherwise fire against the new box and confirm the previous one's group_key.
     cancelDoneTimer(); setJustDone(false);
     setLoading(true); setErr(null);
+    // A scan request that never settles used to leave `loading` true forever, and every
+    // subsequent scan was then dropped silently by the `if (loading) return` guard in onScan —
+    // the device looked completely dead with nothing on screen to explain it. Flaky warehouse
+    // wifi is enough to cause that. Bound it, and say so when it fires.
+    const ctl = new AbortController();
+    const timeout = setTimeout(() => ctl.abort(), SCAN_TIMEOUT_MS);
     try {
       const res = await fetch(endpoints.scan, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scan }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scan }), signal: ctl.signal,
       });
-      const json = await res.json();
+      // A middleware bounce to /login returns HTML, not JSON, so this throws rather than
+      // yielding a useful error. Say "signed out" instead of a parse failure.
+      const json = await res.json().catch(() => null);
+      if (json === null) {
+        setErr('Signed out or unreachable — reload the page and sign in again.');
+        setScreen('ready');
+        return;
+      }
       if (!res.ok) {
         const t = json.parsed_tracking ? ` (tracking ${json.parsed_tracking})` : '';
         setErr(`No matching order for “${json.scanned_value ?? scan}”${t}`);
@@ -288,25 +334,187 @@ export default function PackStationOverlay({
       if (unbound) setScreen('alert');
       else if (lines.length === 0) setScreen('empty');
       else { setScreen('pick'); setActiveIdx(firstUnpickedIdx(lines, {})); }
-    } catch {
-      setErr('Network error loading the box'); setScreen('ready');
+    } catch (e) {
+      setErr(
+        (e as Error)?.name === 'AbortError'
+          ? `No response after ${Math.round(SCAN_TIMEOUT_MS / 1000)}s — check the connection and scan again.`
+          : 'Network error loading the box',
+      );
+      setScreen('ready');
     } finally {
+      clearTimeout(timeout);
       setLoading(false); focusInput();
     }
   }
 
+  /**
+   * Show a scan result over the item for a beat, then clear it.
+   *
+   * Auto-dismissing on purpose: a picker holding a scanner in one hand and a box in the other
+   * should not have to tap anything to get back to work, and a message that needs dismissing
+   * is one that will still be on screen for the next scan.
+   */
+  function flashScan(text: string, tone: 'error' | 'info') {
+    if (scanMsgTimer.current) clearTimeout(scanMsgTimer.current);
+    setScanMsg({ text, tone });
+    scanMsgTimer.current = setTimeout(() => { setScanMsg(null); scanMsgTimer.current = null; }, 2600);
+  }
+
+  /**
+   * A section scan while picking confirms THE ITEM ON SCREEN, and nothing else.
+   *
+   * An earlier version accepted any section belonging to the box, jumping to that line and
+   * counting it, on the reasoning that picking out of order is normal. Two problems with that
+   * in use: the screen moved without being asked to, and — more importantly — the scan then
+   * confirmed something other than what the device had just told the picker to fetch, which
+   * is not really verification at all.
+   *
+   * Now the device names one section and that is the only one it accepts. The lines are in
+   * walking order, so following them IS the efficient path; anything else is a detour, and
+   * Next/Back are there for deliberately working ahead.
+   */
+  function confirmBySection(raw: string) {
+    const code = normalizeSlotCode(raw);
+    const current = pickLines[activeIdx];
+
+    // Anything that is not the item on screen gets ONE answer, whether it belongs to a later
+    // item, an already-picked one, or no item in this box at all. The picker's next move is
+    // identical in every case: scan the section the screen is asking for.
+    if (!current || current.kind !== 'sku' || !current.slot_codes.includes(code)) {
+      flashScan('Wrong section for this item', 'error');
+      return;
+    }
+
+    const idx = activeIdx;
+    const l = current;
+    if ((counts[l.key] ?? 0) >= l.required_qty) {
+      // The ON-SCREEN item is already fully grabbed — a double-scan. Still not an error, and
+      // still not "wrong section": this is the right place, it is just done.
+      flashScan('Already picked', 'info');
+      return;
+    }
+    setActiveIdx(idx);
+    setScanMsg(null);
+    grab(l, 'scan');
+  }
+
   function onScan() {
     const v = value.trim(); setValue('');
-    if (pickerModalOpen) return; // picker gate open → swallow the scan (value already cleared)
+    handleScan(v);
+  }
+
+  /**
+   * Handle one completed scan, wherever it came from.
+   *
+   * Split out from onScan because scans no longer arrive only through the hidden input — see
+   * the window-level listener below.
+   */
+  function handleScan(v: string) {
+    if (pickerModalOpen) {
+      // The gate is a full-screen modal, so it is usually obvious — but say it anyway, because
+      // a scan that vanishes with no acknowledgement is indistinguishable from a broken device.
+      flashScan('Choose who\'s picking first.', 'error');
+      return;
+    }
     focusInput();
-    if (!v || loading) return;
+    if (!v) return;
+    if (loading) {
+      flashScan('Still loading the last scan…', 'info');
+      return;
+    }
+    // Prefix test, so a section label can never be mistaken for a shipping label and start a
+    // new box mid-pick. See lib/mapping/slotCode.
+    if (screen === 'pick' && isSlotCode(v)) { confirmBySection(v); return; }
     if (screen === 'pick' && anyPicked) { setAbandon({ scan: v }); return; }
     loadBox(v);
   }
 
+  // ── Scanner capture, at the WINDOW rather than a focused input ──────────────────────────
+  //
+  // The scanner is a keyboard wedge: it types the code then presses Enter. Relying on a hidden
+  // input holding focus is fragile on a touch device — tapping ANY control (Next, the item
+  // photo, a mode button) moves focus to it, and from then on every scan lands there instead.
+  // Enter just re-clicks the focused button, so the device looks completely dead while the
+  // scanner beeps happily. That is the reported "scanning does nothing", and it explains why
+  // the FIRST scan of a box works and later ones do not: the first happens before anyone has
+  // touched the screen.
+  //
+  // Capturing at the window removes the dependency on focus entirely. Keystrokes are ignored
+  // while the operator is deliberately typing in a real field (the override PIN, the SKU
+  // search) so those still behave normally.
+  useEffect(() => {
+    const inRealTextField = () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === inputRef.current) return false;
+      return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (inRealTextField()) return;
+      if (e.key === 'Enter') {
+        const v = scanBufRef.current.trim();
+        scanBufRef.current = '';
+        if (!v) return;
+        e.preventDefault();
+        setValue('');
+        handleScan(v);
+        return;
+      }
+      // Printable characters only; a scanner emits nothing else mid-code.
+      if (e.key.length === 1) scanBufRef.current += e.key;
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  // Lead-authorised bypass for a section that cannot be scanned — a damaged or unreachable
+  // label. Authorising and logging happen server-side; on success the line is counted as if
+  // scanned, and the override is on the record.
+  async function submitOverride(cred: { pin?: string; ownerPassword?: string }, reason: string) {
+    if (!override || !box) return { ok: false, error: 'No line selected' };
+    const line = override.line;
+    try {
+      // Which endpoint depends on WHICH LOGIN is running the overlay: a station session is
+      // hard-confined to /api/station, so calling the shipping route there is a middleware 403
+      // before the handler ever runs.
+      const res = await fetch(endpoints.override, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pin: cred.pin,
+          owner_password: cred.ownerPassword,
+          reason,
+          group_key: box.group_key,
+          inventory_sku_id: line.kind === 'sku' ? line.key : null,
+          picker_employee_id: pickerId || null,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: json.error || 'Could not authorise' };
+      setOverride(null);
+      flashScan(json.warning ? String(json.warning) : `Authorised by ${json.authorized_by}`, 'info');
+      grab(line, 'override');
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Network error' };
+    }
+  }
+
   // ── pick actions ──
-  function grab(line: PickLine) {
+  //
+  // A line REQUIRES a section scan once its SKU has been mapped. Unmapped SKUs still pick by
+  // tap, which is what lets verification roll out gradually instead of blocking the floor on
+  // the day the first rack is drawn.
+  const requiresScan = (line: PickLine) => line.kind === 'sku' && line.slot_codes.length > 0;
+
+  function grab(line: PickLine, via: 'tap' | 'scan' | 'override' = 'tap') {
     if (!box) return;
+    if (via === 'tap' && requiresScan(line)) {
+      flashScan(
+        `Scan ${line.kind === 'sku' && line.location_label ? line.location_label : 'the section label'}`,
+        'info',
+      );
+      return;
+    }
     const have = counts[line.key] ?? 0;
     if (have >= line.required_qty) return;
     const next = have + 1;
@@ -406,9 +614,15 @@ export default function PackStationOverlay({
   const line = box && screen === 'pick' ? pickLines[activeIdx] ?? null : null;
   const have = line ? counts[line.key] ?? 0 : 0;
   const lineDone = line ? have >= line.required_qty : false;
+  const needsScan = line ? requiresScan(line) : false;
   // Display-only. Never ANDed into lineDone, grab(), or allComplete — a short item is still
   // grabbable, still navigable, and still lets the box complete.
   const lineShelfOut = !!(line && line.kind === 'sku' && line.shelf_out);
+  // "Unmapped" is only worth saying when SOMETHING in this box is mapped. On a box where
+  // nothing has a location — every box, until mapping is under way — a badge on every single
+  // line is pure noise: there is no expectation of a location to explain the absence of. This
+  // is what keeps the screen identical to today's while the catalogue is still unmapped.
+  const anyMapped = pickLines.some((l) => l.kind === 'sku' && !!l.location_label);
 
   // ── focus-mode overlay — portalled to <body> so it escapes any transformed ancestor and fills
   // the whole dynamic viewport at z-[200], above app chrome. Safe under SSR (mounts client-side). ──
@@ -431,7 +645,8 @@ export default function PackStationOverlay({
           document-level keydown capture with no focused field — not needed unless this fails.) */}
       <input
         ref={inputRef} value={value} onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onScan(); } }}
+        // No Enter handler: the window-level listener above owns scan completion, so keeping
+        // one here would double-fire whenever this input happens to hold focus.
         inputMode="none"
         disabled={pickerModalOpen}
         autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false}
@@ -485,7 +700,25 @@ export default function PackStationOverlay({
                 <span className="mr-2" aria-hidden>⚠</span>{err}
               </div>
             )}
-            <div className="mt-10 text-sm text-tt-muted break-words">{pickedCount} {pickedCount === 1 ? 'box' : 'boxes'} picked today</div>
+            {/* The day's count, loud.
+                It lives on the READY screen rather than during a pick on purpose: this is the
+                beat right after finishing a box, when the number has just gone up and there is
+                nothing competing for the screen. Putting it over the item mid-pick would fight
+                the thing the picker actually needs to look at. */}
+            <div className="mt-8 flex flex-col items-center">
+              <div
+                className={`font-extrabold leading-none tabular-nums ${pickedCount > 0 ? 'text-tt-green' : 'text-tt-muted'}`}
+                style={{ fontSize: 'clamp(3.5rem, 20vh, 9rem)' }}
+              >
+                {pickedCount}
+              </div>
+              <div
+                className="mt-1 font-bold uppercase tracking-[0.2em] text-tt-muted"
+                style={{ fontSize: 'clamp(0.7rem, 2.4vh, 1.05rem)' }}
+              >
+                {pickedCount === 1 ? 'box' : 'boxes'} picked today
+              </div>
+            </div>
           </div>
         )}
 
@@ -569,6 +802,61 @@ export default function PackStationOverlay({
                 </div>
               )}
               </div>
+              {/* WHERE it is. Pinned top-left of the hero and pointer-events-none so the whole
+                  area stays a tap target. Shown before anything else because it decides where
+                  the picker walks; absent when the SKU has no section, rather than guessing. */}
+              {/* Suppressed entirely while the OUT OF STOCK band is up. That band is the one
+                  thing worth reading on a short item, and a second badge beside it either
+                  competes for attention or — when the SKU is short at bind but still shows
+                  stock on hand — flatly contradicts it. Out of stock wins; not-mapped can
+                  wait. */}
+              {line.kind === 'sku' && !lineShelfOut && (
+                <div className="absolute top-0 left-0 p-2 pointer-events-none">
+                  {line.location_label ? (
+                    <span
+                      className="inline-block rounded-lg bg-tt-cyan text-black font-extrabold tracking-wide shadow-lg"
+                      style={{ fontSize: 'clamp(1rem, 4.5vh, 2rem)', padding: '0.12em 0.45em' }}
+                    >
+                      {line.location_label}
+                    </span>
+                  ) : anyMapped ? (
+                    // An unmapped SKU has no home yet, so there is no location to show. Say that
+                    // rather than leaving a hole where the badge normally is: a picker who has
+                    // learned to look there reads a blank as a fault and goes hunting for a
+                    // location that does not exist. These sort LAST and are still grabbed by
+                    // tapping, so nothing about them blocks the box.
+                    //
+                    // Says nothing about stock. On-hand counts here run negative on items that
+                    // ship every day, so any stock claim from this screen would be wrong about
+                    // half the catalogue. Stock has exactly one voice — the OUT OF STOCK band —
+                    // and this badge is suppressed whenever that band is up, so the slot always
+                    // carries exactly one message.
+                    <span
+                      className="inline-block rounded-lg bg-black/60 text-tt-muted font-bold tracking-wide"
+                      style={{ fontSize: 'clamp(0.8rem, 3vh, 1.1rem)', padding: '0.2em 0.5em' }}
+                    >
+                      Unmapped
+                    </span>
+                  ) : null}
+                </div>
+              )}
+
+              {/* Section-scan result, over the item and sized to be read at arm's length. It
+                  sits here rather than under the controls, where it collided with Back/Next and
+                  was too small to catch. pointer-events-none so the hero stays a tap target. */}
+              {scanMsg && (
+                <div className="absolute inset-0 flex items-center justify-center p-3 pointer-events-none">
+                  <div
+                    className={`w-full rounded-xl text-center font-extrabold tracking-wide shadow-2xl ${
+                      scanMsg.tone === 'error' ? 'bg-red-700/95 text-red-50' : 'bg-tt-cyan/95 text-black'
+                    }`}
+                    style={{ padding: '0.5em 0.6em', fontSize: 'clamp(1.05rem, 4.6vh, 2rem)' }}
+                  >
+                    {scanMsg.text}
+                  </div>
+                </div>
+              )}
+
               {/* Picker-reported out-of-stock band. pointer-events-none so the whole hero stays a
                   tap target for grab() — a flagged item is still grabbable if it turns up. */}
               {lineShelfOut && (
@@ -602,12 +890,27 @@ export default function PackStationOverlay({
               </div>
               {/* count */}
               <div className={`text-center font-extrabold ${lineDone ? 'text-tt-green' : 'text-tt-text'}`} style={{ fontSize: 'clamp(1.1rem, 4.5vw, 1.9rem)' }}>{have} / {line.required_qty} grabbed</div>
-              {/* grab */}
+              {/* grab — a mapped SKU is confirmed by SCANNING its section, not by tapping.
+                  The button stays as the affordance and says what to do; tapping it explains
+                  rather than silently doing nothing. An unmapped SKU still taps through, so
+                  the floor is never blocked on a rack that has not been drawn yet. */}
               <button onClick={() => grab(line)} disabled={lineDone}
-                className={`w-full rounded-2xl font-extrabold transition-opacity ${lineDone ? 'bg-tt-card-hover text-tt-muted cursor-default' : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}
+                className={`w-full rounded-2xl font-extrabold transition-opacity ${
+                  lineDone ? 'bg-tt-card-hover text-tt-muted cursor-default'
+                    : needsScan ? 'bg-tt-card-hover text-tt-cyan border-2 border-tt-cyan cursor-pointer'
+                    : 'bg-tt-green text-black cursor-pointer hover:opacity-90'}`}
                 style={{ padding: 'clamp(0.55rem, 1.9vh, 1rem) 0', fontSize: 'clamp(1rem, 4vw, 1.4rem)' }}>
-                {lineDone ? '✓ Complete' : 'Grab one'}
+                {lineDone ? '✓ Complete' : needsScan ? 'Scan the section label' : 'Grab one'}
               </button>
+              {needsScan && !lineDone && (
+                <button
+                  onClick={() => setOverride({ line })}
+                  className="w-full text-center text-tt-muted underline cursor-pointer"
+                  style={{ fontSize: 'clamp(0.7rem, 2.6vw, 0.9rem)' }}
+                >
+                  Can&apos;t scan it? Get a lead to override
+                </button>
+              )}
               {/* Back / info / Next */}
               <div className="flex items-center justify-between gap-2">
                 <button onClick={() => setActiveIdx((i) => Math.max(0, i - 1))} disabled={activeIdx === 0}
@@ -770,6 +1073,14 @@ export default function PackStationOverlay({
       </div>
 
       {/* abandon-confirm (mid-pick new label / scan) */}
+      {override && (
+        <OverrideDialog
+          line={override.line}
+          onCancel={() => setOverride(null)}
+          onSubmit={submitOverride}
+        />
+      )}
+
       {abandon && (
         <div className="absolute inset-0 bg-black/60 flex items-center justify-center p-6 z-30">
           <div className="bg-tt-card border border-tt-border rounded-2xl p-6 max-w-sm w-full text-center">
@@ -789,5 +1100,113 @@ export default function PackStationOverlay({
       {pickerModal}
     </div>,
     document.body,
+  );
+}
+
+/**
+ * Lead-authorised bypass for a section that cannot be scanned.
+ *
+ * Deliberately asks for a REASON as well as the PIN. The reason is what makes the override
+ * log readable later — a column of "authorised" rows with no why tells you an override
+ * happened but nothing about whether the labels are failing, and label failures are exactly
+ * what this is meant to surface.
+ */
+function OverrideDialog({
+  line, onCancel, onSubmit,
+}: {
+  line: PickLine;
+  onCancel: () => void;
+  onSubmit: (
+    cred: { pin?: string; ownerPassword?: string },
+    reason: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  // A lead's PIN is the everyday path. The owner's own account password is the fallback for
+  // when no lead is on the floor — rare, so it is behind a link rather than shown by default.
+  const [mode, setMode] = useState<'pin' | 'owner'>('pin');
+  const [pin, setPin] = useState('');
+  const [ownerPassword, setOwnerPassword] = useState('');
+  const [reason, setReason] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ready = mode === 'pin' ? pin.length >= 4 : ownerPassword.length > 0;
+
+  const where = line.kind === 'sku' ? (line.location_label ?? `#${line.sku_number ?? '?'}`) : 'this line';
+
+  return (
+    <div className="absolute inset-0 bg-black/70 flex items-center justify-center p-6 z-40">
+      <div className="bg-tt-card border border-tt-border rounded-2xl p-5 max-w-sm w-full">
+        <div className="text-lg font-bold text-tt-text">Override the scan</div>
+        <div className="mt-1 text-sm text-tt-muted">
+          A lead enters their PIN to confirm <b className="text-tt-text">{where}</b> without scanning it.
+          This is recorded.
+        </div>
+
+        {mode === 'pin' ? (
+          <input
+            autoFocus
+            value={pin}
+            onChange={(e) => { setPin(e.target.value.replace(/\D/g, '').slice(0, 8)); setErr(null); }}
+            inputMode="numeric"
+            placeholder="Lead PIN"
+            className="mt-4 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-center text-2xl tracking-[0.4em] text-tt-text"
+          />
+        ) : (
+          <input
+            autoFocus
+            type="password"
+            value={ownerPassword}
+            onChange={(e) => { setOwnerPassword(e.target.value); setErr(null); }}
+            placeholder="Account password"
+            className="mt-4 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-center text-lg text-tt-text"
+          />
+        )}
+
+        <button
+          onClick={() => {
+            setMode(mode === 'pin' ? 'owner' : 'pin');
+            setPin(''); setOwnerPassword(''); setErr(null);
+          }}
+          className="mt-2 w-full text-center text-xs text-tt-muted underline cursor-pointer"
+        >
+          {mode === 'pin'
+            ? 'No lead available? Use the account password'
+            : 'Use a lead PIN instead'}
+        </button>
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="What's wrong? (e.g. label torn)"
+          className="mt-2 w-full rounded-xl border border-tt-border bg-tt-card px-3 py-2 text-sm text-tt-text"
+        />
+
+        {err && <div className="mt-2 text-sm text-tt-red">{err}</div>}
+
+        <div className="mt-4 flex gap-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 rounded-xl border border-tt-border py-2 text-sm text-tt-muted cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={busy || !ready}
+            onClick={async () => {
+              setBusy(true);
+              setErr(null);
+              const r = await onSubmit(
+                mode === 'pin' ? { pin } : { ownerPassword },
+                reason,
+              );
+              setBusy(false);
+              if (!r.ok) setErr(r.error ?? 'Could not authorise');
+            }}
+            className="flex-1 rounded-xl bg-tt-green py-2 text-sm font-bold text-black disabled:opacity-40 cursor-pointer"
+          >
+            {busy ? 'Checking…' : 'Authorise'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

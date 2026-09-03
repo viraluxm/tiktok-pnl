@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { routePositionMap, sectionRoutePosition, slotAddress } from '@/lib/mapping/route';
 
 // Shared scan → box resolution used by both /api/shipping/pick-list (the
 // operator-facing picker, scoped to the caller's own user_id) and
@@ -169,6 +170,12 @@ export type SkuBlock = {
   // if the box holds two orders for one SKU and only one was short, the box still cannot be
   // filled, so it warns. Display-only — it never gates grabbing, navigation, or completion.
   shelf_out: boolean;
+  // Where this SKU lives, e.g. "R3A L2". Null when it has no section mapped yet — the device
+  // then shows no guidance rather than guessing, and the line sorts last.
+  location_label: string | null;
+  // Every slot code that legitimately holds this SKU. More than one when it sits on both faces
+  // of a rack, or in two places: walking to the far face is not an error.
+  slot_codes: string[];
 };
 export type ExcludedOrder = { order_id: string; reason: string; skus: string[] };
 export type MissingOrder = { order_id: string; listing_name: string | null; seller_sku: string | null };
@@ -189,6 +196,107 @@ export type AssembleResult = {
 //               station passes the stored status). Drives the excluded reason.
 //   orderDetail — live line-item names when the caller fetched them (pick-list);
 //               empty for station, which falls back to capture_events/products.
+/**
+ * Attach WHERE each SKU lives, and re-order the list into walking order.
+ *
+ * Lives here rather than in a route because BOTH pick paths must behave identically:
+ * /api/shipping/pick-list (owner login) and /api/station/scan (the fulfilment station login).
+ * They already duplicate the aggregation above; duplicating this too is how the station login
+ * would silently keep the old sku_number ordering and show no location — the exact bug this
+ * function exists to prevent.
+ *
+ * A SKU can occupy more than one section (both faces of a rack, or two places). The picker is
+ * sent to whichever comes FIRST on the route, and every one of its slot codes stays valid.
+ *
+ * Unmapped SKUs fall to the END, keeping lowest-SKU#-first among themselves, so a partly
+ * mapped catalogue is strictly better than an unmapped one and never worse.
+ *
+ * NOTE the route's start corner is not persisted anywhere yet, so this uses the 'top-left'
+ * default the Mapping tab opens with. The ORDER of stops is correct either way; only which
+ * end you begin from can differ.
+ */
+export async function attachLocations(
+  db: SupabaseClient,
+  userIds: string[],
+  skus: SkuBlock[],
+): Promise<SkuBlock[]> {
+  if (!skus.length) return skus;
+  const skuIds = skus.map((s) => s.inventory_sku_id);
+
+  const [{ data: racks }, { data: slots }] = await Promise.all([
+    db.from('pick_racks')
+      .select('id, name, grid_row, grid_col, route_pos_a, route_pos_b, is_active')
+      .in('user_id', userIds),
+    db.from('pick_slots')
+      .select('rack_id, shelf_index, section_index, side, slot_code, inventory_sku_id')
+      .in('user_id', userIds)
+      .in('inventory_sku_id', skuIds),
+  ]);
+
+  const positions = routePositionMap(racks ?? []);
+  type RackRow = { id: string; name: string };
+  const rackById = new Map<string, RackRow>(
+    ((racks ?? []) as RackRow[]).map((r) => [String(r.id), r]),
+  );
+  const byS = new Map<string, { label: string; position: number; shelf: number; section: number; codes: string[] }>();
+
+  for (const slot of slots ?? []) {
+    const skuId = String(slot.inventory_sku_id);
+    const rack = rackById.get(String(slot.rack_id));
+    if (!rack) continue;
+    const side = slot.side as 'A' | 'B' | 'AB';
+    const pos = sectionRoutePosition(positions, String(rack.id), side);
+    const prev = byS.get(skuId);
+    const codes = [...(prev?.codes ?? []), String(slot.slot_code)];
+    if (pos == null) {
+      byS.set(skuId, prev ? { ...prev, codes }
+        : { label: '', position: Infinity, shelf: 0, section: 0, codes });
+      continue;
+    }
+    // Includes the SECTION. Originally stopped at the level on the reasoning that a picker
+    // finds the item by eye once at the right shelf — but in use the section is what matches
+    // the printed label they are about to scan, so leaving it off made the screen and the
+    // label disagree.
+    const label = slotAddress(
+      String(rack.name),
+      side === 'AB' ? 'A' : side,
+      Number(slot.shelf_index),
+      Number(slot.section_index),
+    );
+    if (!prev || pos < prev.position) {
+      byS.set(skuId, {
+        label, position: pos, codes,
+        shelf: Number(slot.shelf_index), section: Number(slot.section_index),
+      });
+    } else byS.set(skuId, { ...prev, codes });
+  }
+
+  return skus
+    .map((s) => {
+      const loc = byS.get(s.inventory_sku_id);
+      return { ...s, location_label: loc?.label || null, slot_codes: loc?.codes ?? [] };
+    })
+    // Walking order, then order WITHIN a rack face.
+    //
+    // Route position is per rack-SIDE, so every item on R1A shares one position. Without the
+    // secondary keys they all tied and fell back to sku_number — which put a picker standing
+    // at R1A through L3 → L1 → L4, reintroducing at one rack exactly the zigzag the route
+    // ordering removes between racks.
+    //
+    // Section before shelf, because you walk ALONG a rack and reach up and down at each
+    // position — not up one whole shelf and back for the next.
+    .sort((x, y) => {
+      const lx = byS.get(x.inventory_sku_id);
+      const ly = byS.get(y.inventory_sku_id);
+      const px = lx?.position ?? Infinity;
+      const py = ly?.position ?? Infinity;
+      if (px !== py) return px - py;
+      if ((lx?.section ?? 0) !== (ly?.section ?? 0)) return (lx?.section ?? 0) - (ly?.section ?? 0);
+      if ((lx?.shelf ?? 0) !== (ly?.shelf ?? 0)) return (lx?.shelf ?? 0) - (ly?.shelf ?? 0);
+      return (Number(x.sku_number) || 0) - (Number(y.sku_number) || 0);
+    });
+}
+
 export async function assembleBox(
   db: SupabaseClient,
   userIds: string[],
@@ -268,8 +376,10 @@ export async function assembleBox(
       });
     }
   }
-  const skus: SkuBlock[] = skuIds
-    .map((id) => {
+  const skus: SkuBlock[] = await attachLocations(
+    db,
+    userIds,
+    skuIds.map((id) => {
       const a = agg.get(id)!;
       const inv = invById.get(id);
       return {
@@ -280,9 +390,11 @@ export async function assembleBox(
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
         shelf_out: a.short,
+        location_label: null,
+        slot_codes: [],
       };
-    })
-    .sort((a, b) => (Number(a.sku_number) || 0) - (Number(b.sku_number) || 0));
+    }),
+  );
 
   // EXCLUDED (do-not-pack) orders, kept VISIBLE so screen ⟷ paper slip stays reconciled.
   const linesByOrder = new Map<string, string[]>();

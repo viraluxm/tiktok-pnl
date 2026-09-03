@@ -7,7 +7,7 @@ import Header from '@/components/layout/Header';
 import FiltersBar from '@/components/filters/FiltersBar';
 import UnmappedSessionsBanner from '@/components/admin/UnmappedSessionsBanner';
 import SummaryCards from '@/components/dashboard/SummaryCards';
-import InventorySection from '@/components/inventory/InventorySection';
+import InventoryTabs from '@/components/inventory/InventoryTabs';
 import TikTokConnect from '@/components/tiktok/TikTokConnect';
 import { useTikTok } from '@/hooks/useTikTok';
 import { useEntries } from '@/hooks/useEntries';
@@ -472,7 +472,7 @@ export default function RealDashboard() {
         {activeView === 'pnl' && <PnlTab dateFrom={filters.dateFrom} dateTo={filters.dateTo} />}
 
         {/* Inventory View */}
-        {activeView === 'inventory' && <InventorySection />}
+        {activeView === 'inventory' && <InventoryTabs />}
 
         {/* Shows View */}
         {activeView === 'shows' && <ShowsTab />}

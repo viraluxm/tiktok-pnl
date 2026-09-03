@@ -7,6 +7,7 @@ import type { ActiveBadge } from '@/hooks/useBadges';
 import { AspHitBadge, BelowBreakEvenBadge } from './HostPerformanceBadges';
 import { StatusBadge, titleCase } from './shared';
 import { ScheduleLinkButton } from './ScheduleLinkButton';
+import { LeadPinButton } from './LeadPinButton';
 import { BadgeButton } from './BadgeButton';
 import PersonAvatar from './weekly/PersonAvatar';
 
@@ -26,6 +27,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 export default function EmployeeDetailModal({
   employee, hostAgg, link, badge, hourlyRate,
   onClose, onMintLink, onLinkCreated, onIssueBadge, onReissueBadge, onEdit, onDelete,
+  hasOverridePin, onSetOverridePin,
 }: {
   employee: Employee;
   hostAgg: HostAgg | undefined;
@@ -38,6 +40,9 @@ export default function EmployeeDetailModal({
   onIssueBadge: (employeeId: string) => Promise<void>;
   onReissueBadge: (employeeId: string, badgeId: string) => Promise<void>;
   onEdit: (e: Employee) => void;
+  /** Whether this employee can authorise a pick override. Having a PIN IS being a lead. */
+  hasOverridePin: boolean;
+  onSetOverridePin: (employeeId: string, pin: string | null) => Promise<unknown>;
   onDelete: (e: Employee) => void;
 }) {
   const isHost = (employee.role ?? '').toLowerCase() === 'host';
@@ -94,6 +99,23 @@ export default function EmployeeDetailModal({
             />
           </div>
         </div>
+
+        {/* Only fulfilment staff pick, so only they can authorise a skipped section scan.
+            Lives here rather than in the roster grid because this is where per-employee
+            actions moved when the table was refactored. */}
+        {employee.role?.toLowerCase() === 'fulfillment' && (
+          <div className="space-y-2">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">
+              Pick-override authority
+            </div>
+            <LeadPinButton
+              employeeId={employee.id}
+              employeeName={employee.name}
+              hasPin={hasOverridePin}
+              onSet={onSetOverridePin}
+            />
+          </div>
+        )}
 
         <div className="mt-5 flex gap-2">
           <button

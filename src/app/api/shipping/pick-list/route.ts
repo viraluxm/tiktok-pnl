@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { attachLocations } from '@/lib/shipping/scanResolve';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
@@ -308,8 +309,15 @@ export async function POST(req: Request) {
       });
     }
   }
-  const skus = skuIds
-    .map((id) => {
+  // WHERE each SKU lives, and therefore what order to walk them in.
+  //
+  // Delegated to the SHARED helper in scanResolve so this route and /api/station/scan cannot
+  // drift. They already duplicate the aggregation above, and keeping this logic here too is
+  // precisely how the station login ended up with no location and the old sku_number order.
+  const skus = await attachLocations(
+    supabase,
+    [user.id],
+    skuIds.map((id) => {
       const a = agg.get(id)!;
       const inv = invById.get(id);
       return {
@@ -320,10 +328,11 @@ export async function POST(req: Request) {
         thumbnail_url: inv?.thumbnail_url ?? null,
         required_qty: a.qty,
         shelf_out: a.short,
+        location_label: null,
+        slot_codes: [] as string[],
       };
-    })
-    // Stable order: lowest SKU# first.
-    .sort((a, b) => (Number(a.sku_number) || 0) - (Number(b.sku_number) || 0));
+    }),
+  );
 
   // EXCLUDED (do-not-pack) orders, kept VISIBLE so screen ⟷ paper slip stays reconciled.
   const linesByOrder = new Map<string, string[]>();
