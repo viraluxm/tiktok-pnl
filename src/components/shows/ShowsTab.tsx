@@ -10,6 +10,8 @@ import { notSoldBadge, paidNeedsFlip } from '@/lib/paymentStatus';
 import { ASP_GOAL_MULTIPLIER, aspGoalCents } from '@/lib/asp';
 import { useInventorySkus, useCreateSku, type InventorySku } from '@/hooks/useInventorySkus';
 import { useUser } from '@/hooks/useUser';
+import { useFulfillmentCostRate, useShowNetEconomics, PICK_RATE_DAYS } from '@/hooks/useShowNetEconomics';
+import { showNetEconomics, SHORT_SHOW_MS } from '@/lib/shows/netEconomics';
 import MobileDataCard from '@/components/ui/MobileDataCard';
 import SkuThumb from '@/components/common/SkuThumb';
 
@@ -28,6 +30,11 @@ interface UnboundOrder {
 // No writes, no edits, no deletes.
 
 const money = (c: number | null | undefined) => (c == null ? '—' : `$${(c / 100).toFixed(2)}`);
+
+// Per-unit money. Sub-dollar figures get 3 decimals — the whole point of a per-unit card is
+// that $0.556 and $0.492 are different answers, and 2 decimals would round them together.
+const perUnit = (c: number | null | undefined) =>
+  c == null ? '—' : Math.abs(c) < 100 ? `$${(c / 100).toFixed(3)}` : `$${(c / 100).toFixed(2)}`;
 
 function fmtDate(iso: string | null): string {
   if (!iso) return 'Unknown date';
@@ -77,6 +84,13 @@ function summarize(items: AuctionItem[]): ShowSummary {
 // ASP per UNIT = realized sale value ÷ units sold (not per-auction). 0 when no units.
 function aspPerUnitCents(s: ShowSummary): number {
   return s.unitsSold > 0 ? Math.round(s.saleCents / s.unitsSold) : 0;
+}
+
+// Average COGS per unit — the buy-side twin of ASP/unit. Together with ASP they make the P&L
+// band readable as a chain: ASP − COGS/unit = gross/unit, then minus the two labor lines gives
+// net/unit. Null (not 0) with no units, so the card shows "—" instead of a fake $0.00.
+function costPerUnitCents(s: ShowSummary): number | null {
+  return s.unitsSold > 0 ? s.costCents / s.unitsSold : null;
 }
 
 // Per-show ASP-hit / below-break-even rates, same definitions as the roster badges but
@@ -582,7 +596,7 @@ function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id
         { label: 'Auctions won', value: isLoading ? '…' : sum.itemsSold },
         { label: 'Units sold', value: isLoading ? '…' : sum.unitsSold },
         { label: 'Sale value', value: isLoading ? '…' : money(sum.saleCents) },
-        { label: 'Cost', value: isLoading ? '…' : money(sum.costCents) },
+        { label: 'COGS', value: isLoading ? '…' : money(sum.costCents) },
         {
           label: 'Gross profit',
           wide: true,
@@ -661,6 +675,41 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   // from provisional (won−cost) to net (payout−cost, after fees). Works on a
   // fresh reload too (board-derived), not only right after a refresh click.
   const anyPayout = useMemo(() => items.some((it) => it.net_payout_cents != null), [items]);
+
+  // ── NET-NET: product margin minus the two labor costs behind it ──────────────────────────
+  // Picking is ALLOCATED at the crew's trailing rate (one shared fetch for the whole tab — the
+  // rate is identical for every show); host pay is MEASURED server-side as live duration ×
+  // rate, so no individual's hourly_rate reaches the browser. Both nulls propagate: a show
+  // with no host mapped shows "—" rather than a net-net that quietly omits host cost.
+  const { data: pickRate, isPending: pickRatePending, isError: pickRateError } = useFulfillmentCostRate();
+  const { data: showEcon, isPending: showEconPending, isError: showEconError } = useShowNetEconomics(session.id);
+  // Still fetching is NOT the same as "no data" — without this the cards would assert "no pick
+  // cost in the last 7 days" for the second before the rate lands, and again forever if the
+  // request failed. Loading shows "…", a failure says so, and only a genuine absence explains.
+  const netPending = isLoading || pickRatePending || showEconPending;
+  const netFailed = pickRateError || showEconError;
+  const net = useMemo(() => showNetEconomics({
+    // Base = the SAME figure the Profit card shows: net (payout−cost, fees out) once payouts
+    // have been refreshed, provisional won−cost until then.
+    baseProfitCents: anyPayout ? netProfitTotal : sum.profitCents,
+    baseIsNetOfFees: anyPayout,
+    unitsSold: sum.unitsSold,
+    durationMs: showEcon?.duration_ms ?? duration?.duration_ms ?? null,
+    hostPayCents: showEcon?.host_pay_cents ?? null,
+    pickCentsPerUnit: pickRate?.cents_per_unit_projected ?? null,
+  }), [anyPayout, netProfitTotal, sum.profitCents, sum.unitsSold, showEcon, duration?.duration_ms, pickRate]);
+
+  // Why a net-net card is blank, in the card's own sub-line. Never silently blank, and never
+  // a claim about the data while the data is still in flight.
+  const netMissingNote = netPending ? null
+    : netFailed ? 'labor cost unavailable — reload to retry'
+      : net.missing.includes('units') ? 'no units sold yet'
+        : net.missing.includes('host_pay')
+          ? (showEcon && showEcon.host_id == null ? 'no host on this show'
+            : showEcon && !showEcon.host_rate_known ? 'host has no pay rate set'
+              : 'host pay unavailable')
+          : net.missing.includes('pick_rate') ? `no costed fulfillment labor in the last ${PICK_RATE_DAYS} days`
+            : null;
 
   const qc = useQueryClient();
   const { data: invSkus = [] } = useInventorySkus();
@@ -1164,61 +1213,161 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
         </div>
       )}
 
-      {/* Summary cards. Before reconcile: normal board figures. After reconcile:
-          "Sale value" becomes capture-based Revenue (all paid wins) + a completeness caption. */}
-      <div className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 ${recon || payout ? 'mb-2' : 'mb-6'}`}>
-        <SummaryCard label="Auctions won" value={isLoading ? '…' : String(sum.itemsSold)} />
-        <SummaryCard label="Units sold" value={isLoading ? '…' : String(sum.unitsSold)} />
-        <SummaryCard
-          label="Units / hr"
-          value={isLoading ? '…' : unitsPerHr == null ? '—' : unitsPerHr >= 10 ? String(Math.round(unitsPerHr)) : unitsPerHr.toFixed(1)}
-        />
-        {recon ? (
-          <SummaryCard label="Revenue (all wins)" value={money(recon.revenue_cents)} />
-        ) : (
-          <SummaryCard label="Sale value" value={isLoading ? '…' : money(sum.saleCents)} />
-        )}
-        <SummaryCard label="ASP / unit" value={isLoading ? '…' : money(aspPerUnitCents(sum))} />
-        <SummaryCard label="Cost" value={isLoading ? '…' : money(sum.costCents)} />
-        {/* ONE adaptive Profit card: provisional won−cost total until payout data
-            exists, then the true net (payout−cost) total — label tracks the state. */}
-        {anyPayout ? (
-          <SummaryCard label="Profit (net, after fees)" value={isLoading ? '…' : money(netProfitTotal)} valueClass={isLoading ? '' : profitClass(netProfitTotal)} />
-        ) : (
+      {/* ── Summary cards, in three bands ────────────────────────────────────────────────────
+          Volume / P&L / Quality. Previously all 11 cards sat in one flat 6-wide grid at
+          identical visual weight, which put "Below Break-even" — the loudest number on the
+          screen — in an orphaned second row beside two blanks, and read as a wall of numbers
+          with no order. Banding also lets the P&L row run left-to-right as an actual
+          waterfall: revenue → COGS → gross → labor → net-net.
+          Before reconcile: normal board figures. After reconcile: "Sale value" becomes
+          capture-based Revenue (all paid wins) + a completeness caption. */}
+      <div className={recon || payout ? 'mb-2' : 'mb-6'}>
+        <BandLabel>Volume</BandLabel>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+          {/* Auctions won and Units sold differ by a handful (385 vs 393) — as two equal cards
+              they invited a hunt for a difference that does not matter. Units is the figure
+              every rate below divides by, so it leads and the auction count is its sub. */}
           <SummaryCard
-            label={recon ? 'Profit (won−cost), so far' : 'Profit (won−cost)'}
-            value={isLoading ? '…' : money(sum.profitCents)}
-            valueClass={isLoading ? '' : profitClass(sum.profitCents)}
+            label="Units sold"
+            value={isLoading ? '…' : String(sum.unitsSold)}
+            sub={isLoading ? undefined : `${sum.itemsSold} auctions won`}
           />
-        )}
-        {/* Payout-only extras (after a "Refresh payouts" run): authoritative net
-            payout across ALL orders incl. unbound, and ROI. Net profit itself is
-            folded into the adaptive Profit card above. */}
-        {payout && (
-          <>
-            <SummaryCard label="Net payout (so far)" value={money(payout.net_payout_cents_total)} />
+          <SummaryCard
+            label="Units / hr"
+            value={isLoading ? '…' : unitsPerHr == null ? '—' : unitsPerHr >= 10 ? String(Math.round(unitsPerHr)) : unitsPerHr.toFixed(1)}
+          />
+          {/* Time live was never a card, despite being the denominator of Units/hr and of net
+              profit per hour. Shown so both rates can be checked against it. */}
+          <SummaryCard
+            label="Time live"
+            value={durationLabel ?? '—'}
+            sub={duration?.source === 'last_capture' ? 'to last sale' : duration?.source === 'ended_at' ? 'to show end' : undefined}
+          />
+        </div>
+
+        <BandLabel>Profit &amp; loss</BandLabel>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
+          {recon ? (
+            <SummaryCard label="Revenue (all wins)" value={money(recon.revenue_cents)} />
+          ) : (
             <SummaryCard
-              label="ROI (net)"
-              value={roiNet == null ? '—' : `${roiNet.toFixed(0)}%`}
-              valueClass={roiNet == null ? '' : profitClass(roiNet)}
+              label="Sale value"
+              value={isLoading ? '…' : money(sum.saleCents)}
+              sub={isLoading ? undefined : `${money(aspPerUnitCents(sum))} / unit (ASP)`}
             />
-          </>
-        )}
+          )}
+          {/* "Cost" → "COGS". With two labor costs now on this screen, a card labelled only
+              "Cost" is ambiguous about which cost it means. */}
+          <SummaryCard
+            label="COGS"
+            value={isLoading ? '…' : money(sum.costCents)}
+            sub={isLoading ? undefined : `${perUnit(costPerUnitCents(sum))} / unit avg cost`}
+          />
+          {/* ONE adaptive Profit card: provisional won−cost total until payout data
+              exists, then the true net (payout−cost) total — sub tracks the basis. The
+              formula moved out of the label; it is the basis, not the name. */}
+          {anyPayout ? (
+            <SummaryCard
+              label="Gross profit"
+              value={isLoading ? '…' : money(netProfitTotal)}
+              valueClass={isLoading ? '' : profitClass(netProfitTotal)}
+              sub={sum.unitsSold > 0 ? `${perUnit(netProfitTotal / sum.unitsSold)} / unit · payout − COGS` : 'payout − COGS, after fees'}
+            />
+          ) : (
+            <SummaryCard
+              label="Gross profit"
+              value={isLoading ? '…' : money(sum.profitCents)}
+              valueClass={isLoading ? '' : profitClass(sum.profitCents)}
+              sub={sum.unitsSold > 0 ? `${perUnit(sum.profitCents / sum.unitsSold)} / unit · won − COGS` : (recon ? 'won − COGS, so far' : 'won − COGS')}
+            />
+          )}
+          {/* ── The two net cards ("net-net" in the code, labelled "Net" in the UI — it is net of
+              BOTH product cost and labor). Gross profit above stops at product margin; these charge
+              the labor that produced it. Picking is an ALLOCATION at the crew's trailing
+              rate and is labelled as such — a show's units are picked the next day, in boxes
+              combining several shows, so there is no per-show measurement to make. */}
+          <SummaryCard
+            label="Net / unit"
+            value={netPending ? '…' : perUnit(net.netNetPerUnitCents)}
+            valueClass={netPending || net.netNetPerUnitCents == null ? '' : profitClass(net.netNetPerUnitCents)}
+            sub={net.netNetPerUnitCents != null
+              ? `after ${perUnit(net.pickPerUnitCents)} fulfillment + ${perUnit(net.hostPerUnitCents)} host`
+              : netMissingNote ?? undefined}
+          />
+          <SummaryCard
+            label="Net profit / hr"
+            value={netPending ? '…' : net.netPerHourCents == null ? '—' : money(Math.round(net.netPerHourCents))}
+            valueClass={netPending || net.netPerHourCents == null ? '' : profitClass(net.netPerHourCents)}
+            sub={net.netPerHourCents != null
+              ? `over ${durationLabel ?? '—'} live`
+              : netMissingNote ?? undefined}
+          />
+          {/* Payout-only extras (after a "Refresh payouts" run): authoritative net
+              payout across ALL orders incl. unbound, and ROI. Net profit itself is
+              folded into the adaptive Gross profit card above. */}
+          {payout && (
+            <>
+              <SummaryCard label="Net payout (so far)" value={money(payout.net_payout_cents_total)} />
+              <SummaryCard
+                label="ROI (net)"
+                value={roiNet == null ? '—' : `${roiNet.toFixed(0)}%`}
+                valueClass={roiNet == null ? '' : profitClass(roiNet)}
+              />
+            </>
+          )}
+        </div>
+
+        <BandLabel>Auction quality</BandLabel>
         {/* Per-show performance rates over SOLD auctions only (payment-failed/unsold
             excluded). "—" when the show has no sold auctions (never "0%"). */}
-        <SummaryCard
-          label="ASP Hit Rate"
-          value={isLoading ? '…' : rates.aspHitPct == null ? '—' : `${Math.round(rates.aspHitPct)}%`}
-          valueClass={isLoading ? '' : aspHitClass(rates.aspHitPct)}
-          sub={rates.soldCount > 0 ? `of ${rates.soldCount} sold` : undefined}
-        />
-        <SummaryCard
-          label="Below Break-even"
-          value={isLoading ? '…' : rates.belowBePct == null ? '—' : `${Math.round(rates.belowBePct)}%`}
-          valueClass={isLoading ? '' : belowBeClass(rates.belowBePct)}
-          sub={rates.soldCount > 0 ? `of ${rates.soldCount} sold` : undefined}
-        />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <SummaryCard
+            label="ASP Hit Rate"
+            value={isLoading ? '…' : rates.aspHitPct == null ? '—' : `${Math.round(rates.aspHitPct)}%`}
+            valueClass={isLoading ? '' : aspHitClass(rates.aspHitPct)}
+            sub={rates.soldCount > 0 ? `of ${rates.soldCount} sold` : undefined}
+          />
+          <SummaryCard
+            label="Below Break-even"
+            value={isLoading ? '…' : rates.belowBePct == null ? '—' : `${Math.round(rates.belowBePct)}%`}
+            valueClass={isLoading ? '' : belowBeClass(rates.belowBePct)}
+            sub={rates.soldCount > 0 ? `of ${rates.soldCount} sold` : undefined}
+          />
+        </div>
       </div>
+
+      {/* The allocation, stated in full. A reader who sees a negative net-net is owed the
+          basis: which trailing window, what the crew rate was, whose air time was charged,
+          and the one case where the host line is known to understate (a short show). */}
+      {(net.netNetCents != null || netMissingNote) && (
+        <div className={`text-xs text-tt-muted ${recon || payout ? 'mb-2' : 'mb-6'}`}>
+          {net.netNetCents != null ? (
+            <>
+              Net {money(net.netNetCents)} = {net.baseIsNetOfFees ? 'net' : 'gross'} profit
+              {' '}− {money(net.pickCents)} fulfillment − {money(net.hostCents)} host pay.
+              {' '}Fulfillment is <span className="font-medium">allocated</span> at
+              {' '}{perUnit(pickRate?.cents_per_unit_projected ?? null)} per unit sold — all
+              {' '}warehouse labor over the last {pickRate?.days ?? PICK_RATE_DAYS} fulfillment days
+              {pickRate?.sold_units ? ` ÷ ${pickRate.sold_units.toLocaleString()} units sold` : ''}.
+              {' '}A show&rsquo;s units are picked afterwards, in boxes shared with other shows, so
+              {' '}this is a rate, not a measurement — but dividing real payroll by real sales
+              {' '}means the charges across every show add back to what was actually paid.
+              {' '}Host pay is {showEcon?.host_name ? `${showEcon.host_name}'s ` : ''}air time × rate.
+              {!net.baseIsNetOfFees && ' TikTok fees are NOT yet included — refresh payouts for the true bottom line.'}
+              {net.shortShow && ` This show ran under ${SHORT_SHOW_MS / 60000} minutes, so host pay covers only its air time and understates what the host was actually paid.`}
+              {pickRate?.pick_coverage_pct != null && pickRate.pick_coverage_pct < 90 && (
+                <>
+                  {' '}Note: only {Math.round(pickRate.pick_coverage_pct)}% of sold units have a
+                  {' '}recorded pick, so the per-box and per-pick figures on the Team view read
+                  {' '}high — this rate divides by sales, so it is unaffected.
+                </>
+              )}
+            </>
+          ) : (
+            <>Net / unit unavailable — {netMissingNote}. Costs are left out rather than counted as $0.</>
+          )}
+        </div>
+      )}
       {recon && (
         <div className={`text-xs text-tt-muted ${payout ? 'mb-2' : 'mb-6'}`}>
           Revenue {money(recon.revenue_cents)} is final (all {recon.revenue_count} paid wins).
@@ -1816,6 +1965,12 @@ function CoveragePanel({ sessionId }: { sessionId: string }) {
       )}
     </div>
   );
+}
+
+// Band heading over each group of summary cards. Quiet on purpose — it orders the cards
+// without competing with them for attention.
+function BandLabel({ children }: { children: React.ReactNode }) {
+  return <div className="text-[11px] font-semibold uppercase tracking-wider text-tt-muted mb-2">{children}</div>;
 }
 
 function SummaryCard({ label, value, valueClass = '', sub }: { label: string; value: string; valueClass?: string; sub?: string }) {

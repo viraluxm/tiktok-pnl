@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { resolveShowDuration } from '@/lib/shows/duration';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,21 +32,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { data: lastCap } = await q;
   const last_capture_at: string | null = lastCap?.[0]?.created_at ?? null;
 
-  // Prefer ended_at only when it's sane: after the start and not wildly past the
-  // last sale (guards a stale "ended days later" value). Otherwise last-capture.
-  let source: 'ended_at' | 'last_capture' = 'last_capture';
-  let end: string | null = last_capture_at;
-  if (session.ended_at && session.started_at) {
-    const s = new Date(session.started_at).getTime();
-    const e = new Date(session.ended_at).getTime();
-    const lc = last_capture_at ? new Date(last_capture_at).getTime() : null;
-    const sane = e > s && (lc == null || e <= lc + 6 * 3600 * 1000);
-    if (sane) { source = 'ended_at'; end = session.ended_at; }
-  }
-
-  const duration_ms = end && session.started_at
-    ? new Date(end).getTime() - new Date(session.started_at).getTime()
-    : null;
+  // The ended_at-vs-last-capture rule lives in resolveShowDuration() — /api/live/sessions/[id]
+  // /net-economics divides by the SAME duration, and two copies would eventually disagree.
+  const { duration_ms, source } = resolveShowDuration({
+    started_at: session.started_at,
+    ended_at: session.ended_at,
+    last_capture_at,
+  });
 
   return NextResponse.json({
     started_at: session.started_at,
