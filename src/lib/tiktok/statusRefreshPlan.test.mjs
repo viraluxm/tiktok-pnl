@@ -107,6 +107,39 @@ console.log('\nLegacy rows with no date');
       .ids.includes('bad'));
 }
 
+console.log('\nDuplicate inputs — the caller concatenates two overlapping reads');
+{
+  // THE OUTAGE. The caller builds its list from a newest-end read and an oldest-end read. On a
+  // store smaller than the combined budget both return the SAME rows, so the list arrives with
+  // every order twice. Deduping only BETWEEN the halves left duplicates inside the recent half,
+  // a batch went to getOrderById containing one id twice, and TikTok rejected the whole call
+  // with 98001004 "Wrong order id" — killing the phase for that store.
+  const eleven = openSet(11);
+  const asCallerBuildsIt = [...eleven, ...eleven];   // both reads returned everything
+  const plan = planStatusRefresh(asCallerBuildsIt, OPTS);
+  check('11 orders read twice plan as 11, not 22', plan.ids.length === 11, String(plan.ids.length));
+  check('no id appears twice', new Set(plan.ids).size === plan.ids.length);
+  // `planned` exceeding the open total was the signature of the bug in the run summaries.
+  check('planned never exceeds the distinct open set', plan.ids.length <= eleven.length);
+  check('nothing is reported skipped', plan.skipped === 0, String(plan.skipped));
+}
+{
+  // Toysfordeals' shape: 2,981 open, both halves overlapping into 3,981 planned.
+  const set = openSet(2981);
+  const plan = planStatusRefresh([...set.slice(0, 2981), ...set.slice(0, 1000)], OPTS);
+  check('a partially overlapping pair still plans only distinct ids',
+    plan.ids.length === 2981 && new Set(plan.ids).size === 2981, String(plan.ids.length));
+}
+{
+  // Dedup must keep the FIRST occurrence's data, not silently prefer a later copy.
+  const dup = [
+    { order_id: 'x', order_created_at: new Date(T0).toISOString() },
+    { order_id: 'x', order_created_at: new Date(T0 - 99 * DAY).toISOString() },
+  ];
+  const plan = planStatusRefresh(dup, { chunk: 5, recentCalls: 1, backlogCalls: 1 });
+  check('a duplicated id resolves to one entry', plan.ids.length === 1 && plan.ids[0] === 'x');
+}
+
 console.log('\nDeterminism');
 {
   const set = openSet(500);
