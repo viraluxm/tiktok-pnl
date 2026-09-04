@@ -10,8 +10,8 @@ export default function PracticeModePage() {
       <div className="mx-auto w-full max-w-2xl">
         <h1 className="text-2xl font-bold">Practice Mode</h1>
         <p className="mt-2 text-tt-muted">
-          Train live auction hosts with mock comments, bids, and auction timing. Create a session
-          to open a host screen (for the company iPhone) and its matching controller.
+          Train live auction hosts with mock comments, bids, and auction timing. Create a practice
+          session, then have the host scan the QR code or open the host link.
         </p>
 
         <PracticeModeLauncher />

@@ -1,9 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 import {
   isValidTrainingSessionId,
   shortTrainingSessionLabel,
+  trainingHostPath,
+  trainingControllerPath,
+  trainingHostUrl,
+  trainingControllerUrl,
 } from '@/lib/training/session';
 
 // Launcher storage: a small list of recently created sessions so the admin can
@@ -11,24 +16,6 @@ import {
 // scoped — this IS the cross-session index).
 const LAUNCHER_STORAGE_KEY = 'training:launcher:recent-sessions';
 const MAX_RECENT = 8;
-
-// Build a root-relative path with the session encoded via URLSearchParams so the
-// query is always well-formed (a UUID needs no escaping, but this is safe by
-// construction and future-proof).
-function withSession(pathname: string, id: string): string {
-  return `${pathname}?${new URLSearchParams({ session: id }).toString()}`;
-}
-function hostPath(id: string): string {
-  return withSession('/admin/training/live-simulator', id);
-}
-function controllerPath(id: string): string {
-  return withSession('/admin/training/live-simulator/control', id);
-}
-// Absolute URL for the clipboard, resolved against the CURRENT origin so it works
-// under any deployment host (no hard-coded production origin).
-function absoluteUrl(path: string): string {
-  return new URL(path, window.location.origin).toString();
-}
 
 function loadRecent(): string[] {
   try {
@@ -68,12 +55,12 @@ export default function PracticeModeLauncher() {
     saveRecent(next);
   }, []);
 
+  // Creating a session is purely local: mint a UUID and remember it. It does NOT
+  // open, navigate to, or launch the host screen — the admin stays on this page
+  // and the host joins independently via the card's QR code or host link.
   const createSession = useCallback(() => {
     const sessionId = crypto.randomUUID();
     persist([sessionId, ...sessions].slice(0, MAX_RECENT));
-    // Open the host screen immediately in a new tab so the admin can hand off
-    // the phone; they open the controller from the card when ready.
-    window.open(hostPath(sessionId), '_blank', 'noopener');
   }, [persist, sessions]);
 
   const removeSession = useCallback(
@@ -83,13 +70,15 @@ export default function PracticeModeLauncher() {
     [persist, sessions],
   );
 
-  const copyLink = useCallback(async (label: string, path: string) => {
+  // Copies an ABSOLUTE url built by the shared @/lib/training/session helpers —
+  // the same helpers the QR code uses, so the two can never disagree.
+  const copyLink = useCallback(async (label: string, url: string) => {
     try {
-      await navigator.clipboard.writeText(absoluteUrl(path));
+      await navigator.clipboard.writeText(url);
       setCopied(label);
       window.setTimeout(() => setCopied((c) => (c === label ? null : c)), 1500);
     } catch {
-      /* clipboard blocked — admin can still use Open buttons */
+      /* clipboard blocked — admin can still use the Open buttons */
     }
   }, []);
 
@@ -105,7 +94,8 @@ export default function PracticeModeLauncher() {
 
       {sessions.length === 0 ? (
         <p className="mt-6 text-[13px] text-tt-muted">
-          No active sessions yet. Create one to open a host screen and its controller.
+          No active sessions yet. Create one, then have the host scan its QR code or open the host
+          link.
         </p>
       ) : (
         <ul className="mt-6 grid gap-3 sm:grid-cols-2">
@@ -128,17 +118,26 @@ export default function PracticeModeLauncher() {
                 </button>
               </div>
 
+              <HostQr sessionId={id} />
+
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <a
-                  href={hostPath(id)}
+                  href={trainingHostPath(id)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex min-h-[40px] items-center justify-center rounded-lg bg-[#FE2C55] px-3 text-[13px] font-semibold text-white transition-[filter] hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
                 >
                   Open Host
                 </a>
+                <button
+                  type="button"
+                  onClick={() => void copyLink(`host:${id}`, trainingHostUrl(window.location.origin, id))}
+                  className="flex min-h-[40px] cursor-pointer items-center justify-center rounded-lg border border-tt-border bg-tt-input-bg px-3 text-[13px] font-medium text-tt-text transition-colors hover:bg-tt-card-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
+                >
+                  {copied === `host:${id}` ? 'Copied!' : 'Copy Host Link'}
+                </button>
                 <a
-                  href={controllerPath(id)}
+                  href={trainingControllerPath(id)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex min-h-[40px] items-center justify-center rounded-lg bg-[#00B66C] px-3 text-[13px] font-semibold text-white transition-[filter] hover:brightness-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
@@ -147,14 +146,9 @@ export default function PracticeModeLauncher() {
                 </a>
                 <button
                   type="button"
-                  onClick={() => void copyLink(`host:${id}`, hostPath(id))}
-                  className="flex min-h-[40px] cursor-pointer items-center justify-center rounded-lg border border-tt-border bg-tt-input-bg px-3 text-[13px] font-medium text-tt-text transition-colors hover:bg-tt-card-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
-                >
-                  {copied === `host:${id}` ? 'Copied!' : 'Copy Host Link'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void copyLink(`ctrl:${id}`, controllerPath(id))}
+                  onClick={() =>
+                    void copyLink(`ctrl:${id}`, trainingControllerUrl(window.location.origin, id))
+                  }
                   className="flex min-h-[40px] cursor-pointer items-center justify-center rounded-lg border border-tt-border bg-tt-input-bg px-3 text-[13px] font-medium text-tt-text transition-colors hover:bg-tt-card-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
                 >
                   {copied === `ctrl:${id}` ? 'Copied!' : 'Copy Controller Link'}
@@ -164,6 +158,55 @@ export default function PracticeModeLauncher() {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+// Inline QR for one session's HOST url. Generated locally with the `qrcode`
+// package already used by src/app/s/[token]/ClockControls.tsx (no network, no
+// external QR service). The encoded value comes from trainingHostUrl() — the
+// exact same helper behind "Copy Host Link" — so scanning and copying always
+// resolve to the same URL.
+function HostQr({ sessionId }: { sessionId: string }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    // `cancelled` keeps a late resolve from setting state after unmount (e.g. the
+    // admin removes the card while generation is in flight).
+    let cancelled = false;
+    const url = trainingHostUrl(window.location.origin, sessionId);
+    QRCode.toString(url, { type: 'svg', errorCorrectionLevel: 'M', margin: 4, width: 280 })
+      .then((out) => {
+        if (!cancelled) setSvg(out);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  return (
+    <div className="mt-3 flex flex-col items-center">
+      {/* White plate guarantees scannable contrast + quiet zone in any theme. */}
+      <div className="w-full max-w-[200px] rounded-xl bg-white p-3">
+        {svg ? (
+          // Only ever the qrcode package's own SVG output — never user input.
+          <div
+            className="[&>svg]:h-auto [&>svg]:w-full"
+            aria-label="QR code to open the host screen"
+            role="img"
+            dangerouslySetInnerHTML={{ __html: svg }}
+          />
+        ) : (
+          <div className="flex aspect-square items-center justify-center text-center text-[12px] text-black/50">
+            {failed ? 'QR unavailable — use the host link' : 'Generating QR…'}
+          </div>
+        )}
+      </div>
+      <p className="mt-2 text-[12px] text-tt-muted">Scan to join as host</p>
     </div>
   );
 }
