@@ -65,13 +65,13 @@ export function ReleaseButton({
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 sm:items-center sm:p-8"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 sm:p-8"
           onClick={() => !busy && setOpen(false)}
           role="dialog" aria-modal="true" aria-label="Release this shift"
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="max-h-[85dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-2xl border border-tt-border bg-tt-card p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-2xl sm:pb-4"
+            className="max-h-[85dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-2xl border border-tt-border bg-tt-card p-4 shadow-2xl"
           >
             <h2 className="text-base font-semibold text-tt-text">Release this shift</h2>
 
