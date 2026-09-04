@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { payPeriodStartFor } from '@/lib/employees';
 import { laWallTimeToUtc, addDaysISO, laTodayISO } from './timezone';
 import { ScheduleError } from './release';
-import { planAdminShift, crossesMidnight } from './eligibility';
+import { planAdminShift, crossesMidnight, planShiftRemoval, SHIFT_REMOVAL_MESSAGES } from './eligibility';
 
 // Admin one-time shifts (migration 090) + OT-claim approve/reject. Server-side; the routes gate on
 // app_metadata.role === 'admin'. Nothing here is payable — shift_instances never feed pay.
@@ -66,6 +66,88 @@ export async function postOneTimeShift(input: PostShiftInput): Promise<{ id: str
     .single();
   if (error) throw new ScheduleError('POST_FAILED', error.message);
   return { id: data.id };
+}
+
+// REMOVE a one-time admin shift (Remove Shift, MVP). Hard-deletes exactly ONE `shift_instances`
+// row and nothing else. It never touches `shifts`, `employee_time_entries`, `attendance_events`,
+// `clock_audit` or `shift_claims` — the scheduling/payroll table separation IS the safety boundary
+// here, so this function deliberately has no other delete target.
+//
+// Eligibility is decided by planShiftRemoval() (pure, unit-tested) from facts read here. The button
+// in the calendar is not a security boundary: every condition is re-checked server-side, and the
+// final DELETE re-asserts the two mutable ones (source, status) as predicates so a row that changed
+// between the read and the write is left alone instead of destroyed.
+//
+// SCOPING: createAdminClient() bypasses RLS, so `user_id` is written into every query explicitly
+// rather than relied upon — the same discipline the rest of this module uses.
+export async function removeOneTimeShift(input: { userId: string; instanceId: string }): Promise<void> {
+  const admin = createAdminClient();
+
+  const { data: inst, error } = await admin
+    .from('shift_instances')
+    .select('id, employee_id, shift_date, starts_at, status, source')
+    .eq('id', input.instanceId)
+    .eq('user_id', input.userId)
+    .maybeSingle();
+  if (error) throw new ScheduleError('READ_FAILED', error.message);
+  if (!inst) throw new ScheduleError('NOT_FOUND', 'That shift no longer exists.');
+
+  // Payroll-side facts. An UNASSIGNED admin shift (employee_id NULL) is posted straight to the
+  // board as 'released', so it can never reach the 'scheduled' branch below — but guard anyway
+  // rather than querying on a null key.
+  let hasOpenPunch = false;
+  let hasWorkedShift = false;
+  if (inst.employee_id) {
+    const [openPunch, worked] = await Promise.all([
+      admin
+        .from('employee_time_entries')
+        .select('id')
+        .eq('employee_id', inst.employee_id)
+        .eq('user_id', input.userId)
+        .is('clocked_out_at', null)
+        .limit(1)
+        .maybeSingle(),
+      // `shifts.date` and `shift_instances.shift_date` are both LA-local calendar dates, so this
+      // is a direct comparison — the same (employee, date) key the calendar pairs plan to punch on.
+      admin
+        .from('shifts')
+        .select('id')
+        .eq('employee_id', inst.employee_id)
+        .eq('user_id', input.userId)
+        .eq('date', inst.shift_date)
+        .limit(1)
+        .maybeSingle(),
+    ]);
+    if (openPunch.error) throw new ScheduleError('READ_FAILED', openPunch.error.message);
+    if (worked.error) throw new ScheduleError('READ_FAILED', worked.error.message);
+    hasOpenPunch = !!openPunch.data;
+    hasWorkedShift = !!worked.data;
+  }
+
+  const plan = planShiftRemoval({
+    source: inst.source,
+    status: inst.status,
+    startsAtMs: Date.parse(inst.starts_at),
+    nowMs: Date.now(),
+    hasWorkedShift,
+    hasOpenPunch,
+  });
+  if (!plan.ok) throw new ScheduleError(plan.code, SHIFT_REMOVAL_MESSAGES[plan.code]);
+
+  // Conditional delete: the predicates repeat the two fields that can change under us. A shift
+  // released or claimed between the read and here matches 0 rows and is reported, not deleted.
+  const { data: deleted, error: dErr } = await admin
+    .from('shift_instances')
+    .delete()
+    .eq('id', input.instanceId)
+    .eq('user_id', input.userId)
+    .eq('source', 'admin_open')
+    .eq('status', 'scheduled')
+    .select('id');
+  if (dErr) throw new ScheduleError('REMOVE_FAILED', dErr.message);
+  if (!deleted || deleted.length === 0) {
+    throw new ScheduleError('SHIFT_UNAVAILABLE', 'This shift is no longer available.');
+  }
 }
 
 export interface PendingClaimRow {

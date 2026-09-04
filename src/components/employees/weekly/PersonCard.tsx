@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { formatTime12 } from '@/lib/weeklySchedule';
 import { confirmErrorMessage } from '@/lib/timeclock';
-import { formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
+import { canRemoveScheduled, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
 import PersonAvatar from './PersonAvatar';
 
 // One person's day as a TILE: avatar on top, name under it, the facts under that.
@@ -33,17 +33,29 @@ export default function PersonCard({
   dateLabel,
   onConfirm,
   onEdit,
+  onRemoveScheduled,
 }: {
   person: DayPerson;
   /** Shown only in the pending overlay, where cards span many days. */
   dateLabel?: string;
   onConfirm: (shiftId: string, confirmed: boolean) => Promise<void>;
   onEdit?: (shiftId: string) => void;
+  /**
+   * ASK to remove this person's one-off scheduled shift. The container owns the confirmation and
+   * the request (it has the date label); this tile only surfaces the affordance. Absent → no
+   * Remove action, which is how the pending-confirmations overlay keeps its punch-only vocabulary.
+   */
+  onRemoveScheduled?: (instanceId: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const badge = badgeFor(person);
   const { punch, scheduled } = person;
+
+  // Remove Shift is offered on a PLAN-ONLY tile and nowhere else. The rule itself lives in
+  // calendarModel (canRemoveScheduled) so it is pure and unit-tested; a tile with any punch is
+  // excluded there, which is what keeps this action away from worked/payroll rows.
+  const canRemove = !!onRemoveScheduled && canRemoveScheduled(person);
 
   async function run(confirmed: boolean) {
     if (!punch) return;
@@ -107,6 +119,17 @@ export default function PersonCard({
         </div>
       )}
       {err && <div className="mt-1 text-[9.5px] text-tt-red">{err}</div>}
+
+      {/* PLAN-ONLY action. Mutually exclusive with the punch actions below by construction —
+          canRemoveScheduled() returns false the moment a punch exists. */}
+      {canRemove && scheduled && (
+        <div className="mt-2 flex w-full">
+          <button
+            type="button" onClick={() => onRemoveScheduled(scheduled.id)}
+            className="flex-1 rounded-lg border border-tt-border px-2 py-1.5 text-[11px] font-semibold text-tt-muted transition-colors hover:border-tt-red/40 hover:bg-tt-red/10 hover:text-tt-red"
+          >Remove Shift</button>
+        </div>
+      )}
 
       {/* Actions. Edit is offered on ANY real punch — a 19h forgotten clock-out has to be
           correctable, and refusing to confirm it is not a fix. */}
