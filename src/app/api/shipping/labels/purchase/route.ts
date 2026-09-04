@@ -5,7 +5,9 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { createPackage, getPackageDocument, ALREADY_PURCHASED_CODES } from '@/lib/tiktok/client';
 import { planPageSequence, type PlanBox } from '@/lib/shipping/labelPlan';
-import { resolveLabelRun, shipTypeFor, VerifyFailedError } from '@/lib/shipping/labelRun';
+import {
+  resolveLabelRun, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
+} from '@/lib/shipping/labelRun';
 import {
   authorizeRun, estimateSpend, parsePrice, MAX_BOXES_PER_RUN,
 } from '@/lib/shipping/purchaseGuards';
@@ -131,6 +133,8 @@ export async function POST(req: Request) {
     store_id: storeId,
     verified_against_tiktok: true,
     boxes_in_plan: run.plan.totalBoxes,
+    excluded_too_recent: run.excludedTooRecent,
+    min_order_age_hours: MIN_ORDER_AGE_HOURS,
     already_in_ledger: alreadyOwned.size,
     would_buy: ordered.length,
     one_order_boxes: ordered.filter((b) => shipTypeFor(b) === '1').length,
