@@ -185,6 +185,49 @@ export async function shopPost(path: string, accessToken: string, body: Record<s
   return json.data;
 }
 
+/**
+ * POST that RETURNS the error instead of throwing it.
+ *
+ * shopPost above flattens every failure into one message string. That is fine for reads, but
+ * the label purchase must branch on the numeric code — 21022025 "a shipping label has already
+ * been purchased" means the box is done and must NOT be retried, while 11021009 "no available
+ * shipping service" is a genuine failure that may be. Losing that distinction risks either
+ * double-buying or abandoning a paid label.
+ */
+export async function shopPostRaw(
+  path: string,
+  accessToken: string,
+  body: Record<string, unknown>,
+  extraParams: Record<string, string> = {},
+): Promise<{ code: number; message: string; data: Record<string, unknown> | null }> {
+  const bodyString = JSON.stringify(body);
+  const params: Record<string, string> = {
+    app_key: TIKTOK_SHOP_APP_KEY,
+    timestamp: Math.floor(Date.now() / 1000).toString(),
+    ...extraParams,
+  };
+  params.sign = generateShopSignature(path, params, bodyString);
+
+  const res = await fetch(`${TIKTOK_SHOP_BASE}${path}?${new URLSearchParams(params)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-tts-access-token': accessToken },
+    body: bodyString,
+  });
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text);
+    return {
+      code: Number(json.code),
+      message: String(json.message ?? ''),
+      data: (json.data ?? null) as Record<string, unknown> | null,
+    };
+  } catch {
+    // A non-JSON body means we cannot tell whether the call took effect. Report it as such
+    // rather than inventing a code, so the caller leaves the row claimed for a human.
+    return { code: -1, message: `HTTP ${res.status}: ${text.slice(0, 300)}`, data: null };
+  }
+}
+
 // ==================== SHOP ENDPOINTS ====================
 
 export interface ShopInfo {
@@ -289,6 +332,90 @@ export async function getOrderById(
     ids,
   });
   return (data?.orders || data?.order_list || []) as Record<string, unknown>[];
+}
+
+// ==================== FULFILMENT: LABEL PURCHASE ====================
+
+/**
+ * Codes that mean "this box already has a label" — the box is DONE, not failed.
+ *
+ * Treating either as a failure would let a retry buy a second label for one package, which is
+ * both a charge and a carrier problem (two labels, one parcel). They are the server-side
+ * idempotency guard and are trusted as such.
+ */
+export const ALREADY_PURCHASED_CODES = new Set([21022025, 21008042]);
+
+export interface CreatedPackage {
+  package_id: string;
+  price: string | null;
+  currency: string | null;
+  shipping_provider_name: string | null;
+  shipping_service_name: string | null;
+}
+
+/**
+ * Buy a shipping label.
+ *
+ * THIS SPENDS MONEY. Verified on Snore 2026-09-03: a single call moved the order
+ * AWAITING_SHIPMENT -> AWAITING_COLLECTION, issued a tracking number and made the shipping
+ * document downloadable — with no Ship Package call afterwards. The returned
+ * `shipping_service_info.price` reads like a quote but is a receipt: there is no cancel, and
+ * no other endpoint prices a label without buying it.
+ *
+ * `dimension`, `weight` and `shipping_service_id` are deliberately NOT sent. TikTok defaults
+ * them (0.44 POUND, 1x1x1 INCH on the test) and picks the eligible service, which reproduces
+ * what Seller Center does today. Every active SKU has a NULL weight, so sending a guess would
+ * be strictly worse than sending nothing.
+ */
+export async function createPackage(
+  accessToken: string,
+  shopCipher: string,
+  args: { shipType: '1' | '3'; orderId?: string; orderIds?: string[] },
+): Promise<{ code: number; message: string; pkg: CreatedPackage | null }> {
+  const body: Record<string, unknown> = { ship_type: args.shipType };
+  if (args.shipType === '3') body.order_list_ids = args.orderIds ?? [];
+  else body.order_id = args.orderId;
+
+  const r = await shopPostRaw('/fulfillment/202512/packages', accessToken, body, {
+    shop_cipher: shopCipher,
+  });
+  if (r.code !== 0 || !r.data) return { code: r.code, message: r.message, pkg: null };
+
+  const info = (r.data.shipping_service_info ?? {}) as Record<string, unknown>;
+  return {
+    code: 0,
+    message: r.message,
+    pkg: {
+      package_id: String(r.data.package_id ?? ''),
+      price: info.price == null ? null : String(info.price),
+      currency: info.currency == null ? null : String(info.currency),
+      shipping_provider_name: info.shipping_provider_name == null ? null : String(info.shipping_provider_name),
+      shipping_service_name: info.name == null ? null : String(info.name),
+    },
+  };
+}
+
+/**
+ * Fetch a package's shipping label.
+ *
+ * `doc_url` is short-lived (~24h on the test), so it is a convenience rather than a record —
+ * `package_id` is the durable handle and this can be called again at print time. Works BEFORE
+ * any Ship Package call.
+ */
+export async function getPackageDocument(
+  accessToken: string,
+  shopCipher: string,
+  packageId: string,
+): Promise<{ doc_url: string | null; tracking_number: string | null }> {
+  const data = await shopGet(
+    `/fulfillment/202309/packages/${packageId}/shipping_documents`,
+    accessToken,
+    { shop_cipher: shopCipher, document_type: 'SHIPPING_LABEL' },
+  );
+  return {
+    doc_url: data?.doc_url ? String(data.doc_url) : null,
+    tracking_number: data?.tracking_number ? String(data.tracking_number) : null,
+  };
 }
 
 // ==================== FINANCE ENDPOINTS ====================
