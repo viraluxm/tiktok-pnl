@@ -65,7 +65,15 @@ export async function GET(req: Request) {
         { status: 502 },
       );
     }
-    throw e;
+    // Anything else is reported as JSON rather than rethrown into a bare 500. A dry run whose
+    // only symptom is "failed" costs a trip to the server log to learn anything at all — which
+    // is exactly what happened when an .in() list crossed undici's header cap and surfaced as
+    // `TypeError: fetch failed`.
+    console.error('[labels/dry-run] failed', e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : String(e) },
+      { status: 500 },
+    );
   }
 
   if (heal && run.healed.length) await applyHealed(admin, user.id, storeId, run.healed);

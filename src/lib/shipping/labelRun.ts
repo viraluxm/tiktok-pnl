@@ -7,7 +7,7 @@
 // impossible rather than merely unlikely.
 
 import { getOrderById } from '@/lib/tiktok/client';
-import { readAllPaged } from '@/lib/db/readAll';
+import { readAllPaged, readAllPagedIn } from '@/lib/db/readAll';
 import { buildLabelPlan, type LabelPlan, type PlanBox, type PlanSkuLine } from '@/lib/shipping/labelPlan';
 import {
   groupIntoBoxes, gateByAge, gateByVerifiedStatus, MIN_ORDER_AGE_HOURS, type GateBox,
@@ -148,10 +148,11 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
       .gte('last_seen_at', new Date(nowMs - LIVE_WINDOW_MIN * 60_000).toISOString());
     const liveIds = (liveSessions ?? []).map((s: { id: unknown }) => String(s.id));
     if (liveIds.length) {
-      const liveItems = await readAllPaged<{ client_idempotency_key: string | null }>(
-        (from, to) => admin.from('live_auction_items')
+      const liveItems = await readAllPagedIn<{ client_idempotency_key: string | null }, string>(
+        liveIds,
+        (chunk, from, to) => admin.from('live_auction_items')
           .select('client_idempotency_key')
-          .eq('user_id', userId).in('session_id', liveIds)
+          .eq('user_id', userId).in('session_id', chunk)
           .order('id', { ascending: true })
           .range(from, to),
         `labels ${tag} live-session items`,
@@ -233,22 +234,29 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   const confirmedIds = confirmed.map((c) => c.order_id);
   const linesByOrder = new Map<string, PlanSkuLine[]>();
   if (confirmedIds.length) {
-    const items = await readAllPaged<{ id: string; client_idempotency_key: string }>(
-      (from, to) => admin.from('live_auction_items')
+    // Chunked: an .in() list past ~750 ids blows undici's 16KB header cap and fails as an
+    // opaque `TypeError: fetch failed`. A 400-box run averages 2.6 orders per box, so this
+    // read routinely carries a thousand ids.
+    const items = await readAllPagedIn<{ id: string; client_idempotency_key: string }, string>(
+      confirmedIds,
+      (chunk, from, to) => admin.from('live_auction_items')
         .select('id, client_idempotency_key')
-        .eq('user_id', userId).in('client_idempotency_key', confirmedIds)
+        .eq('user_id', userId).in('client_idempotency_key', chunk)
         .order('id', { ascending: true }).range(from, to),
       `labels ${tag} auction items`,
     );
     const itemToOrder = new Map(items.map((i) => [String(i.id), String(i.client_idempotency_key)]));
     if (items.length) {
-      const skuRows = await readAllPaged<{
+      // Same ceiling, and worse here: item ids are 36-character UUIDs, so this list hits 16KB
+      // in roughly a third as many entries as the order-id read above.
+      const skuRows = await readAllPagedIn<{
         auction_item_id: string; inventory_sku_id: string; qty: number;
         sku_number_snapshot: number | null; title_snapshot: string | null;
-      }>(
-        (from, to) => admin.from('live_auction_item_skus')
+      }, string>(
+        items.map((i) => String(i.id)),
+        (chunk, from, to) => admin.from('live_auction_item_skus')
           .select('auction_item_id, inventory_sku_id, qty, sku_number_snapshot, title_snapshot')
-          .eq('user_id', userId).in('auction_item_id', items.map((i) => String(i.id)))
+          .eq('user_id', userId).in('auction_item_id', chunk)
           .order('auction_item_id', { ascending: true }).range(from, to),
         `labels ${tag} sku lines`,
       );

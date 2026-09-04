@@ -110,7 +110,13 @@ export async function POST(req: Request) {
         { status: 502 },
       );
     }
-    throw e;
+    // Reported, not rethrown — see the same note on the dry run. Nothing has been bought at
+    // this point: resolution happens entirely before the first purchase call.
+    console.error('[labels/purchase] resolve failed', e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : String(e), purchased: 0, spent: 0 },
+      { status: 500 },
+    );
   }
 
   // ── Remove anything the ledger already owns. ──
