@@ -17,9 +17,10 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
-// Roster ACTIONS button. No active token → "Create link" (mints, copies, flips to copied). Active
-// token → "Copy link" (copies the full URL, brief "Copied ✓"). onCreated fires after a fresh mint
-// so the caller can surface LINK_WARNING.
+// Roster ACTIONS button. No active token → "Create employee link" (mints, copies, flips to copied).
+// Active token → "Copy employee link" (copies the full URL, brief "Copied ✓"). onCreated fires after
+// a fresh mint so the caller can surface LINK_WARNING. "Employee link" because the same persistent
+// URL is the person's whole portal — schedule, time off, QR clock-in — not a per-week credential.
 export function ScheduleLinkButton({
   employeeId,
   token,
@@ -62,7 +63,7 @@ export function ScheduleLinkButton({
     }
   }
 
-  const label = failed ? 'Copy failed' : copied ? 'Copied ✓' : busy ? 'Creating…' : token ? 'Copy link' : 'Create link';
+  const label = failed ? 'Copy failed' : copied ? 'Copied ✓' : busy ? 'Creating…' : token ? 'Copy employee link' : 'Create employee link';
   return (
     <button
       onClick={handleClick}

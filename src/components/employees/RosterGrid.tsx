@@ -23,10 +23,13 @@ export default function RosterGrid({
   employees,
   isLoading,
   onOpen,
+  weekCounts,
 }: {
   employees: Employee[];
   isLoading: boolean;
   onOpen: (e: Employee) => void;
+  /** Working days this Mon→Sun week per employee (real shift_instances). Absent → no summary line. */
+  weekCounts?: Record<string, number>;
 }) {
   const groups = useMemo(() => {
     const key = (e: Employee) => (e.role ?? '').trim().toLowerCase();
@@ -77,6 +80,14 @@ export default function RosterGrid({
                     <span className="text-tt-cyan">· {titleCase(e.fulfillment_track)}</span>
                   )}
                 </span>
+                {/* Completeness at a glance — a count, never the times (those live in the detail). */}
+                {weekCounts && e.status !== 'former' && (
+                  <span className={`mt-1 text-[10px] tabular-nums ${(weekCounts[e.id] ?? 0) > 0 ? 'text-tt-muted' : 'text-tt-muted/50'}`}>
+                    {(weekCounts[e.id] ?? 0) > 0
+                      ? `${weekCounts[e.id]} shift${weekCounts[e.id] === 1 ? '' : 's'} this week`
+                      : 'Not scheduled this week'}
+                  </span>
+                )}
               </button>
             ))}
           </div>
