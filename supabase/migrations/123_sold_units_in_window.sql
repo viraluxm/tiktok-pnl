@@ -92,19 +92,24 @@ grant execute on function public.lensed_sold_units_in_window(timestamptz, timest
 --
 -- The header above justifies this function partly by claiming the picked count is structurally
 -- under-recorded ("recorded picks were 65% of units sold over 7 days ... it never converges").
--- THAT CLAIM IS WRONG. Those were aggregates spanning the pack-station rollout. Measured per
--- cohort — orders that actually reached a shipped state — coverage was 0% through early July,
--- 1.2% (07-13), 9.5% (07-20), 44.5% (07-27), 85.6%, 90.7%, 97.4%, 96.8%, 97.2%. Pick recording
--- is now essentially complete, and the 4,185 shipped-without-a-pick-row orders cited above are
--- almost entirely pre-rollout.
+-- BOTH THAT CLAIM AND THE BACKLOG READING BUILT ON IT ARE WRONG.
 --
--- What the picked-vs-sold gap actually measures is BACKLOG: weekly outflow ran 45% to 112% of
--- inflow through August, and four full weeks saw 83,700 units sold against 69,707 picked — a
--- ~14,000 unit build.
+-- Recording is fine. Those percentages were aggregates spanning the pack-station rollout.
+-- Measured per COHORT — orders sold in week W, checked for a pick row with no window on the pick
+-- side — coverage runs 84% (08-03), 86% (08-10), 94% (08-17); of orders that actually shipped it
+-- is ~97% from mid-August. The 4,185 shipped-without-a-pick-row orders cited above are almost
+-- entirely pre-rollout.
 --
--- The conservation argument for this function still stands on its own (a period's allocation
--- should sum to that period's payroll), and units sold remains the chosen basis. But the honest
--- trade is now explicit rather than hidden: while the backlog grows, dividing by units sold
--- UNDER-charges, because the picking still owed on unpicked units lands on no show. 122's
--- picked-based rate is returned alongside for that comparison, and the UI surfaces the ratio as
--- a backlog signal — not, as it first did, as a data-quality warning.
+-- And there is no demonstrated backlog. "Sold in window minus picked in window" compares two
+-- different clocks — order date against verified_at — so orders sold late in a window are picked
+-- after it. At ~3,400 units/day with a couple of days of lag that edge effect accounts for
+-- essentially the whole apparent gap, and it scales with volume, which is why it looked worse as
+-- the operation grew.
+--
+-- WHAT THIS MEANS FOR THIS FUNCTION: each sold unit is picked exactly once, so units sold and
+-- units picked are the same population and the two possible denominators converge over matched
+-- cohorts. The choice is practical, not economic. Units sold is used because it comes from order
+-- sync — complete and authoritative — so the rate depends on no pack-station behaviour at all,
+-- and because it makes a period's allocation sum to that period's payroll. 122 is still read for
+-- raw picked/box volume, which belongs to the Team view's own KPIs; the ratio between the two
+-- windowed counts is NOT interpretable and must not be surfaced as one.

@@ -156,10 +156,11 @@ console.log('trailing pick rate — pooled over the REAL 2026-08-27..09-02 windo
   check('$/unit PICKED is higher than $/unit sold (the picked count is under-recorded)',
     r.cents_per_picked_unit_projected > r.cents_per_unit_projected,
     `picked $${(r.cents_per_picked_unit_projected / 100).toFixed(4)} vs sold $${(r.cents_per_unit_projected / 100).toFixed(4)}`);
-  // picked ÷ sold is a BACKLOG ratio, not a recording-coverage one (coverage of shipped orders
-  // is ~97%). Below 100% means picking ran behind sales in the window.
-  check('picked % of sold ≈ 68.6% (backlog, not a recording gap)',
-    near(r.picked_pct_of_sold, 100 * 18355 / 26741, 0.1), `${r.picked_pct_of_sold.toFixed(1)}%`);
+  // Raw picked volume is carried through as a diagnostic. Deliberately NOT expressed as a ratio
+  // against sold units: the two counts are on different clocks (order date vs verified_at), so
+  // that ratio is not interpretable and previously invited a false backlog reading.
+  check('picked volume is carried through untouched',
+    r.picked_units === 18355 && r.boxes === 5908);
   check('$/box ≈ $1.728', near(r.cents_per_box_projected / 100, 1.7283, 0.005),
     `$${(r.cents_per_box_projected / 100).toFixed(4)}`);
 
@@ -198,7 +199,7 @@ console.log('trailing pick rate — pooled over the REAL 2026-08-27..09-02 windo
     TZ, [], Date.parse('2026-09-03T18:00:00Z'));
   check('no units sold → null rate, never 0 or Infinity',
     empty.cents_per_unit === null && empty.cents_per_box_projected === null
-    && empty.cents_per_picked_unit_projected === null && empty.picked_pct_of_sold === null);
+    && empty.cents_per_picked_unit_projected === null);
 }
 
 // Where the two definitions actually diverge: equal hours, wildly unequal volume. A mean of

@@ -1355,14 +1355,6 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
               {' '}Host pay is {showEcon?.host_name ? `${showEcon.host_name}'s ` : ''}air time × rate.
               {!net.baseIsNetOfFees && ' TikTok fees are NOT yet included — refresh payouts for the true bottom line.'}
               {net.shortShow && ` This show ran under ${SHORT_SHOW_MS / 60000} minutes, so host pay covers only its air time and understates what the host was actually paid.`}
-              {pickRate?.picked_pct_of_sold != null && pickRate.picked_pct_of_sold < 95 && (
-                <>
-                  {' '}Heads up: the warehouse picked {Math.round(pickRate.picked_pct_of_sold)}% of
-                  {' '}what sold over this window, so a backlog is building and this rate reflects
-                  {' '}labor already paid — not the picking still owed on unpicked units. Per unit
-                  {' '}actually picked it ran {perUnit(pickRate.cents_per_picked_unit_projected)}.
-                </>
-              )}
             </>
           ) : (
             <>Net / unit unavailable — {netMissingNote}. Costs are left out rather than counted as $0.</>
