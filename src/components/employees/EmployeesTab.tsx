@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useChatContext } from '@/lib/chat/context';
 import { fmt } from '@/lib/calculations';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
 import type { Employee, EmployeeStatus } from '@/types';
@@ -41,6 +42,16 @@ const EMPTY_FORM: EmployeeInput = {
 
 export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
   const [subView, setSubView] = useState<SubView>('roster');
+
+  // Publish the sub-view to the admin assistant. This is the one the assistant most needs and
+  // the one the URL never shows: ?tab=employees is as far as the URL goes, so without this the
+  // assistant cannot tell Shifts from Pay from Roster.
+  const { setContext: setChatContext } = useChatContext();
+  useEffect(() => { setChatContext({ subView }); }, [subView, setChatContext]);
+  // Retract on unmount. Without this, leaving Team for P&L would strand subView='shifts'
+  // alongside tab='pnl' and the assistant would be told "pnl → shifts" — actively wrong,
+  // worse than no context at all.
+  useEffect(() => () => setChatContext({ subView: null }), [setChatContext]);
 
   // One-shot: land on a specific sub-tab when a flow requested it (e.g. Exit Kiosk → Shifts).
   useEffect(() => {

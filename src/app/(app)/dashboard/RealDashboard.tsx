@@ -24,6 +24,7 @@ import ShippingTab from '@/components/shipping/ShippingTab';
 import EmployeesTab from '@/components/employees/EmployeesTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
+import { useChatContext } from '@/lib/chat/context';
 
 const Charts = dynamic(() => import('@/components/dashboard/Charts'), { ssr: false });
 // P&L renders chart.js — load client-only, same as Charts.
@@ -129,6 +130,20 @@ export default function RealDashboard() {
   const [activeQuickFilter, setActiveQuickFilter] = useState<number | 'all' | 'custom'>('all');
 
   const { filters, setQuickFilter, setDateFrom, setDateTo } = useFilters();
+
+  // Publish what's on screen to the admin assistant. The tab lives in ?tab= today but the
+  // date filter is local state, so the assistant can't read either from the URL alone —
+  // the component that owns the state publishes it. Carries no data, only the view + range.
+  const { setContext: setChatContext } = useChatContext();
+  useEffect(() => {
+    setChatContext({ tab: activeView, dateFrom: filters.dateFrom, dateTo: filters.dateTo });
+  }, [activeView, filters.dateFrom, filters.dateTo, setChatContext]);
+  // Retract on unmount — the widget also lives on /account, /products, /live etc., where a
+  // leftover "you're on the Shipping tab" would be a lie rather than a hint.
+  useEffect(
+    () => () => setChatContext({ tab: null, subView: null, dateFrom: null, dateTo: null }),
+    [setChatContext],
+  );
   const { syncProgress, isConnected, connection } = useTikTok();
   const { data: productStatsData, isError: productStatsError } = useProductStats(filters.dateFrom, filters.dateTo);
   const productStats = productStatsData?.products;
