@@ -71,7 +71,7 @@ export function ReleaseButton({
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md rounded-t-2xl border border-tt-border bg-tt-card p-4 sm:rounded-2xl"
+            className="max-h-[85dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-2xl border border-tt-border bg-tt-card p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:rounded-2xl sm:pb-4"
           >
             <h2 className="text-base font-semibold text-tt-text">Release this shift</h2>
 
@@ -95,7 +95,9 @@ export function ReleaseButton({
                 rows={3}
                 disabled={atCap}
                 placeholder="e.g. doctor&apos;s appointment I couldn&apos;t move"
-                className="mt-1 w-full resize-none rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text placeholder:text-tt-muted/60 disabled:opacity-50"
+                // 16px: iOS Safari zooms the page for a focused control under 16px, and this
+                // overlay is fixed-position — the zoom would leave it half off-screen.
+                className="mt-1 w-full resize-none appearance-none rounded-lg border border-tt-input-border bg-tt-input-bg px-3 py-2.5 text-base text-tt-text [-webkit-text-fill-color:var(--color-tt-text)] placeholder:text-tt-muted/60 disabled:opacity-50"
               />
             </label>
 
@@ -104,11 +106,11 @@ export function ReleaseButton({
             <div className="mt-3 flex gap-2">
               <button
                 type="button" onClick={() => setOpen(false)} disabled={busy}
-                className="flex-1 rounded-lg border border-tt-border py-2.5 text-sm font-semibold text-tt-muted disabled:opacity-40"
+                className="min-h-12 flex-1 rounded-lg border border-tt-border text-base font-semibold text-tt-muted disabled:opacity-40"
               >Cancel</button>
               <button
                 type="button" onClick={submit} disabled={busy || atCap || !reason.trim()}
-                className="flex-1 rounded-lg bg-tt-red py-2.5 text-sm font-semibold text-white disabled:opacity-40"
+                className="min-h-12 flex-1 rounded-lg bg-tt-red text-base font-semibold text-white disabled:opacity-40"
               >{busy ? 'Releasing…' : 'Release'}</button>
             </div>
           </div>
