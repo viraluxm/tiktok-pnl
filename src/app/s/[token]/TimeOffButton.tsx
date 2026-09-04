@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
+import TimeOffCalendar from './TimeOffCalendar';
 
 // Top-right "Time off" control on the worker's schedule link, plus the request sheet.
 //
@@ -24,6 +25,18 @@ function fmt(iso: string): string {
     weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC',
   });
 }
+
+// Styling for the one remaining text control.
+//
+//   text-base (16px)  iOS Safari ZOOMS the whole page when a focused control is under 16px, and
+//                     this dialog is fixed-position — that zoom would leave it half off-screen
+//                     with no way back.
+//   min-h-11 (44px)   Apple's minimum touch target.
+//
+// (The date inputs that needed -webkit-text-fill-color are gone — TimeOffCalendar replaced them.)
+const FIELD =
+  'w-full min-h-11 appearance-none rounded-lg border border-tt-input-border bg-tt-input-bg px-3 py-2.5 ' +
+  'text-base text-tt-text [-webkit-text-fill-color:var(--color-tt-text)] placeholder:text-tt-muted/60';
 
 const STATUS_STYLE: Record<TimeOffRequest['status'], string> = {
   pending: 'border-tt-yellow/50 text-tt-yellow',
@@ -101,13 +114,13 @@ export default function TimeOffButton({ token }: { token: string }) {
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 sm:items-center sm:p-8"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 sm:p-8"
           onClick={() => setOpen(false)}
           role="dialog" aria-modal="true" aria-label="Time off"
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-t-2xl border border-tt-border bg-tt-card p-4 sm:rounded-2xl"
+            className="max-h-[85dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-2xl border border-tt-border bg-tt-card p-4 shadow-2xl sm:max-h-[85vh]"
           >
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
@@ -124,35 +137,23 @@ export default function TimeOffButton({ token }: { token: string }) {
               >✕</button>
             </div>
 
-            <div className="space-y-2.5">
-              <div className="flex gap-2">
-                <label className="flex-1 text-[10px] uppercase tracking-wide text-tt-muted">
-                  First day
-                  <input
-                    type="date" value={start} min={earliest || undefined}
-                    onChange={(e) => setStart(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text"
-                  />
-                </label>
-                <label className="flex-1 text-[10px] uppercase tracking-wide text-tt-muted">
-                  Last day <span className="normal-case text-tt-muted/70">(optional)</span>
-                  <input
-                    type="date" value={end} min={start || earliest || undefined}
-                    onChange={(e) => setEnd(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text"
-                  />
-                </label>
-              </div>
+            <div className="space-y-3">
+              <TimeOffCalendar
+                earliest={earliest}
+                start={start}
+                end={end}
+                onChange={(a, b) => { setStart(a); setEnd(b); }}
+              />
               <input
                 type="text" value={reason} maxLength={300}
                 onChange={(e) => setReason(e.target.value)}
                 placeholder="Reason (optional)"
-                className="w-full rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text placeholder:text-tt-muted/60"
+                className={FIELD}
               />
-              {error && <p className="text-xs text-tt-magenta-soft">{error}</p>}
+              {error && <p className="text-sm text-tt-magenta-soft">{error}</p>}
               <button
                 type="button" onClick={submit} disabled={busy || !start}
-                className="w-full rounded-lg bg-tt-cyan py-2.5 text-sm font-semibold text-black disabled:opacity-40"
+                className="min-h-12 w-full rounded-lg bg-tt-cyan text-base font-semibold text-black disabled:opacity-40"
               >
                 {busy ? 'Sending…' : 'Send request'}
               </button>
