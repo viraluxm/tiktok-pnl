@@ -234,6 +234,9 @@ export async function GET(req: Request) {
       batched_boxes: plan.batchedBoxes,
       bundle_boxes: plan.bundles.length,
       sku_batches: plan.batches.length,
+      // Distinguishes "nothing could batch" from "these could have, but each was alone".
+      demoted_singletons: plan.demotedSingletons,
+      demoted_skus: plan.demotedSkus,
     },
     batches: plan.batches.map((b) => ({ slip: b.slip, sku_number: b.sku_number, boxes: b.boxes.length })),
     page_sequence: planPageSequence(plan),
