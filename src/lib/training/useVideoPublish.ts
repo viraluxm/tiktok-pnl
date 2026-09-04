@@ -2,6 +2,7 @@
 
 import { useCallback, useRef } from 'react';
 import type { Room } from 'livekit-client';
+import { PRACTICE_ROOM_OPTIONS } from '@/lib/training/media';
 
 // Publishes the host's EXISTING camera track to LiveKit for the trainer preview.
 // Best-effort: any failure is swallowed so the practice simulator keeps working.
@@ -40,7 +41,12 @@ export function useVideoPublish(sessionId: string) {
         const { token, url } = (await res.json()) as { token?: string; url?: string };
         if (!token || !url) return;
 
-        const room = new Room();
+        // dynacast lets the SFU pause simulcast layers nobody is watching, which
+        // is the publisher half of the bandwidth fix (adaptiveStream on the
+        // trainer side is the subscriber half — the two only pay off as a pair).
+        // Without it every host uploads its full simulcast ladder regardless of
+        // demand, which is the dominant Wi-Fi cost when ~20 hosts publish at once.
+        const room = new Room(PRACTICE_ROOM_OPTIONS);
         roomRef.current = room;
         await room.connect(url, token);
 

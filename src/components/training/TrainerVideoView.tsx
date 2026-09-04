@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import TrainerPreviewOverlay, { type PreviewAuction } from './TrainerPreviewOverlay';
 import type { LiveComment } from './simulatorData';
+import { PRACTICE_ROOM_OPTIONS } from '@/lib/training/media';
 
 type VideoStatus = 'connecting' | 'waiting' | 'live' | 'error';
 
@@ -19,9 +20,17 @@ export default function TrainerVideoView({
   auction?: PreviewAuction;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const roomRef = useRef<import('livekit-client').Room | null>(null);
   const [status, setStatus] = useState<VideoStatus>('connecting');
-  const [needAudioUnlock, setNeedAudioUnlock] = useState(false);
+  // Host audio is OFF by default and scoped to THIS tab. A trainer machine can
+  // hold several controller tabs, and LiveKit's bare attach() would create its
+  // own unmuted <audio> for each one — every host's mic playing at once. The
+  // trainer opts in per tab with a click, which also satisfies the browser
+  // autoplay policy. hostAudioOnRef mirrors the state for the connect closure.
+  const [hostAudioOn, setHostAudioOn] = useState(false);
+  const hostAudioOnRef = useRef(false);
+  const [hasHostAudio, setHasHostAudio] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,21 +60,30 @@ export default function TrainerVideoView({
           if (videoRef.current) track.attach(videoRef.current);
           if (!cancelled) setStatus('live');
         } else if (track.kind === Track.Kind.Audio) {
-          // LiveKit creates + manages the audio element and its playback.
-          track.attach();
+          // Attach to OUR element so this tab controls playback. attach() sets
+          // element.muted = false internally, so re-apply the trainer's choice
+          // immediately after — otherwise subscribing alone would start audio.
+          if (audioRef.current) {
+            track.attach(audioRef.current);
+            audioRef.current.muted = !hostAudioOnRef.current;
+          }
+          if (!cancelled) setHasHostAudio(true);
         }
       };
 
-      room = new Room();
+      // adaptiveStream is the subscriber half of the bandwidth fix: it requests
+      // a simulcast layer sized to this small preview element instead of pulling
+      // the host's full-resolution top layer. dynacast is its publisher-side
+      // pair. Together they cut both host upload and trainer download sharply
+      // when ~20 sessions run at once.
+      room = new Room(PRACTICE_ROOM_OPTIONS);
       roomRef.current = room;
       room
         .on(RoomEvent.TrackSubscribed, (track) => attach(track))
         .on(RoomEvent.TrackUnsubscribed, (track) => {
           track.detach();
           if (track.kind === Track.Kind.Video && !cancelled) setStatus('waiting');
-        })
-        .on(RoomEvent.AudioPlaybackStatusChanged, () => {
-          if (!cancelled && room) setNeedAudioUnlock(!room.canPlaybackAudio);
+          if (track.kind === Track.Kind.Audio && !cancelled) setHasHostAudio(false);
         })
         .on(RoomEvent.Disconnected, () => {
           if (!cancelled) setStatus('waiting');
@@ -91,7 +109,6 @@ export default function TrainerVideoView({
         });
       });
       if (!hasVideo && !cancelled) setStatus('waiting');
-      if (!cancelled) setNeedAudioUnlock(!room.canPlaybackAudio);
     })().catch(() => {
       if (!cancelled) setStatus('error');
     });
@@ -103,12 +120,31 @@ export default function TrainerVideoView({
     };
   }, [sessionId]);
 
-  async function enableAudio() {
+  // Explicit per-tab opt-in/out for this host's audio. Runs from a click, so
+  // room.startAudio() and element.play() both count as a user gesture and clear
+  // the browser's autoplay block. Muting keeps the subscription intact (video is
+  // untouched) — it only silences local playback.
+  async function toggleHostAudio() {
+    const next = !hostAudioOn;
+    hostAudioOnRef.current = next;
+    setHostAudioOn(next);
+    const el = audioRef.current;
+    if (!next) {
+      if (el) el.muted = true;
+      return;
+    }
     try {
       await roomRef.current?.startAudio();
-      setNeedAudioUnlock(false);
     } catch {
-      /* ignore — trainer can tap again */
+      /* ignore — the element play() below is the real unlock */
+    }
+    if (el) {
+      el.muted = false;
+      try {
+        await el.play();
+      } catch {
+        /* blocked — trainer can tap again */
+      }
     }
   }
 
@@ -133,13 +169,16 @@ export default function TrainerVideoView({
       {status === 'live' && auction && (
         <TrainerPreviewOverlay comments={comments} auction={auction} />
       )}
-      {status === 'live' && needAudioUnlock && (
+      {/* Host mic sink. Starts muted; only this tab's toggle unmutes it. */}
+      <audio ref={audioRef} autoPlay playsInline muted className="hidden" />
+      {status === 'live' && hasHostAudio && (
         <button
           type="button"
-          onClick={enableAudio}
+          onClick={() => void toggleHostAudio()}
+          aria-pressed={hostAudioOn}
           className="absolute left-1/2 top-2 -translate-x-1/2 cursor-pointer rounded-full bg-black/70 px-3 py-1 text-[11px] font-semibold text-white backdrop-blur-md transition-colors hover:bg-black/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/50"
         >
-          Enable host audio
+          {hostAudioOn ? 'Mute host' : 'Hear host'}
         </button>
       )}
     </div>
