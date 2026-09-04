@@ -44,3 +44,29 @@ export function trainingStorageKey(sessionId: string, key: string): string {
 export function shortTrainingSessionLabel(sessionId: string): string {
   return sessionId.slice(0, 8);
 }
+
+// ---- Practice Mode link builders -------------------------------------------
+// SINGLE SOURCE OF TRUTH for the two screen URLs. The launcher's QR code and its
+// "Copy Host Link" button both go through trainingHostUrl(), so the scanned URL
+// and the copied URL can never drift apart. The session id is encoded via
+// URLSearchParams so the query is always well-formed. Pure (no browser globals)
+// so these stay unit-testable and server-safe.
+
+export function trainingHostPath(sessionId: string): string {
+  return `/admin/training/live-simulator?${new URLSearchParams({ session: sessionId }).toString()}`;
+}
+
+export function trainingControllerPath(sessionId: string): string {
+  return `/admin/training/live-simulator/control?${new URLSearchParams({ session: sessionId }).toString()}`;
+}
+
+// Absolute URLs, resolved against a caller-supplied origin (pass
+// window.location.origin in the browser) — never a hard-coded domain, and never
+// an origin derived from untrusted input.
+export function trainingHostUrl(origin: string, sessionId: string): string {
+  return new URL(trainingHostPath(sessionId), origin).toString();
+}
+
+export function trainingControllerUrl(origin: string, sessionId: string): string {
+  return new URL(trainingControllerPath(sessionId), origin).toString();
+}
