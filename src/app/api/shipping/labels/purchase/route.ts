@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
-import { createPackage, getPackageDocument, ALREADY_PURCHASED_CODES } from '@/lib/tiktok/client';
+import { createPackage, ALREADY_PURCHASED_CODES } from '@/lib/tiktok/client';
 import { planPageSequence, type PlanBox } from '@/lib/shipping/labelPlan';
 import {
   resolveLabelRun, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
@@ -15,7 +15,7 @@ import {
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-// POST /api/shipping/labels/purchase?store_id=…&confirm_boxes=N&limit=M[&skip_docs=1]
+// POST /api/shipping/labels/purchase?store_id=…&confirm_boxes=N&limit=M
 //
 // BUYS SHIPPING LABELS. This is the only route in the app that spends money.
 //
@@ -65,7 +65,6 @@ export async function POST(req: Request) {
   const storeId = url.searchParams.get('store_id');
   const confirmRaw = url.searchParams.get('confirm_boxes');
   const limitRaw = url.searchParams.get('limit');
-  const skipDocs = url.searchParams.get('skip_docs') === '1';
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
 
   const confirmBoxes = confirmRaw == null || confirmRaw.trim() === '' ? null : Number(confirmRaw);
@@ -114,12 +113,18 @@ export async function POST(req: Request) {
 
   // Buy in the order the labels PRINT, so the ledger reads in the same sequence as the stack
   // and a partially-completed run leaves a contiguous, printable front section.
+  //
+  // The section caption each box sits under is captured here and stored with it. The plan
+  // cannot be re-derived at print time — buying a label advances its order out of the
+  // candidate set, and SKU batching depends on the whole set, so re-planning later would
+  // produce a different stack from the one that was reviewed.
   const byKey = new Map(run.boxes.map((b) => [b.group_key, b]));
-  const ordered: PlanBox[] = [];
+  const ordered: Array<{ box: PlanBox; slipCaption: string | null }> = [];
+  let currentCaption: string | null = null;
   for (const page of planPageSequence(run.plan)) {
-    if (page.kind !== 'label') continue;
+    if (page.kind === 'slip') { currentCaption = page.caption; continue; }
     const b = byKey.get(page.group_key);
-    if (b && !alreadyOwned.has(b.group_key)) ordered.push(b);
+    if (b && !alreadyOwned.has(b.group_key)) ordered.push({ box: b, slipCaption: currentCaption });
   }
 
   const decision = authorizeRun({
@@ -137,8 +142,8 @@ export async function POST(req: Request) {
     min_order_age_hours: MIN_ORDER_AGE_HOURS,
     already_in_ledger: alreadyOwned.size,
     would_buy: ordered.length,
-    one_order_boxes: ordered.filter((b) => shipTypeFor(b) === '1').length,
-    multi_order_boxes: ordered.filter((b) => shipTypeFor(b) === '3').length,
+    one_order_boxes: ordered.filter((o) => shipTypeFor(o.box) === '1').length,
+    multi_order_boxes: ordered.filter((o) => shipTypeFor(o.box) === '3').length,
     max_boxes_per_run: MAX_BOXES_PER_RUN,
     limit_requested: limit,
     spend_estimate: await estimateSpend(admin, user.id, storeId, ordered.length),
@@ -163,16 +168,17 @@ export async function POST(req: Request) {
   const toBuy = ordered.slice(0, decision.buy);
   const runId = randomUUID();
   const bought: Array<{
-    group_key: string; package_id: string; tracking_number: string | null;
+    group_key: string; package_id: string;
     price: number | null; ship_type: string; already_existed?: true;
   }> = [];
   const failed: Array<{ group_key: string; code: number | null; message: string }> = [];
   const skipped: Array<{ group_key: string; reason: string }> = [];
   let stoppedEarly = false;
 
-  for (const box of toBuy) {
+  for (let seq = 0; seq < toBuy.length; seq++) {
     if (Date.now() - startedAt > TIME_BUDGET_MS) { stoppedEarly = true; break; }
 
+    const { box, slipCaption } = toBuy[seq];
     const shipType = shipTypeFor(box);
 
     // Each box is wrapped on its own. A throw here must not abandon a run whose earlier
@@ -186,6 +192,9 @@ export async function POST(req: Request) {
           user_id: user.id, store_id: storeId, run_id: runId,
           group_key: box.group_key, order_ids: box.order_ids,
           status: 'claimed', ship_type: shipType,
+          // Written with the claim, before the purchase, so even a box left 'claimed' by a
+          // crash records where it belonged in the reviewed stack.
+          print_seq: seq, slip_caption: slipCaption,
         });
       if (claimError) {
         skipped.push({ group_key: box.group_key, reason: `claim rejected: ${claimError.message}` });
@@ -210,7 +219,7 @@ export async function POST(req: Request) {
           })
           .eq('user_id', user.id).eq('store_id', storeId).eq('group_key', box.group_key);
         bought.push({
-          group_key: box.group_key, package_id: '', tracking_number: null,
+          group_key: box.group_key, package_id: '',
           price: null, ship_type: shipType, already_existed: true,
         });
         continue;
@@ -244,32 +253,20 @@ export async function POST(req: Request) {
         })
         .eq('user_id', user.id).eq('store_id', storeId).eq('group_key', box.group_key);
 
-      // ── The document. Best-effort ONLY. ──
+      // ── The document is NOT fetched here. ──
       //
-      // The label is already bought. A document failure must never mark the row 'failed' or a
-      // retry would buy a second label; the doc can always be re-fetched from package_id.
-      let tracking: string | null = null;
-      if (!skipDocs) {
-        try {
-          const doc = await getPackageDocument(token, cipher, res.pkg.package_id);
-          tracking = doc.tracking_number;
-          await admin.from('shipping_label_purchases')
-            .update({
-              doc_url: doc.doc_url, tracking_number: doc.tracking_number,
-              // ~24h on the one-box test. Stored so the assembly step knows when to re-fetch.
-              doc_url_expires_at: new Date(Date.now() + 23 * 3_600_000).toISOString(),
-            })
-            .eq('user_id', user.id).eq('store_id', storeId).eq('group_key', box.group_key);
-        } catch (e) {
-          await admin.from('shipping_label_purchases')
-            .update({ doc_error: (e instanceof Error ? e.message : String(e)).slice(0, 500) })
-            .eq('user_id', user.id).eq('store_id', storeId).eq('group_key', box.group_key);
-        }
-      }
-
+      // Measured on the 5-box run 2026-09-04: all five documents came back empty immediately
+      // after Create, and all five were available about a minute later. TikTok needs time to
+      // render the label, so an inline fetch fails almost every time — it would spend an extra
+      // call per box and write a doc_error on every purchased row, for nothing.
+      //
+      // Assembly fetches instead, which is the right owner: it already treats an absent or
+      // near-expiry doc_url as stale and re-fetches by package_id, and doc_url is short-lived
+      // (~24h) so it would have to re-fetch before most prints anyway. package_id is the
+      // durable handle and it is recorded above, which is what actually matters.
       bought.push({
         group_key: box.group_key, package_id: res.pkg.package_id,
-        tracking_number: tracking, price, ship_type: shipType,
+        price, ship_type: shipType,
       });
     } catch (e) {
       // The claim row stays 'claimed' on purpose: we do not know whether the purchase landed,
@@ -298,9 +295,6 @@ export async function POST(req: Request) {
     limit_truncated_run: decision.buy < ordered.length,
     stopped_early: stoppedEarly,
     ...(stoppedEarly ? { stopped_reason: 'time budget — re-read the dry run and run again' } : {}),
-    // Labels bought but whose document could not be fetched are still labels. They are listed
-    // so they cannot be quietly lost; re-fetch from package_id.
-    docs_skipped: skipDocs,
     bought,
     failed_detail: failed,
     skipped_detail: skipped,
