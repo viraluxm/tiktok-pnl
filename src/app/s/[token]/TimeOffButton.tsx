@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
+import TimeOffCalendar from './TimeOffCalendar';
 
 // Top-right "Time off" control on the worker's schedule link, plus the request sheet.
 //
@@ -25,17 +26,14 @@ function fmt(iso: string): string {
   });
 }
 
-// Form-control styling for a sheet that has to work on a real phone.
+// Styling for the one remaining text control.
 //
-//   text-base (16px)         iOS Safari ZOOMS the whole page when a focused control is under 16px.
-//                            The sheet is fixed-position, so that zoom leaves it half off-screen
-//                            with no way back. This is the single most important rule here.
-//   -webkit-text-fill-color  iOS renders input[type=date] with its OWN text colour, ignoring
-//                            `color`. On this dark ground that produced the empty-looking boxes:
-//                            the value was present, just painted near-black on near-black.
-//   appearance-none          stops iOS applying its native inset/rounding on top of ours.
-//   min-h-11 (44px)          Apple's minimum touch target; an empty date input otherwise
-//                            collapses to a few pixels tall on iOS.
+//   text-base (16px)  iOS Safari ZOOMS the whole page when a focused control is under 16px, and
+//                     this dialog is fixed-position — that zoom would leave it half off-screen
+//                     with no way back.
+//   min-h-11 (44px)   Apple's minimum touch target.
+//
+// (The date inputs that needed -webkit-text-fill-color are gone — TimeOffCalendar replaced them.)
 const FIELD =
   'w-full min-h-11 appearance-none rounded-lg border border-tt-input-border bg-tt-input-bg px-3 py-2.5 ' +
   'text-base text-tt-text [-webkit-text-fill-color:var(--color-tt-text)] placeholder:text-tt-muted/60';
@@ -140,24 +138,12 @@ export default function TimeOffButton({ token }: { token: string }) {
             </div>
 
             <div className="space-y-3">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="block text-[11px] uppercase tracking-wide text-tt-muted">
-                  First day
-                  <input
-                    type="date" value={start} min={earliest || undefined}
-                    onChange={(e) => setStart(e.target.value)}
-                    className={`mt-1 ${FIELD}`}
-                  />
-                </label>
-                <label className="block text-[11px] uppercase tracking-wide text-tt-muted">
-                  Last day <span className="normal-case text-tt-muted/70">— leave blank for one day</span>
-                  <input
-                    type="date" value={end} min={start || earliest || undefined}
-                    onChange={(e) => setEnd(e.target.value)}
-                    className={`mt-1 ${FIELD}`}
-                  />
-                </label>
-              </div>
+              <TimeOffCalendar
+                earliest={earliest}
+                start={start}
+                end={end}
+                onChange={(a, b) => { setStart(a); setEnd(b); }}
+              />
               <input
                 type="text" value={reason} maxLength={300}
                 onChange={(e) => setReason(e.target.value)}
