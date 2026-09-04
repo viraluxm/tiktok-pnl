@@ -8,12 +8,16 @@
 // halfway through, and no endpoint that quotes a run before committing to it.
 
 /**
- * Hard ceiling on boxes bought in one invocation.
+ * Hard ceiling on the `limit` a single call may ask for.
  *
- * Chosen from real volume: the Snore test set held 356 boxes, and a normal day's backlog is
- * that order of magnitude. 400 lets one legitimate day through in a single run while keeping
- * the worst possible mistake — a wrong plan bought in full — bounded at roughly $1,600 rather
- * than unbounded. A genuine larger backlog is bought in successive runs, each re-verified.
+ * This bounds the INVOCATION, not the plan: a backlog bigger than this is bought in successive
+ * calls, each re-verified against TikTok. Chosen from real volume — the Snore test set held
+ * 356 boxes and a normal day is that order of magnitude — so one legitimate day fits in one
+ * call while the worst a single call can do stays bounded at roughly $1,600 rather than
+ * unbounded.
+ *
+ * It is the backstop, not the primary control. `limit` is required on every call precisely so
+ * that the real ceiling is the one the caller names, visible in the request itself.
  */
 export const MAX_BOXES_PER_RUN = 400;
 
@@ -68,28 +72,56 @@ export interface AuthorizeInput {
   boxes: number;
   /** The count the caller read on the dry run and is authorising. Null when absent. */
   confirmBoxes: number | null;
+  /**
+   * REQUIRED ceiling on how many of those boxes this invocation may buy. Null when absent,
+   * which is refused — see authorizeRun.
+   */
+  limit: number | null;
   cap?: number;
 }
 
+export type AuthorizeRefusal =
+  | 'disabled'
+  | 'nothing_to_buy'
+  | 'confirm_missing'
+  | 'confirm_mismatch'
+  | 'limit_missing'
+  | 'limit_invalid'
+  | 'over_cap';
+
 export type AuthorizeResult =
-  | { ok: true }
-  | { ok: false; code: 'disabled' | 'nothing_to_buy' | 'confirm_missing' | 'confirm_mismatch' | 'over_cap'; reason: string };
+  | { ok: true; buy: number }
+  | { ok: false; code: AuthorizeRefusal; reason: string };
 
 /**
- * Whether a purchase run may proceed.
+ * Whether a purchase run may proceed, and how many boxes it may buy.
  *
- * THE CONFIRM-COUNT CHECK IS THE LOAD-BEARING ONE. The caller must pass the box count it saw
- * on the dry run, and it must match exactly. That turns the review into a real gate: if a show
- * ended, a sync landed, or another run bought something in between, the count moves and this
- * refuses rather than buying a plan nobody read. "Approximately what I approved" is not good
- * enough when every difference is a purchased label.
+ * TWO INDEPENDENT CHECKS DO THE WORK, AND THEY GUARD DIFFERENT THINGS.
+ *
+ * `confirmBoxes` guards against a plan that MOVED. The caller passes the box count it saw on
+ * the dry run and it must match exactly, so if a show ended, a sync landed, or another run
+ * bought something in between, this refuses rather than buying a plan nobody read.
+ * "Approximately what I approved" is not good enough when every difference is a paid label.
+ *
+ * `limit` guards against a plan that is LARGE. It is a separate concern, and confirmBoxes does
+ * nothing for it: a caller that reads the dry run and passes its count straight back through —
+ * which is exactly what a "Print labels" button would naturally do — is perfectly consistent
+ * and would buy the entire backlog in one click. So `limit` is REQUIRED and has no default.
+ * A request cannot express "buy everything"; it has to name a number, and that number is
+ * bounded by the cap. The worst a single call can do is therefore always visible in the call
+ * itself.
+ *
+ * Because every invocation is bounded by `limit`, a backlog LARGER than the cap is no longer
+ * refused outright — it is bought in successive capped runs, each one re-verified against
+ * TikTok. The cap now bounds the invocation rather than the plan, which is the thing that
+ * actually spends money.
  */
 export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
   const cap = input.cap ?? MAX_BOXES_PER_RUN;
   if (!input.enabled) {
     return { ok: false, code: 'disabled', reason: 'LABEL_PURCHASE_ENABLED is not 1 — log-only' };
   }
-  if (input.boxes <= 0) {
+  if (!Number.isFinite(input.boxes) || input.boxes <= 0) {
     return { ok: false, code: 'nothing_to_buy', reason: 'no boxes left to buy' };
   }
   if (input.confirmBoxes == null) {
@@ -104,13 +136,26 @@ export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
       reason: `plan moved since it was reviewed: confirm_boxes=${input.confirmBoxes} but ${input.boxes} boxes now resolve — re-read the dry run`,
     };
   }
-  if (input.boxes > cap) {
+  if (input.limit == null) {
     return {
-      ok: false, code: 'over_cap',
-      reason: `${input.boxes} boxes exceeds the ${cap}-box cap for one run`,
+      ok: false, code: 'limit_missing',
+      reason: `limit is required — the most boxes this call may buy (1-${cap}). There is deliberately no default: a request must name its own ceiling rather than inherit "all of them".`,
     };
   }
-  return { ok: true };
+  if (!Number.isInteger(input.limit) || input.limit < 1) {
+    return {
+      ok: false, code: 'limit_invalid',
+      reason: `limit must be a whole number of at least 1, got ${input.limit}`,
+    };
+  }
+  if (input.limit > cap) {
+    return {
+      ok: false, code: 'over_cap',
+      reason: `limit=${input.limit} exceeds the ${cap}-box ceiling for one call`,
+    };
+  }
+  // A limit above what is left is not an error — it simply buys what there is.
+  return { ok: true, buy: Math.min(input.limit, input.boxes) };
 }
 
 /**

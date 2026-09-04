@@ -27,9 +27,9 @@ const check = (name, cond, extra = '') => {
   passed++;
 };
 
-/** An otherwise-valid run of `n` boxes, confirmed correctly. */
+/** An otherwise-valid run of `n` boxes: confirmed correctly, with a limit that covers them. */
 const okRun = (n = 10, over = {}) =>
-  ({ enabled: true, boxes: n, confirmBoxes: n, ...over });
+  ({ enabled: true, boxes: n, confirmBoxes: n, limit: n, ...over });
 
 console.log('\nThe flag is the outermost gate');
 {
@@ -37,24 +37,26 @@ console.log('\nThe flag is the outermost gate');
   check('a disabled run is refused', r.ok === false && r.code === 'disabled', r.code);
   // Log-only must win over every other verdict. If a disabled run reported "over_cap" it would
   // read as "lift the cap and it buys", when in fact the flag is off.
-  const capped = authorizeRun({ enabled: false, boxes: 99_999, confirmBoxes: 1 });
+  const capped = authorizeRun({ enabled: false, boxes: 99_999, confirmBoxes: 1, limit: 99_999 });
   check('disabled outranks both the cap and a mismatch',
     capped.ok === false && capped.code === 'disabled', capped.code);
 }
 
 console.log('\nThe confirm count is the real approval');
 {
-  check('a matching count authorises', authorizeRun(okRun(10)).ok === true);
-  const missing = authorizeRun({ enabled: true, boxes: 10, confirmBoxes: null });
+  const good = authorizeRun(okRun(10));
+  check('a matching count authorises, and says how many to buy',
+    good.ok === true && good.buy === 10, String(good.buy ?? good.code));
+  const missing = authorizeRun({ enabled: true, boxes: 10, confirmBoxes: null, limit: 10 });
   check('no confirm_boxes at all is refused',
     missing.ok === false && missing.code === 'confirm_missing', missing.code);
 
   // THE case this exists for: a show ended or a sync landed between the review and the run, so
   // the plan is no longer the one a human read. Buying it would be buying an unreviewed plan.
-  const grew = authorizeRun({ enabled: true, boxes: 11, confirmBoxes: 10 });
+  const grew = authorizeRun({ enabled: true, boxes: 11, confirmBoxes: 10, limit: 11 });
   check('a plan that GREW since review is refused',
     grew.ok === false && grew.code === 'confirm_mismatch', grew.code);
-  const shrank = authorizeRun({ enabled: true, boxes: 9, confirmBoxes: 10 });
+  const shrank = authorizeRun({ enabled: true, boxes: 9, confirmBoxes: 10, limit: 9 });
   check('a plan that SHRANK since review is also refused',
     shrank.ok === false && shrank.code === 'confirm_mismatch', shrank.code);
   check('…and the refusal says both numbers, so the operator can see what moved',
@@ -62,28 +64,78 @@ console.log('\nThe confirm count is the real approval');
 
   // Off-by-one must not be tolerated anywhere near money.
   check('one box of drift is enough to refuse',
-    authorizeRun({ enabled: true, boxes: 356, confirmBoxes: 357 }).ok === false);
+    authorizeRun({ enabled: true, boxes: 356, confirmBoxes: 357, limit: 356 }).ok === false);
 }
 
 console.log('\nNothing to buy is not an error');
 {
-  const r = authorizeRun({ enabled: true, boxes: 0, confirmBoxes: 0 });
+  const r = authorizeRun({ enabled: true, boxes: 0, confirmBoxes: 0, limit: 1 });
   check('an empty run is refused as nothing_to_buy, not as a mismatch',
     r.ok === false && r.code === 'nothing_to_buy', r.code);
   check('a negative box count cannot slip through',
-    authorizeRun({ enabled: true, boxes: -5, confirmBoxes: -5 }).code === 'nothing_to_buy');
+    authorizeRun({ enabled: true, boxes: -5, confirmBoxes: -5, limit: 1 }).code === 'nothing_to_buy');
 }
 
-console.log('\nThe cap bounds the worst mistake');
+console.log('\nlimit is REQUIRED — a request cannot mean "buy everything"');
+{
+  // THE HOLE THIS CLOSES. confirm_boxes guards a plan that MOVED, not one that is LARGE. A
+  // caller that reads the dry run and passes its count straight back is perfectly consistent
+  // and would buy the entire backlog — which is exactly what a "Print labels" button does if
+  // nothing stops it. So an omitted limit must never be read as "no ceiling".
+  const noLimit = authorizeRun({ enabled: true, boxes: 356, confirmBoxes: 356, limit: null });
+  check('a consistent, fully-confirmed request with NO limit is refused',
+    noLimit.ok === false && noLimit.code === 'limit_missing', noLimit.code);
+  check('…and the refusal says there is deliberately no default',
+    noLimit.reason.includes('no default'), noLimit.reason);
+
+  check('a limit of 1 authorises exactly one box',
+    authorizeRun({ enabled: true, boxes: 356, confirmBoxes: 356, limit: 1 }).buy === 1);
+  check('a limit smaller than the plan truncates the run',
+    authorizeRun({ enabled: true, boxes: 87, confirmBoxes: 87, limit: 25 }).buy === 25);
+  check('a limit larger than the plan just buys what there is',
+    authorizeRun({ enabled: true, boxes: 5, confirmBoxes: 5, limit: 400 }).buy === 5);
+
+  const zero = authorizeRun({ enabled: true, boxes: 10, confirmBoxes: 10, limit: 0 });
+  check('limit 0 is rejected rather than silently buying nothing',
+    zero.ok === false && zero.code === 'limit_invalid', zero.code);
+  check('a negative limit is rejected',
+    authorizeRun({ enabled: true, boxes: 10, confirmBoxes: 10, limit: -3 }).code === 'limit_invalid');
+  check('a fractional limit is rejected',
+    authorizeRun({ enabled: true, boxes: 10, confirmBoxes: 10, limit: 2.5 }).code === 'limit_invalid');
+  check('NaN as a limit is rejected, not treated as unbounded',
+    authorizeRun({ enabled: true, boxes: 10, confirmBoxes: 10, limit: Number.NaN }).code === 'limit_invalid');
+  check('Infinity as a limit is rejected',
+    authorizeRun({ enabled: true, boxes: 10, confirmBoxes: 10, limit: Number.POSITIVE_INFINITY }).code === 'limit_invalid');
+}
+
+console.log('\nThe cap bounds one CALL, not the backlog');
 {
   check('the cap is 400', MAX_BOXES_PER_RUN === 400);
-  check('exactly at the cap is allowed', authorizeRun(okRun(MAX_BOXES_PER_RUN)).ok === true);
-  const over = authorizeRun(okRun(MAX_BOXES_PER_RUN + 1));
-  check('one over the cap is refused', over.ok === false && over.code === 'over_cap', over.code);
+  check('a limit exactly at the cap is allowed',
+    authorizeRun(okRun(MAX_BOXES_PER_RUN)).ok === true);
+  const over = authorizeRun({ enabled: true, boxes: 500, confirmBoxes: 500, limit: MAX_BOXES_PER_RUN + 1 });
+  check('a limit one over the cap is refused', over.ok === false && over.code === 'over_cap', over.code);
   check('a caller cannot raise the cap by confirming a bigger number',
-    authorizeRun({ enabled: true, boxes: 5000, confirmBoxes: 5000 }).code === 'over_cap');
+    authorizeRun({ enabled: true, boxes: 5000, confirmBoxes: 5000, limit: 5000 }).code === 'over_cap');
   check('an explicit lower cap is honoured',
-    authorizeRun({ enabled: true, boxes: 10, confirmBoxes: 10, cap: 5 }).code === 'over_cap');
+    authorizeRun({ enabled: true, boxes: 10, confirmBoxes: 10, limit: 10, cap: 5 }).code === 'over_cap');
+
+  // A backlog bigger than the cap is no longer refused outright — it is bought in successive
+  // capped calls, each re-verified. Refusing it would have made a big day unbuyable.
+  const big = authorizeRun({ enabled: true, boxes: 5000, confirmBoxes: 5000, limit: MAX_BOXES_PER_RUN });
+  check('a plan far bigger than the cap is allowed, capped to one call',
+    big.ok === true && big.buy === MAX_BOXES_PER_RUN, String(big.buy ?? big.code));
+}
+
+console.log('\nRefusal order — the cheapest, safest verdict wins');
+{
+  // A missing limit must not mask a stale plan: the operator needs to know the plan moved,
+  // because re-running with a limit would then buy something unreviewed.
+  const both = authorizeRun({ enabled: true, boxes: 20, confirmBoxes: 10, limit: null });
+  check('a stale plan is reported before a missing limit',
+    both.code === 'confirm_mismatch', both.code);
+  check('an empty plan is nothing_to_buy even with no limit given',
+    authorizeRun({ enabled: true, boxes: 0, confirmBoxes: 0, limit: null }).code === 'nothing_to_buy');
 }
 
 console.log('\nPrices as TikTok actually returns them');
