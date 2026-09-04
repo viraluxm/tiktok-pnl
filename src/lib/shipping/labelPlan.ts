@@ -7,11 +7,19 @@
 // labels by SKU turns packing into a mechanical loop: hold a box of one SKU, one item per
 // package, slap, next. Nothing to read, nothing to count.
 //
-// WHY MULTI-UNIT SAME-SKU BOXES ARE DELIBERATELY EXCLUDED FROM THAT. A 3-unit order of the
-// same SKU breaks the loop: the packer has to NOTICE that this one label needs three items,
-// which means reading every label and losing the speed the batch existed for. Those boxes go
-// with the bundles, where reading and counting is already the job. It costs 1.6% of volume
-// (439 boxes) to keep the other 47.7% mechanical.
+// MIXED MEANS TWO OR MORE SKUS ON ONE LABEL — nothing else. A box holding one SKU always gets
+// that SKU's header, even when it is the only such box in the run. An earlier version demoted
+// those lone boxes into mixed on the theory that "a slip in front of one label is pure paper",
+// which had it backwards: the slip's job is not to amortise itself over a long run, it is to
+// tell the packer WHAT TO GRAB without reading. A lone "#302 JUMBO UV STRAWBERRY" does that
+// perfectly; burying the same box in mixed forces exactly the read this whole feature exists
+// to remove. Paper is cheaper than a misread.
+//
+// MULTI-UNIT BOXES GET THEIR OWN HEADER, NOT THE SINGLE-UNIT ONE. A 3-unit order of the same
+// SKU is still one SKU, so it is not mixed — but it cannot sit under the same heading as the
+// 1-unit boxes either, because the packer working that pile puts one item per package and
+// would under-ship it. Single-SKU boxes are therefore grouped by (SKU, units per box) and the
+// header states the count, so the pile in front of the packer is always uniform.
 //
 // THE UNIT IS THE BOX, NOT THE ORDER. One label covers one package, and a combine group is one
 // package however many orders it contains — on the Snore test set, 159 eligible orders
@@ -32,7 +40,7 @@ export interface PlanBox {
   skus: PlanSkuLine[];
 }
 
-/** A run of same-SKU labels that prints behind one separator slip. */
+/** A run of labels for one SKU at one units-per-box, printing behind a single separator slip. */
 export interface SkuBatch {
   inventory_sku_id: string;
   sku_number: number | null;
@@ -43,43 +51,29 @@ export interface SkuBatch {
 }
 
 export interface LabelPlan {
-  /** Single-SKU/single-unit boxes, grouped by SKU, in print order. */
+  /** Single-SKU boxes, grouped by (SKU, units per box), in print order. */
   batches: SkuBatch[];
   /**
-   * Everything that does not pack mechanically, printed after every batch: multi-SKU boxes,
-   * multi-unit boxes, and single-SKU groups too small to be worth a slip.
+   * Genuine bundles: boxes whose label covers TWO OR MORE SKUs, so each must be read
+   * individually. Printed after every SKU section. Nothing else lands here — a single-SKU box
+   * always gets its own header, however few of them there are.
    */
   bundles: PlanBox[];
   totalBoxes: number;
   totalOrders: number;
-  /** Boxes in real batches — the share that packs mechanically. Excludes demoted singletons. */
+  /** Boxes under a SKU header — the share that packs without reading a label. */
   batchedBoxes: number;
   /**
-   * Boxes that WERE batchable — one SKU, one unit — but whose SKU had no other box in this
-   * run, so they were demoted to mixed.
+   * Single-box sections: a SKU with exactly one box in this run.
    *
-   * Reported because `batchedBoxes: 0` alone cannot distinguish "nothing here could ever
-   * batch" from "eight could have, each was simply alone" — and that difference is exactly
-   * what tells you whether to wait for more volume or whether the mix is wrong. On the first
-   * real Snore run it was 0 batched and 8 demoted: eight single-item boxes across eight
-   * different SKUs.
+   * Reported because it is the honest measure of how much the stack is really batching. Ten
+   * sections of one are ten slips for ten labels — still worth printing, since each says what
+   * to grab, but nothing like the mechanical run that eight boxes of one SKU gives.
    */
-  demotedSingletons: number;
-  /** Distinct SKUs among the demoted singletons. */
-  demotedSkus: number;
+  singleBoxSections: number;
+  /** Boxes needing multiple items each, so their header carries a per-box count. */
+  multiUnitBoxes: number;
 }
-
-/**
- * Smallest group worth a separator slip.
- *
- * A slip in front of ONE label is pure paper — it announces a batch that isn't one, and the
- * packer still has to read that single label to know what it is. On the Snore test set this
- * would have printed 7 slips for 7 single-box groups: 8 slips for 16 labels.
- *
- * Groups below this are demoted to the mixed section, which is exactly the right home: what
- * unites everything there is that each label must be read individually.
- */
-export const MIN_BATCH_SIZE = 2;
 
 /** Total units across a box's SKU lines. */
 function unitsIn(box: PlanBox): number {
@@ -87,20 +81,43 @@ function unitsIn(box: PlanBox): number {
 }
 
 /**
- * Whether a box's label can join a same-SKU batch.
+ * Whether a box holds exactly one SKU, and so gets that SKU's header rather than going to mixed.
  *
- * Exactly one distinct SKU AND exactly one unit. Both conditions are load-bearing: one SKU so
- * the batch is homogeneous, one unit so the packer's loop stays "one item per label".
+ * Units do not enter into it: a 3-unit box of one SKU is still one SKU. What units decide is
+ * WHICH header it goes under — see sectionKeyOf. A box whose lines sum to less than one unit is
+ * treated as mixed: the data is wrong and a label that must be read is the safe outcome.
  */
-export function isBatchable(box: PlanBox): boolean {
-  if (box.skus.length !== 1) return false;
-  return unitsIn(box) === 1;
+export function isSingleSku(box: PlanBox): boolean {
+  return box.skus.length === 1 && unitsIn(box) >= 1;
 }
 
-/** The separator-slip caption for a SKU. */
-export function slipCaption(skuNumber: number | null, title: string): string {
-  const num = skuNumber == null ? '#?' : `#${skuNumber}`;
-  return `${num} ${(title || '').trim().toUpperCase()}`.trim();
+/**
+ * Section identity for a single-SKU box: the SKU, plus how many units the box needs.
+ *
+ * Units are part of the key so a 3-unit box never lands under a heading the packer is working
+ * one-item-per-package. Every pile in front of them is uniform.
+ */
+export function sectionKeyOf(box: PlanBox): string {
+  return `${box.skus[0].inventory_sku_id}::${unitsIn(box)}`;
+}
+
+/**
+ * The separator-slip caption for a SKU section.
+ *
+ * When a box needs more than one unit the count is stated, because the packer's default is one
+ * item per package and silence would under-ship it. The slip's own footer already gives the
+ * number of LABELS, so the two numbers never mean the same thing: "3 PER BOX" with "2 LABELS"
+ * reads as six items across two parcels.
+ */
+export function slipCaption(skuNumber: number | null, title: string, units = 1): string {
+  // Assembled from parts rather than interpolated, so an absent title cannot leave a double
+  // space before the count — the caption is compared byte-for-byte in the ledger's
+  // slip_caption, where a stray space would split one section into two.
+  const parts = [skuNumber == null ? '#?' : `#${skuNumber}`];
+  const t = (title || '').trim().toUpperCase();
+  if (t) parts.push(t);
+  if (units > 1) parts.push(`— ${units} PER BOX`);
+  return parts.join(' ');
 }
 
 /**
@@ -117,38 +134,37 @@ export function slipCaption(skuNumber: number | null, title: string): string {
  * arbitrary without being explainable.)
  */
 export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
-  const batchable: PlanBox[] = [];
+  const singleSku: PlanBox[] = [];
   const bundles: PlanBox[] = [];
-  for (const b of boxes) (isBatchable(b) ? batchable : bundles).push(b);
+  for (const b of boxes) (isSingleSku(b) ? singleSku : bundles).push(b);
 
-  const bySku = new Map<string, SkuBatch>();
-  for (const box of batchable) {
+  // Keyed by (SKU, units per box), so a 3-unit box never joins the one-per-package pile.
+  const sections = new Map<string, SkuBatch>();
+  for (const box of singleSku) {
     const line = box.skus[0];
-    const existing = bySku.get(line.inventory_sku_id);
+    const key = sectionKeyOf(box);
+    const existing = sections.get(key);
     if (existing) { existing.boxes.push(box); continue; }
-    bySku.set(line.inventory_sku_id, {
+    const units = box.skus.reduce((n, x) => n + (Number(x.qty) || 0), 0);
+    sections.set(key, {
       inventory_sku_id: line.inventory_sku_id,
       sku_number: line.sku_number,
       title: line.title,
-      slip: slipCaption(line.sku_number, line.title),
+      slip: slipCaption(line.sku_number, line.title, units),
       boxes: [box],
     });
   }
 
-  // Demote groups too small to be a batch. Done AFTER grouping, not during: whether a SKU has
-  // enough boxes is only knowable once every box has been assigned.
-  const grouped = [...bySku.values()];
-  const tooSmall = grouped.filter((g) => g.boxes.length < MIN_BATCH_SIZE);
-  for (const g of tooSmall) bundles.push(...g.boxes);
-  const demotedSingletons = tooSmall.reduce((n, g) => n + g.boxes.length, 0);
-
-  const batches = grouped.filter((g) => g.boxes.length >= MIN_BATCH_SIZE).sort(
+  // No demotion. Every single-SKU section keeps its header however few boxes it has: the header
+  // exists to say what to grab, and one box needs that as much as eight do.
+  const batches = [...sections.values()].sort(
     (a, b) => b.boxes.length - a.boxes.length
       || (a.sku_number ?? Number.MAX_SAFE_INTEGER) - (b.sku_number ?? Number.MAX_SAFE_INTEGER)
-      || a.inventory_sku_id.localeCompare(b.inventory_sku_id),
+      || a.inventory_sku_id.localeCompare(b.inventory_sku_id)
+      || a.slip.localeCompare(b.slip),
   );
 
-  // Stable order within a batch and among bundles, for the same reason as the tie-break above.
+  // Stable order within a section and among bundles, for the same reason as the tie-break above.
   for (const b of batches) b.boxes.sort((x, y) => x.group_key.localeCompare(y.group_key));
   bundles.sort((x, y) => x.group_key.localeCompare(y.group_key));
 
@@ -160,12 +176,12 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
     bundles,
     totalBoxes: boxes.length,
     totalOrders: orderIds.size,
-    // Boxes that actually pack mechanically — i.e. in a real batch. NOT every single-SKU box:
-    // a demoted singleton is packed one-at-a-time like a bundle, and counting it as batched
-    // would overstate the only number this feature exists to improve.
+    // Every box under a SKU header — the share that packs without reading a label.
     batchedBoxes: batches.reduce((n, b) => n + b.boxes.length, 0),
-    demotedSingletons,
-    demotedSkus: tooSmall.length,
+    singleBoxSections: batches.filter((b) => b.boxes.length === 1).length,
+    multiUnitBoxes: singleSku.filter(
+      (b) => b.skus.reduce((n, x) => n + (Number(x.qty) || 0), 0) > 1,
+    ).length,
   };
 }
 

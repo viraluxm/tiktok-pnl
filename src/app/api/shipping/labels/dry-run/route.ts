@@ -102,9 +102,10 @@ export async function GET(req: Request) {
       batched_boxes: plan.batchedBoxes,
       bundle_boxes: plan.bundles.length,
       sku_batches: plan.batches.length,
-      // Distinguishes "nothing could batch" from "these could have, but each was alone".
-      demoted_singletons: plan.demotedSingletons,
-      demoted_skus: plan.demotedSkus,
+      // How much of the stack really batches: ten sections of one box are ten slips for ten
+      // labels — worth printing, since each says what to grab, but not a mechanical run.
+      single_box_sections: plan.singleBoxSections,
+      multi_unit_boxes: plan.multiUnitBoxes,
       // Boxes a purchase run would actually buy: the plan minus anything already in the ledger.
       already_in_ledger: alreadyBought.size,
       would_buy: toBuy.length,
