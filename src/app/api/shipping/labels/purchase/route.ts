@@ -114,12 +114,18 @@ export async function POST(req: Request) {
 
   // Buy in the order the labels PRINT, so the ledger reads in the same sequence as the stack
   // and a partially-completed run leaves a contiguous, printable front section.
+  //
+  // The section caption each box sits under is captured here and stored with it. The plan
+  // cannot be re-derived at print time — buying a label advances its order out of the
+  // candidate set, and SKU batching depends on the whole set, so re-planning later would
+  // produce a different stack from the one that was reviewed.
   const byKey = new Map(run.boxes.map((b) => [b.group_key, b]));
-  const ordered: PlanBox[] = [];
+  const ordered: Array<{ box: PlanBox; slipCaption: string | null }> = [];
+  let currentCaption: string | null = null;
   for (const page of planPageSequence(run.plan)) {
-    if (page.kind !== 'label') continue;
+    if (page.kind === 'slip') { currentCaption = page.caption; continue; }
     const b = byKey.get(page.group_key);
-    if (b && !alreadyOwned.has(b.group_key)) ordered.push(b);
+    if (b && !alreadyOwned.has(b.group_key)) ordered.push({ box: b, slipCaption: currentCaption });
   }
 
   const decision = authorizeRun({
@@ -137,8 +143,8 @@ export async function POST(req: Request) {
     min_order_age_hours: MIN_ORDER_AGE_HOURS,
     already_in_ledger: alreadyOwned.size,
     would_buy: ordered.length,
-    one_order_boxes: ordered.filter((b) => shipTypeFor(b) === '1').length,
-    multi_order_boxes: ordered.filter((b) => shipTypeFor(b) === '3').length,
+    one_order_boxes: ordered.filter((o) => shipTypeFor(o.box) === '1').length,
+    multi_order_boxes: ordered.filter((o) => shipTypeFor(o.box) === '3').length,
     max_boxes_per_run: MAX_BOXES_PER_RUN,
     limit_requested: limit,
     spend_estimate: await estimateSpend(admin, user.id, storeId, ordered.length),
@@ -170,9 +176,10 @@ export async function POST(req: Request) {
   const skipped: Array<{ group_key: string; reason: string }> = [];
   let stoppedEarly = false;
 
-  for (const box of toBuy) {
+  for (let seq = 0; seq < toBuy.length; seq++) {
     if (Date.now() - startedAt > TIME_BUDGET_MS) { stoppedEarly = true; break; }
 
+    const { box, slipCaption } = toBuy[seq];
     const shipType = shipTypeFor(box);
 
     // Each box is wrapped on its own. A throw here must not abandon a run whose earlier
@@ -186,6 +193,9 @@ export async function POST(req: Request) {
           user_id: user.id, store_id: storeId, run_id: runId,
           group_key: box.group_key, order_ids: box.order_ids,
           status: 'claimed', ship_type: shipType,
+          // Written with the claim, before the purchase, so even a box left 'claimed' by a
+          // crash records where it belonged in the reviewed stack.
+          print_seq: seq, slip_caption: slipCaption,
         });
       if (claimError) {
         skipped.push({ group_key: box.group_key, reason: `claim rejected: ${claimError.message}` });
