@@ -14,11 +14,14 @@ import HoverCard, { type HoverPayload } from './HoverCard';
 // These write to DIFFERENT tables with different consequences, and the distinction is the whole
 // reason this modal exists:
 //
-//   Scheduled → `shift_instances`. The PLAN. Never payable. This is what a biweekly schedule is
-//               made of, and what the personal clock-in links check against.
-//   Worked    → `shifts`. A payable time entry, exactly like a punch (isPayableShift pays a
-//               manual row). Only for a real correction: the clock was down, someone forgot to
-//               punch in.
+//   Scheduled Shift      → `shift_instances`. The PLAN. Never payable. This is what a biweekly
+//                           schedule is made of, and what the personal clock-in links check against.
+//   Worked / Missed Punch → `shifts` with source 'manual'. A payable time entry, exactly like a
+//                           punch (isPayableShift pays a manual row, with no separate confirmation
+//                           step — the manager entering it IS the approval). This is the MANAGER
+//                           CORRECTION workflow: forgot to clock in, forgot to clock out with no
+//                           usable punch, worked before being added to Lensed, or a historical
+//                           day being backfilled. Any date is allowed, including the past.
 //
 // Defaulting to Scheduled matters. If building next fortnight's schedule wrote payable rows,
 // every future shift would become hours owed with nobody having worked them.
@@ -130,25 +133,25 @@ export default function DayAddShiftModal({
         </div>
 
         {/* Mode. Worded as an outcome, not a table name. */}
-        <div className="mb-4 flex gap-1 rounded-lg bg-white/5 p-0.5" role="group" aria-label="What kind of shift">
+        <div className="mb-4 flex gap-1 rounded-lg bg-white/5 p-0.5" role="group" aria-label="Scheduled shift, or worked hours for a missed punch">
           <button
             type="button" onClick={() => { setMode('scheduled'); setOpenEnded(false); }} aria-pressed={mode === 'scheduled'}
             className={`flex-1 rounded-md px-3 py-2 text-xs font-semibold transition-colors ${mode === 'scheduled' ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'}`}
           >
-            Scheduled<span className="ml-1 font-normal text-tt-muted">· the plan</span>
+            Scheduled Shift<span className="mt-0.5 block font-normal text-tt-muted">the plan</span>
           </button>
           <button
             type="button" onClick={() => setMode('worked')} aria-pressed={mode === 'worked'}
             className={`flex-1 rounded-md px-3 py-2 text-xs font-semibold transition-colors ${mode === 'worked' ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'}`}
           >
-            Worked<span className="ml-1 font-normal text-tt-muted">· gets paid</span>
+            Worked / Missed Punch<span className="mt-0.5 block font-normal text-tt-muted">gets paid</span>
           </button>
         </div>
 
         <p className="mb-4 rounded-lg border border-tt-border bg-white/[0.02] px-3 py-2 text-[11px] leading-snug text-tt-muted">
           {mode === 'scheduled'
-            ? 'A plan only — it is never paid. Pay comes from the time clock.'
-            : 'A payable time entry, same as a punch. Use it when the clock was down or someone forgot to punch in.'}
+            ? 'Add this employee to the schedule. This does not add worked hours to payroll.'
+            : 'Add hours the employee actually worked when no usable time-clock record exists. These hours count toward payroll.'}
         </p>
 
         {/* Employee picker */}

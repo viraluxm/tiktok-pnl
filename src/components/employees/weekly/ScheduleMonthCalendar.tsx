@@ -72,7 +72,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
 
   const { shifts, addShift, updateShift, deleteShift, confirmShift } = useShifts(grid.gridStart, grid.gridEnd);
   const { rules, exceptions, upsertException } = useShiftRules();
-  const { instances } = useShiftInstances(grid.gridStart, grid.gridEnd);
+  const { instances, removeInstance } = useShiftInstances(grid.gridStart, grid.gridEnd);
 
   // Punches = time-clock rows only. Manual one-offs are a correction to the record, so they read
   // as punches here too — they are what pay uses. Rows materialized from a rule are the PLAN and
@@ -120,6 +120,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
         start_time: laWallClockOf(i.starts_at).time,
         end_time: laWallClockOf(i.ends_at).time,
         origin: 'instance',
+        source: i.source ?? null,
       });
     }
     for (const g of generated) {
@@ -127,6 +128,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
       out.push({
         id: g.id, employee_id: g.employee_id, date: g.date,
         start_time: g.start_time, end_time: g.end_time, origin: 'rule',
+        source: null,
       });
     }
     return out;
@@ -195,6 +197,13 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
       }
     }
     await qc.invalidateQueries({ queryKey: ['shift_instances'] });
+  }
+
+  // PLAN, removed. Deletes ONE `shift_instances` row through the admin route, which re-checks every
+  // eligibility condition server-side and refuses anything that is not an untouched future one-off.
+  // Nothing in `shifts` is touched, so pay cannot move. The hook invalidates ['shift_instances'].
+  async function removeScheduled(instanceId: string) {
+    await removeInstance.mutateAsync(instanceId);
   }
 
   // PAYABLE. Writes a `shifts` row — the same thing a punch produces, so only for corrections.
@@ -327,6 +336,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           onConfirm={handleConfirm}
           onEdit={openEditor}
           onAddShift={setAddOnDate}
+          onRemoveScheduled={removeScheduled}
         />
       )}
 

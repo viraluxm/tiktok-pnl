@@ -10,6 +10,7 @@ const { outputText } = ts.transpileModule(src, { compilerOptions: { module: ts.M
 const out = join(mkdtempSync(join(tmpdir(), 'cm-')), 'cm.mjs'); writeFileSync(out, outputText);
 const {
   buildCalendarDays, punchHours, wallHours, densityLevel, isPaydayISO, formatDelta, initialsOf,
+  canRemoveScheduled,
 } = await import(pathToFileURL(out).href);
 
 let passed = 0;
@@ -143,5 +144,58 @@ check('a non-payday is not one', !isPaydayISO('2026-07-24', '2026-07-17'));
 check('formatDelta signs', formatDelta(1.2) === '+1.2h' && formatDelta(-0.5) === '−0.5h' && formatDelta(0) === 'on time');
 check('formatDelta of null is empty', formatDelta(null) === '');
 check('initials match the badge rule', initialsOf('Tomas Vela') === 'TV' && initialsOf('Haley') === 'HA' && initialsOf('') === '?');
+
+console.log('\ncanRemoveScheduled — the Remove Shift affordance rule');
+// A one-off materialized PLAN with no punch, today or later: the only removable shape.
+const remSched = (o = {}) => ({ id: 'i1', start_time: '16:00', end_time: '02:00', hours: 10, origin: 'instance', source: 'admin_open', ...o });
+const remTile = (o = {}) => ({ punch: null, scheduled: remSched(), state: 'scheduled', ...o });
+
+check('admin_open instance, no punch, upcoming → Remove offered', canRemoveScheduled(remTile()) === true);
+
+// THE CRITICAL EXCLUSION (Part 8): any worked/`shifts` row on the tile removes the action, in
+// every punch shape — the schedule-delete path must never sit beside payroll data.
+const punchShapes = {
+  'unconfirmed time_clock': { id: 'p', start_time: '16:00', end_time: '02:00', hours: 10, breakMinutes: 0, confirmed: false, confirmable: true, autoClosed: false, isOpen: false },
+  'confirmed time_clock': { id: 'p', start_time: '16:00', end_time: '02:00', hours: 10, breakMinutes: 0, confirmed: true, confirmable: true, autoClosed: false, isOpen: false },
+  'manual worked row': { id: 'p', start_time: '16:00', end_time: '02:00', hours: 10, breakMinutes: 0, confirmed: true, confirmable: false, autoClosed: false, isOpen: false },
+  'currently open punch': { id: 'p', start_time: '16:00', end_time: null, hours: 0, breakMinutes: 0, confirmed: true, confirmable: true, autoClosed: false, isOpen: true },
+};
+for (const [label, punch] of Object.entries(punchShapes)) {
+  check(`${label} present → NO Remove action`, canRemoveScheduled(remTile({ punch })) === false);
+}
+// Even a punched tile whose state reads 'scheduled' (the plan view classifies a worked day as
+// 'confirmed', but assert the punch clause alone is sufficient) stays excluded.
+check('punch + state scheduled → still no Remove', canRemoveScheduled(remTile({ punch: punchShapes['manual worked row'], state: 'scheduled' })) === false);
+
+// Not a removable plan shape.
+check('rule projection (origin rule) → no Remove (no stored row)', canRemoveScheduled(remTile({ scheduled: remSched({ origin: 'rule', source: null }) })) === false);
+check('pattern instance → no Remove (materializer regenerates)', canRemoveScheduled(remTile({ scheduled: remSched({ source: 'pattern' }) })) === false);
+check('claim instance → no Remove (OT trail)', canRemoveScheduled(remTile({ scheduled: remSched({ source: 'claim' }) })) === false);
+check('missing source → no Remove', canRemoveScheduled(remTile({ scheduled: remSched({ source: null }) })) === false);
+check('no scheduled span at all → no Remove', canRemoveScheduled(remTile({ scheduled: null })) === false);
+
+// Past days are history: classify() turns an unworked past plan into 'no_show'.
+check('no_show (past, unworked) → no Remove', canRemoveScheduled(remTile({ state: 'no_show' })) === false);
+check('open state → no Remove', canRemoveScheduled(remTile({ state: 'open' })) === false);
+check('pending state → no Remove', canRemoveScheduled(remTile({ state: 'pending' })) === false);
+
+// End-to-end through the real assembler: an admin_open plan-only day yields a removable tile,
+// and the same day with a punch does not — proving the wiring, not just the predicate.
+const REM_DAYS = ['2026-09-20'];
+const planOnly = buildCalendarDays({
+  employees: EMPS, punches: [], days: REM_DAYS, view: 'all', todayISO: '2026-09-15',
+  scheduled: [{ id: 'i9', employee_id: 'e1', date: '2026-09-20', start_time: '16:00', end_time: '02:00', origin: 'instance', source: 'admin_open' }],
+});
+check('buildCalendarDays → plan-only admin_open tile is removable',
+  canRemoveScheduled(planOnly.get('2026-09-20').people[0]) === true);
+const withPunch = buildCalendarDays({
+  employees: EMPS, days: REM_DAYS, view: 'all', todayISO: '2026-09-15',
+  scheduled: [{ id: 'i9', employee_id: 'e1', date: '2026-09-20', start_time: '16:00', end_time: '02:00', origin: 'instance', source: 'admin_open' }],
+  punches: [{ id: 'p9', employee_id: 'e1', source: 'manual', date: '2026-09-20', start_time: '16:00', end_time: '02:00', clock_in_at: null, clock_out_at: null, break_minutes: 0, confirmed_at: null }],
+});
+check('buildCalendarDays → same day WITH a worked row is not removable',
+  canRemoveScheduled(withPunch.get('2026-09-20').people[0]) === false);
+// The source must actually survive the assembly, or every tile would silently lose its Remove.
+check('assembly carries scheduled.source through', planOnly.get('2026-09-20').people[0].scheduled.source === 'admin_open');
 
 console.log(`\n${passed} checks passed\n`);

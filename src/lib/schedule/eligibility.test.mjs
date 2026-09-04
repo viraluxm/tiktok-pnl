@@ -15,7 +15,10 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'elig-')), 'eligibility.mjs');
 writeFileSync(outFile, outputText);
-const { effectiveShiftRole, planAdminShift, crossesMidnight, scheduleIsEmpty } = await import(pathToFileURL(outFile).href);
+const {
+  effectiveShiftRole, planAdminShift, crossesMidnight, scheduleIsEmpty,
+  planShiftRemoval, SHIFT_REMOVAL_MESSAGES,
+} = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -74,5 +77,62 @@ check('no rules + nothing → empty state', scheduleIsEmpty({ myShifts: 0, board
 check('has rules (materialized shift present) → renders', scheduleIsEmpty({ myShifts: 3, board: 0, pending: 0 }) === false);
 // A pending OT claim alone is also enough to render (the claimer must see it in-flight).
 check('pending claim only → renders', scheduleIsEmpty({ myShifts: 0, board: 0, pending: 1 }) === false);
+
+console.log('\nplanShiftRemoval — Remove Shift is for an UNTOUCHED FUTURE ONE-OFF PLAN only');
+// Facts are supplied as epoch millis from the row's authoritative starts_at, so no calendar-day /
+// UTC assumption can enter the decision. NOW is frozen for the whole block.
+const NOW = Date.parse('2026-09-10T12:00:00Z');
+const HR = 3600_000;
+const base = {
+  source: 'admin_open', status: 'scheduled',
+  startsAtMs: NOW + 48 * HR, nowMs: NOW,
+  hasWorkedShift: false, hasOpenPunch: false,
+};
+const plan = (o = {}) => planShiftRemoval({ ...base, ...o });
+
+// ── the one allowed case ──
+check('admin_open + scheduled + future + no punch + no worked shift → ALLOWED', plan().ok === true);
+// One minute in the future is still the future — the boundary is the instant, not the day.
+check('one minute in the future → allowed', plan({ startsAtMs: NOW + 60_000 }).ok === true);
+
+// ── refusals: not a one-off plan ──
+const rPattern = plan({ source: 'pattern' });
+check('pattern → NOT_ONE_OFF (materializer would regenerate it)', !rPattern.ok && rPattern.code === 'NOT_ONE_OFF');
+const rClaim = plan({ source: 'claim' });
+check('claim → NOT_ONE_OFF (carries a shift_claims OT trail)', !rClaim.ok && rClaim.code === 'NOT_ONE_OFF');
+
+// ── refusals: not still merely scheduled ──
+for (const st of ['released', 'claimed', 'worked', 'missed', 'cancelled']) {
+  const r = plan({ status: st });
+  check(`status '${st}' → NOT_SCHEDULED`, !r.ok && r.code === 'NOT_SCHEDULED');
+}
+
+// ── refusals: time ──
+const rPast = plan({ startsAtMs: NOW - 24 * HR });
+check('past shift → ALREADY_STARTED', !rPast.ok && rPast.code === 'ALREADY_STARTED');
+const rNow = plan({ startsAtMs: NOW });
+check('starts exactly now → ALREADY_STARTED (boundary is inclusive)', !rNow.ok && rNow.code === 'ALREADY_STARTED');
+const rStarted = plan({ startsAtMs: NOW - 60_000 });
+check('started a minute ago → ALREADY_STARTED', !rStarted.ok && rStarted.code === 'ALREADY_STARTED');
+// Fails CLOSED: an unparseable instant must never read as "safe to delete".
+const rNaN = plan({ startsAtMs: Number.NaN });
+check('unparseable starts_at → refused, not allowed (fail closed)', !rNaN.ok && rNaN.code === 'ALREADY_STARTED');
+
+// ── refusals: a payroll record already refers to this employee/date ──
+const rWorked = plan({ hasWorkedShift: true });
+check('worked `shifts` row on that employee+date → WORKED_TIME_EXISTS', !rWorked.ok && rWorked.code === 'WORKED_TIME_EXISTS');
+const rPunch = plan({ hasOpenPunch: true });
+check('employee currently clocked in → EMPLOYEE_CLOCKED_IN', !rPunch.ok && rPunch.code === 'EMPLOYEE_CLOCKED_IN');
+
+// ── precedence: the structural reason wins, so the message explains the real blocker ──
+const rBoth = plan({ source: 'pattern', hasOpenPunch: true, startsAtMs: NOW - HR });
+check('recurring + started + clocked in → reports NOT_ONE_OFF first', !rBoth.ok && rBoth.code === 'NOT_ONE_OFF');
+const rWorkedBeatsPunch = plan({ hasWorkedShift: true, hasOpenPunch: true });
+check('worked shift outranks open punch', !rWorkedBeatsPunch.ok && rWorkedBeatsPunch.code === 'WORKED_TIME_EXISTS');
+
+// Every refusal code must have a manager-readable sentence — a missing one would render "undefined".
+for (const code of ['NOT_ONE_OFF', 'NOT_SCHEDULED', 'ALREADY_STARTED', 'WORKED_TIME_EXISTS', 'EMPLOYEE_CLOCKED_IN']) {
+  check(`SHIFT_REMOVAL_MESSAGES has ${code}`, typeof SHIFT_REMOVAL_MESSAGES[code] === 'string' && SHIFT_REMOVAL_MESSAGES[code].length > 10);
+}
 
 console.log(`\nALL PASSED (${passed} assertions)`);
