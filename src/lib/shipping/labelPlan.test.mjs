@@ -98,6 +98,9 @@ console.log('\nA group of one is not a batch');
     !planPageSequence(plan).some((p) => p.kind === 'slip' && p.caption.includes('999')));
   check('batchedBoxes counts only real batches, not the demoted one',
     plan.batchedBoxes === 2, String(plan.batchedBoxes));
+  check('the demoted box is counted separately, not lost',
+    plan.demotedSingletons === 1 && plan.demotedSkus === 1,
+    `${plan.demotedSingletons}/${plan.demotedSkus}`);
   check('but the lone box is still printed', plan.totalBoxes === 3
     && planPageSequence(plan).filter((p) => p.kind === 'label').length === 3);
 }
@@ -109,6 +112,29 @@ console.log('\nA group of one is not a batch');
   const slips = planPageSequence(plan).filter((p) => p.kind === 'slip');
   check('…and exactly one slip instead of seven', slips.length === 1, String(slips.length));
   check('…which names the action', slips[0].caption === 'MIXED — READ EACH LABEL', slips[0].caption);
+  // The real Snore shape: 0 batched, 8 demoted across 8 SKUs. Without these counts the output
+  // could not tell "nothing could batch" from "everything was alone".
+  check('demoted counts explain WHY there are no batches',
+    plan.batchedBoxes === 0 && plan.demotedSingletons === 7 && plan.demotedSkus === 7,
+    `${plan.batchedBoxes}/${plan.demotedSingletons}/${plan.demotedSkus}`);
+}
+{
+  // A box that could never batch (multi-SKU) must NOT be counted as a demoted singleton —
+  // conflating the two would make the number useless for deciding whether to wait for volume.
+  const plan = buildLabelPlan([
+    box('m', [sku('x', 1, 'A'), sku('y', 2, 'B')]),
+    box('u', [sku('z', 3, 'C', 4)]),
+    box('s', [sku('q', 4, 'D')]),
+  ]);
+  check('only genuinely-batchable-but-alone boxes are demoted',
+    plan.demotedSingletons === 1 && plan.demotedSkus === 1,
+    `${plan.demotedSingletons}/${plan.demotedSkus}`);
+  check('all three still print', plan.bundles.length === 3);
+}
+{
+  const plan = buildLabelPlan([box('a', [sku('p', 1, 'A')]), box('b', [sku('p', 1, 'A')])]);
+  check('a real batch demotes nothing',
+    plan.batchedBoxes === 2 && plan.demotedSingletons === 0 && plan.demotedSkus === 0);
 }
 
 console.log('\nSlip captions');

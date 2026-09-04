@@ -54,6 +54,19 @@ export interface LabelPlan {
   totalOrders: number;
   /** Boxes in real batches — the share that packs mechanically. Excludes demoted singletons. */
   batchedBoxes: number;
+  /**
+   * Boxes that WERE batchable — one SKU, one unit — but whose SKU had no other box in this
+   * run, so they were demoted to mixed.
+   *
+   * Reported because `batchedBoxes: 0` alone cannot distinguish "nothing here could ever
+   * batch" from "eight could have, each was simply alone" — and that difference is exactly
+   * what tells you whether to wait for more volume or whether the mix is wrong. On the first
+   * real Snore run it was 0 batched and 8 demoted: eight single-item boxes across eight
+   * different SKUs.
+   */
+  demotedSingletons: number;
+  /** Distinct SKUs among the demoted singletons. */
+  demotedSkus: number;
 }
 
 /**
@@ -127,6 +140,7 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
   const grouped = [...bySku.values()];
   const tooSmall = grouped.filter((g) => g.boxes.length < MIN_BATCH_SIZE);
   for (const g of tooSmall) bundles.push(...g.boxes);
+  const demotedSingletons = tooSmall.reduce((n, g) => n + g.boxes.length, 0);
 
   const batches = grouped.filter((g) => g.boxes.length >= MIN_BATCH_SIZE).sort(
     (a, b) => b.boxes.length - a.boxes.length
@@ -150,6 +164,8 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
     // a demoted singleton is packed one-at-a-time like a bundle, and counting it as batched
     // would overstate the only number this feature exists to improve.
     batchedBoxes: batches.reduce((n, b) => n + b.boxes.length, 0),
+    demotedSingletons,
+    demotedSkus: tooSmall.length,
   };
 }
 
