@@ -110,9 +110,16 @@ export async function GET(req: Request) {
     // Spend is ESTIMATED, never quoted: no TikTok endpoint prices a label without buying it.
     spend_estimate: spend,
     max_boxes_per_run: MAX_BOXES_PER_RUN,
-    over_cap: toBuy.length > MAX_BOXES_PER_RUN,
-    // Pass this back to the purchase route as ?confirm_boxes= to authorise the run.
+    // Pass BOTH of these to the purchase route to authorise a run:
+    //   ?confirm_boxes= proves the plan has not moved since this was read
+    //   ?limit=         states the most boxes that call may buy, and is REQUIRED
+    // suggested_limit is only a suggestion. A smaller limit is always safe, and is the right
+    // choice for a first run — nothing is lost but a second call.
     confirm_boxes: toBuy.length,
+    suggested_limit: Math.min(toBuy.length, MAX_BOXES_PER_RUN),
+    // How many capped calls this backlog would take. A plan larger than the cap is not
+    // refused; it is bought in successive runs, each re-verified against TikTok.
+    calls_needed_at_cap: Math.ceil(toBuy.length / MAX_BOXES_PER_RUN),
     batches: plan.batches.map((b) => ({ slip: b.slip, sku_number: b.sku_number, boxes: b.boxes.length })),
     page_sequence: planPageSequence(plan),
     excluded: run.excluded,

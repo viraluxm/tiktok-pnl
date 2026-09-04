@@ -13,7 +13,7 @@ import {
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-// POST /api/shipping/labels/purchase?store_id=…&confirm_boxes=N[&skip_docs=1]
+// POST /api/shipping/labels/purchase?store_id=…&confirm_boxes=N&limit=M[&skip_docs=1]
 //
 // BUYS SHIPPING LABELS. This is the only route in the app that spends money.
 //
@@ -32,7 +32,13 @@ export const maxDuration = 300;
 //   4. CONFIRM COUNT. The caller must pass the box count the dry run reported, and it must
 //      match exactly. If a show ended or a sync landed in between, the count moves and this
 //      refuses — so a plan nobody reviewed can never be bought.
-//   5. CAP. A hard ceiling on boxes per run, bounding the worst possible mistake.
+//   5. LIMIT, REQUIRED. The most boxes this call may buy, with no default. confirm_boxes does
+//      NOT protect against size — a caller that reads the dry run and passes its count back
+//      through is perfectly consistent and would buy the whole backlog in one action, which is
+//      exactly what a "Print labels" button would naturally do. Requiring `limit` means a
+//      request cannot express "all of them": it has to name a ceiling, and that ceiling is
+//      visible in the call.
+//   6. CAP. `limit` may not exceed MAX_BOXES_PER_RUN, bounding the worst single call.
 //
 // DURING the run, two rules matter. Each box is CLAIMED in the ledger before its API call, so
 // a crash cannot lead to a re-buy; and each box is wrapped individually, so one failure costs
@@ -56,6 +62,7 @@ export async function POST(req: Request) {
   const url = new URL(req.url);
   const storeId = url.searchParams.get('store_id');
   const confirmRaw = url.searchParams.get('confirm_boxes');
+  const limitRaw = url.searchParams.get('limit');
   const skipDocs = url.searchParams.get('skip_docs') === '1';
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
 
@@ -63,6 +70,9 @@ export async function POST(req: Request) {
   if (confirmBoxes != null && !Number.isInteger(confirmBoxes)) {
     return NextResponse.json({ error: 'confirm_boxes must be an integer' }, { status: 400 });
   }
+  // Absent stays NULL rather than defaulting. authorizeRun refuses a null limit, so an
+  // omitted parameter can never be read as "no ceiling".
+  const limit = limitRaw == null || limitRaw.trim() === '' ? null : Number(limitRaw);
 
   const admin = createAdminClient();
 
@@ -114,6 +124,7 @@ export async function POST(req: Request) {
     enabled: process.env.LABEL_PURCHASE_ENABLED === '1',
     boxes: ordered.length,
     confirmBoxes,
+    limit,
   });
 
   const planSummary = {
@@ -125,6 +136,7 @@ export async function POST(req: Request) {
     one_order_boxes: ordered.filter((b) => shipTypeFor(b) === '1').length,
     multi_order_boxes: ordered.filter((b) => shipTypeFor(b) === '3').length,
     max_boxes_per_run: MAX_BOXES_PER_RUN,
+    limit_requested: limit,
     spend_estimate: await estimateSpend(admin, user.id, storeId, ordered.length),
   };
 
@@ -139,7 +151,12 @@ export async function POST(req: Request) {
     );
   }
 
-  // ── Buy. ──
+  // ── Buy, and ONLY as many as were authorised. ──
+  //
+  // decision.buy is min(limit, boxes) — the slice this call may spend on. Slicing here rather
+  // than inside the loop keeps the bound in one place and makes it impossible for a later edit
+  // to iterate the full plan by accident.
+  const toBuy = ordered.slice(0, decision.buy);
   const runId = randomUUID();
   const bought: Array<{
     group_key: string; package_id: string; tracking_number: string | null;
@@ -149,7 +166,7 @@ export async function POST(req: Request) {
   const skipped: Array<{ group_key: string; reason: string }> = [];
   let stoppedEarly = false;
 
-  for (const box of ordered) {
+  for (const box of toBuy) {
     if (Date.now() - startedAt > TIME_BUDGET_MS) { stoppedEarly = true; break; }
 
     const shipType = shipTypeFor(box);
@@ -269,7 +286,12 @@ export async function POST(req: Request) {
     currency: 'USD',
     failed: failed.length,
     skipped: skipped.length,
+    // Boxes still unbought across the WHOLE plan, not just this slice — otherwise a limited
+    // run would report 0 remaining and read as "the backlog is done".
     remaining: ordered.length - bought.length - failed.length - skipped.length,
+    boxes_in_plan: ordered.length,
+    limit_applied: decision.buy,
+    limit_truncated_run: decision.buy < ordered.length,
     stopped_early: stoppedEarly,
     ...(stoppedEarly ? { stopped_reason: 'time budget — re-read the dry run and run again' } : {}),
     // Labels bought but whose document could not be fetched are still labels. They are listed
