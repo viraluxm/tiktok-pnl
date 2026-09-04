@@ -97,7 +97,14 @@ const find = (calls, table, op) => calls.filter((c) => c.table === table && c.op
 
 const HOUR = 3600_000;
 const EMP = { id: 'emp-claimer', user_id: 'owner-1', name: 'Cass', role: 'fulfillment', hourly_rate: 20 };
-const FAR = () => new Date(Date.now() + 96 * HOUR).toISOString();   // well outside the 24h notice
+// Well outside the 24h notice window. The clock is read ONCE, at module load, because FAR() is
+// called twice inside a single object literal below — for starts_at and again for ends_at. Two
+// reads meant a millisecond tick between them made the shift 8h + 1ms, so projected_week_hours
+// came out 8.000000277777778 and the deep-equal against 8 failed. Measured at 99 of 200,000
+// constructions (~0.05% each, ~1% per run given how many instances a run builds): rare enough
+// to look green locally, frequent enough to fail CI at random. A frozen instant cannot drift.
+const FAR_MS = Date.now() + 96 * HOUR;
+const FAR = () => new Date(FAR_MS).toISOString();
 const inst = (o = {}) => ({
   id: 'inst-1', status: 'released', starts_at: FAR(),
   ends_at: new Date(Date.parse(FAR()) + 8 * HOUR).toISOString(),
