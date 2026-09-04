@@ -34,7 +34,13 @@ const serverOnly = write('serverOnly.mjs', 'export {};\n');
 const adminStub  = write('adminStub.mjs', 'export function createAdminClient(){ return globalThis.__DB; }\n');
 const smsStub    = write('smsStub.mjs',
   'export async function sendAlertSms(){ globalThis.__SMS = (globalThis.__SMS||0)+1; }\n');
-const dropsStub  = write('dropsStub.mjs', 'export function computeDrops(){ return {}; }\n');
+// release.ts now imports DROP_CAP alongside computeDrops for its cap gate, so the stub must
+// provide both. computeDrops returns a full ZERO summary rather than {}: with `{}`, drops.drops is
+// undefined and `undefined >= DROP_CAP` is false, so the gate would appear to pass for the wrong
+// reason. A real zero makes these claim tests run against "no drops used", which is what they mean.
+const dropsStub  = write('dropsStub.mjs',
+  'export const DROP_CAP = 2;\n' +
+  'export function computeDrops(){ return { releases: 0, claims: 0, excused: 0, drops: 0 }; }\n');
 
 // ── real modules ──
 const employees   = transpile('../employees.ts',  'employees.mjs');
