@@ -14,7 +14,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'lp-')), 'labelPlan.mjs');
 writeFileSync(outFile, outputText);
-const { buildLabelPlan, planPageSequence, isSingleSku, slipCaption, sectionKeyOf } =
+const { buildLabelPlan, planPageSequence, isSingleSku, slipCaption, sectionKeyOf, UNBOUND_CAPTION } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -225,6 +225,49 @@ console.log('\nPage sequence');
   check('an empty run plans nothing',
     plan.batches.length === 0 && plan.bundles.length === 0 && plan.totalBoxes === 0);
   check('…and produces no pages', planPageSequence(plan).length === 0);
+}
+
+console.log('\nA box with NO SKU is its own third case, not a bundle');
+{
+  const plan = buildLabelPlan([
+    box('a', [sku('p', 248, 'Pumpkin')]),
+    box('a2', [sku('p', 248, 'Pumpkin')]),
+    box('mix', [sku('x', 1, 'A'), sku('y', 2, 'B')]),
+    box('nosku', []),
+    box('nosku2', []),
+  ]);
+  check('unbound boxes are separated from bundles',
+    plan.unbound.map((b) => b.group_key).join(',') === 'nosku,nosku2',
+    plan.unbound.map((b) => b.group_key).join(','));
+  // THE point. A bundle's label says what to pack; an unbound label says nothing and has to be
+  // looked up by hand. Mixing them hides that inside a pile the packer thinks they can work.
+  check('…and mixed holds ONLY the real bundle',
+    plan.bundles.map((b) => b.group_key).join(',') === 'mix');
+  const seq = planPageSequence(plan);
+  const shape = seq.map((p) => (p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`));
+  check('unbound prints LAST, behind its own header',
+    shape.join(' ') === 'SLIP(#248 PUMPKIN|2) L(a) L(a2) SLIP(MIXED — READ EACH LABEL|1) L(mix) '
+      + `SLIP(${UNBOUND_CAPTION}|2) L(nosku) L(nosku2)`,
+    shape.join(' '));
+  check('the header names the WORK, since the contents are what is unknown',
+    UNBOUND_CAPTION.includes('LOOK UP'), UNBOUND_CAPTION);
+  check('every box is still printed exactly once',
+    seq.filter((p) => p.kind === 'label').length === 5);
+}
+{
+  const plan = buildLabelPlan([box('n1', []), box('n2', [])]);
+  const seq = planPageSequence(plan);
+  check('an all-unbound run still opens with the unbound header',
+    seq[0].kind === 'slip' && seq[0].caption === UNBOUND_CAPTION);
+  check('…and no phantom mixed slip appears',
+    !seq.some((p) => p.kind === 'slip' && p.caption.startsWith('MIXED')));
+  check('unbound boxes are not counted as headed', plan.batchedBoxes === 0);
+}
+{
+  check('no unbound section when everything has a SKU',
+    buildLabelPlan([box('a', [sku('p', 1, 'A')])]).unbound.length === 0);
+  check('an empty run has an empty unbound section',
+    buildLabelPlan([]).unbound.length === 0);
 }
 
 console.log('\nDeterminism — a reviewed dry run must print in the reviewed order');

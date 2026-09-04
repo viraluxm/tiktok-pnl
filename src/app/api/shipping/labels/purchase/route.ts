@@ -9,7 +9,8 @@ import {
   resolveLabelRun, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
 } from '@/lib/shipping/labelRun';
 import {
-  authorizeRun, estimateSpend, parsePrice, MAX_BOXES_PER_RUN,
+  authorizeRun, estimateSpend, parsePrice, readSpendWindows, MAX_BOXES_PER_RUN,
+  type UnboundPolicy,
 } from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
@@ -40,7 +41,11 @@ export const maxDuration = 300;
 //      exactly what a "Print labels" button would naturally do. Requiring `limit` means a
 //      request cannot express "all of them": it has to name a ceiling, and that ceiling is
 //      visible in the call.
-//   6. CAP. `limit` may not exceed MAX_BOXES_PER_RUN, bounding the worst single call.
+//   6. UNBOUND, ANSWERED EXPLICITLY. If any box has no SKU on file the run refuses until the
+//      caller says `skip` or `include`. Unbound is usually a TIMING state — the team binds
+//      shortly after a show — so the right answer is normally to wait and re-run. Picking one
+//      silently would either leave those orders unshipped or buy labels nobody can pick from.
+//   7. CAP. `limit` may not exceed MAX_BOXES_PER_RUN, bounding the worst single call.
 //
 // DURING the run, two rules matter. Each box is CLAIMED in the ledger before its API call, so
 // a crash cannot lead to a re-buy; and each box is wrapped individually, so one failure costs
@@ -65,6 +70,7 @@ export async function POST(req: Request) {
   const storeId = url.searchParams.get('store_id');
   const confirmRaw = url.searchParams.get('confirm_boxes');
   const limitRaw = url.searchParams.get('limit');
+  const unboundRaw = url.searchParams.get('unbound');
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
 
   const confirmBoxes = confirmRaw == null || confirmRaw.trim() === '' ? null : Number(confirmRaw);
@@ -74,6 +80,11 @@ export async function POST(req: Request) {
   // Absent stays NULL rather than defaulting. authorizeRun refuses a null limit, so an
   // omitted parameter can never be read as "no ceiling".
   const limit = limitRaw == null || limitRaw.trim() === '' ? null : Number(limitRaw);
+
+  if (unboundRaw != null && unboundRaw !== 'skip' && unboundRaw !== 'include') {
+    return NextResponse.json({ error: "unbound must be 'skip' or 'include'" }, { status: 400 });
+  }
+  const unboundPolicy = (unboundRaw ?? null) as UnboundPolicy | null;
 
   const admin = createAdminClient();
 
@@ -132,6 +143,8 @@ export async function POST(req: Request) {
     boxes: ordered.length,
     confirmBoxes,
     limit,
+    unboundCount: run.unboundBoxes.length,
+    unboundPolicy,
   });
 
   const planSummary = {
@@ -146,7 +159,10 @@ export async function POST(req: Request) {
     multi_order_boxes: ordered.filter((o) => shipTypeFor(o.box) === '3').length,
     max_boxes_per_run: MAX_BOXES_PER_RUN,
     limit_requested: limit,
+    unbound_boxes: run.unboundBoxes.length,
+    unbound_policy: unboundPolicy,
     spend_estimate: await estimateSpend(admin, user.id, storeId, ordered.length),
+    spend_recent: await readSpendWindows(admin, user.id, storeId),
   };
 
   if (!decision.ok) {

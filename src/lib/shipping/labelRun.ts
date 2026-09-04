@@ -39,6 +39,12 @@ export interface LabelRunOptions {
   shopCipher: string;
   /** Short tag used in read labels and logs, e.g. 'dry-run' or 'purchase'. */
   tag: string;
+  /**
+   * When 'include', boxes with no SKU are planned alongside the rest (behind their own
+   * header). Anything else leaves them out of the plan but still reports them, so the dry run
+   * and the purchase agree about what they are looking at.
+   */
+  includeUnbound?: boolean;
 }
 
 export interface ResolvedLabelRun {
@@ -53,6 +59,13 @@ export interface ResolvedLabelRun {
   /** Status corrections TikTok implied. The caller decides whether to write them. */
   healed: Healed[];
   boxes: PlanBox[];
+  /**
+   * Boxes with no SKU on file. Returned SEPARATELY rather than dropped, because the caller has
+   * to decide about them: unbound is usually a timing state (the team binds after a show), so
+   * silently excluding these orders would leave them unshipped while everything around them
+   * went out.
+   */
+  unboundBoxes: PlanBox[];
   plan: LabelPlan;
   excluded: Excluded[];
 }
@@ -79,7 +92,7 @@ type Admin = any;
  * cached status is exactly what this step exists to distrust.
  */
 export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Promise<ResolvedLabelRun> {
-  const { userId, storeId, accessToken, shopCipher, tag } = opts;
+  const { userId, storeId, accessToken, shopCipher, tag, includeUnbound = false } = opts;
   const nowMs = Date.now();
 
   // ── 1. Candidates, from Lensed. Paged: PostgREST silently caps a response at 1000 rows. ──
@@ -255,6 +268,7 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   }
 
   const boxes: PlanBox[] = [];
+  const unboundBoxes: PlanBox[] = [];
   for (const { group_key, orders } of confirmedBoxes) {
     const ids = orders.map((o) => o.order_id);
     // Merge the box's SKU lines, summing quantities per SKU, so a combine group holding two
@@ -269,7 +283,11 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
       }
     }
     if (merged.size === 0) {
-      excluded.push({ group_key, order_ids: ids, reason: 'no SKUs bound — cannot classify' });
+      // Kept, not dropped. The caller decides — see LabelRunOptions.includeUnbound.
+      const box = { group_key, order_ids: ids, skus: [] as PlanSkuLine[] };
+      unboundBoxes.push(box);
+      if (includeUnbound) boxes.push(box);
+      else excluded.push({ group_key, order_ids: ids, reason: 'no SKU on file — held back' });
       continue;
     }
     boxes.push({ group_key, order_ids: ids, skus: [...merged.values()] });
@@ -285,6 +303,7 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
     confirmedCount: confirmed.length,
     healed,
     boxes,
+    unboundBoxes,
     plan: buildLabelPlan(boxes),
     excluded,
   };

@@ -6,12 +6,12 @@ import { planPageSequence } from '@/lib/shipping/labelPlan';
 import {
   resolveLabelRun, applyHealed, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
 } from '@/lib/shipping/labelRun';
-import { MAX_BOXES_PER_RUN, estimateSpend } from '@/lib/shipping/purchaseGuards';
+import { MAX_BOXES_PER_RUN, estimateSpend, readSpendWindows } from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
 
-// GET /api/shipping/labels/dry-run?store_id=…[&heal=1]
+// GET /api/shipping/labels/dry-run?store_id=…[&heal=1][&unbound=include]
 //
 // What a label run WOULD buy, and the order it would print. Buys nothing.
 //
@@ -34,6 +34,9 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const storeId = url.searchParams.get('store_id');
   const heal = url.searchParams.get('heal') === '1';
+  // Mirrors the purchase route's `unbound` parameter, so whatever you review here is what you
+  // authorise there and confirm_boxes always lines up.
+  const includeUnbound = url.searchParams.get('unbound') === 'include';
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
 
   const admin = createAdminClient();
@@ -53,6 +56,7 @@ export async function GET(req: Request) {
       accessToken: fresh.accessToken as string,
       shopCipher: (fresh.shopCipher ?? (conn as { shop_cipher: string }).shop_cipher) as string,
       tag: 'dry-run',
+      includeUnbound,
     });
   } catch (e) {
     if (e instanceof VerifyFailedError) {
@@ -106,6 +110,10 @@ export async function GET(req: Request) {
       // labels — worth printing, since each says what to grab, but not a mechanical run.
       single_box_sections: plan.singleBoxSections,
       multi_unit_boxes: plan.multiUnitBoxes,
+      // Boxes with no SKU on file. Non-zero means the purchase route will REFUSE until you
+      // answer: wait for the team to bind and re-run, or pass unbound=skip / unbound=include.
+      unbound_boxes: run.unboundBoxes.length,
+      unbound_included: includeUnbound,
       // Boxes a purchase run would actually buy: the plan minus anything already in the ledger.
       already_in_ledger: alreadyBought.size,
       would_buy: toBuy.length,
@@ -114,6 +122,8 @@ export async function GET(req: Request) {
     },
     // Spend is ESTIMATED, never quoted: no TikTok endpoint prices a label without buying it.
     spend_estimate: spend,
+    // What the last week and month actually cost, so this run is judged against real numbers.
+    spend_recent: await readSpendWindows(admin, user.id, storeId),
     max_boxes_per_run: MAX_BOXES_PER_RUN,
     // Pass BOTH of these to the purchase route to authorise a run:
     //   ?confirm_boxes= proves the plan has not moved since this was read

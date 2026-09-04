@@ -65,6 +65,16 @@ export function summarizeSpend(prices: number[], boxes: number): SpendEstimate {
   };
 }
 
+/**
+ * What to do when a run contains boxes with no SKU on file.
+ *
+ * There is deliberately no default. Unbound is usually a TIMING state, not a permanent one —
+ * the team binds shortly after a show — so the right answer is normally to wait and re-run,
+ * and a job that quietly picked one for you would either skip orders silently or buy labels
+ * nobody can pick from. Both are worse than being asked.
+ */
+export type UnboundPolicy = 'skip' | 'include';
+
 export interface AuthorizeInput {
   /** LABEL_PURCHASE_ENABLED === '1'. Anything else means log-only. */
   enabled: boolean;
@@ -77,6 +87,10 @@ export interface AuthorizeInput {
    * which is refused — see authorizeRun.
    */
   limit: number | null;
+  /** Boxes in this run with no SKU on file. */
+  unboundCount: number;
+  /** What to do about them. Null when the caller has not said, which is refused if any exist. */
+  unboundPolicy: UnboundPolicy | null;
   cap?: number;
 }
 
@@ -85,6 +99,7 @@ export type AuthorizeRefusal =
   | 'nothing_to_buy'
   | 'confirm_missing'
   | 'confirm_mismatch'
+  | 'unbound_present'
   | 'limit_missing'
   | 'limit_invalid'
   | 'over_cap';
@@ -136,6 +151,14 @@ export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
       reason: `plan moved since it was reviewed: confirm_boxes=${input.confirmBoxes} but ${input.boxes} boxes now resolve — re-read the dry run`,
     };
   }
+  // Asked BEFORE limit, because the answer can change what the run contains and therefore what
+  // a sensible limit is. Only fires when unbound boxes actually exist, which is rare.
+  if (input.unboundCount > 0 && input.unboundPolicy == null) {
+    return {
+      ok: false, code: 'unbound_present',
+      reason: `${input.unboundCount} box(es) in this batch have no SKU on file. Wait for them to be bound and re-run, or pass unbound=skip to buy the rest, or unbound=include to buy them too (their labels tell the picker nothing and must be looked up by hand).`,
+    };
+  }
   if (input.limit == null) {
     return {
       ok: false, code: 'limit_missing',
@@ -170,6 +193,60 @@ export function parsePrice(raw: unknown): number | null {
   if (!m) return null;
   const n = Number(m[0]);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Rolling spend, so a run is judged against what the last week and month actually cost. */
+export interface SpendWindows {
+  run_total: number;
+  last_7d: { labels: number; spent: number };
+  last_30d: { labels: number; spent: number };
+  currency: string;
+}
+
+/**
+ * Total what the ledger says was spent over the trailing windows.
+ *
+ * Rows with a null price are COUNTED as labels but contribute 0 to spend — those are the
+ * "already purchased at TikTok" rows, where a label exists but was bought outside Lensed and
+ * its price was never ours to see. Dropping them would undercount the labels; inventing a price
+ * would overstate the spend.
+ */
+export function summarizeLedgerSpend(
+  rows: Array<{ price_amount: unknown; purchased_at: unknown }>,
+  nowMs: number,
+  runTotal = 0,
+): SpendWindows {
+  const win = (days: number) => {
+    const from = nowMs - days * 86_400_000;
+    let labels = 0, spent = 0;
+    for (const r of rows) {
+      const t = Date.parse(String(r.purchased_at ?? ''));
+      if (!Number.isFinite(t) || t < from || t > nowMs) continue;
+      labels++;
+      const p = Number(r.price_amount);
+      if (Number.isFinite(p) && p > 0) spent += p;
+    }
+    return { labels, spent: Math.round(spent * 100) / 100 };
+  };
+  return {
+    run_total: Math.round(runTotal * 100) / 100,
+    last_7d: win(7),
+    last_30d: win(30),
+    currency: 'USD',
+  };
+}
+
+/** Read the ledger and total the trailing windows. */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export async function readSpendWindows(
+  admin: any, userId: string, storeId: string, runTotal = 0,
+): Promise<SpendWindows> {
+  const { data } = await admin
+    .from('shipping_label_purchases')
+    .select('price_amount, purchased_at')
+    .eq('user_id', userId).eq('store_id', storeId).eq('status', 'purchased')
+    .gte('purchased_at', new Date(Date.now() - 30 * 86_400_000).toISOString());
+  return summarizeLedgerSpend(data ?? [], Date.now(), runTotal);
 }
 
 /**

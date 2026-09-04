@@ -15,6 +15,11 @@
 // perfectly; burying the same box in mixed forces exactly the read this whole feature exists
 // to remove. Paper is cheaper than a misread.
 //
+// A BOX WITH NO SKU ON FILE IS ITS OWN THIRD CASE, not a bundle. Nothing is known about what
+// is inside it, so its label tells the packer nothing and has to be looked up in TikTok by
+// hand. Putting it in the mixed pile would hide that inside a section the packer believes they
+// can work from. It prints last, behind a header naming the work.
+//
 // MULTI-UNIT BOXES GET THEIR OWN HEADER, NOT THE SINGLE-UNIT ONE. A 3-unit order of the same
 // SKU is still one SKU, so it is not mixed — but it cannot sit under the same heading as the
 // 1-unit boxes either, because the packer working that pile puts one item per package and
@@ -59,6 +64,16 @@ export interface LabelPlan {
    * always gets its own header, however few of them there are.
    */
   bundles: PlanBox[];
+  /**
+   * Boxes with NO SKU on file, printed last behind their own header.
+   *
+   * These are orders Lensed has not bound to an auction item, so nothing is known about what
+   * is inside them. They are kept separate from `bundles` rather than lumped in, because the
+   * two need opposite handling: a bundle's label tells the packer what to pack, an unbound
+   * label tells them nothing at all and has to be looked up in TikTok by hand. Mixing them
+   * would hide that in a pile the packer thinks they can work from.
+   */
+  unbound: PlanBox[];
   totalBoxes: number;
   totalOrders: number;
   /** Boxes under a SKU header — the share that packs without reading a label. */
@@ -74,6 +89,9 @@ export interface LabelPlan {
   /** Boxes needing multiple items each, so their header carries a per-box count. */
   multiUnitBoxes: number;
 }
+
+/** Header for the unbound section. Names the action, since the label itself says nothing. */
+export const UNBOUND_CAPTION = 'NO SKU ON FILE — LOOK UP EACH ORDER';
 
 /** Total units across a box's SKU lines. */
 function unitsIn(box: PlanBox): number {
@@ -136,7 +154,14 @@ export function slipCaption(skuNumber: number | null, title: string, units = 1):
 export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
   const singleSku: PlanBox[] = [];
   const bundles: PlanBox[] = [];
-  for (const b of boxes) (isSingleSku(b) ? singleSku : bundles).push(b);
+  const unbound: PlanBox[] = [];
+  for (const b of boxes) {
+    // Three-way, and the order matters: no SKU lines at all is a different problem from two or
+    // more, and must not be answered with the bundle pile.
+    if (b.skus.length === 0) unbound.push(b);
+    else if (isSingleSku(b)) singleSku.push(b);
+    else bundles.push(b);
+  }
 
   // Keyed by (SKU, units per box), so a 3-unit box never joins the one-per-package pile.
   const sections = new Map<string, SkuBatch>();
@@ -167,6 +192,7 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
   // Stable order within a section and among bundles, for the same reason as the tie-break above.
   for (const b of batches) b.boxes.sort((x, y) => x.group_key.localeCompare(y.group_key));
   bundles.sort((x, y) => x.group_key.localeCompare(y.group_key));
+  unbound.sort((x, y) => x.group_key.localeCompare(y.group_key));
 
   const orderIds = new Set<string>();
   for (const b of boxes) for (const o of b.order_ids) orderIds.add(o);
@@ -174,6 +200,7 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
   return {
     batches,
     bundles,
+    unbound,
     totalBoxes: boxes.length,
     totalOrders: orderIds.size,
     // Every box under a SKU header — the share that packs without reading a label.
@@ -210,6 +237,12 @@ export function planPageSequence(plan: LabelPlan): Array<
     // read individually.
     out.push({ kind: 'slip', caption: 'MIXED — READ EACH LABEL', count: plan.bundles.length });
     for (const box of plan.bundles) out.push({ kind: 'label', group_key: box.group_key });
+  }
+  if (plan.unbound.length) {
+    // Last, and behind a header that names the work rather than the contents — because the
+    // contents are exactly what is not known.
+    out.push({ kind: 'slip', caption: UNBOUND_CAPTION, count: plan.unbound.length });
+    for (const box of plan.unbound) out.push({ kind: 'label', group_key: box.group_key });
   }
   return out;
 }
