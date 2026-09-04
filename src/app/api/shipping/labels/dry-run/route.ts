@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { parseScope } from '@/lib/shipping/labelScope';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { planPageSequence } from '@/lib/shipping/labelPlan';
 import {
@@ -39,6 +40,15 @@ export async function GET(req: Request) {
   const includeUnbound = url.searchParams.get('unbound') === 'include';
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
 
+  // Which slice of the backlog: everything, one fulfilment day, or specific lives. A malformed
+  // value is REFUSED rather than falling back to the whole backlog — see parseScope.
+  const parsed = parseScope({
+    day: url.searchParams.get('day'),
+    sessionIds: url.searchParams.get('session_ids'),
+  });
+  if ('error' in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 });
+  const scope = parsed.scope;
+
   const admin = createAdminClient();
 
   const { data: conn } = await admin
@@ -56,6 +66,7 @@ export async function GET(req: Request) {
       accessToken: fresh.accessToken as string,
       shopCipher: (fresh.shopCipher ?? (conn as { shop_cipher: string }).shop_cipher) as string,
       tag: 'dry-run',
+      scope,
       includeUnbound,
     });
   } catch (e) {
@@ -96,6 +107,7 @@ export async function GET(req: Request) {
     dry_run: true,
     purchased: 0,
     store_id: storeId,
+    scope: run.scope,
     verified_against_tiktok: true,
     healed: heal ? run.healed.length : 0,
     heal_available: !heal && run.healed.length > 0 ? run.healed.length : 0,

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { parseScope } from '@/lib/shipping/labelScope';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { createPackage, ALREADY_PURCHASED_CODES } from '@/lib/tiktok/client';
 import { planPageSequence, type PlanBox } from '@/lib/shipping/labelPlan';
@@ -73,6 +74,15 @@ export async function POST(req: Request) {
   const unboundRaw = url.searchParams.get('unbound');
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
 
+  // Which slice of the backlog: everything, one fulfilment day, or specific lives. A malformed
+  // value is REFUSED rather than falling back to the whole backlog — see parseScope.
+  const parsed = parseScope({
+    day: url.searchParams.get('day'),
+    sessionIds: url.searchParams.get('session_ids'),
+  });
+  if ('error' in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 });
+  const scope = parsed.scope;
+
   const confirmBoxes = confirmRaw == null || confirmRaw.trim() === '' ? null : Number(confirmRaw);
   if (confirmBoxes != null && !Number.isInteger(confirmBoxes)) {
     return NextResponse.json({ error: 'confirm_boxes must be an integer' }, { status: 400 });
@@ -102,6 +112,8 @@ export async function POST(req: Request) {
   try {
     run = await resolveLabelRun(admin, {
       userId: user.id, storeId, accessToken: token, shopCipher: cipher, tag: 'purchase',
+      scope,
+      includeUnbound: unboundPolicy === 'include',
     });
   } catch (e) {
     if (e instanceof VerifyFailedError) {
@@ -155,6 +167,7 @@ export async function POST(req: Request) {
 
   const planSummary = {
     store_id: storeId,
+    scope: run.scope,
     verified_against_tiktok: true,
     boxes_in_plan: run.plan.totalBoxes,
     excluded_too_recent: run.excludedTooRecent,
@@ -167,6 +180,10 @@ export async function POST(req: Request) {
     limit_requested: limit,
     unbound_boxes: run.unboundBoxes.length,
     unbound_policy: unboundPolicy,
+    // Echoed from what the RESOLVER was actually told, not from the parameter. These drifted
+    // apart once already: the policy was parsed and gated while the resolver never received it,
+    // so "buy them too" silently bought only the bound boxes.
+    unbound_included: unboundPolicy === 'include',
     spend_estimate: await estimateSpend(admin, user.id, storeId, ordered.length),
     spend_recent: await readSpendWindows(admin, user.id, storeId),
   };

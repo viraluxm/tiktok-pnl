@@ -7,11 +7,13 @@
 // impossible rather than merely unlikely.
 
 import { getOrderById } from '@/lib/tiktok/client';
-import { readAllPaged, readAllPagedIn } from '@/lib/db/readAll';
+import { readAllPagedIn } from '@/lib/db/readAll';
 import { buildLabelPlan, type LabelPlan, type PlanBox, type PlanSkuLine } from '@/lib/shipping/labelPlan';
 import {
   groupIntoBoxes, gateByAge, gateByVerifiedStatus, MIN_ORDER_AGE_HOURS, type GateBox,
 } from '@/lib/shipping/candidateGate';
+import { readCandidates } from '@/lib/shipping/labelCandidates';
+import { describeScope, type LabelScope } from '@/lib/shipping/labelScope';
 
 /** getOrderById accepts at most 50 ids per call. */
 export const CHUNK = 50;
@@ -45,9 +47,16 @@ export interface LabelRunOptions {
    * and the purchase agree about what they are looking at.
    */
   includeUnbound?: boolean;
+  /**
+   * Which slice of the backlog to consider: everything, one fulfilment day, or specific lives.
+   * Narrowing only — every safety gate still applies to whatever it selects.
+   */
+  scope?: LabelScope;
 }
 
 export interface ResolvedLabelRun {
+  /** Human description of what this run was pointed at, for the summary and logs. */
+  scope: string;
   candidateCount: number;
   candidateBoxCount: number;
   /** Boxes held back because their combine group may still be growing. */
@@ -70,11 +79,6 @@ export interface ResolvedLabelRun {
   excluded: Excluded[];
 }
 
-type Candidate = {
-  order_id: string;
-  auto_combine_group_id: string | null;
-  order_created_at: string | null;
-};
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Admin = any;
@@ -92,23 +96,18 @@ type Admin = any;
  * cached status is exactly what this step exists to distrust.
  */
 export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Promise<ResolvedLabelRun> {
-  const { userId, storeId, accessToken, shopCipher, tag, includeUnbound = false } = opts;
+  const {
+    userId, storeId, accessToken, shopCipher, tag,
+    includeUnbound = false, scope = { kind: 'all' },
+  } = opts;
   const nowMs = Date.now();
 
-  // ── 1. Candidates, from Lensed. Paged: PostgREST silently caps a response at 1000 rows. ──
-  const rows = (await readAllPaged<Candidate>(
-    (from, to) => admin.from('synced_order_ids')
-      .select('order_id, auto_combine_group_id, order_created_at')
-      .eq('user_id', userId).eq('store_id', storeId)
-      .eq('status', 'AWAITING_SHIPMENT').is('tracking_number', null)
-      .order('order_id', { ascending: true })
-      .range(from, to),
-    `labels ${tag} candidates`,
-  )).map((c) => ({
-    order_id: String(c.order_id),
-    auto_combine_group_id: c.auto_combine_group_id ?? null,
-    order_created_at: c.order_created_at ?? null,
-  }));
+  // ── 1. Candidates, from Lensed, narrowed by scope. ──
+  //
+  // Shared with the scope picker (labelCandidates) so the dropdown's counts and the run's
+  // candidates cannot drift — a picker advertising boxes the run then declines would make the
+  // whole selection step untrustworthy.
+  const rows = await readCandidates(admin, userId, storeId, scope, tag);
 
   const excluded: Excluded[] = [];
 
@@ -302,6 +301,7 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   }
 
   return {
+    scope: describeScope(scope),
     candidateCount: rows.length,
     candidateBoxCount: allBoxes.length,
     excludedTooRecent,
