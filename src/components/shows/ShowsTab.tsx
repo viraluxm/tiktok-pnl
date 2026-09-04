@@ -1355,13 +1355,6 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
               {' '}Host pay is {showEcon?.host_name ? `${showEcon.host_name}'s ` : ''}air time × rate.
               {!net.baseIsNetOfFees && ' TikTok fees are NOT yet included — refresh payouts for the true bottom line.'}
               {net.shortShow && ` This show ran under ${SHORT_SHOW_MS / 60000} minutes, so host pay covers only its air time and understates what the host was actually paid.`}
-              {pickRate?.pick_coverage_pct != null && pickRate.pick_coverage_pct < 90 && (
-                <>
-                  {' '}Note: only {Math.round(pickRate.pick_coverage_pct)}% of sold units have a
-                  {' '}recorded pick, so the per-box and per-pick figures on the Team view read
-                  {' '}high — this rate divides by sales, so it is unaffected.
-                </>
-              )}
             </>
           ) : (
             <>Net / unit unavailable — {netMissingNote}. Costs are left out rather than counted as $0.</>

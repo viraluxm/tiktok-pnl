@@ -5,12 +5,22 @@ import { useUser } from './useUser';
 import type { TrailingFulfillmentRate } from '@/lib/shipping/trailingFulfillmentRate';
 import type { DurationSource } from '@/lib/shows/duration';
 
-// How many completed fulfillment days the rate pools. 30, not 7: the figure is an ALLOCATION,
-// so stability beats recency. At 7 days it read $0.449/unit against $0.500 at 30, and the
-// difference was one bad week of pick recording rather than any change in real cost. See
-// trailingFulfillmentRate.ts for the denominator argument and netEconomics.ts for why picking
-// cost is allocated at all.
-export const PICK_RATE_DAYS = 30;
+// How many completed fulfillment days the rate pools.
+//
+// 14, not 7 and not 30. 7 is too noisy — the crew rate swung 2.2x day to day over one week, and
+// picking runs in batches (weekly outflow ranged 45% to 112% of sales over August), so a short
+// window measures which days happened to fall inside it. 30 is too long while the operation is
+// SCALING: units sold per week ran 17,623 → 19,084 → 23,286 → 23,707 through August, up 35%, so
+// a 30-day window prices today's shows partly off weeks that no longer resemble the business.
+//
+// 14 days spans the batch cycle without reaching back into the smaller weeks. It also happens to
+// be where the two candidate denominators agree most closely ($0.520 per unit sold vs $0.601 per
+// unit picked, a 16% spread against 23% at 30 days), which is a sign the window is long enough
+// for fulfillment lag to average out and short enough to still describe current volume.
+//
+// See trailingFulfillmentRate.ts for the denominator argument and netEconomics.ts for why
+// fulfillment cost is allocated rather than measured per show.
+export const PICK_RATE_DAYS = 14;
 
 export interface FulfillmentCostRateResponse extends TrailingFulfillmentRate {
   window: { days: number; first_day: string; last_day: string; start: string; end: string };

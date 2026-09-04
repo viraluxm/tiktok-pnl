@@ -85,3 +85,31 @@ grant execute on function public.lensed_sold_units_in_window(timestamptz, timest
 -- schema and will 500 with PGRST202 on a function it has not re-read yet, even though the
 -- function exists and is correctly granted. This bit 122 for several minutes after a clean
 -- apply. See the note at the end of 122 for the verification probe.
+
+-- ─────────────────────────────────────────────────────────────────────────────────────────────
+-- CORRECTION (appended after this migration was applied; the SQL above is unchanged and is the
+-- record of what ran).
+--
+-- The header above justifies this function partly by claiming the picked count is structurally
+-- under-recorded ("recorded picks were 65% of units sold over 7 days ... it never converges").
+-- BOTH THAT CLAIM AND THE BACKLOG READING BUILT ON IT ARE WRONG.
+--
+-- Recording is fine. Those percentages were aggregates spanning the pack-station rollout.
+-- Measured per COHORT — orders sold in week W, checked for a pick row with no window on the pick
+-- side — coverage runs 84% (08-03), 86% (08-10), 94% (08-17); of orders that actually shipped it
+-- is ~97% from mid-August. The 4,185 shipped-without-a-pick-row orders cited above are almost
+-- entirely pre-rollout.
+--
+-- And there is no demonstrated backlog. "Sold in window minus picked in window" compares two
+-- different clocks — order date against verified_at — so orders sold late in a window are picked
+-- after it. At ~3,400 units/day with a couple of days of lag that edge effect accounts for
+-- essentially the whole apparent gap, and it scales with volume, which is why it looked worse as
+-- the operation grew.
+--
+-- WHAT THIS MEANS FOR THIS FUNCTION: each sold unit is picked exactly once, so units sold and
+-- units picked are the same population and the two possible denominators converge over matched
+-- cohorts. The choice is practical, not economic. Units sold is used because it comes from order
+-- sync — complete and authoritative — so the rate depends on no pack-station behaviour at all,
+-- and because it makes a period's allocation sum to that period's payroll. 122 is still read for
+-- raw picked/box volume, which belongs to the Team view's own KPIs; the ratio between the two
+-- windowed counts is NOT interpretable and must not be surfaced as one.

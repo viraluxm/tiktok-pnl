@@ -8,7 +8,7 @@ import { trailingFulfillmentRate, type WindowVolume } from '@/lib/shipping/trail
 
 export const dynamic = 'force-dynamic';
 
-// GET /api/team/fulfillment-cost-rate?days=30
+// GET /api/team/fulfillment-cost-rate?days=14
 //
 // The crew's pooled fulfillment labor cost per unit SOLD over the last N COMPLETED fulfillment
 // days — the rate the Shows tab allocates picking labor at. See
@@ -35,13 +35,11 @@ export async function GET(req: Request) {
 
   const { searchParams } = new URL(req.url);
   const raw = Number(searchParams.get('days'));
-  // 1..60 days, defaulting to 30. Clamped rather than rejected — a smoothing window, not an
-  // identifier. 30 is the default because the rate is an ALLOCATION, so stability matters more
-  // than recency: at 7 days it read $0.449/unit against $0.500 at 30, the difference being one
-  // bad week of pick recording rather than any real change in what fulfillment costs. At 30 days
-  // the labor is also almost entirely manager-confirmed ($46,274 of $47,488), so the figure is
-  // close to settled rather than a projection.
-  const days = Number.isFinite(raw) ? Math.min(60, Math.max(1, Math.trunc(raw))) : 30;
+  // 1..60 days, defaulting to 14 (see PICK_RATE_DAYS in useShowNetEconomics.ts for why 14 rather
+  // than 7 or 30 — 7 measures whichever days fell inside it, since picking runs in batches, and
+  // 30 prices today's shows partly off weeks the operation has already outgrown). Clamped rather
+  // than rejected: this is a smoothing window, not an identifier.
+  const days = Number.isFinite(raw) ? Math.min(60, Math.max(1, Math.trunc(raw))) : 14;
 
   const today = zonedDayKey(Date.now(), SHOP_TIMEZONE);
   const firstDay = addDaysISO(today, -days);

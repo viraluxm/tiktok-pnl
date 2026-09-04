@@ -13,15 +13,32 @@
  * allocation whose parts do not add back to the whole is wrong however carefully each part is
  * computed. Units sold reconciles by construction: $0.449 x 26,760 = $12,015.
  *
- * The picked count was also independently inflating the rate, because it is UNDER-recorded:
- * recorded picks ran 65% of units sold over 7 days, 82% over 14, 77% over 30, 54% over 60. It
- * never converges, so this is not fulfillment lag — real picking writes no verification row
- * (4,185 orders in COMPLETED / DELIVERED / IN_TRANSIT over 30 days have none, and they shipped).
+ * A CORRECTION TO AN EARLIER READING OF THIS. Two claims were made here and both were wrong.
  *
- * The picked figures are still computed and returned, as `pick_coverage_pct` and the
- * `*_per_picked_unit` diagnostics. They are NOT used for allocation. They are kept visible
- * precisely because when that coverage was invisible it silently distorted a cost figure, and
- * the same mechanism still distorts $/box and $/SKU on the Team view.
+ * (1) "The picked count is structurally under-recorded." It is not. That came from aggregates
+ * spanning the pack-station rollout. Measured per COHORT — orders sold in week W, checked for a
+ * pick row with no window on the pick side — coverage runs 84% (08-03), 86% (08-10), 94%
+ * (08-17), with the shortfall being the tail of the rollout. Of orders that actually shipped it
+ * is ~97% from mid-August on. Recording is essentially complete.
+ *
+ * (2) "Sold exceeds picked, so a backlog is building." Also wrong, and it was an artifact of the
+ * measurement rather than a fact about the warehouse. Units sold bucket on the ORDER date and
+ * picks bucket on verified_at — two different clocks — so orders sold late in a window are
+ * picked after it. At ~3,400 units/day with a couple of days of lag, that edge effect accounts
+ * for essentially all of the apparent gap, and it grows with volume. The cohort test above shows
+ * mature weeks reaching 94%, i.e. every sold unit does get picked.
+ *
+ * SO THE TWO DENOMINATORS ARE THE SAME POPULATION, and the choice between them is not an
+ * economic one — each sold unit is picked exactly once, so over matched cohorts labor ÷ sold and
+ * labor ÷ picked converge. Units sold is chosen for two practical reasons only: it comes from
+ * order sync, which is complete and authoritative, so the rate depends on no pack-station
+ * behaviour at all; and it makes a period's allocation sum to that period's payroll.
+ *
+ * DO NOT read anything into (picked in window ÷ sold in window). The counts are on different
+ * clocks and the ratio is not interpretable — it was briefly surfaced in the UI as a backlog
+ * warning, which was removed for exactly this reason. `picked_units` and `boxes` are kept as raw
+ * diagnostics for the Team view's own KPIs, and `cents_per_picked_unit_projected` alongside
+ * them, but none of the three belongs in a comparison against the sold-based rate.
  *
  * POOLED, NOT AVERAGED. Sums cents over the whole window and divides by units over the whole
  * window. A mean of daily rates would weight a quiet day the same as a busy one, which is not
@@ -56,8 +73,6 @@ export interface TrailingFulfillmentRate {
   cancelled_orders: number;
   picked_units: number;
   boxes: number;
-  /** picked ÷ sold. Well under 100% means picks go unrecorded; see the header. */
-  pick_coverage_pct: number | null;
 
   payable_hours: number;
   payable_cents: number;
@@ -125,7 +140,6 @@ export function trailingFulfillmentRate(
     cancelled_orders: volume.cancelled_orders,
     picked_units: volume.picked_units,
     boxes: volume.boxes,
-    pick_coverage_pct: volume.sold_units > 0 ? (volume.picked_units / volume.sold_units) * 100 : null,
 
     payable_hours: pooled.payable_hours,
     payable_cents: pooled.payable_cents,
