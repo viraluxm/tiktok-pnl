@@ -1,11 +1,12 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import type { Employee } from '@/types';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
+import { useScheduleBulk, ScheduleRefusedError } from '@/hooks/useScheduleBulk';
+import type { ScheduleEntry } from '@/lib/schedule/schedulePlan';
 import { generateRecurringShifts, PAY_ANCHOR } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
 import {
@@ -67,7 +68,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   const [addOnDate, setAddOnDate] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
 
-  const qc = useQueryClient();
+  const { apply: applySchedule } = useScheduleBulk();
   const grid = useMemo(() => monthGridDays(anchor), [anchor]);
 
   const { shifts, addShift, updateShift, deleteShift, confirmShift } = useShifts(grid.gridStart, grid.gridEnd);
@@ -181,22 +182,26 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
     await confirmShift.mutateAsync({ id: shiftId, confirmed });
   }
 
-  // PLAN. Writes shift_instances via the admin route — non-payable, and what the personal
-  // clock-in links validate against. One row per selected person.
+  // PLAN. One bulk request for the whole crew through the SAME write path the employee Schedule
+  // Builder uses (POST /api/admin/schedule/instances/bulk) — non-payable shift_instances, and what
+  // the personal clock-in links validate against. Someone who already has a shift that day gets
+  // their times updated rather than a duplicate error, so we preview and ask first.
   async function createScheduled(employeeIds: string[], startTime: string, endTime: string) {
-    const roleById = new Map(employees.map((e) => [e.id, e.role]));
-    for (const employeeId of employeeIds) {
-      const res = await fetch('/api/admin/schedule/instances', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: addOnDate, startTime, endTime, employeeId, role: roleById.get(employeeId) ?? null }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error ?? 'Could not post the scheduled shift.');
+    const entries: ScheduleEntry[] = employeeIds.map((employeeId) => ({
+      employeeId, date: addOnDate as string, startTime, endTime,
+    }));
+    try {
+      const dry = await applySchedule.mutateAsync({ entries, dryRun: true });
+      if (dry.updated > 0) {
+        const msg = dry.updated === 1
+          ? '1 of these people already has a shift that day — update their times?'
+          : `${dry.updated} of these people already have a shift that day — update their times?`;
+        if (!window.confirm(msg)) return;
       }
+      await applySchedule.mutateAsync({ entries });
+    } catch (e) {
+      throw new Error(e instanceof ScheduleRefusedError ? e.message : (e as Error).message);
     }
-    await qc.invalidateQueries({ queryKey: ['shift_instances'] });
   }
 
   // PLAN, removed. Deletes ONE `shift_instances` row through the admin route, which re-checks every
