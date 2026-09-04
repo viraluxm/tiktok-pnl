@@ -25,6 +25,21 @@ function fmt(iso: string): string {
   });
 }
 
+// Form-control styling for a sheet that has to work on a real phone.
+//
+//   text-base (16px)         iOS Safari ZOOMS the whole page when a focused control is under 16px.
+//                            The sheet is fixed-position, so that zoom leaves it half off-screen
+//                            with no way back. This is the single most important rule here.
+//   -webkit-text-fill-color  iOS renders input[type=date] with its OWN text colour, ignoring
+//                            `color`. On this dark ground that produced the empty-looking boxes:
+//                            the value was present, just painted near-black on near-black.
+//   appearance-none          stops iOS applying its native inset/rounding on top of ours.
+//   min-h-11 (44px)          Apple's minimum touch target; an empty date input otherwise
+//                            collapses to a few pixels tall on iOS.
+const FIELD =
+  'w-full min-h-11 appearance-none rounded-lg border border-tt-input-border bg-tt-input-bg px-3 py-2.5 ' +
+  'text-base text-tt-text [-webkit-text-fill-color:var(--color-tt-text)] placeholder:text-tt-muted/60';
+
 const STATUS_STYLE: Record<TimeOffRequest['status'], string> = {
   pending: 'border-tt-yellow/50 text-tt-yellow',
   approved: 'border-tt-green/50 text-tt-green',
@@ -107,7 +122,7 @@ export default function TimeOffButton({ token }: { token: string }) {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-t-2xl border border-tt-border bg-tt-card p-4 sm:rounded-2xl"
+            className="max-h-[85dvh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-2xl border border-tt-border bg-tt-card p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:max-h-[85vh] sm:rounded-2xl sm:pb-4"
           >
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
@@ -124,22 +139,22 @@ export default function TimeOffButton({ token }: { token: string }) {
               >✕</button>
             </div>
 
-            <div className="space-y-2.5">
-              <div className="flex gap-2">
-                <label className="flex-1 text-[10px] uppercase tracking-wide text-tt-muted">
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="block text-[11px] uppercase tracking-wide text-tt-muted">
                   First day
                   <input
                     type="date" value={start} min={earliest || undefined}
                     onChange={(e) => setStart(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text"
+                    className={`mt-1 ${FIELD}`}
                   />
                 </label>
-                <label className="flex-1 text-[10px] uppercase tracking-wide text-tt-muted">
-                  Last day <span className="normal-case text-tt-muted/70">(optional)</span>
+                <label className="block text-[11px] uppercase tracking-wide text-tt-muted">
+                  Last day <span className="normal-case text-tt-muted/70">— leave blank for one day</span>
                   <input
                     type="date" value={end} min={start || earliest || undefined}
                     onChange={(e) => setEnd(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text"
+                    className={`mt-1 ${FIELD}`}
                   />
                 </label>
               </div>
@@ -147,12 +162,12 @@ export default function TimeOffButton({ token }: { token: string }) {
                 type="text" value={reason} maxLength={300}
                 onChange={(e) => setReason(e.target.value)}
                 placeholder="Reason (optional)"
-                className="w-full rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-2 text-sm text-tt-text placeholder:text-tt-muted/60"
+                className={FIELD}
               />
-              {error && <p className="text-xs text-tt-magenta-soft">{error}</p>}
+              {error && <p className="text-sm text-tt-magenta-soft">{error}</p>}
               <button
                 type="button" onClick={submit} disabled={busy || !start}
-                className="w-full rounded-lg bg-tt-cyan py-2.5 text-sm font-semibold text-black disabled:opacity-40"
+                className="min-h-12 w-full rounded-lg bg-tt-cyan text-base font-semibold text-black disabled:opacity-40"
               >
                 {busy ? 'Sending…' : 'Send request'}
               </button>
