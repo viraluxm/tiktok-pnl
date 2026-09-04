@@ -9,6 +9,9 @@
 import { getOrderById } from '@/lib/tiktok/client';
 import { readAllPaged } from '@/lib/db/readAll';
 import { buildLabelPlan, type LabelPlan, type PlanBox, type PlanSkuLine } from '@/lib/shipping/labelPlan';
+import {
+  groupIntoBoxes, gateByAge, gateByVerifiedStatus, MIN_ORDER_AGE_HOURS, type GateBox,
+} from '@/lib/shipping/candidateGate';
 
 /** getOrderById accepts at most 50 ids per call. */
 export const CHUNK = 50;
@@ -16,6 +19,7 @@ export const CHUNK = 50;
 export const VERIFY_CALL_CAP = 20;
 /** Heartbeat freshness that counts as "a show is running right now". */
 export const LIVE_WINDOW_MIN = 20;
+export { MIN_ORDER_AGE_HOURS };
 
 export type Excluded = { group_key: string; order_ids: string[]; reason: string };
 export type Healed = { order_id: string; from: string; to: string };
@@ -39,6 +43,9 @@ export interface LabelRunOptions {
 
 export interface ResolvedLabelRun {
   candidateCount: number;
+  candidateBoxCount: number;
+  /** Boxes held back because their combine group may still be growing. */
+  excludedTooRecent: number;
   excludedShowLive: number;
   verifiedCount: number;
   notVerifiedOverCap: number;
@@ -50,47 +57,82 @@ export interface ResolvedLabelRun {
   excluded: Excluded[];
 }
 
-type Candidate = { order_id: string; auto_combine_group_id: string | null };
-
-const keyOf = (o: Candidate) => o.auto_combine_group_id ?? `order:${o.order_id}`;
+type Candidate = {
+  order_id: string;
+  auto_combine_group_id: string | null;
+  order_created_at: string | null;
+};
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Admin = any;
 
 /**
- * Everything up to (but excluding) the purchase: gather candidates, drop running shows, verify
- * against TikTok, collapse to boxes, and plan the print order.
+ * Everything up to (but excluding) the purchase: gather candidates, group them into boxes, gate
+ * those boxes, verify against TikTok, and plan the print order.
+ *
+ * EVERY GATE OPERATES ON A WHOLE BOX. One label covers one box, so a box is either wholly safe
+ * to buy or wholly held back. Half-boxes are the failure this shape prevents: labelling the
+ * settled orders of a group that is still combining, or the surviving orders of a group whose
+ * sibling has already shipped.
  *
  * Throws VerifyFailedError if TikTok could not be reached. That is deliberately fatal: the
  * cached status is exactly what this step exists to distrust.
  */
 export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Promise<ResolvedLabelRun> {
   const { userId, storeId, accessToken, shopCipher, tag } = opts;
+  const nowMs = Date.now();
 
   // ── 1. Candidates, from Lensed. Paged: PostgREST silently caps a response at 1000 rows. ──
-  const candidates = (await readAllPaged<Candidate>(
+  const rows = (await readAllPaged<Candidate>(
     (from, to) => admin.from('synced_order_ids')
-      .select('order_id, auto_combine_group_id')
+      .select('order_id, auto_combine_group_id, order_created_at')
       .eq('user_id', userId).eq('store_id', storeId)
       .eq('status', 'AWAITING_SHIPMENT').is('tracking_number', null)
       .order('order_id', { ascending: true })
       .range(from, to),
     `labels ${tag} candidates`,
-  )).map((c) => ({ order_id: String(c.order_id), auto_combine_group_id: c.auto_combine_group_id ?? null }));
+  )).map((c) => ({
+    order_id: String(c.order_id),
+    auto_combine_group_id: c.auto_combine_group_id ?? null,
+    order_created_at: c.order_created_at ?? null,
+  }));
 
   const excluded: Excluded[] = [];
 
-  // ── 2. Drop anything from a show that is running. ──
+  // ── 2. GROUP FIRST, then gate whole boxes. ──
   //
-  // Gated on last_seen_at, never live_sessions.status — CLAUDE.md forbids that flag as an
-  // interlock. Buying a running show's labels mid-show is the expensive mistake here, because
-  // its orders are still being combined and a label bought now covers the wrong box.
+  // Grouping before verification is deliberate and does two things. It lets every gate operate
+  // on the box, which is the unit that gets one label — gating per order would buy a label for
+  // the settled half of a group still forming, the exact split shipment these gates exist to
+  // prevent. And it means verification calls are only spent on boxes that survived the cheap
+  // local checks.
+  const allBoxes = groupIntoBoxes(rows);
+
+  // ── 3. Age floor: has this box's combine group stopped growing? ──
+  //
+  // This replaces a live-session LOOKUP that had a hole: an order from the show running right
+  // now has no auction-item row until it is captured, so the lookup could not see it. Measured
+  // 2026-09-04 with five sessions heartbeating, 68 such orders slipped through. Age is a
+  // property of the order itself and cannot be evaded by missing bookkeeping.
+  const aged: GateBox[] = [];
+  for (const b of allBoxes) {
+    const v = gateByAge(b, nowMs);
+    if (v.ok) { aged.push(b); continue; }
+    excluded.push({ group_key: b.group_key, order_ids: b.orders.map((o) => o.order_id), reason: v.reason });
+  }
+  const excludedTooRecent = allBoxes.length - aged.length;
+
+  // ── 4. Belt and braces: drop anything still tied to a running show. ──
+  //
+  // The age floor already covers this for any show of normal length. This stays for the
+  // pathological case — a session running longer than the floor — and is gated on last_seen_at,
+  // never live_sessions.status, which CLAUDE.md forbids as an interlock.
   const liveOrderIds = new Set<string>();
-  if (candidates.length) {
+  if (aged.length) {
     const { data: liveSessions } = await admin
       .from('live_sessions').select('id')
       .eq('user_id', userId)
-      .gte('last_seen_at', new Date(Date.now() - LIVE_WINDOW_MIN * 60_000).toISOString());
+      .gte('last_seen_at', new Date(nowMs - LIVE_WINDOW_MIN * 60_000).toISOString());
     const liveIds = (liveSessions ?? []).map((s: { id: unknown }) => String(s.id));
     if (liveIds.length) {
       const liveItems = await readAllPaged<{ client_idempotency_key: string | null }>(
@@ -108,14 +150,17 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
     }
   }
 
-  const afterLive = candidates.filter((c) => !liveOrderIds.has(c.order_id));
-  for (const c of candidates) {
-    if (liveOrderIds.has(c.order_id)) {
-      excluded.push({ group_key: keyOf(c), order_ids: [c.order_id], reason: 'show is live' });
-    }
+  const afterLive: GateBox[] = [];
+  for (const b of aged) {
+    const hit = b.orders.filter((o) => liveOrderIds.has(o.order_id));
+    if (!hit.length) { afterLive.push(b); continue; }
+    excluded.push({
+      group_key: b.group_key, order_ids: b.orders.map((o) => o.order_id),
+      reason: `show is live (${hit.length} of ${b.orders.length} orders in a running session)`,
+    });
   }
 
-  // ── 3. VERIFY with TikTok. The authoritative step. ──
+  // ── 5. VERIFY with TikTok. The authoritative step. ──
   //
   // Measured 2026-09-03: of 100 orders Lensed believed were AWAITING_SHIPMENT, TikTok said 38
   // had already moved to AWAITING_COLLECTION — labels already bought. The drift is
@@ -123,11 +168,23 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   // order as EARLIER in its lifecycle than it is. Every error is therefore a false positive
   // that this step catches; the only genuine miss is an order not yet synced, which the next
   // run picks up.
-  const toVerify = afterLive.slice(0, VERIFY_CALL_CAP * CHUNK);
+  //
+  // The cap counts BOXES worth of orders, taken whole: splitting a box across the cap boundary
+  // would leave it half-verified and unbuyable anyway.
+  const toVerify: GateBox[] = [];
+  let budget = VERIFY_CALL_CAP * CHUNK;
+  for (const b of afterLive) {
+    if (b.orders.length > budget) break;
+    budget -= b.orders.length;
+    toVerify.push(b);
+  }
+  const notVerifiedBoxes = afterLive.length - toVerify.length;
+  const idsToVerify = toVerify.flatMap((b) => b.orders.map((o) => o.order_id));
+
   const liveStatus = new Map<string, string>();
   try {
-    for (let i = 0; i < toVerify.length; i += CHUNK) {
-      const ids = toVerify.slice(i, i + CHUNK).map((c) => c.order_id);
+    for (let i = 0; i < idsToVerify.length; i += CHUNK) {
+      const ids = idsToVerify.slice(i, i + CHUNK);
       for (const o of await getOrderById(accessToken, shopCipher, ids)) {
         liveStatus.set(
           String((o as { id: unknown }).id),
@@ -139,27 +196,27 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
     throw new VerifyFailedError(e instanceof Error ? e.message : String(e));
   }
 
-  const confirmed: Candidate[] = [];
+  // ── 6. Every order in a box must still be awaiting shipment. Partial boxes are refused. ──
+  const confirmedBoxes: GateBox[] = [];
   const healed: Healed[] = [];
-  for (const c of toVerify) {
-    const live = liveStatus.get(c.order_id);
-    if (live === 'AWAITING_SHIPMENT') { confirmed.push(c); continue; }
-    excluded.push({
-      group_key: keyOf(c), order_ids: [c.order_id],
-      reason: live ? `TikTok says ${live}` : 'TikTok returned no such order',
-    });
-    if (live) healed.push({ order_id: c.order_id, from: 'AWAITING_SHIPMENT', to: live });
+  for (const b of toVerify) {
+    const v = gateByVerifiedStatus(b, liveStatus);
+    if (v.ok) { confirmedBoxes.push(b); continue; }
+    excluded.push({ group_key: b.group_key, order_ids: b.orders.map((o) => o.order_id), reason: v.reason });
+  }
+  // Status corrections are collected for EVERY order TikTok disagreed about, including those in
+  // boxes that were refused — the cache is wrong either way and healing it is free.
+  for (const b of toVerify) {
+    for (const o of b.orders) {
+      const live = liveStatus.get(o.order_id);
+      if (live && live !== 'AWAITING_SHIPMENT') {
+        healed.push({ order_id: o.order_id, from: 'AWAITING_SHIPMENT', to: live });
+      }
+    }
   }
 
-  // ── 4. Collapse to boxes, attach SKU lines. ──
-  const byBox = new Map<string, string[]>();
-  for (const c of confirmed) {
-    const k = keyOf(c);
-    const arr = byBox.get(k);
-    if (arr) arr.push(c.order_id);
-    else byBox.set(k, [c.order_id]);
-  }
-
+  // ── 7. Attach SKU lines. ──
+  const confirmed = confirmedBoxes.flatMap((b) => b.orders.map((o) => ({ ...o, group_key: b.group_key })));
   const confirmedIds = confirmed.map((c) => c.order_id);
   const linesByOrder = new Map<string, PlanSkuLine[]>();
   if (confirmedIds.length) {
@@ -198,7 +255,8 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   }
 
   const boxes: PlanBox[] = [];
-  for (const [group_key, ids] of byBox) {
+  for (const { group_key, orders } of confirmedBoxes) {
+    const ids = orders.map((o) => o.order_id);
     // Merge the box's SKU lines, summing quantities per SKU, so a combine group holding two
     // orders of the same SKU reads as one line of two units — which correctly makes it a
     // bundle rather than a batchable single.
@@ -218,10 +276,12 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   }
 
   return {
-    candidateCount: candidates.length,
-    excludedShowLive: candidates.length - afterLive.length,
-    verifiedCount: toVerify.length,
-    notVerifiedOverCap: afterLive.length - toVerify.length,
+    candidateCount: rows.length,
+    candidateBoxCount: allBoxes.length,
+    excludedTooRecent,
+    excludedShowLive: aged.length - afterLive.length,
+    verifiedCount: idsToVerify.length,
+    notVerifiedOverCap: notVerifiedBoxes,
     confirmedCount: confirmed.length,
     healed,
     boxes,

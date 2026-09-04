@@ -4,7 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { planPageSequence } from '@/lib/shipping/labelPlan';
 import {
-  resolveLabelRun, applyHealed, shipTypeFor, VerifyFailedError,
+  resolveLabelRun, applyHealed, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
 } from '@/lib/shipping/labelRun';
 import { MAX_BOXES_PER_RUN, estimateSpend } from '@/lib/shipping/purchaseGuards';
 
@@ -89,6 +89,10 @@ export async function GET(req: Request) {
     heal_available: !heal && run.healed.length > 0 ? run.healed.length : 0,
     counts: {
       candidates_in_lensed: run.candidateCount,
+      candidate_boxes: run.candidateBoxCount,
+      // Held back because the combine group may still be growing — the primary safety gate.
+      excluded_too_recent: run.excludedTooRecent,
+      min_order_age_hours: MIN_ORDER_AGE_HOURS,
       excluded_show_live: run.excludedShowLive,
       verified: run.verifiedCount,
       not_verified_over_cap: run.notVerifiedOverCap,
