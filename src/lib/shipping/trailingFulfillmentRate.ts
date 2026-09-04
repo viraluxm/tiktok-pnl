@@ -13,15 +13,26 @@
  * allocation whose parts do not add back to the whole is wrong however carefully each part is
  * computed. Units sold reconciles by construction: $0.449 x 26,760 = $12,015.
  *
- * The picked count was also independently inflating the rate, because it is UNDER-recorded:
- * recorded picks ran 65% of units sold over 7 days, 82% over 14, 77% over 30, 54% over 60. It
- * never converges, so this is not fulfillment lag — real picking writes no verification row
- * (4,185 orders in COMPLETED / DELIVERED / IN_TRANSIT over 30 days have none, and they shipped).
+ * A CORRECTION TO AN EARLIER READING OF THIS. The first version of this comment claimed the
+ * picked count was structurally under-recorded, citing recorded picks at 65% of units sold over
+ * 7 days, 82% over 14, 77% over 30 and 54% over 60. Those aggregates were an artifact of the
+ * pack-station rollout, not of operator discipline: measured per cohort, coverage of orders that
+ * actually SHIPPED ran 0% through early July, 44% the week of 07-27, then 86%, 91%, 97%, 97%,
+ * 97%. Recording is now essentially complete and the picked count can be trusted.
  *
- * The picked figures are still computed and returned, as `pick_coverage_pct` and the
- * `*_per_picked_unit` diagnostics. They are NOT used for allocation. They are kept visible
- * precisely because when that coverage was invisible it silently distorted a cost figure, and
- * the same mechanism still distorts $/box and $/SKU on the Team view.
+ * What the picked-vs-sold gap actually measures is BACKLOG. Weekly outflow ranged from 45% to
+ * 112% of inflow through August (the week of 08-17 picked MORE than it sold, catching up on
+ * 08-10), and across four full weeks 83,700 units sold against 69,707 picked — a backlog build
+ * of ~14,000 units. So `picked_pct_of_sold` below 100% means picking is running behind sales,
+ * NOT that picks are going unrecorded.
+ *
+ * THE HONEST CAVEAT OF THE UNITS-SOLD DENOMINATOR, stated plainly: while that backlog grows,
+ * this rate UNDER-charges. Labor paid in the window picked fewer units than the window sold, so
+ * the picking cost still owed on the unpicked remainder never lands on any show. Cost per unit
+ * PICKED ($0.601 over 14 days vs $0.520 per unit sold) is the backlog-independent figure and is
+ * returned alongside for exactly that comparison. Units sold is kept as the allocation basis
+ * because it matches a period's real payroll to that period's real sales; the two converge as
+ * the window lengthens past the batch cycle and diverge when the warehouse falls behind.
  *
  * POOLED, NOT AVERAGED. Sums cents over the whole window and divides by units over the whole
  * window. A mean of daily rates would weight a quiet day the same as a busy one, which is not
@@ -56,8 +67,12 @@ export interface TrailingFulfillmentRate {
   cancelled_orders: number;
   picked_units: number;
   boxes: number;
-  /** picked ÷ sold. Well under 100% means picks go unrecorded; see the header. */
-  pick_coverage_pct: number | null;
+  /**
+   * picked ÷ sold, as a percentage. Below 100% means picking is running BEHIND sales (a backlog
+   * is building) — it is NOT a recording-coverage figure. Coverage of shipped orders is ~97%.
+   * See the header for why that distinction matters to how this rate should be read.
+   */
+  picked_pct_of_sold: number | null;
 
   payable_hours: number;
   payable_cents: number;
@@ -125,7 +140,7 @@ export function trailingFulfillmentRate(
     cancelled_orders: volume.cancelled_orders,
     picked_units: volume.picked_units,
     boxes: volume.boxes,
-    pick_coverage_pct: volume.sold_units > 0 ? (volume.picked_units / volume.sold_units) * 100 : null,
+    picked_pct_of_sold: volume.sold_units > 0 ? (volume.picked_units / volume.sold_units) * 100 : null,
 
     payable_hours: pooled.payable_hours,
     payable_cents: pooled.payable_cents,

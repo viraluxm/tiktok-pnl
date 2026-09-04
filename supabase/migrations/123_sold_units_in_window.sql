@@ -85,3 +85,26 @@ grant execute on function public.lensed_sold_units_in_window(timestamptz, timest
 -- schema and will 500 with PGRST202 on a function it has not re-read yet, even though the
 -- function exists and is correctly granted. This bit 122 for several minutes after a clean
 -- apply. See the note at the end of 122 for the verification probe.
+
+-- ─────────────────────────────────────────────────────────────────────────────────────────────
+-- CORRECTION (appended after this migration was applied; the SQL above is unchanged and is the
+-- record of what ran).
+--
+-- The header above justifies this function partly by claiming the picked count is structurally
+-- under-recorded ("recorded picks were 65% of units sold over 7 days ... it never converges").
+-- THAT CLAIM IS WRONG. Those were aggregates spanning the pack-station rollout. Measured per
+-- cohort — orders that actually reached a shipped state — coverage was 0% through early July,
+-- 1.2% (07-13), 9.5% (07-20), 44.5% (07-27), 85.6%, 90.7%, 97.4%, 96.8%, 97.2%. Pick recording
+-- is now essentially complete, and the 4,185 shipped-without-a-pick-row orders cited above are
+-- almost entirely pre-rollout.
+--
+-- What the picked-vs-sold gap actually measures is BACKLOG: weekly outflow ran 45% to 112% of
+-- inflow through August, and four full weeks saw 83,700 units sold against 69,707 picked — a
+-- ~14,000 unit build.
+--
+-- The conservation argument for this function still stands on its own (a period's allocation
+-- should sum to that period's payroll), and units sold remains the chosen basis. But the honest
+-- trade is now explicit rather than hidden: while the backlog grows, dividing by units sold
+-- UNDER-charges, because the picking still owed on unpicked units lands on no show. 122's
+-- picked-based rate is returned alongside for that comparison, and the UI surfaces the ratio as
+-- a backlog signal — not, as it first did, as a data-quality warning.
