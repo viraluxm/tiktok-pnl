@@ -6,7 +6,8 @@
 // What is pinned here, because each was a real design decision:
 //   • overnight shifts end on the NEXT LA day (16:00→02:00 is a 10h span, UTC-correct)
 //   • edits UPDATE the existing (employee, date) row — never a second row for the same day
-//   • "Off" on an admin_open row deletes; on a pattern/claimed row it cancels
+//   • "Off" on an admin_open row deletes; on a pattern row it cancels; on a CLAIMED row it is
+//     refused outright (nothing in the schema un-does an approved claim)
 //   • repeat sends the visible week in FULL and later weeks as WORKING DAYS ONLY
 //   • past days are shown, never sent
 //   • nothing the planner emits can ever be a `shifts` write (it only knows shift_instances)
@@ -129,7 +130,7 @@ console.log('\nplan: create / update / unchanged');
     existing: [existingRow({ status: 'claimed', source: 'claim' })],
     entries: [{ employeeId: EMP.id, date: '2026-09-10', startTime: '07:00', endTime: '15:00' }],
   }));
-  eq('editing a CLAIMED shift keeps status claimed', plan.upserts[0].status, 'claimed');
+  eq('editing a CLAIMED shift is REFUSED, not re-spanned', [plan.refusals.map((x) => x.code), plan.upserts.length], [['SHIFT_CLAIMED'], 0]);
 }
 {
   const plan = P.planScheduleBatch(base({
@@ -137,6 +138,7 @@ console.log('\nplan: create / update / unchanged');
     entries: [{ employeeId: EMP.id, date: '2026-09-10', startTime: '06:00', endTime: '14:00' }],
   }));
   eq('re-scheduling a cancelled day REVIVES the row as scheduled (updated, not created)', [plan.counts.updated, plan.upserts[0].status], [1, 'scheduled']);
+  eq('a revived day is reported as an updated DATE for the repeat confirmation', plan.updatedDates, ['2026-09-10']);
 }
 
 console.log('\nplan: multiple days + crew');
@@ -169,7 +171,7 @@ console.log('\nplan: off → delete or cancel');
 }
 {
   const plan = P.planScheduleBatch(base({ existing: [existingRow({ status: 'claimed', source: 'claim' })], entries: [{ employeeId: EMP.id, date: '2026-09-10', off: true }] }));
-  eq('Off on a CLAIMED row → cancel, never delete (claim record survives)', [plan.deleteIds, plan.cancelIds], [[], ['inst-1']]);
+  eq('Off on a CLAIMED row → REFUSED; no delete, no cancel, no stale claim state', [plan.refusals.map((x) => x.code), plan.deleteIds, plan.cancelIds, plan.counts.removed], [['SHIFT_CLAIMED'], [], [], 0]);
 }
 {
   const plan = P.planScheduleBatch(base({ entries: [{ employeeId: EMP.id, date: '2026-09-10', off: true }] }));
@@ -272,12 +274,70 @@ console.log('\nrange helpers');
 eq('entryDateRange spans min..max', P.entryDateRange([{ employeeId: 'x', date: '2026-09-10', off: true }, { employeeId: 'x', date: '2026-09-03', off: true }, { employeeId: 'y', date: '2026-09-21', off: true }]), { from: '2026-09-03', to: '2026-09-21' });
 eq('uniqueEmployeeIds dedupes', P.uniqueEmployeeIds([{ employeeId: 'x', date: '2026-09-10', off: true }, { employeeId: 'x', date: '2026-09-11', off: true }, { employeeId: 'y', date: '2026-09-10', off: true }]), ['x', 'y']);
 
+console.log('\nHARDENING — claimed shifts are inviolable to the builder');
+{
+  const claimed = existingRow({ status: 'claimed', source: 'claim' });
+  for (const [label, entry] of [
+    ['set Off', { employeeId: EMP.id, date: '2026-09-10', off: true }],
+    ['change the times', { employeeId: EMP.id, date: '2026-09-10', startTime: '05:00', endTime: '13:00' }],
+    ['re-send the SAME times', { employeeId: EMP.id, date: '2026-09-10', startTime: '06:00', endTime: '14:00' }],
+  ]) {
+    const plan = P.planScheduleBatch(base({ existing: [claimed], entries: [entry] }));
+    if (label === 're-send the SAME times') {
+      // Identical times are a no-op BEFORE the claim check — nothing changes, so nothing to refuse.
+      eq(`claimed + ${label} → unchanged, still no writes`, [plan.counts.unchanged, plan.upserts.length, plan.deleteIds.length, plan.cancelIds.length], [1, 0, 0, 0]);
+    } else {
+      eq(`claimed + ${label} → SHIFT_CLAIMED and zero writes`, [plan.refusals.map((x) => x.code), plan.upserts.length, plan.deleteIds.length, plan.cancelIds.length], [['SHIFT_CLAIMED'], 0, 0, 0]);
+    }
+  }
+  eq('the refusal names the claim and tells the manager what to do', P.SCHEDULE_REFUSAL_MESSAGES.SHIFT_CLAIMED, 'This shift has already been claimed by someone. Resolve the claim before changing it.');
+  check('UNEDITABLE_STATUS_REASON maps claimed → SHIFT_CLAIMED for the UI', P.UNEDITABLE_STATUS_REASON.claimed === 'SHIFT_CLAIMED');
+  // An ordinary scheduled/admin_open day in the SAME batch still saves — a claim on one day does
+  // not have to block the rest, and the route's all-or-nothing rule is what decides that.
+  const mixed = P.planScheduleBatch(base({
+    existing: [claimed, existingRow({ id: 'inst-9', shift_date: '2026-09-11', source: 'admin_open' })],
+    entries: [{ employeeId: EMP.id, date: '2026-09-10', off: true }, { employeeId: EMP.id, date: '2026-09-11', off: true }],
+  }));
+  eq('mixed batch: the claimed day refuses, the admin_open day still plans its delete', [mixed.refusals.map((x) => x.code), mixed.deleteIds], [['SHIFT_CLAIMED'], ['inst-9']]);
+}
+
+console.log('\nHARDENING — claimedDatesFor drives the locked builder row');
+{
+  const rows = [
+    existingRow({ id: 'c1', shift_date: '2026-09-10', status: 'claimed' }),
+    existingRow({ id: 's1', shift_date: '2026-09-11', status: 'scheduled' }),
+    existingRow({ id: 'x1', shift_date: '2026-09-12', status: 'cancelled' }),
+    existingRow({ id: 'r1', shift_date: '2026-09-13', status: 'claimed', employee_id: null }),
+    existingRow({ id: 'o1', shift_date: '2026-09-20', status: 'claimed' }), // outside the week
+  ];
+  eq('only in-week claimed rows WITH an assignee are locked', [...P.claimedDatesFor(rows, WEEK)], ['2026-09-10']);
+  eq('a claimed row still reads as working in the week state (times shown, row locked by the UI)', P.weekStateFromInstances(rows, WEEK)['2026-09-10'], { working: true, start: '06:00', end: '14:00' });
+}
+
+console.log('\nHARDENING — affected dates for the repeat confirmation');
+{
+  const state = P.weekStateFromInstances([], WEEK);
+  state['2026-09-10'] = { working: true, start: '06:00', end: '14:00' };
+  state['2026-09-11'] = { working: false, start: '', end: '' };
+  const entries = P.expandRepeat(EMP.id, '2026-09-07', state, 3, TODAY);
+  const plan = P.planScheduleBatch(base({ existing: [
+    existingRow({ id: 'f1', shift_date: '2026-09-17', starts_at: '2026-09-17T15:00:00Z', ends_at: '2026-09-17T23:00:00Z' }),
+    existingRow({ id: 'f2', shift_date: '2026-09-24', starts_at: '2026-09-24T16:00:00Z', ends_at: '2026-09-25T00:00:00Z' }),
+    existingRow({ id: 'f3', shift_date: '2026-09-11', source: 'admin_open' }),
+  ], entries }));
+  eq('updatedDates names every future day whose times get replaced', plan.updatedDates, ['2026-09-17', '2026-09-24']);
+  eq('removedDates names the day being removed', plan.removedDates, ['2026-09-11']);
+  eq('counts agree with the date lists', [plan.counts.updated, plan.counts.removed], [2, 1]);
+  check('dates are sorted so the dialog reads chronologically', JSON.stringify(plan.updatedDates) === JSON.stringify([...plan.updatedDates].sort()));
+}
+
 console.log('\nPAYROLL INVARIANT');
 {
   const src = readFileSync(fileURLToPath(new URL('./schedulePlan.ts', import.meta.url)), 'utf8');
   check("schedulePlan.ts never names the `shifts` table as a write target", !/from\('shifts'\)|into\s+shifts|shifts\.insert/.test(src));
   const plan = P.planScheduleBatch(base({ entries: [{ employeeId: EMP.id, date: '2026-09-10', startTime: '06:00', endTime: '14:00' }] }));
-  check('a plan has only shift_instances-shaped outputs (upserts/deleteIds/cancelIds)', Object.keys(plan).sort().join() === ['cancelIds', 'counts', 'deleteIds', 'refusals', 'upserts'].join());
+  check('a plan has only shift_instances-shaped outputs + reporting metadata', Object.keys(plan).sort().join() === ['cancelIds', 'counts', 'deleteIds', 'refusals', 'removedDates', 'updatedDates', 'upserts'].join());
+  check('the only id-bearing outputs are shift_instances ids', ['upserts', 'deleteIds', 'cancelIds'].every((k) => Array.isArray(plan[k])));
 }
 
 console.log(`\n${passed} checks passed`);

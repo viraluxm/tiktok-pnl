@@ -11,7 +11,7 @@
 
 import { laWallTimeToUtc, laWallClockOf, addDaysISO } from './timezone';
 import { mondayOfISO, weekDatesISO } from '@/lib/weeklySchedule';
-import { crossesMidnight } from './eligibility';
+import { crossesMidnight, isClockEligibleStatus } from './eligibility';
 
 // ── Wire types ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,7 @@ export type ScheduleRefusalCode =
   | 'PAST_DATE'
   | 'BAD_TIMES'
   | 'SHIFT_FINAL'
+  | 'SHIFT_CLAIMED'
   | 'ALREADY_STARTED'
   | 'WORKED_TIME_EXISTS'
   | 'EMPLOYEE_CLOCKED_IN';
@@ -83,6 +84,7 @@ export const SCHEDULE_REFUSAL_MESSAGES: Record<ScheduleRefusalCode, string> = {
   PAST_DATE: 'Past days cannot be scheduled.',
   BAD_TIMES: 'Start and end cannot be the same time.',
   SHIFT_FINAL: 'That shift has already been recorded and cannot be changed here.',
+  SHIFT_CLAIMED: 'This shift has already been claimed by someone. Resolve the claim before changing it.',
   ALREADY_STARTED: 'That shift has already started and cannot be removed.',
   WORKED_TIME_EXISTS: 'This employee already has worked time on that date.',
   EMPLOYEE_CLOCKED_IN: 'This employee is currently clocked in.',
@@ -95,16 +97,30 @@ export interface ScheduleCounts {
   unchanged: number;
 }
 
+/** Statuses of an existing row that the builder must never rewrite, with the reason. Exported for
+ *  the UI so a locked row can be explained in place rather than only on save. */
+export const UNEDITABLE_STATUS_REASON: Record<string, ScheduleRefusalCode> = {
+  claimed: 'SHIFT_CLAIMED',
+  worked: 'SHIFT_FINAL',
+  missed: 'SHIFT_FINAL',
+};
+
 export interface SchedulePlan {
   upserts: UpsertRow[];
   /** admin_open + scheduled rows → hard delete (the existing Remove Shift semantics). */
   deleteIds: string[];
-  /** every other removable row (pattern / claimed) → status 'cancelled'. Keeps the (employee,
-   *  date) slot occupied so a dormant materializer can never regenerate it, and hides it from
-   *  every schedule read (they all filter status IN scheduled/claimed). */
+  /** a removable non-one-off row (a 'pattern' instance) → status 'cancelled'. Keeps the
+   *  (employee, date) slot occupied so a dormant materializer can never regenerate it, and hides it
+   *  from every schedule and clock-in read (they all filter status IN scheduled/claimed). CLAIMED
+   *  rows are NEVER cancelled here — they are refused; see SHIFT_CLAIMED. */
   cancelIds: string[];
   counts: ScheduleCounts;
   refusals: ScheduleRefusal[];
+  /** Dates whose existing times this plan would REPLACE, and dates it would remove. Surfaced so the
+   *  builder's repeat confirmation can name what it is about to change in weeks the manager has
+   *  not looked at. Sorted; one entry per date (a date appears in at most one of the two). */
+  updatedDates: string[];
+  removedDates: string[];
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────────
@@ -185,9 +201,21 @@ export function weekDatesFor(dateISO: string): string[] {
 }
 
 /** True when an instance row represents "working" to the schedule (released rows have no
- *  employee and cancelled/missed rows are not coverage). */
+ *  employee and cancelled/missed rows are not coverage). Same pair as CLOCK_ELIGIBLE_STATUSES. */
 export function isWorkingInstance(i: Pick<ExistingInstance, 'status' | 'employee_id'>): boolean {
-  return !!i.employee_id && (i.status === 'scheduled' || i.status === 'claimed');
+  return !!i.employee_id && isClockEligibleStatus(i.status);
+}
+
+/** Dates in `weekDates` whose shift has been CLAIMED by someone. The builder locks these rows: the
+ *  manager sees "Picked up" instead of editable controls, rather than discovering the refusal on
+ *  save. */
+export function claimedDatesFor(instances: ExistingInstance[], weekDates: string[]): Set<string> {
+  const inWeek = new Set(weekDates);
+  const out = new Set<string>();
+  for (const i of instances) {
+    if (i.status === 'claimed' && i.employee_id && inWeek.has(i.shift_date)) out.add(i.shift_date);
+  }
+  return out;
 }
 
 /** Build the builder's editable week from the employee's real instances for those dates. */
@@ -314,6 +342,8 @@ export function planScheduleBatch(input: PlanInput): SchedulePlan {
   const deleteIds: string[] = [];
   const cancelIds: string[] = [];
   const counts: ScheduleCounts = { created: 0, updated: 0, removed: 0, unchanged: 0 };
+  const updatedDates: string[] = [];
+  const removedDates: string[] = [];
   const seen = new Set<string>();
 
   for (const e of input.entries) {
@@ -329,14 +359,20 @@ export function planScheduleBatch(input: PlanInput): SchedulePlan {
       // Off on a day with nothing planned, or already cancelled → nothing to do. Off on a past day
       // is also a no-op: the builder sends the whole week and the past is not ours to edit.
       if (!cur || cur.status === 'cancelled' || e.date < input.todayISO) { counts.unchanged++; continue; }
-      if (cur.status !== 'scheduled' && cur.status !== 'claimed') { refuse(e.employeeId, e.date, 'SHIFT_FINAL'); continue; }
+      // A CLAIMED shift is refused, never cancelled. Cancelling it would strand the approved
+      // `shift_claims` row and the 'claimed' attendance_event that offsets the original releaser's
+      // drop — and nothing in the schema un-does an approved claim (rejectClaim only handles
+      // 'pending'). Refusing is the only option that cannot corrupt claim state. See the header.
+      if (cur.status === 'claimed') { refuse(e.employeeId, e.date, 'SHIFT_CLAIMED'); continue; }
+      if (cur.status !== 'scheduled') { refuse(e.employeeId, e.date, 'SHIFT_FINAL'); continue; }
       const startsMs = Date.parse(cur.starts_at);
       if (!Number.isFinite(startsMs) || startsMs <= input.nowMs) { refuse(e.employeeId, e.date, 'ALREADY_STARTED'); continue; }
       if (input.workedKeys.has(key)) { refuse(e.employeeId, e.date, 'WORKED_TIME_EXISTS'); continue; }
       if (input.clockedInEmployees.has(e.employeeId)) { refuse(e.employeeId, e.date, 'EMPLOYEE_CLOCKED_IN'); continue; }
-      if (cur.source === 'admin_open' && cur.status === 'scheduled') deleteIds.push(cur.id);
+      if (cur.source === 'admin_open') deleteIds.push(cur.id);
       else cancelIds.push(cur.id);
       counts.removed++;
+      removedDates.push(e.date);
       continue;
     }
 
@@ -369,6 +405,12 @@ export function planScheduleBatch(input: PlanInput): SchedulePlan {
       counts.unchanged++;
       continue;
     }
+    // Editing the TIME of a claimed shift is refused for the same reason as removing it: the claim
+    // was auto-approved (or approved) against `projected_week_hours` computed from THIS span, and
+    // the 40h OT gate was decided on those hours. Re-spanning the shift silently invalidates that
+    // decision — a longer shift could push the claimer past 40h with no approval on record. v1
+    // refuses; reconciling a claim to a new span is claim-lifecycle work, out of scope here.
+    if (cur.status === 'claimed') { refuse(e.employeeId, e.date, 'SHIFT_CLAIMED'); continue; }
     // Update in place. Source / rule link / store / role are preserved — editing the time of a
     // shift does not reclassify where it came from. A cancelled row is revived as 'scheduled'.
     upserts.push({
@@ -377,16 +419,21 @@ export function planScheduleBatch(input: PlanInput): SchedulePlan {
       shift_date: e.date,
       starts_at,
       ends_at,
-      status: cur.status === 'claimed' ? 'claimed' : 'scheduled',
+      status: 'scheduled',
       source: cur.source,
       shift_rule_id: cur.shift_rule_id,
       store_id: cur.store_id,
       role: cur.role,
     });
     counts.updated++;
+    updatedDates.push(e.date);
   }
 
-  return { upserts, deleteIds, cancelIds, counts, refusals };
+  return {
+    upserts, deleteIds, cancelIds, counts, refusals,
+    updatedDates: [...updatedDates].sort(),
+    removedDates: [...removedDates].sort(),
+  };
 }
 
 /** Date span the planner needs existing rows for. */

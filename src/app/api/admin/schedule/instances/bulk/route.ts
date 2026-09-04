@@ -43,7 +43,13 @@ export async function POST(req: Request) {
         { status: 409 },
       );
     }
-    return NextResponse.json({ ok: true, dryRun: result.dryRun, ...result.counts });
+    return NextResponse.json({
+      ok: true,
+      dryRun: result.dryRun,
+      ...result.counts,
+      updatedDates: result.updatedDates,
+      removedDates: result.removedDates,
+    });
   } catch (e) {
     if (e instanceof ScheduleBatchError) {
       console.error('[schedule/bulk]', e.code, e.message);

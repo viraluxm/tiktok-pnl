@@ -8,9 +8,11 @@ import { laTodayISO, addDaysISO } from '@/lib/schedule/timezone';
 import { fmtMonthDay } from '@/lib/schedule/format';
 import {
   weekDatesFor, weekStateFromInstances, copyWeekPattern, weekStateIsEmpty, expandRepeat,
-  repeatCountUntil, EMPTY_DAY, type WeekState, type DayState, type ExistingInstance, type ScheduleCounts,
+  repeatCountUntil, claimedDatesFor, EMPTY_DAY,
+  type WeekState, type DayState, type ExistingInstance, type ScheduleCounts,
 } from '@/lib/schedule/schedulePlan';
 import { validateShiftTimes, WEEKDAY_LABELS } from '@/lib/weeklySchedule';
+import { fmtMonthDay as fmtDay } from '@/lib/schedule/format';
 
 // One employee, one week, real dated shift_instances. Opened from the roster's employee detail as
 // "Build Schedule" / "Edit Schedule" — same component either way; the only difference is whether
@@ -35,6 +37,14 @@ function dayLabel(dateISO: string): string {
   const [y, m, d] = dateISO.split('-').map(Number);
   return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' })
     .format(new Date(Date.UTC(y, m - 1, d)));
+}
+
+/** "Sep 14, Sep 21, Sep 28" — capped so a long repeat cannot produce an unreadable dialog. */
+const MAX_LISTED_DATES = 8;
+function formatDateList(dates: string[]): string {
+  const shown = dates.slice(0, MAX_LISTED_DATES).map(fmtDay).join(', ');
+  const rest = dates.length - MAX_LISTED_DATES;
+  return rest > 0 ? `${shown} and ${rest} more` : shown;
 }
 
 export default function EmployeeScheduleBuilder({
@@ -68,6 +78,10 @@ export default function EmployeeScheduleBuilder({
   );
 
   const base = useMemo(() => weekStateFromInstances(mine, week), [mine, week]);
+  // Days someone has PICKED UP. The server refuses to re-time or remove a claimed shift (the claim
+  // was approved against its span and nothing un-does an approved claim), so the row is locked here
+  // and says so — the manager should not have to discover that on save.
+  const claimedDates = useMemo(() => claimedDatesFor(mine, week), [mine, week]);
   const [edits, setEdits] = useState<Partial<WeekState>>({});
   const state: WeekState = useMemo(() => {
     const s: WeekState = {};
@@ -88,10 +102,12 @@ export default function EmployeeScheduleBuilder({
   const [notice, setNotice] = useState<string | null>(null);
 
   const isPast = (d: string) => d < today;
+  const isLocked = (d: string) => isPast(d) || claimedDates.has(d);
   const wholeWeekPast = week.every(isPast);
   const isThisWeek = weekStart === weekDatesFor(today)[0];
 
   function setDay(date: string, patch: Partial<DayState>) {
+    if (isLocked(date)) return;
     setEdits((prev) => ({ ...prev, [date]: { ...(prev[date] ?? base[date] ?? EMPTY_DAY), ...patch } }));
     setNotice(null);
   }
@@ -109,7 +125,7 @@ export default function EmployeeScheduleBuilder({
     setError(null);
     const check = validateShiftTimes(qStart, qEnd);
     if (!check.ok) return setError(check.error);
-    const targets = week.filter((d) => qDays.has(d) && !isPast(d));
+    const targets = week.filter((d) => qDays.has(d) && !isLocked(d));
     if (targets.length === 0) return setError('Pick at least one day to apply these hours to.');
     setEdits((prev) => {
       const next = { ...prev };
@@ -129,7 +145,7 @@ export default function EmployeeScheduleBuilder({
     const copied = copyWeekPattern(prevMine, prevWeek, week);
     setEdits((prev) => {
       const next = { ...prev };
-      for (const d of week) if (!isPast(d)) next[d] = copied[d];
+      for (const d of week) if (!isLocked(d)) next[d] = copied[d];
       return next;
     });
     setNotice('Copied last week’s pattern — adjust anything, then Save Schedule.');
@@ -144,26 +160,44 @@ export default function EmployeeScheduleBuilder({
     // Client-side completeness: every working day in the visible week needs valid times.
     for (const d of week) {
       const s = state[d];
-      if (isPast(d) || !s.working) continue;
+      if (isLocked(d) || !s.working) continue;
       const check = validateShiftTimes(s.start, s.end);
       if (!check.ok) return setError(`${WEEKDAY_LABELS[week.indexOf(d)]}: ${check.error}`);
     }
     if (repeat === 'until' && !untilDate) return setError('Choose the last week to repeat until.');
 
-    const entries = expandRepeat(employee.id, weekStart, state, weekCount, today);
+    // Claimed days in the VISIBLE week are never sent: the row is locked, its stored value is
+    // already what the server has, and the server would refuse it anyway. Later repeat weeks are
+    // not filtered — a claim there is genuinely new information and the server's refusal is the
+    // right answer, surfaced with the day it names.
+    const entries = expandRepeat(employee.id, weekStart, state, weekCount, today)
+      .filter((e) => !(claimedDates.has(e.date) && week.includes(e.date)));
     if (entries.length === 0) return setError('Nothing to save for this week.');
 
     setBusy(true);
     try {
       if (weekCount > 1) {
-        // Later weeks were never on screen, so preview what the repeat would change there.
+        // Later weeks were never on screen, so preview exactly what the repeat would change there
+        // and name the dates — a count alone does not tell the manager whose week is being rewritten.
         const dry = await apply.mutateAsync({ entries, dryRun: true });
         if (dry.updated > 0 || dry.removed > 0) {
-          const parts = [
-            dry.updated > 0 ? `update ${dry.updated} existing shift${dry.updated === 1 ? '' : 's'}` : null,
-            dry.removed > 0 ? `remove ${dry.removed}` : null,
-          ].filter(Boolean).join(' and ');
-          if (!window.confirm(`Repeating for ${weekCount} weeks will ${parts}. Continue?`)) {
+          const lines: string[] = [`Repeating for ${weekCount} weeks affects days that are already scheduled.`];
+          if (dry.updated > 0) {
+            lines.push(
+              '',
+              `${dry.updated} existing shift${dry.updated === 1 ? '' : 's'}: the times already on ${dry.updated === 1 ? 'that day' : 'those days'} will be REPLACED by this week's pattern.`,
+              formatDateList(dry.updatedDates),
+            );
+          }
+          if (dry.removed > 0) {
+            lines.push(
+              '',
+              `${dry.removed} scheduled day${dry.removed === 1 ? '' : 's'} will be REMOVED.`,
+              formatDateList(dry.removedDates),
+            );
+          }
+          lines.push('', 'Continue?');
+          if (!window.confirm(lines.join('\n'))) {
             setBusy(false);
             return;
           }
@@ -226,7 +260,7 @@ export default function EmployeeScheduleBuilder({
           <div className="mb-2 flex flex-wrap gap-1.5" role="group" aria-label="Days to apply hours to">
             {week.map((d, k) => {
               const on = qDays.has(d);
-              const past = isPast(d);
+              const past = isLocked(d); // past OR picked up — quick fill cannot touch either
               return (
                 <button
                   key={d} type="button" disabled={past} aria-pressed={on}
@@ -259,6 +293,8 @@ export default function EmployeeScheduleBuilder({
           {week.map((d, k) => {
             const s = state[d];
             const past = isPast(d);
+            const claimed = claimedDates.has(d);
+            const locked = past || claimed;
             const check = s.working && s.start && s.end ? validateShiftTimes(s.start, s.end) : null;
             return (
               <div key={d} className={`grid grid-cols-[minmax(84px,1fr)_auto_1fr_1fr] items-center gap-2 px-3 py-2 ${past ? 'opacity-50' : ''}`}>
@@ -266,28 +302,40 @@ export default function EmployeeScheduleBuilder({
                   <div className={`text-sm font-semibold ${d === today ? 'text-tt-cyan' : 'text-tt-text'}`}>{WEEKDAY_LABELS[k]}</div>
                   <div className="text-[11px] text-tt-muted">{dayLabel(d)}{past ? ' · past' : d === today ? ' · today' : ''}</div>
                 </div>
-                <button
-                  type="button" disabled={past || isLoading} aria-pressed={s.working}
-                  onClick={() => setDay(d, { working: !s.working })}
-                  className={`h-8 rounded-lg border px-2.5 text-xs font-semibold transition-colors disabled:cursor-default ${
-                    s.working ? 'border-tt-green/60 bg-tt-green/15 text-tt-green' : 'border-tt-border text-tt-muted hover:text-tt-text'
-                  }`}
-                >{s.working ? 'Working' : 'Off'}</button>
-                <input
-                  type="time" value={s.start} disabled={past || !s.working} aria-label={`${WEEKDAY_LABELS[k]} start`}
-                  onChange={(e) => setDay(d, { start: e.target.value })} className={inputCls}
-                />
-                <div className="flex items-center gap-2">
-                  <input
-                    type="time" value={s.end} disabled={past || !s.working} aria-label={`${WEEKDAY_LABELS[k]} end`}
-                    onChange={(e) => setDay(d, { end: e.target.value })} className={`${inputCls} w-full`}
-                  />
-                  {check && !check.error && (
-                    <span className="hidden shrink-0 text-[11px] tabular-nums text-tt-muted sm:inline" title={check.overnight ? 'Ends the next day' : undefined}>
-                      {check.hours}h{check.overnight ? ' 🌙' : ''}
-                    </span>
-                  )}
-                </div>
+                {claimed ? (
+                  // Locked: someone picked this shift up. Times shown for reference; changing or
+                  // removing it needs the claim resolved first (the server refuses either way).
+                  <div className="col-span-3 flex flex-wrap items-center gap-2">
+                    <span className="rounded-lg border border-tt-green/50 bg-tt-green/10 px-2.5 py-1 text-xs font-semibold text-tt-green">Picked up</span>
+                    <span className="text-[13px] tabular-nums text-tt-text">{s.start && s.end ? `${s.start}–${s.end}` : '—'}</span>
+                    <span className="text-[11px] text-tt-muted">Resolve the claim to change this day</span>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      type="button" disabled={locked || isLoading} aria-pressed={s.working}
+                      onClick={() => setDay(d, { working: !s.working })}
+                      className={`h-8 rounded-lg border px-2.5 text-xs font-semibold transition-colors disabled:cursor-default ${
+                        s.working ? 'border-tt-green/60 bg-tt-green/15 text-tt-green' : 'border-tt-border text-tt-muted hover:text-tt-text'
+                      }`}
+                    >{s.working ? 'Working' : 'Off'}</button>
+                    <input
+                      type="time" value={s.start} disabled={locked || !s.working} aria-label={`${WEEKDAY_LABELS[k]} start`}
+                      onChange={(e) => setDay(d, { start: e.target.value })} className={inputCls}
+                    />
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="time" value={s.end} disabled={locked || !s.working} aria-label={`${WEEKDAY_LABELS[k]} end`}
+                        onChange={(e) => setDay(d, { end: e.target.value })} className={`${inputCls} w-full`}
+                      />
+                      {check && !check.error && (
+                        <span className="hidden shrink-0 text-[11px] tabular-nums text-tt-muted sm:inline" title={check.overnight ? 'Ends the next day' : undefined}>
+                          {check.hours}h{check.overnight ? ' 🌙' : ''}
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             );
           })}

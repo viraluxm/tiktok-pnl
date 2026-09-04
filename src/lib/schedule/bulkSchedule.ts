@@ -25,6 +25,9 @@ export interface ApplyScheduleResult {
   ok: true;
   dryRun: boolean;
   counts: ScheduleCounts;
+  /** Dates whose times this operation replaces / removes — for the repeat confirmation. */
+  updatedDates: string[];
+  removedDates: string[];
 }
 
 export interface ApplyScheduleRefused {
@@ -98,11 +101,14 @@ export async function applyScheduleBatch(input: {
   });
 
   if (plan.refusals.length > 0) return { ok: false, refusals: plan.refusals };
-  if (input.dryRun) return { ok: true, dryRun: true, counts: plan.counts };
+  const dates = { updatedDates: plan.updatedDates, removedDates: plan.removedDates };
+  if (input.dryRun) return { ok: true, dryRun: true, counts: plan.counts, ...dates };
 
   // 1. Upsert (one statement). ON CONFLICT (employee_id, shift_date) DO UPDATE — the unique
   //    constraint IS the idempotency key, so a row created between our read and this write is
-  //    updated rather than erroring.
+  //    updated rather than erroring. (An upsert cannot carry a status predicate, so the claim rule
+  //    is enforced by the planner refusing before we get here; a row claimed in the microseconds
+  //    between read and write would be re-spanned — accepted for v1, noted in the report.)
   if (plan.upserts.length > 0) {
     const { error } = await admin
       .from('shift_instances')
@@ -122,16 +128,19 @@ export async function applyScheduleBatch(input: {
     if (error) throw new ScheduleBatchError('WRITE_FAILED', error.message);
   }
 
-  // 3. Cancel everything else that was removed (pattern / claimed rows).
+  // 3. Cancel the removed non-one-off rows ('pattern' instances). The `status='scheduled'`
+  //    predicate is the race guard AND a second line of defence for the claim rule: a row that was
+  //    claimed between our read and this write matches 0 rows and is left alone rather than
+  //    cancelled out from under an approved claim.
   if (plan.cancelIds.length > 0) {
     const { error } = await admin
       .from('shift_instances')
       .update({ status: 'cancelled' })
       .eq('user_id', input.userId)
-      .in('status', ['scheduled', 'claimed'])
+      .eq('status', 'scheduled')
       .in('id', plan.cancelIds);
     if (error) throw new ScheduleBatchError('WRITE_FAILED', error.message);
   }
 
-  return { ok: true, dryRun: false, counts: plan.counts };
+  return { ok: true, dryRun: false, counts: plan.counts, ...dates };
 }

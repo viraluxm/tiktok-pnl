@@ -7,7 +7,7 @@ import { useShiftRules } from '@/hooks/useShiftRules';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
 import { useScheduleBulk, ScheduleRefusedError } from '@/hooks/useScheduleBulk';
 import type { ScheduleEntry } from '@/lib/schedule/schedulePlan';
-import { generateRecurringShifts, PAY_ANCHOR } from '@/lib/employees';
+import { PAY_ANCHOR } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
 import {
   buildCalendarDays, maxHeadcount,
@@ -72,7 +72,10 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   const grid = useMemo(() => monthGridDays(anchor), [anchor]);
 
   const { shifts, addShift, updateShift, deleteShift, confirmShift } = useShifts(grid.gridStart, grid.gridEnd);
-  const { rules, exceptions, upsertException } = useShiftRules();
+  // `upsertException` still feeds the shift editor's skip/modify-occurrence actions for a
+  // rule-materialized PUNCH row (a `shifts` row carrying source_rule_id). The rule/exception LISTS
+  // are no longer read here — this calendar's scheduled layer is shift_instances only.
+  const { upsertException } = useShiftRules();
   const { instances, removeInstance } = useShiftInstances(grid.gridStart, grid.gridEnd);
 
   // Punches = time-clock rows only. Manual one-offs are a correction to the record, so they read
@@ -97,21 +100,20 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
     [shifts],
   );
 
-  // Scheduled = shift_instances ∪ recurring projections, flattened to LA wall clock. Both are
-  // real today (10 active rules, plus admin-posted one-time instances), so the view shows both
-  // and the model gives an instance precedence over a rule for the same person-day.
-  const materialized = useMemo(
-    () => new Set(shifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
-    [shifts],
-  );
-  const generated = useMemo(
-    () => generateRecurringShifts(rules, exceptions, grid.gridStart, grid.gridEnd, materialized),
-    [rules, exceptions, grid.gridStart, grid.gridEnd, materialized],
-  );
+  // Scheduled = REAL `shift_instances` ONLY.
+  //
+  // This view used to union the instances with recurring-rule PROJECTIONS from
+  // generateRecurringShifts(), so a visible planned shift might have had no row behind it — it
+  // could not be edited, removed, or clocked into, and the Schedule Builder could not see it. The
+  // architecture is now "the visible planned schedule IS shift_instances", so the projections are
+  // gone from here. The legacy recurring machinery is untouched and still backs the payroll-side
+  // consumers (see PayView / scheduledSpan / the materializers).
+  //
+  // A released shift has no assignee, and cancelled/missed rows are not coverage. 'worked' stays
+  // visible: the day happened, and the calendar's All view pairs it with its punch.
   const scheduled: CalScheduled[] = useMemo(() => {
     const out: CalScheduled[] = [];
     for (const i of instances) {
-      // A released shift has no assignee and a cancelled/missed one is not coverage.
       if (!i.employee_id || i.released_at) continue;
       if (i.status !== 'scheduled' && i.status !== 'claimed' && i.status !== 'worked') continue;
       out.push({
@@ -124,16 +126,8 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
         source: i.source ?? null,
       });
     }
-    for (const g of generated) {
-      if (g.skipped) continue;
-      out.push({
-        id: g.id, employee_id: g.employee_id, date: g.date,
-        start_time: g.start_time, end_time: g.end_time, origin: 'rule',
-        source: null,
-      });
-    }
     return out;
-  }, [instances, generated]);
+  }, [instances]);
 
   const byDate = useMemo(
     () => buildCalendarDays({

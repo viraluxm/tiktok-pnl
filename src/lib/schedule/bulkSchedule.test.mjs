@@ -110,7 +110,8 @@ console.log('\n1. happy path: create + update + off(delete) + off(cancel) in one
     { employeeId: EMP.id, date: '2026-09-12', off: true }, // cancel
     { employeeId: EMP.id, date: '2026-09-13', off: true }, // nothing there → unchanged
   ] });
-  eq('result counts', res, { ok: true, dryRun: false, counts: { created: 1, updated: 1, removed: 2, unchanged: 1 } });
+  eq('result counts', [res.ok, res.dryRun, res.counts], [true, false, { created: 1, updated: 1, removed: 2, unchanged: 1 }]);
+  eq('affected dates are reported for the repeat confirmation', [res.updatedDates, res.removedDates], [['2026-09-10'], ['2026-09-11', '2026-09-12']]);
 
   const ops = writes().map((r) => `${r.table}:${r.op}`);
   eq('WRITE ORDER: upsert → delete → cancel(update), all on shift_instances', ops, ['shift_instances:upsert', 'shift_instances:delete', 'shift_instances:update']);
@@ -127,7 +128,8 @@ console.log('\n1. happy path: create + update + off(delete) + off(cancel) in one
 
   const can = writes()[2];
   eq('cancel sets ONLY status=cancelled', can.payload, { status: 'cancelled' });
-  eq('cancel is owner-scoped, limited to live statuses, targets ids', [can.f('eq', 'user_id'), can.f('in', 'status'), can.f('in', 'id')], [USER, ['scheduled', 'claimed'], ['inst-3']]);
+  eq('cancel is owner-scoped, guarded on status=scheduled, targets ids', [can.f('eq', 'user_id'), can.f('eq', 'status'), can.f('in', 'id')], [USER, 'scheduled', ['inst-3']]);
+  check('the cancel predicate cannot touch a CLAIMED row even if one slipped into cancelIds', can.f('eq', 'status') === 'scheduled');
 }
 
 console.log('\n2. PAYROLL INVARIANT — `shifts` and punches are read for guards, never written');
@@ -165,7 +167,8 @@ console.log('\n4. dry run writes NOTHING and still reports the plan');
     { employeeId: EMP.id, date: '2026-09-10', off: true },
     { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
   ] });
-  eq('dryRun counts', res, { ok: true, dryRun: true, counts: { created: 1, updated: 0, removed: 1, unchanged: 0 } });
+  eq('dryRun counts', [res.ok, res.dryRun, res.counts], [true, true, { created: 1, updated: 0, removed: 1, unchanged: 0 }]);
+  eq('dryRun still reports the affected dates', res.removedDates, ['2026-09-10']);
   eq('zero write ops', writes().length, 0);
 }
 
@@ -227,6 +230,51 @@ console.log('\n9. editing an existing day never produces a second row for that (
   const up = writes()[0];
   eq('one upsert row, keyed to the existing (employee, date)', [up.payload.length, up.payload[0].employee_id, up.payload[0].shift_date], [1, EMP.id, '2026-09-10']);
   check('no delete/insert accompanies an edit', writes().length === 1 && up.op === 'upsert');
+}
+
+console.log('\n10. HARDENING — a claimed shift is refused end to end, and nothing is written');
+{
+  const claimedRow = existing({ id: 'cl-1', status: 'claimed', source: 'claim' });
+  for (const [label, entry] of [
+    ['Off', { employeeId: EMP.id, date: '2026-09-10', off: true }],
+    ['time edit', { employeeId: EMP.id, date: '2026-09-10', startTime: '05:00', endTime: '13:00' }],
+  ]) {
+    reset(scriptWith({ instances: [claimedRow] }));
+    const res = await applyScheduleBatch({ userId: USER, now: NOW, entries: [entry] });
+    eq(`claimed + ${label} → ok:false SHIFT_CLAIMED`, [res.ok, res.refusals.map((r) => r.code)], [false, ['SHIFT_CLAIMED']]);
+    eq(`claimed + ${label} → ZERO writes (no cancel, no delete, no upsert)`, writes().length, 0);
+  }
+  // The whole batch is refused, so a valid sibling day is not written either — the manager fixes
+  // the claimed day and saves again. This is the all-or-nothing contract, not an accident.
+  reset(scriptWith({ instances: [claimedRow] }));
+  const mixed = await applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-10', off: true },
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] });
+  eq('a claimed day refuses the whole batch', [mixed.ok, writes().length], [false, 0]);
+}
+
+console.log('\n11. HARDENING — the ATOMICITY property survives the changes');
+{
+  // Property: a mid-operation failure may leave a requested-OFF day still scheduled, but must never
+  // silently remove a requested-WORKING day and must never create payroll time. Writes run
+  // upsert → delete → cancel, so a failure at step 2 or 3 has already persisted every working day.
+  reset(scriptWith({ instances: [existing({ id: 'del-me', source: 'admin_open' })], fail: 'delete' }));
+  await assert.rejects(applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-10', off: true },
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] }), (e) => e instanceof ScheduleBatchError && e.code === 'WRITE_FAILED');
+  const ops = writes().map((r) => `${r.table}:${r.op}`);
+  eq('the working day was upserted BEFORE the failing delete', ops[0], 'shift_instances:upsert');
+  check('the requested-working day is present in that upsert', writes()[0].payload.some((r) => r.shift_date === '2026-09-11'));
+  check('no payroll table was touched even on the failure path', !writes().some((r) => r.table !== 'shift_instances'));
+  // And the inverse: an upsert failure at step 1 means NOTHING was removed.
+  reset(scriptWith({ instances: [existing({ id: 'del-me', source: 'admin_open' })], fail: 'upsert' }));
+  await assert.rejects(applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-10', off: true },
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] }), (e) => e instanceof ScheduleBatchError);
+  check('an upsert failure aborts before any delete/cancel — nothing removed', !writes().some((r) => r.op === 'delete' || r.op === 'update'));
 }
 
 console.log(`\n${passed} checks passed`);

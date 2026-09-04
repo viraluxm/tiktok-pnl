@@ -16,7 +16,13 @@ export interface ScheduleBulkInput {
   dryRun?: boolean;
 }
 
-export type ScheduleBulkResult = ScheduleCounts & { ok: true; dryRun: boolean };
+export type ScheduleBulkResult = ScheduleCounts & {
+  ok: true;
+  dryRun: boolean;
+  /** Dates whose existing times this operation replaces / removes. */
+  updatedDates: string[];
+  removedDates: string[];
+};
 
 /** Thrown when the server refuses one or more days (HTTP 409). Nothing was written. */
 export class ScheduleRefusedError extends Error {
@@ -44,7 +50,7 @@ export async function postScheduleBulk(input: ScheduleBulkInput): Promise<Schedu
   const data = await res.json().catch(() => ({}));
   if (res.status === 409 && Array.isArray(data.refusals)) throw new ScheduleRefusedError(data.refusals);
   if (!res.ok) throw new Error(data.error ?? 'Could not save the schedule.');
-  return data as ScheduleBulkResult;
+  return { ...data, updatedDates: data.updatedDates ?? [], removedDates: data.removedDates ?? [] } as ScheduleBulkResult;
 }
 
 export function useScheduleBulk() {
