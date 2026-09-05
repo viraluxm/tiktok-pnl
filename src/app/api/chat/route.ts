@@ -220,10 +220,14 @@ export async function POST(request: Request) {
         }
       } catch (err) {
         console.error('[chat] stream failed:', err);
+        // A 400 is OUR bug — a malformed request shape — not something the admin did. Swallowing
+        // its message makes it undebuggable in prod, and this endpoint is admin-only, so surface
+        // the provider's own detail. Everything else stays a short human message.
         const msg =
           err instanceof Anthropic.RateLimitError ? 'The model is rate limited right now — try again shortly.'
           : err instanceof Anthropic.AuthenticationError ? 'Chat credentials are invalid.'
-          : err instanceof Anthropic.APIError ? `Model error (${err.status}).`
+          : err instanceof Anthropic.BadRequestError ? `Request rejected (400): ${String(err.message).slice(0, 600)}`
+          : err instanceof Anthropic.APIError ? `Model error (${err.status}): ${String(err.message).slice(0, 300)}`
           : 'Something went wrong answering that.';
         send({ type: 'error', message: msg });
       } finally {

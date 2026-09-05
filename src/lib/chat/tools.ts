@@ -69,11 +69,12 @@ export const TOOL_DEFS: Anthropic.Beta.BetaTool[] = [
       type: 'object',
       properties: {
         status: {
-          // Nullable + required, not omitted: `strict: true` demands every property appear in
-          // `required`, so optionality is expressed as a null-able type. Null means "default".
-          type: ['string', 'null'],
-          enum: ['active', 'inactive', 'all', null],
-          description: 'Filter by employment status. Null or omitted means active only.',
+          // Single scalar type + a sentinel value rather than a nullable union: `strict: true`
+          // demands every property appear in `required`, and the supported schema subset is
+          // narrower than full JSON Schema — a `type: [...]` union is not worth the risk here.
+          type: 'string',
+          enum: ['active', 'inactive', 'all'],
+          description: 'Filter by employment status. Use "active" unless asked otherwise.',
         },
       },
       required: ['status'],
@@ -94,7 +95,11 @@ export const TOOL_DEFS: Anthropic.Beta.BetaTool[] = [
       properties: {
         from: { type: 'string', pattern: ISO_DATE, description: 'Start date, inclusive (YYYY-MM-DD, America/Los_Angeles).' },
         to: { type: 'string', pattern: ISO_DATE, description: 'End date, inclusive (YYYY-MM-DD, America/Los_Angeles).' },
-        employee_id: { type: ['string', 'null'], description: 'Optional: restrict to one employee id from get_roster.' },
+        employee_id: {
+          // Sentinel rather than a nullable union — see the note on get_roster.status.
+          type: 'string',
+          description: 'An employee id from get_roster to restrict to one person, or the literal "all" for everyone.',
+        },
       },
       required: ['from', 'to', 'employee_id'],
       additionalProperties: false,
@@ -138,7 +143,7 @@ async function getSchedule(
   if (span > MAX_RANGE_DAYS) {
     throw new Error(`range too wide: ${span + 1} days requested, max ${MAX_RANGE_DAYS}. Narrow the range and ask again.`);
   }
-  const emp = input.employee_id ?? null;
+  const emp = input.employee_id && input.employee_id !== 'all' ? input.employee_id : null;
 
   // (a) Real shift rows — the pay input.
   const worked = await pageAll<Record<string, unknown>>((f: number, t: number) => {
