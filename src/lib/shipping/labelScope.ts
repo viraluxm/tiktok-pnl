@@ -22,11 +22,20 @@ import { zonedDayRangeUtcMs, zonedDayKey, SHOP_TIMEZONE } from '@/lib/shipping/p
 
 export type LabelScope =
   | { kind: 'all' }
-  | { kind: 'day'; day: string }
+  | { kind: 'day'; days: string[] }
   | { kind: 'lives'; sessionIds: string[] };
 
 /** Most lives selectable in one run. A guard against an unbounded id list in the query. */
 export const MAX_SCOPE_LIVES = 40;
+
+/**
+ * Most days selectable in one run.
+ *
+ * Two is the normal answer to "we fell behind over the weekend"; seven bounds the pathological
+ * case without getting in the way. Beyond that the operator wants the whole backlog, which is
+ * what leaving the scope empty already does.
+ */
+export const MAX_SCOPE_DAYS = 7;
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -47,10 +56,17 @@ export function parseScope(
   if (day && ids) return { error: 'Pass either day or session_ids, not both' };
 
   if (day) {
-    if (!DAY_RE.test(day)) return { error: 'day must be YYYY-MM-DD' };
-    // Date.parse on a bare YYYY-MM-DD is UTC midnight, which is fine for validity checking.
-    if (Number.isNaN(Date.parse(day))) return { error: 'day is not a real date' };
-    return { scope: { kind: 'day', day } };
+    const list = [...new Set(day.split(',').map((d) => d.trim()).filter(Boolean))].sort();
+    if (!list.length) return { error: 'day was empty' };
+    if (list.length > MAX_SCOPE_DAYS) {
+      return { error: `at most ${MAX_SCOPE_DAYS} days per run, got ${list.length}` };
+    }
+    for (const d of list) {
+      if (!DAY_RE.test(d)) return { error: `day must be YYYY-MM-DD, got "${d}"` };
+      // Date.parse on a bare YYYY-MM-DD is UTC midnight, fine for validity checking.
+      if (Number.isNaN(Date.parse(d))) return { error: `"${d}" is not a real date` };
+    }
+    return { scope: { kind: 'day', days: list } };
   }
 
   if (ids) {
@@ -80,7 +96,9 @@ export function dayOf(utcMs: number): string {
 
 /** Human label for a scope, for logs and the run summary. */
 export function describeScope(scope: LabelScope): string {
-  if (scope.kind === 'day') return `day ${scope.day}`;
+  if (scope.kind === 'day') {
+    return scope.days.length === 1 ? `day ${scope.days[0]}` : `${scope.days.length} days`;
+  }
   if (scope.kind === 'lives') return `${scope.sessionIds.length} live(s)`;
   return 'entire backlog';
 }

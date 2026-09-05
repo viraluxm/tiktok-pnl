@@ -21,7 +21,7 @@ const here = (f) => fileURLToPath(new URL(f, import.meta.url));
 emit(here('./pickerPerformance.ts'), 'pickerPerformance.mjs');
 const mod = await import(emit(here('./labelScope.ts'), 'labelScope.mjs',
   (s) => s.replace('@/lib/shipping/pickerPerformance', './pickerPerformance.mjs')));
-const { parseScope, dayWindow, dayOf, describeScope, MAX_SCOPE_LIVES } = mod;
+const { parseScope, dayWindow, dayOf, describeScope, MAX_SCOPE_LIVES, MAX_SCOPE_DAYS } = mod;
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -68,7 +68,8 @@ console.log('\nA malformed scope is REFUSED, never widened');
 console.log('\nValid scopes');
 {
   const d = parseScope({ day: '2026-09-03' });
-  check('a well-formed day parses', d.scope.kind === 'day' && d.scope.day === '2026-09-03');
+  check('a well-formed day parses',
+    d.scope.kind === 'day' && d.scope.days.join(',') === '2026-09-03');
   const l = parseScope({ sessionIds: `${U(1)},${U(2)}` });
   check('a session list parses', l.scope.kind === 'lives' && l.scope.sessionIds.length === 2);
   check('duplicate ids collapse',
@@ -77,6 +78,35 @@ console.log('\nValid scopes');
     parseScope({ sessionIds: ` ${U(1)} , ${U(2)} ` }).scope.sessionIds.length === 2);
   check('uppercase UUIDs are accepted',
     parseScope({ sessionIds: U(1).toUpperCase() }).scope?.kind === 'lives');
+}
+
+console.log('\nSeveral days at once — the weekend catch-up case');
+{
+  const r = parseScope({ day: '2026-09-03,2026-09-02' });
+  check('two days parse', r.scope.kind === 'day' && r.scope.days.length === 2);
+  // Sorted so two runs over the same selection describe and log identically.
+  check('…in a stable order', r.scope.days.join(',') === '2026-09-02,2026-09-03', r.scope.days.join(','));
+  check('duplicates collapse', parseScope({ day: '2026-09-03,2026-09-03' }).scope.days.length === 1);
+  check('spaces are tolerated',
+    parseScope({ day: ' 2026-09-03 , 2026-09-02 ' }).scope.days.length === 2);
+
+  // Non-adjacent days must stay two windows, never one span — a span would sweep in the day
+  // between them, which nobody selected.
+  const gap = parseScope({ day: '2026-09-01,2026-09-05' });
+  check('non-adjacent days stay separate', gap.scope.days.join(',') === '2026-09-01,2026-09-05');
+
+  check('one bad day among good ones refuses the whole set',
+    !!parseScope({ day: '2026-09-03,nope' }).error);
+  check('…and names the offender', parseScope({ day: '2026-09-03,nope' }).error.includes('nope'));
+  check('the cap is 7', MAX_SCOPE_DAYS === 7);
+  const many = Array.from({ length: MAX_SCOPE_DAYS + 1 },
+    (_, i) => `2026-09-0${(i % 9) + 1}`).join(',');
+  check('too many days is refused', !!parseScope({ day: many }).error
+    || parseScope({ day: many }).scope.days.length <= MAX_SCOPE_DAYS);
+  check('describe names the count for several days',
+    describeScope({ kind: 'day', days: ['a', 'b'] }).includes('2'));
+  check('…and the date itself for one',
+    describeScope({ kind: 'day', days: ['2026-09-03'] }).includes('2026-09-03'));
 }
 
 console.log('\nToo many lives is bounded');
@@ -127,7 +157,7 @@ console.log('\nThe fulfilment day is 04:00 → 04:00, not midnight');
 console.log('\nDescribing a scope');
 {
   check('all', describeScope({ kind: 'all' }).includes('backlog'));
-  check('day names the date', describeScope({ kind: 'day', day: '2026-09-03' }).includes('2026-09-03'));
+  check('day names the date', describeScope({ kind: 'day', days: ['2026-09-03'] }).includes('2026-09-03'));
   check('lives names the count',
     describeScope({ kind: 'lives', sessionIds: [U(1), U(2)] }).includes('2'));
 }

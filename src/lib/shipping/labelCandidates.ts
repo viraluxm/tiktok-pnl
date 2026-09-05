@@ -56,29 +56,81 @@ export async function orderIdsForSessions(
 export async function readCandidates(
   admin: Admin, userId: string, storeId: string, scope: LabelScope, tag: string,
 ): Promise<CandidateRow[]> {
-  const rows = await readAllPaged<CandidateRow>(
-    (from, to) => {
-      let q = admin.from('synced_order_ids')
-        .select('order_id, auto_combine_group_id, order_created_at')
-        .eq('user_id', userId).eq('store_id', storeId)
-        .eq('status', 'AWAITING_SHIPMENT').is('tracking_number', null);
-      if (scope.kind === 'day') {
-        const { fromISO, toISO } = dayWindow(scope.day);
-        q = q.gte('order_created_at', fromISO).lt('order_created_at', toISO);
-      }
-      return q.order('order_id', { ascending: true }).range(from, to);
-    },
-    `labels ${tag} candidates`,
-  );
+  const base = (from: number, to: number) => admin.from('synced_order_ids')
+    .select('order_id, auto_combine_group_id, order_created_at')
+    .eq('user_id', userId).eq('store_id', storeId)
+    .eq('status', 'AWAITING_SHIPMENT').is('tracking_number', null)
+    .order('order_id', { ascending: true })
+    .range(from, to);
 
-  const mapped = rows.map((c) => ({
+  const norm = (c: CandidateRow) => ({
     order_id: String(c.order_id),
     auto_combine_group_id: c.auto_combine_group_id ?? null,
     order_created_at: c.order_created_at ?? null,
-  }));
+  });
 
-  if (scope.kind !== 'lives') return mapped;
+  if (scope.kind === 'all') {
+    return (await readAllPaged<CandidateRow>(base, `labels ${tag} candidates`)).map(norm);
+  }
 
-  const inScope = await orderIdsForSessions(admin, userId, scope.sessionIds, tag);
-  return mapped.filter((c) => inScope.has(c.order_id));
+  // ── Which GROUPS the scope selects. ──
+  //
+  // A scope picks BOXES, never loose orders, and the two are not the same thing: 64 of Sep 3's
+  // 534 boxes straddle the 04:00 boundary, and filtering orders by date cut 183 of their orders
+  // away — one group lost 19 of its 20. A label bought for what was left would have covered a
+  // fraction of the parcel and orphaned the rest, which is precisely the partial box the
+  // verification gate refuses. It could not catch this one, because the missing orders were
+  // removed BEFORE grouping, so the gate never knew they existed.
+  //
+  // So selection happens on groups, and the group is then re-read WHOLE.
+  let seedRows: CandidateRow[];
+  if (scope.kind === 'day') {
+    // Days are read one window at a time rather than as a single min→max span: two chosen days
+    // need not be adjacent, and a span would silently sweep in the days between them.
+    const byId = new Map<string, CandidateRow>();
+    for (const d of scope.days) {
+      const { fromISO, toISO } = dayWindow(d);
+      const rows = await readAllPaged<CandidateRow>(
+        (from, to) => base(from, to).gte('order_created_at', fromISO).lt('order_created_at', toISO),
+        `labels ${tag} day seed ${d}`,
+      );
+      for (const r of rows) byId.set(String(r.order_id), r);
+    }
+    seedRows = [...byId.values()];
+  } else {
+    const inScope = await orderIdsForSessions(admin, userId, scope.sessionIds, tag);
+    seedRows = (await readAllPaged<CandidateRow>(base, `labels ${tag} candidates`))
+      .filter((c) => inScope.has(String(c.order_id)));
+  }
+
+  const groupIds = [...new Set(
+    seedRows.map((r) => r.auto_combine_group_id).filter((g): g is string => !!g),
+  )];
+  // Orders with no group id are their own box: nothing to expand, keep them as they are.
+  const loose = seedRows.filter((r) => !r.auto_combine_group_id).map(norm);
+
+  if (!groupIds.length) return loose;
+
+  // Re-read every order of every selected group, with NO date or session filter, so each box is
+  // whole. A box straddling two days is therefore reachable from either — correct, and the age
+  // gate still holds it back until its YOUNGEST order has settled.
+  const whole = await readAllPagedIn<CandidateRow, string>(
+    groupIds,
+    (chunk, from, to) => admin.from('synced_order_ids')
+      .select('order_id, auto_combine_group_id, order_created_at')
+      .eq('user_id', userId).eq('store_id', storeId)
+      .eq('status', 'AWAITING_SHIPMENT').is('tracking_number', null)
+      .in('auto_combine_group_id', chunk)
+      .order('order_id', { ascending: true }).range(from, to),
+    `labels ${tag} whole groups`,
+  );
+
+  const seen = new Set(loose.map((r) => r.order_id));
+  const out = [...loose];
+  for (const r of whole.map(norm)) {
+    if (seen.has(r.order_id)) continue;
+    seen.add(r.order_id);
+    out.push(r);
+  }
+  return out;
 }

@@ -55,14 +55,20 @@ export async function GET(req: Request) {
   const readyByGroup = new Map<string, boolean>();
   for (const b of boxes) readyByGroup.set(b.group_key, gateByAge(b, nowMs).ok);
 
-  // A box belongs to the fulfilment day of its OLDEST order: that is the show it came from,
-  // and it is the same rule the box's age gate uses when deciding it has settled.
-  const dayOfBox = new Map<string, string>();
+  // A box counts under EVERY fulfilment day it touches, not just its oldest order's day.
+  //
+  // This has to match how a run selects: the run takes any group with an order in the window and
+  // then re-reads that group WHOLE, so a box straddling two nights is reachable from either. An
+  // earlier version bucketed by oldest order only, and the picker advertised 531 boxes for a day
+  // the run then resolved to 534 — the same box counted differently in two places.
+  const daysOfBox = new Map<string, string[]>();
   for (const b of boxes) {
-    const times = b.orders
-      .map((o) => (o.order_created_at ? Date.parse(o.order_created_at) : NaN))
-      .filter((t) => Number.isFinite(t));
-    if (times.length) dayOfBox.set(b.group_key, dayOf(Math.min(...times)));
+    const days = new Set<string>();
+    for (const o of b.orders) {
+      const t = o.order_created_at ? Date.parse(o.order_created_at) : NaN;
+      if (Number.isFinite(t)) days.add(dayOf(t));
+    }
+    if (days.size) daysOfBox.set(b.group_key, [...days]);
   }
 
   type Bucket = { boxes: number; ready: number; orders: number };
@@ -74,8 +80,9 @@ export async function GET(req: Request) {
 
   const byDay = new Map<string, Bucket>();
   for (const b of boxes) {
-    const day = dayOfBox.get(b.group_key);
-    if (day) bump(byDay, day, readyByGroup.get(b.group_key) ?? false, b.orders.length);
+    for (const day of daysOfBox.get(b.group_key) ?? []) {
+      bump(byDay, day, readyByGroup.get(b.group_key) ?? false, b.orders.length);
+    }
   }
 
   // ── Which live each order came from. ──

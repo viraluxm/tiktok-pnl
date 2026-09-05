@@ -70,7 +70,7 @@ export default function LabelsPanel() {
 
   const [scopes, setScopes] = useState<Scopes | null>(null);
   const [scopeKind, setScopeKind] = useState<ScopeKind>('day');
-  const [day, setDay] = useState<string | null>(null);
+  const [days, setDays] = useState<Set<string>>(new Set());
   const [lives, setLives] = useState<Set<string>>(new Set());
   const [unbound, setUnbound] = useState<UnboundChoice>('wait');
 
@@ -87,10 +87,10 @@ export default function LabelsPanel() {
 
   const scopeParams = useCallback(() => {
     const p = new URLSearchParams({ store_id: activeStore });
-    if (scopeKind === 'day' && day) p.set('day', day);
+    if (scopeKind === 'day' && days.size) p.set('day', [...days].sort().join(','));
     if (scopeKind === 'lives' && lives.size) p.set('session_ids', [...lives].join(','));
     return p;
-  }, [activeStore, scopeKind, day, lives]);
+  }, [activeStore, scopeKind, days, lives]);
 
   // ── Scope options ──
   useEffect(() => {
@@ -106,14 +106,14 @@ export default function LabelsPanel() {
         // Default to the most recent day that has anything ready, which is nearly always the
         // one being printed. Never auto-select a scope with nothing in it.
         const first = (j.days as DayScope[]).find((d) => d.ready > 0) ?? (j.days as DayScope[])[0];
-        setDay(first?.day ?? null);
+        setDays(first ? new Set([first.day]) : new Set());
       })
       .catch(() => { if (!cancelled) { setScopes(null); setErr('Could not load shows'); } })
       .finally(() => { if (!cancelled) setLoadingScopes(false); });
     return () => { cancelled = true; };
   }, [activeStore, invalidate]);
 
-  const scopeChosen = scopeKind === 'day' ? !!day : lives.size > 0;
+  const scopeChosen = scopeKind === 'day' ? days.size > 0 : lives.size > 0;
 
   async function check() {
     if (!scopeChosen) return;
@@ -240,26 +240,19 @@ export default function LabelsPanel() {
             </div>
 
             {scopeKind === 'day' && (
-              <div className="mt-3">
-                <select
-                  value={day ?? ''}
-                  onChange={(e) => { setDay(e.target.value || null); invalidate(); }}
-                  className="w-full rounded-md border border-tt-input-border bg-tt-input-bg px-3 py-2 text-sm text-tt-text"
-                >
-                  <option value="">Pick a day…</option>
-                  {scopes.days.map((d) => (
-                    <option key={d.day} value={d.day}>
-                      {fmtDay(d.day)}{d.day === scopes.today ? ' (today)' : ''}
-                      {' · '}{d.ready} ready{d.ready !== d.boxes ? ` of ${d.boxes}` : ''}
-                      {' · '}{d.orders} orders
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[11px] text-tt-muted/70">
-                  A day runs 4am to 4am, so a show ending after midnight stays with the night it
-                  started.
-                </p>
-              </div>
+              <DayCalendar
+                days={scopes.days}
+                today={scopes.today}
+                selected={days}
+                onToggle={(d) => {
+                  setDays((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(d)) next.delete(d); else next.add(d);
+                    return next;
+                  });
+                  invalidate();
+                }}
+              />
             )}
 
             {scopeKind === 'lives' && (
@@ -440,6 +433,91 @@ export default function LabelsPanel() {
           {err}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A month grid of fulfilment days, multi-select.
+ *
+ * A calendar rather than a list because the question is "which nights am I behind on", and that
+ * is a question about dates. Only days with unbought boxes are selectable — the rest are drawn
+ * but inert, so the grid still reads as a calendar while making it impossible to pick a night
+ * with nothing in it.
+ *
+ * Counts are shown per day because they are what decides the selection: 515 ready of 531 is a
+ * night worth printing, 2 is not.
+ */
+function DayCalendar({ days, today, selected, onToggle }: {
+  days: DayScope[]; today: string; selected: Set<string>; onToggle: (d: string) => void;
+}) {
+  const byDay = new Map(days.map((d) => [d.day, d]));
+  if (!days.length) return <p className="mt-3 text-xs text-tt-muted">No unbought labels.</p>;
+
+  // Span the offered range, so the grid has no holes where a quiet day fell.
+  const sorted = [...days].map((d) => d.day).sort();
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const cells: string[] = [];
+  for (let t = Date.parse(`${first}T12:00:00Z`); t <= Date.parse(`${last}T12:00:00Z`); t += 86_400_000) {
+    cells.push(new Date(t).toISOString().slice(0, 10));
+  }
+  // Pad to the week so columns line up under their weekday.
+  const lead = new Date(`${cells[0]}T12:00:00Z`).getUTCDay();
+
+  const total = [...selected].reduce((n, d) => n + (byDay.get(d)?.ready ?? 0), 0);
+
+  return (
+    <div className="mt-3">
+      <div className="grid grid-cols-7 gap-1">
+        {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((w, i) => (
+          <div key={i} className="pb-1 text-center text-[11px] text-tt-muted/60">{w}</div>
+        ))}
+        {Array.from({ length: lead }, (_, i) => <div key={`pad${i}`} />)}
+        {cells.map((d) => {
+          const info = byDay.get(d);
+          const on = selected.has(d);
+          const usable = !!info && info.ready > 0;
+          return (
+            <button
+              key={d}
+              onClick={() => usable && onToggle(d)}
+              disabled={!usable}
+              aria-pressed={on}
+              className={`rounded-md border px-1 py-1.5 text-center transition-colors ${
+                on ? 'border-tt-green bg-tt-green/10 text-tt-text'
+                  : usable ? 'cursor-pointer border-tt-border text-tt-text hover:border-tt-border-hover'
+                    : 'border-transparent text-tt-muted/30'
+              }`}
+              title={info ? `${info.ready} ready of ${info.boxes} · ${info.orders} orders` : 'nothing to buy'}
+            >
+              <span className="block text-sm leading-tight">
+                {Number(d.slice(8, 10))}
+                {d === today && <span className="ml-0.5 text-[9px] text-tt-muted">•</span>}
+              </span>
+              <span className="block text-[10px] leading-tight text-tt-muted">
+                {info?.ready ? info.ready : ''}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-2 text-xs text-tt-muted">
+        {selected.size === 0 && 'Pick one or more nights.'}
+        {selected.size === 1 && `1 night · ${total} labels ready`}
+        {/*
+          Deliberately "up to" for several nights. A combine group spanning midnight belongs to
+          both nights and is counted under each, so adding the per-night numbers double-counts
+          it — 64 of Sep 3's boxes straddle into Sep 4. The check resolves the real union in one
+          click, so an approximate number here is honest and a precise-looking sum would not be.
+        */}
+        {selected.size > 1 && `${selected.size} nights · up to ${total} labels — some orders `
+          + 'span midnight and belong to both, so the check will land a little lower'}
+      </p>
+      <p className="mt-1 text-[11px] text-tt-muted/60">
+        A night runs 4am to 4am; a show ending after midnight stays with the night it started.
+        The dot marks today.
+      </p>
     </div>
   );
 }
