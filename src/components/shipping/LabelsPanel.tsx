@@ -48,6 +48,7 @@ interface DryRun {
     excluded_too_recent: number; min_order_age_hours: number;
     boxes: number; orders: number; batched_boxes: number; bundle_boxes: number;
     orders_in_scope: number; orders_pulled_in: number; pulled_in_by_day: Record<string, number>;
+    not_verified_over_cap: number;
     sku_batches: number; unbound_boxes: number; already_in_ledger: number; would_buy: number;
   };
   spend_estimate: {
@@ -355,6 +356,21 @@ export default function LabelsPanel() {
               {' '}— they share a combine box with one of this night&rsquo;s orders, and a box is
               always bought whole so no label covers half a parcel. Buying this night will reduce
               those nights too.
+            </p>
+          )}
+          {plan.counts.not_verified_over_cap > 0 && (
+            /* A truncated check must never look like a complete one. Without this the plan
+               silently under-reports and the operator buys less than they meant to. */
+            <p className="mt-3 rounded-md border border-tt-yellow/40 bg-tt-yellow/5 px-3 py-2 text-xs text-tt-yellow">
+              <span className="font-semibold">
+                This check is incomplete — {plan.counts.not_verified_over_cap} more box
+                {plan.counts.not_verified_over_cap === 1 ? '' : 'es'} could not be verified in time.
+              </span>{' '}
+              <span className="text-tt-muted">
+                They are NOT in the count above and will not be bought. Narrow the scope to fewer
+                nights, buy this batch and check again, or just re-check — it often completes on
+                a second pass.
+              </span>
             </p>
           )}
           {plan.counts.excluded_too_recent > 0 && (

@@ -32,6 +32,15 @@ export const CHUNK = 50;
 export const VERIFY_CALL_CAP = 200;
 
 /**
+ * Verification calls in flight at once.
+ *
+ * Verification is read-only and idempotent, so it parallelises safely — and must, because doing
+ * it one call at a time truncated real runs against the time budget. Six keeps a three-night
+ * scope (96 calls) around 16 seconds instead of 96.
+ */
+export const VERIFY_CONCURRENCY = 6;
+
+/**
  * Stop verifying with this much of the request left, and report the shortfall.
  *
  * Truncating is survivable as long as it is VISIBLE: the count that gets authorised must never
@@ -229,32 +238,58 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   const liveStatus = new Map<string, string>();
   const verifyStart = Date.now();
   let verifiedIds = 0;
-  try {
-    for (let i = 0; i < idsToVerify.length; i += CHUNK) {
-      if (Date.now() - verifyStart > VERIFY_BUDGET_MS) break;
-      const ids = idsToVerify.slice(i, i + CHUNK);
-      verifiedIds += ids.length;
-      for (const o of await getOrderById(accessToken, shopCipher, ids)) {
-        liveStatus.set(
-          String((o as { id: unknown }).id),
-          String((o as { status: unknown }).status || '').toUpperCase(),
-        );
+
+  // ── Verified CONCURRENTLY. ──
+  //
+  // These are read-only, idempotent GETs, so unlike purchases there is no reason to serialise
+  // them — and serialising was silently truncating real runs. A three-night scope is 4,787
+  // orders, or 96 sequential calls at roughly a second each, which overran the budget and left
+  // ~417 boxes unverified. Unverified reads as "moved on", so the check quietly reported 983
+  // buyable boxes when 1,400 were.
+  //
+  // The budget stays as a backstop, checked between chunks rather than only before them.
+  const chunks: string[][] = [];
+  for (let i = 0; i < idsToVerify.length; i += CHUNK) chunks.push(idsToVerify.slice(i, i + CHUNK));
+
+  let nextChunk = 0;
+  let verifyError: unknown = null;
+  const worker = async () => {
+    for (;;) {
+      if (verifyError) return;
+      if (Date.now() - verifyStart > VERIFY_BUDGET_MS) return;
+      const idx = nextChunk++;
+      if (idx >= chunks.length) return;
+      const ids = chunks[idx];
+      try {
+        const got = await getOrderById(accessToken, shopCipher, ids);
+        for (const o of got) {
+          liveStatus.set(
+            String((o as { id: unknown }).id),
+            String((o as { status: unknown }).status || '').toUpperCase(),
+          );
+        }
+        verifiedIds += ids.length;
+      } catch (e) {
+        verifyError = e;
+        return;
       }
     }
-  } catch (e) {
-    throw new VerifyFailedError(e instanceof Error ? e.message : String(e));
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(VERIFY_CONCURRENCY, chunks.length) }, worker),
+  );
+  if (verifyError) {
+    throw new VerifyFailedError(
+      verifyError instanceof Error ? verifyError.message : String(verifyError),
+    );
   }
 
-  // Boxes whose orders the loop never got to. idsToVerify is built by walking toVerify in order,
-  // so the shortfall is a suffix: count boxes from the end until the verified ids are accounted
-  // for. Those boxes are then refused below (a missing status reads as "moved on"), so this is
-  // reporting, not gating — but without it a truncated run looks complete.
+  // Boxes whose orders were never verified. With concurrency the shortfall is no longer a clean
+  // suffix, so this counts boxes by whether every one of their orders actually came back.
   let unreachedBoxes = 0;
   if (verifiedIds < idsToVerify.length) {
-    let seen = 0;
     for (const b of toVerify) {
-      seen += b.orders.length;
-      if (seen > verifiedIds) unreachedBoxes++;
+      if (b.orders.some((o) => !liveStatus.has(o.order_id))) unreachedBoxes++;
     }
   }
 
