@@ -15,6 +15,11 @@
 // perfectly; burying the same box in mixed forces exactly the read this whole feature exists
 // to remove. Paper is cheaper than a misread.
 //
+// A BOX WITH NO SKU ON FILE IS ITS OWN THIRD CASE, not a bundle. Nothing is known about what
+// is inside it, so its label tells the packer nothing and has to be looked up in TikTok by
+// hand. Putting it in the mixed pile would hide that inside a section the packer believes they
+// can work from. It prints last, behind a header naming the work.
+//
 // MULTI-UNIT BOXES GET THEIR OWN HEADER, NOT THE SINGLE-UNIT ONE. A 3-unit order of the same
 // SKU is still one SKU, so it is not mixed — but it cannot sit under the same heading as the
 // 1-unit boxes either, because the packer working that pile puts one item per package and
@@ -59,6 +64,16 @@ export interface LabelPlan {
    * always gets its own header, however few of them there are.
    */
   bundles: PlanBox[];
+  /**
+   * Boxes with NO SKU on file, printed last behind their own header.
+   *
+   * These are orders Lensed has not bound to an auction item, so nothing is known about what
+   * is inside them. They are kept separate from `bundles` rather than lumped in, because the
+   * two need opposite handling: a bundle's label tells the packer what to pack, an unbound
+   * label tells them nothing at all and has to be looked up in TikTok by hand. Mixing them
+   * would hide that in a pile the packer thinks they can work from.
+   */
+  unbound: PlanBox[];
   totalBoxes: number;
   totalOrders: number;
   /** Boxes under a SKU header — the share that packs without reading a label. */
@@ -74,6 +89,23 @@ export interface LabelPlan {
   /** Boxes needing multiple items each, so their header carries a per-box count. */
   multiUnitBoxes: number;
 }
+
+/** Header for the unbound section. Names the action, since the label itself says nothing. */
+export const UNBOUND_CAPTION = 'NO SKU ON FILE — LOOK UP EACH ORDER';
+
+/**
+ * Banners that divide the stack into the three piles that go to three different places.
+ *
+ * A per-SKU slip tells a packer what to grab NEXT. A banner tells whoever splits the stack which
+ * pile they are holding — and that is the whole point of the run: the singles pile goes to a
+ * dedicated prep station where one SKU is packed over and over, and it is 38-51% of a day's
+ * boxes (measured over the 8 days to 2026-09-04). Without a divider that survives being carried
+ * across a warehouse, the split has to be reconstructed by reading labels, which is the work
+ * this exists to remove.
+ */
+export const BANNER_SINGLES = 'SINGLES — PREP STATION';
+export const BANNER_MIXED = 'BUNDLED ORDERS — PICK REGULAR';
+export const BANNER_UNBOUND = UNBOUND_CAPTION;
 
 /** Total units across a box's SKU lines. */
 function unitsIn(box: PlanBox): number {
@@ -136,7 +168,14 @@ export function slipCaption(skuNumber: number | null, title: string, units = 1):
 export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
   const singleSku: PlanBox[] = [];
   const bundles: PlanBox[] = [];
-  for (const b of boxes) (isSingleSku(b) ? singleSku : bundles).push(b);
+  const unbound: PlanBox[] = [];
+  for (const b of boxes) {
+    // Three-way, and the order matters: no SKU lines at all is a different problem from two or
+    // more, and must not be answered with the bundle pile.
+    if (b.skus.length === 0) unbound.push(b);
+    else if (isSingleSku(b)) singleSku.push(b);
+    else bundles.push(b);
+  }
 
   // Keyed by (SKU, units per box), so a 3-unit box never joins the one-per-package pile.
   const sections = new Map<string, SkuBatch>();
@@ -167,6 +206,7 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
   // Stable order within a section and among bundles, for the same reason as the tie-break above.
   for (const b of batches) b.boxes.sort((x, y) => x.group_key.localeCompare(y.group_key));
   bundles.sort((x, y) => x.group_key.localeCompare(y.group_key));
+  unbound.sort((x, y) => x.group_key.localeCompare(y.group_key));
 
   const orderIds = new Set<string>();
   for (const b of boxes) for (const o of b.order_ids) orderIds.add(o);
@@ -174,6 +214,7 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
   return {
     batches,
     bundles,
+    unbound,
     totalBoxes: boxes.length,
     totalOrders: orderIds.size,
     // Every box under a SKU header — the share that packs without reading a label.
@@ -189,27 +230,38 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
  * Flatten a plan into the page sequence a printer would receive: a slip, then that batch's
  * labels, repeating, then every bundle label.
  */
-export function planPageSequence(plan: LabelPlan): Array<
+export type PlanPageOut =
+  | { kind: 'banner'; caption: string; count: number }
   | { kind: 'slip'; caption: string; count: number }
-  | { kind: 'label'; group_key: string }
-> {
-  const out: Array<
-    | { kind: 'slip'; caption: string; count: number }
-    | { kind: 'label'; group_key: string }
-  > = [];
-  for (const b of plan.batches) {
-    out.push({ kind: 'slip', caption: b.slip, count: b.boxes.length });
-    for (const box of b.boxes) out.push({ kind: 'label', group_key: box.group_key });
+  | { kind: 'label'; group_key: string };
+
+export function planPageSequence(plan: LabelPlan): PlanPageOut[] {
+  const out: PlanPageOut[] = [];
+
+  // ── Singles: one banner for the pile, then a slip per SKU inside it. ──
+  //
+  // Both are needed and they answer different questions. The banner says "this pile goes to the
+  // prep station"; the slips say "these forty are pumpkins, the next twelve are bananas". Only
+  // the banner survives the stack being split and carried.
+  if (plan.batches.length) {
+    out.push({ kind: 'banner', caption: BANNER_SINGLES, count: plan.batchedBoxes });
+    for (const b of plan.batches) {
+      out.push({ kind: 'slip', caption: b.slip, count: b.boxes.length });
+      for (const box of b.boxes) out.push({ kind: 'label', group_key: box.group_key });
+    }
   }
+
+  // ── Mixed: one banner, no per-SKU slips, because there is no single SKU to name. ──
   if (plan.bundles.length) {
-    // The mixed section gets a slip too. Without one, its first label reads as part of the last
-    // SKU batch — the exact confusion slips exist to prevent.
-    //
-    // The caption names the ACTION, not the contents: this section holds multi-SKU boxes,
-    // multi-unit boxes and demoted singletons, and what they share is that each label must be
-    // read individually.
-    out.push({ kind: 'slip', caption: 'MIXED — READ EACH LABEL', count: plan.bundles.length });
+    out.push({ kind: 'banner', caption: BANNER_MIXED, count: plan.bundles.length });
     for (const box of plan.bundles) out.push({ kind: 'label', group_key: box.group_key });
   }
+
+  // ── Unbound: last, behind a banner naming the work rather than the contents. ──
+  if (plan.unbound.length) {
+    out.push({ kind: 'banner', caption: BANNER_UNBOUND, count: plan.unbound.length });
+    for (const box of plan.unbound) out.push({ kind: 'label', group_key: box.group_key });
+  }
+
   return out;
 }

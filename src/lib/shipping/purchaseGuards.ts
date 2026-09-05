@@ -8,18 +8,18 @@
 // halfway through, and no endpoint that quotes a run before committing to it.
 
 /**
- * Hard ceiling on the `limit` a single call may ask for.
+ * Sanity ceiling on one authorised manifest.
  *
- * This bounds the INVOCATION, not the plan: a backlog bigger than this is bought in successive
- * calls, each re-verified against TikTok. Chosen from real volume — the Snore test set held
- * 356 boxes and a normal day is that order of magnitude — so one legitimate day fits in one
- * call while the worst a single call can do stays bounded at roughly $1,600 rather than
- * unbounded.
+ * NOT the primary control any more. The controls that matter are SCOPE (a day or named shows,
+ * so a run means a definite set of work) and the confirm count (so the set was reviewed). This
+ * is the backstop against a scope that resolved to something absurd — a bug, or a store whose
+ * backlog was never bought down.
  *
- * It is the backstop, not the primary control. `limit` is required on every call precisely so
- * that the real ceiling is the one the caller names, visible in the request itself.
+ * 1,500 sits well above real volume: the busiest fulfilment day in the 8 days to 2026-09-04 was
+ * 863 boxes, and a normal day is 474-600. A legitimate day therefore always fits in one
+ * authorisation, which is the point — the operator asked not to split a day across runs.
  */
-export const MAX_BOXES_PER_RUN = 400;
+export const MAX_MANIFEST_BOXES = 1500;
 
 /**
  * Fallback unit price when the ledger holds no prior purchases, in USD.
@@ -65,18 +65,27 @@ export function summarizeSpend(prices: number[], boxes: number): SpendEstimate {
   };
 }
 
+/**
+ * What to do when a run contains boxes with no SKU on file.
+ *
+ * There is deliberately no default. Unbound is usually a TIMING state, not a permanent one —
+ * the team binds shortly after a show — so the right answer is normally to wait and re-run,
+ * and a job that quietly picked one for you would either skip orders silently or buy labels
+ * nobody can pick from. Both are worse than being asked.
+ */
+export type UnboundPolicy = 'skip' | 'include';
+
 export interface AuthorizeInput {
   /** LABEL_PURCHASE_ENABLED === '1'. Anything else means log-only. */
   enabled: boolean;
-  /** Boxes this run resolved, after removing everything already in the ledger. */
+  /** Boxes this scope resolved, after removing everything already in the ledger. */
   boxes: number;
   /** The count the caller read on the dry run and is authorising. Null when absent. */
   confirmBoxes: number | null;
-  /**
-   * REQUIRED ceiling on how many of those boxes this invocation may buy. Null when absent,
-   * which is refused — see authorizeRun.
-   */
-  limit: number | null;
+  /** Boxes in this run with no SKU on file. */
+  unboundCount: number;
+  /** What to do about them. Null when the caller has not said, which is refused if any exist. */
+  unboundPolicy: UnboundPolicy | null;
   cap?: number;
 }
 
@@ -85,8 +94,7 @@ export type AuthorizeRefusal =
   | 'nothing_to_buy'
   | 'confirm_missing'
   | 'confirm_mismatch'
-  | 'limit_missing'
-  | 'limit_invalid'
+  | 'unbound_present'
   | 'over_cap';
 
 export type AuthorizeResult =
@@ -94,30 +102,22 @@ export type AuthorizeResult =
   | { ok: false; code: AuthorizeRefusal; reason: string };
 
 /**
- * Whether a purchase run may proceed, and how many boxes it may buy.
+ * Whether a manifest may be authorised, and how many boxes it covers.
  *
- * TWO INDEPENDENT CHECKS DO THE WORK, AND THEY GUARD DIFFERENT THINGS.
+ * THIS IS THE ONLY GATE, and it runs ONCE per run rather than once per call. Authorising writes
+ * the whole manifest to the ledger as claimed rows and buys nothing; the purchase route then
+ * drains those rows mechanically. That split exists because a fulfilment day is 474-863 boxes
+ * and cannot be bought inside one request — but the operator asked not to split a day across
+ * several approvals, and re-approving between chunks is exactly that.
  *
- * `confirmBoxes` guards against a plan that MOVED. The caller passes the box count it saw on
- * the dry run and it must match exactly, so if a show ended, a sync landed, or another run
- * bought something in between, this refuses rather than buying a plan nobody read.
- * "Approximately what I approved" is not good enough when every difference is a paid label.
- *
- * `limit` guards against a plan that is LARGE. It is a separate concern, and confirmBoxes does
- * nothing for it: a caller that reads the dry run and passes its count straight back through —
- * which is exactly what a "Print labels" button would naturally do — is perfectly consistent
- * and would buy the entire backlog in one click. So `limit` is REQUIRED and has no default.
- * A request cannot express "buy everything"; it has to name a number, and that number is
- * bounded by the cap. The worst a single call can do is therefore always visible in the call
- * itself.
- *
- * Because every invocation is bounded by `limit`, a backlog LARGER than the cap is no longer
- * refused outright — it is bought in successive capped runs, each one re-verified against
- * TikTok. The cap now bounds the invocation rather than the plan, which is the thing that
- * actually spends money.
+ * `confirmBoxes` guards a plan that MOVED: the caller passes the count it saw on the dry run and
+ * it must match exactly, so if a show ended or a sync landed in between, this refuses rather
+ * than authorising a set nobody read. It replaces the old per-call `limit` as the thing standing
+ * between a click and a large purchase — the limit is gone because SCOPE now bounds the run, and
+ * a limit on top would have forced the multiple batches the operator specifically ruled out.
  */
 export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
-  const cap = input.cap ?? MAX_BOXES_PER_RUN;
+  const cap = input.cap ?? MAX_MANIFEST_BOXES;
   if (!input.enabled) {
     return { ok: false, code: 'disabled', reason: 'LABEL_PURCHASE_ENABLED is not 1 — log-only' };
   }
@@ -127,35 +127,29 @@ export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
   if (input.confirmBoxes == null) {
     return {
       ok: false, code: 'confirm_missing',
-      reason: 'confirm_boxes is required — read the dry run and pass the box count it reports',
+      reason: 'confirm_boxes is required — read the check and pass the box count it reports',
     };
   }
   if (input.confirmBoxes !== input.boxes) {
     return {
       ok: false, code: 'confirm_mismatch',
-      reason: `plan moved since it was reviewed: confirm_boxes=${input.confirmBoxes} but ${input.boxes} boxes now resolve — re-read the dry run`,
+      reason: `plan moved since it was reviewed: confirm_boxes=${input.confirmBoxes} but ${input.boxes} boxes now resolve — check again`,
     };
   }
-  if (input.limit == null) {
+  // Asked before the cap, because the answer changes how many boxes the run contains.
+  if (input.unboundCount > 0 && input.unboundPolicy == null) {
     return {
-      ok: false, code: 'limit_missing',
-      reason: `limit is required — the most boxes this call may buy (1-${cap}). There is deliberately no default: a request must name its own ceiling rather than inherit "all of them".`,
+      ok: false, code: 'unbound_present',
+      reason: `${input.unboundCount} box(es) in this batch have no SKU on file. Wait for them to be bound and check again, or pass unbound=skip to buy the rest, or unbound=include to buy them too (their labels tell the picker nothing and must be looked up by hand).`,
     };
   }
-  if (!Number.isInteger(input.limit) || input.limit < 1) {
-    return {
-      ok: false, code: 'limit_invalid',
-      reason: `limit must be a whole number of at least 1, got ${input.limit}`,
-    };
-  }
-  if (input.limit > cap) {
+  if (input.boxes > cap) {
     return {
       ok: false, code: 'over_cap',
-      reason: `limit=${input.limit} exceeds the ${cap}-box ceiling for one call`,
+      reason: `${input.boxes} boxes exceeds the ${cap}-box ceiling for one run — narrow the scope to a single day or fewer shows`,
     };
   }
-  // A limit above what is left is not an error — it simply buys what there is.
-  return { ok: true, buy: Math.min(input.limit, input.boxes) };
+  return { ok: true, buy: input.boxes };
 }
 
 /**
@@ -170,6 +164,163 @@ export function parsePrice(raw: unknown): number | null {
   if (!m) return null;
   const n = Number(m[0]);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Rolling spend, so a run is judged against what the last week and month actually cost. */
+export interface SpendWindows {
+  run_total: number;
+  last_7d: { labels: number; spent: number };
+  last_30d: { labels: number; spent: number };
+  currency: string;
+}
+
+/**
+ * Total what the ledger says was spent over the trailing windows.
+ *
+ * Rows with a null price are COUNTED as labels but contribute 0 to spend — those are the
+ * "already purchased at TikTok" rows, where a label exists but was bought outside Lensed and
+ * its price was never ours to see. Dropping them would undercount the labels; inventing a price
+ * would overstate the spend.
+ */
+export function summarizeLedgerSpend(
+  rows: Array<{ price_amount: unknown; purchased_at: unknown }>,
+  nowMs: number,
+  runTotal = 0,
+): SpendWindows {
+  const win = (days: number) => {
+    const from = nowMs - days * 86_400_000;
+    let labels = 0, spent = 0;
+    for (const r of rows) {
+      const t = Date.parse(String(r.purchased_at ?? ''));
+      if (!Number.isFinite(t) || t < from || t > nowMs) continue;
+      labels++;
+      const p = Number(r.price_amount);
+      if (Number.isFinite(p) && p > 0) spent += p;
+    }
+    return { labels, spent: Math.round(spent * 100) / 100 };
+  };
+  return {
+    run_total: Math.round(runTotal * 100) / 100,
+    last_7d: win(7),
+    last_30d: win(30),
+    currency: 'USD',
+  };
+}
+
+/** Read the ledger and total the trailing windows. */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export async function readSpendWindows(
+  admin: any, userId: string, storeId: string, runTotal = 0,
+): Promise<SpendWindows> {
+  const { data } = await admin
+    .from('shipping_label_purchases')
+    .select('price_amount, purchased_at')
+    .eq('user_id', userId).eq('store_id', storeId).eq('status', 'purchased')
+    .gte('purchased_at', new Date(Date.now() - 30 * 86_400_000).toISOString());
+  return summarizeLedgerSpend(data ?? [], Date.now(), runTotal);
+}
+
+
+/** One observed purchase: how many orders the box held, and what its label cost. */
+export interface PricePoint { orders: number; price: number }
+
+export interface SizedEstimate {
+  boxes: number;
+  total: number;
+  /** Observed spread, not a confidence interval: the cheapest and dearest this mix has cost. */
+  low: number;
+  high: number;
+  currency: string;
+  /** 'history' when every box size had prior sales, 'nearest' when some borrowed a neighbour. */
+  basis: 'history' | 'nearest' | 'fallback';
+  samples: number;
+}
+
+/**
+ * Estimate a run from the SIZE of each box, not a flat average.
+ *
+ * A flat average cannot work here. Measured over the first 21 real purchases, price tracks how
+ * many orders a box holds with a correlation of 0.853: a single-order box is about $4.01 and a
+ * 20-order combine is $11.45. The Wednesday test run was all large combines, so a $4.24 average
+ * built mostly from single-item labels under-predicted $107.65 by 69%.
+ *
+ * A size with no history borrows the NEAREST size that has some, which is deliberately
+ * non-parametric: with 21 points a fitted line would look more authoritative than the data
+ * supports, and the observed min and max of a real neighbouring bucket are honest numbers. With
+ * no history at all it falls back to the flat measured price.
+ *
+ * The result carries a RANGE because a single number invites being read as a quote, and there is
+ * no quote: Create Packages charges when it is called.
+ */
+export function estimateForSizes(history: PricePoint[], sizes: number[]): SizedEstimate {
+  const clean = history.filter(
+    (h) => Number.isFinite(h.price) && h.price > 0 && Number.isFinite(h.orders) && h.orders > 0,
+  );
+  if (!sizes.length) {
+    return { boxes: 0, total: 0, low: 0, high: 0, currency: 'USD', basis: 'fallback', samples: clean.length };
+  }
+
+  const buckets = new Map<number, number[]>();
+  for (const h of clean) {
+    const arr = buckets.get(h.orders) ?? [];
+    arr.push(h.price);
+    buckets.set(h.orders, arr);
+  }
+
+  const stat = (prices: number[]) => ({
+    mean: prices.reduce((a, b) => a + b, 0) / prices.length,
+    min: Math.min(...prices),
+    max: Math.max(...prices),
+  });
+
+  let borrowed = false;
+  const pick = (size: number) => {
+    const exact = buckets.get(size);
+    if (exact) return stat(exact);
+    if (!buckets.size) return { mean: FALLBACK_UNIT_PRICE, min: FALLBACK_UNIT_PRICE, max: FALLBACK_UNIT_PRICE };
+    borrowed = true;
+    // Nearest populated size; ties go to the LARGER one, which errs toward over-estimating
+    // rather than surprising someone with a bigger bill than the button promised.
+    let best = [...buckets.keys()][0];
+    for (const k of buckets.keys()) {
+      const d = Math.abs(k - size), bd = Math.abs(best - size);
+      if (d < bd || (d === bd && k > best)) best = k;
+    }
+    return stat(buckets.get(best) as number[]);
+  };
+
+  let total = 0, low = 0, high = 0;
+  for (const size of sizes) {
+    const st = pick(size);
+    total += st.mean; low += st.min; high += st.max;
+  }
+  const r = (n: number) => Math.round(n * 100) / 100;
+  return {
+    boxes: sizes.length,
+    total: r(total), low: r(low), high: r(high),
+    currency: 'USD',
+    basis: !clean.length ? 'fallback' : borrowed ? 'nearest' : 'history',
+    samples: clean.length,
+  };
+}
+
+/** Read the size/price history and estimate a run from its actual box sizes. */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export async function estimateSizedSpend(
+  admin: any, userId: string, storeId: string, sizes: number[],
+): Promise<SizedEstimate> {
+  const { data } = await admin
+    .from('shipping_label_purchases')
+    .select('price_amount, order_ids')
+    .eq('user_id', userId).eq('store_id', storeId).eq('status', 'purchased')
+    .not('price_amount', 'is', null)
+    .order('purchased_at', { ascending: false })
+    .limit(PRICE_SAMPLE_SIZE);
+  const history: PricePoint[] = (data ?? []).map((r: { price_amount: unknown; order_ids: unknown }) => ({
+    orders: Array.isArray(r.order_ids) ? r.order_ids.length : 1,
+    price: Number(r.price_amount),
+  }));
+  return estimateForSizes(history, sizes);
 }
 
 /**
