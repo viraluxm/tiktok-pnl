@@ -8,11 +8,13 @@ import { laTodayISO, addDaysISO } from '@/lib/schedule/timezone';
 import { fmtMonthDay } from '@/lib/schedule/format';
 import {
   weekDatesFor, weekStateFromInstances, copyWeekPattern, weekStateIsEmpty, expandRepeat,
-  repeatCountUntil, claimedDatesFor, EMPTY_DAY,
+  repeatCountUntil, claimedDatesFor, summariseWeek, weekSummaryLabel, EMPTY_DAY,
   type WeekState, type DayState, type ExistingInstance, type ScheduleCounts,
 } from '@/lib/schedule/schedulePlan';
 import { validateShiftTimes, WEEKDAY_LABELS } from '@/lib/weeklySchedule';
 import { fmtMonthDay as fmtDay } from '@/lib/schedule/format';
+import { scheduleLinkUrl } from '@/hooks/useScheduleLinks';
+import { copyText } from '../ScheduleLinkButton';
 
 // One employee, one week, real dated shift_instances. Opened from the roster's employee detail as
 // "Build Schedule" / "Edit Schedule" — same component either way; the only difference is whether
@@ -50,12 +52,19 @@ function formatDateList(dates: string[]): string {
 export default function EmployeeScheduleBuilder({
   employee,
   initialDate,
+  employeeLinkToken,
   onClose,
   onSaved,
 }: {
   employee: Employee;
   /** Any date inside the week to open on. Defaults to the current LA week. */
   initialDate?: string;
+  /**
+   * The employee's EXISTING permanent /s/[token] token, or null when they have none yet. Read-only:
+   * the success step copies this link and never mints, reissues or regenerates one — creating a
+   * link stays in Employee access, where it always was.
+   */
+  employeeLinkToken?: string | null;
   onClose: () => void;
   onSaved?: (counts: ScheduleCounts, weekCount: number) => void;
 }) {
@@ -100,6 +109,9 @@ export default function EmployeeScheduleBuilder({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Set ONLY by a confirmed successful save. Its presence swaps the form for the success step.
+  const [saved, setSaved] = useState<{ scheduled: number; weekCount: number } | null>(null);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   const isPast = (d: string) => d < today;
   const isLocked = (d: string) => isPast(d) || claimedDates.has(d);
@@ -205,7 +217,9 @@ export default function EmployeeScheduleBuilder({
       }
       const result = await apply.mutateAsync({ entries });
       onSaved?.(result, weekCount);
-      onClose();
+      // Success step instead of an immediate close: the manager's next move is almost always to
+      // send the person their link, and that link already exists — see handleCopyLink.
+      setSaved({ scheduled: summariseWeek(state, week, today).scheduled, weekCount });
     } catch (e) {
       setError(e instanceof ScheduleRefusedError ? e.message : (e as Error).message);
     } finally {
@@ -213,7 +227,19 @@ export default function EmployeeScheduleBuilder({
     }
   }
 
-  const workingCount = week.filter((d) => state[d].working && !isPast(d)).length;
+  const summary = useMemo(() => summariseWeek(state, week, today), [state, week, today]);
+
+  // Copy the employee's EXISTING permanent link. No API call, no mint, no token rendered on screen —
+  // the same clipboard behaviour Employee access uses (copyText + scheduleLinkUrl, imported rather
+  // than reimplemented). A missing token is explained, never silently created.
+  async function handleCopyLink() {
+    setCopyState('idle');
+    if (!employeeLinkToken) {
+      setCopyState('failed');
+      return;
+    }
+    setCopyState((await copyText(scheduleLinkUrl(employeeLinkToken))) ? 'copied' : 'failed');
+  }
 
   return (
     <div
@@ -221,6 +247,50 @@ export default function EmployeeScheduleBuilder({
       onClick={onClose} role="dialog" aria-modal="true" aria-label={`${possessive(employee.name)} schedule`}
     >
       <div onClick={(e) => e.stopPropagation()} className="w-full max-w-2xl rounded-[16px] border border-tt-border bg-tt-card p-5 shadow-2xl backdrop-blur-xl">
+        {saved ? (
+          <div className="py-2">
+            <div className="mb-5 text-center">
+              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-tt-green/15 text-lg text-tt-green" aria-hidden>✓</div>
+              <h3 className="text-base font-semibold text-tt-text">Schedule saved</h3>
+              <p className="mt-1 text-sm text-tt-text">{employee.name}</p>
+              <p className="mt-0.5 text-xs text-tt-muted tabular-nums">
+                {saved.scheduled === 0
+                  ? 'No shifts this week'
+                  : `${saved.scheduled} shift${saved.scheduled === 1 ? '' : 's'} scheduled`}
+                {saved.weekCount > 1 ? ` · repeated for ${saved.weekCount} weeks` : ''}
+              </p>
+            </div>
+
+            {/* The employee's PERMANENT link — the same one Employee access copies. Never minted here. */}
+            <div className="mx-auto max-w-sm space-y-2">
+              <div className="flex gap-2">
+                <button
+                  type="button" onClick={handleCopyLink}
+                  className="flex-1 rounded-xl bg-white/5 px-4 py-2.5 text-sm font-semibold text-tt-text transition-colors hover:bg-white/10"
+                >Copy Employee Link</button>
+                <button
+                  type="button" onClick={onClose} autoFocus
+                  className="flex-1 rounded-xl bg-tt-cyan px-4 py-2.5 text-sm font-semibold text-black transition-colors hover:bg-tt-cyan/90"
+                >Done</button>
+              </div>
+              {/* Announced politely: the outcome of a copy is invisible otherwise. */}
+              <p role="status" aria-live="polite" className="min-h-[16px] text-center text-[11px]">
+                {copyState === 'copied' && <span className="text-tt-green">Employee link copied</span>}
+                {copyState === 'failed' && (
+                  <span className="text-tt-red">
+                    {employeeLinkToken
+                      ? 'Could not copy — check clipboard permissions and try again.'
+                      : 'No employee link yet — create one in Employee access.'}
+                  </span>
+                )}
+              </p>
+              <p className="text-center text-[11px] text-tt-muted">
+                Their link never changes — the updated schedule is already on it.
+              </p>
+            </div>
+          </div>
+        ) : (
+        <>
         {/* Header */}
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
@@ -378,7 +448,7 @@ export default function EmployeeScheduleBuilder({
 
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-tt-muted tabular-nums">
-            {workingCount === 0 ? 'No working days' : `${workingCount} working day${workingCount === 1 ? '' : 's'}`}
+            {weekSummaryLabel(summary)}
             {dirty ? ' · unsaved' : ''}
           </span>
           <div className="flex gap-2">
@@ -392,6 +462,8 @@ export default function EmployeeScheduleBuilder({
             >{busy ? 'Saving…' : 'Save Schedule'}</button>
           </div>
         </div>
+        </>
+        )}
       </div>
     </div>
   );

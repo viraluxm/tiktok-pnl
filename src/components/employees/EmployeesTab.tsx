@@ -511,6 +511,7 @@ function RosterView({
       {builderFor && (
         <EmployeeScheduleBuilder
           employee={builderFor}
+          employeeLinkToken={links[builderFor.id]?.token ?? null}
           onClose={() => setBuilderFor(null)}
           onSaved={onScheduleSaved}
         />

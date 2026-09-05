@@ -331,6 +331,50 @@ console.log('\nHARDENING — affected dates for the repeat confirmation');
   check('dates are sorted so the dialog reads chronologically', JSON.stringify(plan.updatedDates) === JSON.stringify([...plan.updatedDates].sort()));
 }
 
+console.log('\nPOLISH — the footer week summary says what the screen shows');
+{
+  // THE BUG THIS FIXES: the footer counted only EDITABLE (future) working days while calling them
+  // "working days", so the week below — five Working rows — reported "2 working days".
+  const mk = (workingDays) => {
+    const st = P.weekStateFromInstances([], WEEK);
+    for (const d of workingDays) st[d] = { working: true, start: '17:00', end: '01:00' };
+    return st;
+  };
+  // Mon Wk, Tue Wk, Wed Off, Thu Wk, Fri Off, Sat Wk, Sun Wk — 5 working, 2 upcoming (today = Wed 09-09,
+  // so Mon 09-07 / Tue 09-08 are past; Thu 09-10 is upcoming, Sat 09-12 + Sun 09-13 upcoming = 3).
+  const mixed = mk(['2026-09-07', '2026-09-08', '2026-09-10', '2026-09-12', '2026-09-13']);
+  eq('mixed week counts ALL visible working days, and the upcoming subset', P.summariseWeek(mixed, WEEK, TODAY), { scheduled: 5, upcoming: 3 });
+  eq('and says both numbers', P.weekSummaryLabel(P.summariseWeek(mixed, WEEK, TODAY)), '5 days scheduled · 3 upcoming');
+
+  // The exact reported case: 5 working, only 2 of them still ahead.
+  const twoAhead = mk(['2026-09-07', '2026-09-08', '2026-09-09', '2026-09-12', '2026-09-13']);
+  eq('the reported case is no longer "2 working days"', P.weekSummaryLabel(P.summariseWeek(twoAhead, WEEK, TODAY)), '5 days scheduled · 3 upcoming');
+
+  // FUTURE-ONLY week: every working day is ahead, so the plain phrasing is complete.
+  const future = mk(['2026-09-10', '2026-09-11', '2026-09-12']);
+  eq('future-only summary', P.summariseWeek(future, WEEK, TODAY), { scheduled: 3, upcoming: 3 });
+  eq('future-only reads plainly, with no redundant tail', P.weekSummaryLabel(P.summariseWeek(future, WEEK, TODAY)), '3 working days');
+  eq('a single future day is singular', P.weekSummaryLabel(P.summariseWeek(mk(['2026-09-11']), WEEK, TODAY)), '1 working day');
+
+  // EMPTY / all-off week.
+  eq('empty week summary', P.summariseWeek(mk([]), WEEK, TODAY), { scheduled: 0, upcoming: 0 });
+  eq('empty week copy is sensible', P.weekSummaryLabel(P.summariseWeek(mk([]), WEEK, TODAY)), 'No working days');
+
+  // WHOLLY PAST week: a "0 upcoming" tail would be noise — the builder already banners the week.
+  const past = mk(['2026-09-07', '2026-09-08']);
+  eq('all-past week', P.summariseWeek(past, WEEK, TODAY), { scheduled: 2, upcoming: 0 });
+  eq('all-past week omits the upcoming clause', P.weekSummaryLabel(P.summariseWeek(past, WEEK, TODAY)), '2 days scheduled');
+
+  // TODAY counts as upcoming — a shift later today is still ahead of the manager.
+  eq('today is upcoming, not past', P.summariseWeek(mk([TODAY]), WEEK, TODAY), { scheduled: 1, upcoming: 1 });
+
+  // Display-only: the summary must not influence what gets submitted. Same state, same entries.
+  const before = P.expandRepeat(EMP.id, '2026-09-07', mixed, 1, TODAY);
+  P.weekSummaryLabel(P.summariseWeek(mixed, WEEK, TODAY));
+  eq('computing the summary does not change the submitted entries', P.expandRepeat(EMP.id, '2026-09-07', mixed, 1, TODAY), before);
+  check('past working days are still never submitted', !before.some((e) => e.date < TODAY));
+}
+
 console.log('\nPAYROLL INVARIANT');
 {
   const src = readFileSync(fileURLToPath(new URL('./schedulePlan.ts', import.meta.url)), 'utf8');

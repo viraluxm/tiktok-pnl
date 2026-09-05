@@ -251,6 +251,42 @@ export function weekStateIsEmpty(state: WeekState): boolean {
   return Object.values(state).every((d) => !d.working);
 }
 
+// ── The builder's footer summary ────────────────────────────────────────────
+// The footer used to count only the EDITABLE (future) working days while calling them "working
+// days", so a week showing five Working rows could report "2 working days" — the count and the
+// screen disagreed. It now reports both numbers, and says "upcoming" only when the two differ.
+//
+// Display only: this never changes which days are editable or which entries are submitted.
+
+export interface WeekSummary {
+  /** Working days visible in the week, past included — what the manager can see on screen. */
+  scheduled: number;
+  /** Of those, the ones still to come (today counts as upcoming). */
+  upcoming: number;
+}
+
+export function summariseWeek(state: WeekState, weekDates: string[], todayISO: string): WeekSummary {
+  let scheduled = 0;
+  let upcoming = 0;
+  for (const d of weekDates) {
+    if (!state[d]?.working) continue;
+    scheduled++;
+    if (d >= todayISO) upcoming++;
+  }
+  return { scheduled, upcoming };
+}
+
+/** Footer copy for a week summary. Concise, and never says "upcoming" when it adds nothing. */
+export function weekSummaryLabel({ scheduled, upcoming }: WeekSummary): string {
+  if (scheduled === 0) return 'No working days';
+  const days = `${scheduled} ${scheduled === 1 ? 'day' : 'days'}`;
+  // Every working day is still ahead → the plain phrasing is complete on its own.
+  if (upcoming === scheduled) return `${scheduled} working ${scheduled === 1 ? 'day' : 'days'}`;
+  // The whole week has passed → the builder already banners that; a "0 upcoming" tail adds noise.
+  if (upcoming === 0) return `${days} scheduled`;
+  return `${days} scheduled · ${upcoming} upcoming`;
+}
+
 // ── Repeat ──────────────────────────────────────────────────────────────────────
 
 /** Mondays for `count` consecutive weeks starting at the week containing `weekStartISO`. */
