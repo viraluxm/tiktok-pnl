@@ -89,11 +89,12 @@ export async function GET(req: Request) {
       pages: seq.pages.length,
       labels: seq.labelCount,
       slips: seq.slipCount,
+      banners: seq.bannerCount,
       needs_refetch: seq.refetch.length,
       missing: seq.missing,
-      sequence: seq.pages.map((p) => (p.kind === 'slip'
-        ? { kind: 'slip', caption: p.caption, count: p.count }
-        : { kind: 'label', group_key: p.group_key })),
+      sequence: seq.pages.map((p) => (p.kind === 'label'
+        ? { kind: 'label', group_key: p.group_key }
+        : { kind: p.kind, caption: p.caption, count: p.count })),
     });
   }
 
@@ -193,8 +194,12 @@ export async function GET(req: Request) {
   }
 
   for (const page of seq.pages) {
-    if (page.kind === 'slip') {
-      addSlipPage(out, font, pageSize, { caption: page.caption, count: page.count });
+    if (page.kind === 'banner' || page.kind === 'slip') {
+      // A banner is drawn heavier than a slip: it is the divider someone finds while splitting
+      // the stack by hand, often without reading it closely.
+      addSlipPage(out, font, pageSize, {
+        caption: page.caption, count: page.count, banner: page.kind === 'banner',
+      });
       continue;
     }
     const bytes = bytesByPackage.get(page.package_id);
@@ -221,6 +226,7 @@ export async function GET(req: Request) {
       // Surfaced in headers so a caller sees an incomplete stack without parsing the PDF.
       'X-Label-Count': String(seq.labelCount),
       'X-Slip-Count': String(seq.slipCount),
+      'X-Banner-Count': String(seq.bannerCount),
       'X-Missing-Count': String(seq.missing.length),
     },
   });

@@ -7,7 +7,7 @@ import { planPageSequence } from '@/lib/shipping/labelPlan';
 import {
   resolveLabelRun, applyHealed, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
 } from '@/lib/shipping/labelRun';
-import { MAX_BOXES_PER_RUN, estimateSpend, readSpendWindows } from '@/lib/shipping/purchaseGuards';
+import { MAX_MANIFEST_BOXES, estimateSpend, readSpendWindows } from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
@@ -144,17 +144,11 @@ export async function GET(req: Request) {
     spend_estimate: spend,
     // What the last week and month actually cost, so this run is judged against real numbers.
     spend_recent: await readSpendWindows(admin, user.id, storeId),
-    max_boxes_per_run: MAX_BOXES_PER_RUN,
-    // Pass BOTH of these to the purchase route to authorise a run:
-    //   ?confirm_boxes= proves the plan has not moved since this was read
-    //   ?limit=         states the most boxes that call may buy, and is REQUIRED
-    // suggested_limit is only a suggestion. A smaller limit is always safe, and is the right
-    // choice for a first run — nothing is lost but a second call.
+    max_manifest_boxes: MAX_MANIFEST_BOXES,
+    // Pass this to /authorize as ?confirm_boxes= — it proves the plan has not moved since this
+    // was read. There is no per-call limit any more: SCOPE bounds a run, and the manifest that
+    // authorising writes is what the purchase route drains.
     confirm_boxes: toBuy.length,
-    suggested_limit: Math.min(toBuy.length, MAX_BOXES_PER_RUN),
-    // How many capped calls this backlog would take. A plan larger than the cap is not
-    // refused; it is bought in successive runs, each re-verified against TikTok.
-    calls_needed_at_cap: Math.ceil(toBuy.length / MAX_BOXES_PER_RUN),
     batches: plan.batches.map((b) => ({ slip: b.slip, sku_number: b.sku_number, boxes: b.boxes.length })),
     page_sequence: planPageSequence(plan),
     excluded: run.excluded,

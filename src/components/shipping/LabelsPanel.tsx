@@ -1,185 +1,205 @@
 'use client';
 
 /**
- * LabelsPanel — buy shipping labels for a shop's backlog, then print them in pick order.
+ * LabelsPanel — buy a day's (or a show's) shipping labels in one act, then print them split into
+ * the piles they are packed from.
  *
- * THE SHAPE OF THIS SCREEN IS A SAFETY DECISION, not a style one. Buying a label is
- * irreversible: TikTok's Create Packages call IS the purchase, there is no quote and no cancel.
- * So this is deliberately NOT a "Print labels" button.
+ * THE SHAPE IS A SAFETY DECISION, not a style one. Buying a label is irreversible: TikTok's
+ * Create Packages call IS the purchase, there is no quote and no cancel.
  *
- *   1. CHECK FIRST, ALWAYS. Nothing can be bought until a check has been read, because the
- *      purchase route requires the box count that check reported. Change anything — the store,
- *      the unbound answer — and the plan is discarded and must be re-checked.
- *   2. THE BATCH SIZE IS PICKED. It defaults to 10, not to everything. A button that bought the
- *      whole backlog in one click is exactly what the API's required `limit` exists to prevent,
- *      and a UI that filled that limit in automatically would hand the risk straight back.
- *   3. THE COST IS ON THE BUTTON. Not in a tooltip, not after the fact.
- *   4. UNBOUND ORDERS BLOCK BY DEFAULT. Waiting is pre-selected, because the team binds shortly
+ *   1. SCOPE FIRST. A run means a definite set of work — a fulfilment day, or named shows — not
+ *      "everything outstanding". Scope is what bounds the run.
+ *   2. CHECK, THEN AUTHORISE. Nothing is bought until a check has been read: authorising passes
+ *      back the box count that check reported, and a mismatch refuses. Change the scope and the
+ *      reviewed plan is discarded.
+ *   3. APPROVAL HAPPENS ONCE. Authorising writes the whole manifest and buys nothing; the drain
+ *      then works through it. A day is 474-863 boxes and about ten minutes of calls, so it must
+ *      be chunked — but chunking the APPROVAL would be the "multiple batches" this exists to
+ *      avoid, so the chunking is internal and invisible.
+ *   4. THE COST IS ON THE BUTTON, before it is spent.
+ *   5. UNBOUND ORDERS BLOCK BY DEFAULT — waiting is pre-selected, because the team binds shortly
  *      after a show and waiting is nearly always right.
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useStores } from '@/hooks/useStores';
 
-// Quick picks, smallest first. 'All' is offered but never pre-selected — see the header note.
-const SIZE_PRESETS = [5, 10, 25, 50, 100];
-const DEFAULT_SIZE = 10;
+/** Boxes per drain request. ~50 calls sits well inside the route's time budget. */
+const DRAIN_CHUNK = 50;
 
 type UnboundChoice = 'wait' | 'skip' | 'include';
+type ScopeKind = 'day' | 'lives';
 
-interface SectionRow { slip: string; sku_number: number | null; boxes: number }
-interface ExcludedRow { group_key: string; order_ids: string[]; reason: string }
+interface DayScope { day: string; boxes: number; ready: number; orders: number }
+interface LiveScope {
+  id: string; channel: string | null; started_at: string | null; ended_at: string | null;
+  running: boolean; day: string | null; boxes: number; ready: number; orders: number;
+}
+interface Scopes { today: string; total_boxes: number; total_ready: number; days: DayScope[]; lives: LiveScope[] }
+
 interface SpendWindows {
   run_total: number;
   last_7d: { labels: number; spent: number };
   last_30d: { labels: number; spent: number };
 }
 interface DryRun {
+  scope: string;
   counts: {
-    candidates_in_lensed: number;
-    candidate_boxes: number;
-    excluded_too_recent: number;
-    min_order_age_hours: number;
-    /** Orders this check actually verified against TikTok. */
-    verified: number;
-    /** Boxes beyond the verification cap — a ceiling on the CHECK, not on the backlog. */
-    not_verified_over_cap: number;
-    confirmed_label_ready: number;
-    boxes: number;
-    orders: number;
-    batched_boxes: number;
-    bundle_boxes: number;
-    sku_batches: number;
-    single_box_sections: number;
-    multi_unit_boxes: number;
-    unbound_boxes: number;
-    already_in_ledger: number;
-    would_buy: number;
-    one_order_boxes: number;
-    multi_order_boxes: number;
+    excluded_too_recent: number; min_order_age_hours: number;
+    boxes: number; orders: number; batched_boxes: number; bundle_boxes: number;
+    sku_batches: number; unbound_boxes: number; already_in_ledger: number; would_buy: number;
   };
-  spend_estimate: { avg_unit_price: number; estimated_total: number; basis: string; samples: number };
+  spend_estimate: { avg_unit_price: number; estimated_total: number; basis: string };
   spend_recent: SpendWindows;
-  max_boxes_per_run: number;
   confirm_boxes: number;
-  suggested_limit: number;
-  batches: SectionRow[];
-  excluded: ExcludedRow[];
+  batches: Array<{ slip: string; boxes: number }>;
 }
-interface BoughtRow {
-  group_key: string; package_id: string; price: number | null; ship_type: string;
-  already_existed?: true;
-}
-interface PurchaseResult {
-  authorized: boolean;
-  code?: string;
-  reason?: string;
-  run_id?: string;
-  purchased: number;
-  spent: number;
-  failed?: number;
-  remaining?: number;
-  stopped_early?: boolean;
-  bought?: BoughtRow[];
-  failed_detail?: Array<{ group_key: string; code: number | null; message: string }>;
-  spend_recent?: SpendWindows;
-}
+interface Progress { total: number; bought: number; failed: number; spent: number; done: boolean }
 
 const money = (n: number) => `$${n.toFixed(2)}`;
+const fmtDay = (d: string) => new Date(`${d}T12:00:00Z`)
+  .toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+const fmtTime = (iso: string | null) => (iso
+  ? new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles' })
+  : '?');
 
 export default function LabelsPanel() {
   const { data: storesData } = useStores();
   const activeStore = storesData?.activeStore ?? 'all';
   const storeName = storesData?.stores?.find((s) => s.id === activeStore)?.name ?? 'this store';
 
+  const [scopes, setScopes] = useState<Scopes | null>(null);
+  const [scopeKind, setScopeKind] = useState<ScopeKind>('day');
+  const [day, setDay] = useState<string | null>(null);
+  const [lives, setLives] = useState<Set<string>>(new Set());
+  const [unbound, setUnbound] = useState<UnboundChoice>('wait');
+
+  const [loadingScopes, setLoadingScopes] = useState(false);
   const [checking, setChecking] = useState(false);
   const [plan, setPlan] = useState<DryRun | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [unbound, setUnbound] = useState<UnboundChoice>('wait');
-  const [size, setSize] = useState<number>(DEFAULT_SIZE);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<Progress | null>(null);
   const [buying, setBuying] = useState(false);
-  const [result, setResult] = useState<PurchaseResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
-  // Any change that could alter what would be bought discards the reviewed plan. The purchase
-  // route would refuse a stale confirm_boxes anyway; throwing it away here means the operator
-  // is never looking at numbers that no longer apply.
-  const invalidate = useCallback(() => { setPlan(null); setResult(null); }, []);
+  /** Any change to what would be bought discards the reviewed plan — never buy an unread plan. */
+  const invalidate = useCallback(() => { setPlan(null); setRunId(null); setProgress(null); }, []);
 
-  const check = useCallback(async () => {
-    if (activeStore === 'all') return;
-    setChecking(true); setErr(null); setResult(null);
+  const scopeParams = useCallback(() => {
+    const p = new URLSearchParams({ store_id: activeStore });
+    if (scopeKind === 'day' && day) p.set('day', day);
+    if (scopeKind === 'lives' && lives.size) p.set('session_ids', [...lives].join(','));
+    return p;
+  }, [activeStore, scopeKind, day, lives]);
+
+  // ── Scope options ──
+  useEffect(() => {
+    if (activeStore === 'all') { setScopes(null); return; }
+    let cancelled = false;
+    setLoadingScopes(true); setErr(null); invalidate();
+    fetch(`/api/shipping/labels/scopes?store_id=${encodeURIComponent(activeStore)}`)
+      .then(async (r) => {
+        const j = await r.json();
+        if (cancelled) return;
+        if (!r.ok) { setScopes(null); setErr(j.error ?? 'Could not load shows'); return; }
+        setScopes(j as Scopes);
+        // Default to the most recent day that has anything ready, which is nearly always the
+        // one being printed. Never auto-select a scope with nothing in it.
+        const first = (j.days as DayScope[]).find((d) => d.ready > 0) ?? (j.days as DayScope[])[0];
+        setDay(first?.day ?? null);
+      })
+      .catch(() => { if (!cancelled) { setScopes(null); setErr('Could not load shows'); } })
+      .finally(() => { if (!cancelled) setLoadingScopes(false); });
+    return () => { cancelled = true; };
+  }, [activeStore, invalidate]);
+
+  const scopeChosen = scopeKind === 'day' ? !!day : lives.size > 0;
+
+  async function check() {
+    if (!scopeChosen) return;
+    setChecking(true); setErr(null); setProgress(null); setRunId(null);
     try {
-      const p = new URLSearchParams({ store_id: activeStore });
+      const p = scopeParams();
       if (unbound === 'include') p.set('unbound', 'include');
       const res = await fetch(`/api/shipping/labels/dry-run?${p.toString()}`);
-      // Read the body as text first: a route that died before its JSON handler returns an HTML
-      // error page, and blindly calling .json() there throws and buries the real reason.
-      const raw = await res.text();
-      let json: (DryRun & { error?: string }) | null = null;
-      try { json = JSON.parse(raw) as DryRun & { error?: string }; } catch { /* not JSON */ }
-      if (!res.ok || !json) {
-        setPlan(null);
-        setErr(json?.error ?? raw.slice(0, 300) ?? `Check failed (${res.status})`);
-        return;
-      }
-      setPlan(json);
-      // Clamp the picked size down to what is actually available, but never up: a smaller
-      // batch is always safe and the operator's choice of a small number is deliberate.
-      setSize((s) => Math.max(1, Math.min(s, Math.max(1, json.counts?.would_buy ?? 1))));
+      const j = await res.json();
+      if (!res.ok) { setPlan(null); setErr(j.error ?? `Check failed (${res.status})`); return; }
+      setPlan(j as DryRun);
     } catch (e) {
       setPlan(null);
-      setErr(e instanceof Error ? e.message : 'Check failed');
-    } finally {
-      setChecking(false);
-    }
-  }, [activeStore, unbound]);
+      setErr(`Check failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally { setChecking(false); }
+  }
 
-  const wouldBuy = plan?.counts.would_buy ?? 0;
-  const unboundCount = plan?.counts.unbound_boxes ?? 0;
-  const unit = plan?.spend_estimate.avg_unit_price ?? 0;
-  const blockedByUnbound = unboundCount > 0 && unbound === 'wait';
-  const buyCount = Math.min(size, wouldBuy);
-  const estimate = useMemo(() => buyCount * unit, [buyCount, unit]);
-  const canBuy = !!plan && wouldBuy > 0 && buyCount > 0 && !blockedByUnbound && !buying;
-
+  /**
+   * Authorise, then drain to completion.
+   *
+   * One click. The loop is internal because the approval is not: authorising claims the whole
+   * manifest, and each drain request only turns claims into labels.
+   */
   async function buy() {
-    if (!plan || !canBuy) return;
-    const msg = `Buy ${buyCount} shipping label${buyCount === 1 ? '' : 's'} for ${storeName}?\n\n`
-      + `Estimated ${money(estimate)} (about ${money(unit)} each).\n`
-      + 'This cannot be undone — TikTok charges at purchase and labels cannot be cancelled.'
-      + (buyCount < wouldBuy ? `\n\n${wouldBuy - buyCount} box(es) will be left for a later run.` : '');
-    if (!window.confirm(msg)) return;
+    if (!plan) return;
+    const n = plan.counts.would_buy;
+    const est = plan.spend_estimate.avg_unit_price * n;
+    const ok = window.confirm(
+      `Buy ${n} shipping label${n === 1 ? '' : 's'} for ${storeName}?\n\n`
+      + `Scope: ${plan.scope}\n`
+      + `Estimated ${money(est)} (about ${money(plan.spend_estimate.avg_unit_price)} each).\n\n`
+      + 'This cannot be undone — TikTok charges at purchase and labels cannot be cancelled.',
+    );
+    if (!ok) return;
 
     setBuying(true); setErr(null);
     try {
-      const p = new URLSearchParams({
-        store_id: activeStore,
-        confirm_boxes: String(plan.confirm_boxes),
-        limit: String(buyCount),
-      });
-      if (unboundCount > 0) p.set('unbound', unbound === 'include' ? 'include' : 'skip');
-      const res = await fetch(`/api/shipping/labels/purchase?${p.toString()}`, { method: 'POST' });
-      const raw = await res.text();
-      let json: PurchaseResult;
-      try { json = JSON.parse(raw) as PurchaseResult; }
-      catch {
-        // Unparseable means we cannot tell what happened — say so, and point at the ledger,
-        // which is the only record that can answer it.
-        setErr(`Purchase returned an unreadable response (${res.status}). Check the ledger before retrying.`);
-        setPlan(null);
+      const ap = scopeParams();
+      ap.set('confirm_boxes', String(plan.confirm_boxes));
+      if (plan.counts.unbound_boxes > 0) ap.set('unbound', unbound === 'include' ? 'include' : 'skip');
+      const aRes = await fetch(`/api/shipping/labels/authorize?${ap.toString()}`, { method: 'POST' });
+      const aJson = await aRes.json();
+      if (!aJson.authorized || !aJson.run_id) {
+        setErr(aJson.reason ?? aJson.error ?? `Could not authorise (${aRes.status})`);
         return;
       }
-      setResult(json);
-      // The plan is spent either way: boxes were bought, or the refusal means it moved.
-      setPlan(null);
-      if (!res.ok && !json.reason) {
-        setErr(String((json as unknown as { error?: string }).error ?? `Purchase failed (${res.status})`));
+      const id = aJson.run_id as string;
+      setRunId(id);
+      const total = (aJson.claimed as number) || n;
+      setProgress({ total, bought: 0, failed: 0, spent: 0, done: false });
+
+      // Drain. Each pass reports what remains, so progress reflects the ledger rather than a
+      // guess, and a stalled pass surfaces instead of looping forever.
+      let bought = 0, failed = 0, spent = 0, guard = 0;
+      for (;;) {
+        if (guard++ > Math.ceil(total / DRAIN_CHUNK) + 10) {
+          setErr('Drain stopped making progress — re-open this tab to resume the run'); break;
+        }
+        const dp = new URLSearchParams({ store_id: activeStore, run_id: id, limit: String(DRAIN_CHUNK) });
+        const dRes = await fetch(`/api/shipping/labels/purchase?${dp.toString()}`, { method: 'POST' });
+        const d = await dRes.json();
+        if (!dRes.ok) { setErr(d.error ?? `Purchase failed (${dRes.status})`); break; }
+        if (d.code === 'disabled') { setErr(d.reason); break; }
+        bought += d.purchased ?? 0; failed += d.failed ?? 0; spent += d.spent ?? 0;
+        setProgress({ total, bought, failed, spent: Math.round(spent * 100) / 100, done: !!d.done });
+        if (d.done) break;
+        // No forward progress and nothing failed means the manifest is stuck, not slow.
+        if ((d.purchased ?? 0) === 0 && (d.failed ?? 0) === 0) {
+          setErr('Nothing left to buy in this run'); break;
+        }
       }
-    } catch {
-      setErr('Purchase failed — check the ledger before retrying');
-    } finally {
-      setBuying(false);
-    }
+      setPlan(null);
+    } catch (e) {
+      setErr(`Purchase interrupted: ${e instanceof Error ? e.message : String(e)}. `
+        + 'Nothing is lost — re-check to see what remains.');
+    } finally { setBuying(false); }
+  }
+
+  async function release() {
+    if (!runId) return;
+    if (!window.confirm('Release the unbought part of this run? Labels already bought are kept.')) return;
+    const p = new URLSearchParams({ store_id: activeStore, run_id: runId });
+    const res = await fetch(`/api/shipping/labels/authorize?${p.toString()}`, { method: 'DELETE' });
+    const j = await res.json();
+    setErr(res.ok ? `Released ${j.released} unbought box(es).` : (j.error ?? 'Release failed'));
+    invalidate();
   }
 
   if (activeStore === 'all') {
@@ -191,218 +211,229 @@ export default function LabelsPanel() {
     );
   }
 
+  const unboundCount = plan?.counts.unbound_boxes ?? 0;
+  const blocked = unboundCount > 0 && unbound === 'wait';
+  const n = plan?.counts.would_buy ?? 0;
+  const unit = plan?.spend_estimate.avg_unit_price ?? 0;
+
   return (
     <div className="space-y-4">
-      {/* ── Step 1 ─────────────────────────────────────────────────────────────────── */}
+      {/* ── 1 · Scope ──────────────────────────────────────────────────────────────── */}
       <div className="rounded-lg border border-tt-border p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-tt-text">1 · Check what&rsquo;s ready</h3>
-            <p className="mt-1 text-xs text-tt-muted">
-              Verifies every order against TikTok before planning. Buys nothing.
-            </p>
-          </div>
-          <button
-            onClick={check}
-            disabled={checking}
-            className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {checking ? 'Checking…' : plan ? 'Re-check' : `Check ${storeName}`}
-          </button>
-        </div>
+        <h3 className="text-sm font-semibold text-tt-text">1 · What are you printing?</h3>
+        {loadingScopes && <p className="mt-2 text-xs text-tt-muted">Loading shows…</p>}
 
-        {plan && (
-          <div className="mt-4 space-y-3">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <Stat label="Ready to buy" value={wouldBuy} big />
-              <Stat label="Orders covered" value={plan.counts.orders} />
-              <Stat
-                label={`Held back (under ${plan.counts.min_order_age_hours}h)`}
-                value={plan.counts.excluded_too_recent}
-                hint="Their combine group may still be growing"
-              />
-              <Stat label="Already bought" value={plan.counts.already_in_ledger} />
+        {scopes && (
+          <>
+            <div className="mt-3 flex gap-1">
+              {(['day', 'lives'] as ScopeKind[]).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => { setScopeKind(k); invalidate(); }}
+                  className={`cursor-pointer rounded-md border px-3 py-1.5 text-sm ${
+                    scopeKind === k ? 'border-tt-green text-tt-text' : 'border-tt-border text-tt-muted hover:text-tt-text'
+                  }`}
+                >
+                  {k === 'day' ? 'A whole day' : 'Specific shows'}
+                </button>
+              ))}
             </div>
 
-            {/* The verification cap is a CEILING ON THIS CHECK, not on the backlog. Without
-                this line "263 ready" reads as "263 left", and the other 249 boxes are invisible
-                — the silent-truncation shape this codebase has been bitten by before. */}
-            {plan.counts.not_verified_over_cap > 0 && (
-              <div className="rounded-md border border-tt-border px-3 py-2 text-xs text-tt-muted">
-                <span className="text-tt-text">
-                  {plan.counts.not_verified_over_cap.toLocaleString()} more box
-                  {plan.counts.not_verified_over_cap === 1 ? '' : 'es'}
-                </span>{' '}
-                could not be checked in one pass — this check verifies up to{' '}
-                {plan.counts.verified.toLocaleString()} orders against TikTok. Buy this batch,
-                then check again to reach the rest.
+            {scopeKind === 'day' && (
+              <div className="mt-3">
+                <select
+                  value={day ?? ''}
+                  onChange={(e) => { setDay(e.target.value || null); invalidate(); }}
+                  className="w-full rounded-md border border-tt-input-border bg-tt-input-bg px-3 py-2 text-sm text-tt-text"
+                >
+                  <option value="">Pick a day…</option>
+                  {scopes.days.map((d) => (
+                    <option key={d.day} value={d.day}>
+                      {fmtDay(d.day)}{d.day === scopes.today ? ' (today)' : ''}
+                      {' · '}{d.ready} ready{d.ready !== d.boxes ? ` of ${d.boxes}` : ''}
+                      {' · '}{d.orders} orders
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-tt-muted/70">
+                  A day runs 4am to 4am, so a show ending after midnight stays with the night it
+                  started.
+                </p>
               </div>
             )}
 
-            {/* Recent spend, so this run is judged against real numbers. */}
-            <div className="flex flex-wrap gap-x-6 gap-y-1 rounded-md bg-tt-card px-3 py-2 text-xs text-tt-muted">
-              <span>
-                Last 7 days: <span className="text-tt-text">
-                  {money(plan.spend_recent.last_7d.spent)}
-                </span> · {plan.spend_recent.last_7d.labels} labels
-              </span>
-              <span>
-                Last 30 days: <span className="text-tt-text">
-                  {money(plan.spend_recent.last_30d.spent)}
-                </span> · {plan.spend_recent.last_30d.labels} labels
-              </span>
-              <span>
-                Average label: <span className="text-tt-text">{money(unit)}</span>
-                {plan.spend_estimate.basis === 'fallback' && ' (estimated — no history yet)'}
-              </span>
-            </div>
-
-            {plan.batches.length > 0 && (
-              <details className="rounded-md border border-tt-border">
-                <summary className="cursor-pointer px-3 py-2 text-xs text-tt-muted">
-                  {plan.counts.sku_batches} SKU section{plan.counts.sku_batches === 1 ? '' : 's'}
-                  {' · '}{plan.counts.bundle_boxes} mixed
-                  {plan.counts.single_box_sections > 0
-                    && ` · ${plan.counts.single_box_sections} section${plan.counts.single_box_sections === 1 ? '' : 's'} of one`}
-                </summary>
-                <ul className="border-t border-tt-border px-3 py-2 text-xs">
-                  {plan.batches.map((b) => (
-                    <li key={b.slip} className="flex justify-between py-0.5">
-                      <span className="text-tt-text">{b.slip}</span>
-                      <span className="text-tt-muted">{b.boxes}</span>
-                    </li>
-                  ))}
-                  {plan.counts.bundle_boxes > 0 && (
-                    <li className="flex justify-between py-0.5">
-                      <span className="text-tt-text">MIXED — READ EACH LABEL</span>
-                      <span className="text-tt-muted">{plan.counts.bundle_boxes}</span>
-                    </li>
-                  )}
-                </ul>
-              </details>
+            {scopeKind === 'lives' && (
+              <div className="mt-3 max-h-72 space-y-1 overflow-y-auto rounded-md border border-tt-border p-2">
+                {scopes.lives.length === 0 && (
+                  <p className="p-2 text-xs text-tt-muted">No shows with unbought labels.</p>
+                )}
+                {scopes.lives.map((l) => (
+                  <label key={l.id} className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 hover:bg-tt-card">
+                    <input
+                      type="checkbox" checked={lives.has(l.id)}
+                      onChange={(e) => {
+                        setLives((prev) => {
+                          const next = new Set(prev);
+                          if (e.target.checked) next.add(l.id); else next.delete(l.id);
+                          return next;
+                        });
+                        invalidate();
+                      }}
+                      className="mt-1 cursor-pointer"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="text-sm text-tt-text">
+                        {l.channel ?? 'Unknown channel'}
+                        {l.running && <span className="ml-2 text-xs text-tt-yellow">· live now</span>}
+                      </span>
+                      <span className="block text-xs text-tt-muted">
+                        {l.day ? fmtDay(l.day) : '?'}, {fmtTime(l.started_at)}–{fmtTime(l.ended_at)}
+                        {' · '}{l.ready} ready{l.ready !== l.boxes ? ` of ${l.boxes}` : ''}
+                        {' · '}{l.orders} orders
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
             )}
-          </div>
+
+            <button
+              onClick={check}
+              disabled={!scopeChosen || checking || buying}
+              className="mt-3 cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-medium text-black disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {checking ? 'Checking against TikTok…' : plan ? 'Re-check' : 'Check what’s ready'}
+            </button>
+          </>
         )}
       </div>
 
-      {/* ── Unbound orders: an explicit answer, defaulting to wait ──────────────────── */}
+      {/* ── 2 · What the check found ───────────────────────────────────────────────── */}
+      {plan && (
+        <div className="rounded-lg border border-tt-border p-4">
+          <h3 className="text-sm font-semibold text-tt-text">2 · {plan.scope}</h3>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Stat label="Labels to buy" value={n} big />
+            <Stat label="Orders covered" value={plan.counts.orders} />
+            <Stat label="Singles (prep station)" value={plan.counts.batched_boxes} />
+            <Stat label="Mixed" value={plan.counts.bundle_boxes} />
+          </div>
+          {plan.counts.excluded_too_recent > 0 && (
+            <p className="mt-3 rounded-md bg-tt-card px-3 py-2 text-xs text-tt-muted">
+              {plan.counts.excluded_too_recent} box(es) held back — newer than{' '}
+              {plan.counts.min_order_age_hours}h, so their combine group may still be growing.
+            </p>
+          )}
+          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 rounded-md bg-tt-card px-3 py-2 text-xs text-tt-muted">
+            <span>Last 7 days: <span className="text-tt-text">{money(plan.spend_recent.last_7d.spent)}</span> · {plan.spend_recent.last_7d.labels} labels</span>
+            <span>Last 30 days: <span className="text-tt-text">{money(plan.spend_recent.last_30d.spent)}</span> · {plan.spend_recent.last_30d.labels} labels</span>
+            <span>Average label: <span className="text-tt-text">{money(unit)}</span></span>
+          </div>
+          {plan.batches.length > 0 && (
+            <details className="mt-3 rounded-md border border-tt-border">
+              <summary className="cursor-pointer px-3 py-2 text-xs text-tt-muted">
+                {plan.counts.sku_batches} SKU section{plan.counts.sku_batches === 1 ? '' : 's'} in the singles pile
+              </summary>
+              <ul className="border-t border-tt-border px-3 py-2 text-xs">
+                {plan.batches.map((b) => (
+                  <li key={b.slip} className="flex justify-between py-0.5">
+                    <span className="text-tt-text">{b.slip}</span>
+                    <span className="text-tt-muted">{b.boxes}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+
+      {/* ── Unbound ────────────────────────────────────────────────────────────────── */}
       {plan && unboundCount > 0 && (
         <div className="rounded-lg border border-tt-yellow/40 bg-tt-yellow/5 p-4">
           <h3 className="text-sm font-semibold text-tt-text">
-            {unboundCount} box{unboundCount === 1 ? '' : 'es'} in this batch have no SKU on file
+            {unboundCount} box{unboundCount === 1 ? '' : 'es'} have no SKU on file
           </h3>
           <p className="mt-1 text-xs text-tt-muted">
-            Usually this just means the show ended recently and binding hasn&rsquo;t caught up.
+            Usually the show ended recently and binding hasn&rsquo;t caught up.
           </p>
           <div className="mt-3 space-y-2">
-            <Radio
-              name="unbound" checked={unbound === 'wait'}
-              onChange={() => { setUnbound('wait'); }}
+            <Radio checked={unbound === 'wait'} onChange={() => setUnbound('wait')}
               label="Wait — bind them, then re-check"
-              hint="Recommended. Nothing is bought while this is selected."
-            />
-            <Radio
-              name="unbound" checked={unbound === 'skip'}
-              onChange={() => { setUnbound('skip'); }}
+              hint="Recommended. Nothing is bought while this is selected." />
+            <Radio checked={unbound === 'skip'} onChange={() => setUnbound('skip')}
               label="Continue without them"
-              hint="Buys the rest. These orders wait for a later run."
-            />
-            <Radio
-              name="unbound" checked={unbound === 'include'}
-              onChange={() => { setUnbound('include'); invalidate(); }}
+              hint="Buys the rest. These wait for a later run." />
+            <Radio checked={unbound === 'include'} onChange={() => { setUnbound('include'); invalidate(); }}
               label="Buy them too"
-              hint="Their labels say nothing about contents — the picker must look each order up by hand. Re-check required."
-            />
+              hint="Their labels say nothing about contents — the picker must look each order up. Re-check required." />
           </div>
         </div>
       )}
 
-      {/* ── Step 2 + 3 ─────────────────────────────────────────────────────────────── */}
-      {plan && wouldBuy > 0 && (
+      {/* ── 3 · Buy ────────────────────────────────────────────────────────────────── */}
+      {plan && n > 0 && !progress && (
         <div className="rounded-lg border border-tt-border p-4">
-          <h3 className="text-sm font-semibold text-tt-text">2 · Choose how many to buy</h3>
+          <h3 className="text-sm font-semibold text-tt-text">3 · Buy them</h3>
           <p className="mt-1 text-xs text-tt-muted">
-            Smaller is always safe — the rest stays for the next run. Cap is{' '}
-            {plan.max_boxes_per_run} per run.
+            {blocked
+              ? 'Answer the unbound question above first.'
+              : `One go. Roughly ${Math.max(1, Math.round(n / 60))} minute${n > 90 ? 's' : ''} of TikTok calls — leave this tab open.`}
           </p>
+          <button
+            onClick={buy}
+            disabled={blocked || buying}
+            className="mt-3 cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {buying ? 'Buying…' : `Buy ${n} label${n === 1 ? '' : 's'} — about ${money(n * unit)}`}
+          </button>
+        </div>
+      )}
 
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {SIZE_PRESETS.filter((n) => n <= wouldBuy).map((n) => (
-              <button
-                key={n}
-                onClick={() => setSize(n)}
-                className={`cursor-pointer rounded-md border px-3 py-1.5 text-sm ${
-                  size === n
-                    ? 'border-tt-green text-tt-text'
-                    : 'border-tt-border text-tt-muted hover:text-tt-text'
-                }`}
+      {plan && n === 0 && (
+        <div className="rounded-lg border border-tt-border p-4 text-sm text-tt-muted">
+          Nothing to buy in this scope.
+          {plan.counts.already_in_ledger > 0 && ` ${plan.counts.already_in_ledger} already bought.`}
+        </div>
+      )}
+
+      {/* ── Progress / result ──────────────────────────────────────────────────────── */}
+      {progress && (
+        <div className={`rounded-lg border p-4 ${progress.done ? 'border-tt-green/40 bg-tt-green/5' : 'border-tt-border'}`}>
+          <div className="flex flex-wrap items-baseline justify-between gap-3">
+            <h3 className="text-sm font-semibold text-tt-text">
+              {progress.done ? 'Bought' : 'Buying'} {progress.bought} of {progress.total} — {money(progress.spent)}
+            </h3>
+            {progress.done && runId && (
+              <a
+                href={`/api/shipping/labels/pdf?store_id=${encodeURIComponent(activeStore)}&run_id=${runId}`}
+                target="_blank" rel="noreferrer"
+                className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black"
               >
-                {n}
-              </button>
-            ))}
-            <button
-              onClick={() => setSize(Math.min(wouldBuy, plan.max_boxes_per_run))}
-              className={`cursor-pointer rounded-md border px-3 py-1.5 text-sm ${
-                size === Math.min(wouldBuy, plan.max_boxes_per_run)
-                  ? 'border-tt-green text-tt-text'
-                  : 'border-tt-border text-tt-muted hover:text-tt-text'
-              }`}
-            >
-              All {Math.min(wouldBuy, plan.max_boxes_per_run)}
-            </button>
-            <input
-              type="number" min={1} max={Math.min(wouldBuy, plan.max_boxes_per_run)}
-              value={size}
-              onChange={(e) => {
-                const n = Number(e.target.value);
-                if (Number.isFinite(n)) {
-                  setSize(Math.max(1, Math.min(n, Math.min(wouldBuy, plan.max_boxes_per_run))));
-                }
-              }}
-              className="w-20 rounded-md border border-tt-input-border bg-tt-input-bg px-2 py-1.5 text-sm text-tt-text"
-              aria-label="Number of labels to buy"
+                Print labels
+              </a>
+            )}
+          </div>
+          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-tt-card">
+            <div
+              className="h-full bg-tt-green transition-all"
+              style={{ width: `${Math.round(100 * progress.bought / Math.max(1, progress.total))}%` }}
             />
           </div>
-
-          <div className="mt-4 border-t border-tt-border pt-4">
-            <h3 className="text-sm font-semibold text-tt-text">3 · Buy</h3>
-            {blockedByUnbound ? (
-              <p className="mt-2 text-xs text-tt-yellow">
-                Answer the unbound question above first.
-              </p>
-            ) : (
-              <p className="mt-1 text-xs text-tt-muted">
-                Charged at purchase. Labels cannot be cancelled.
-              </p>
-            )}
-            <button
-              onClick={buy}
-              disabled={!canBuy}
-              className="mt-3 cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {buying
-                ? 'Buying…'
-                : `Buy ${buyCount} label${buyCount === 1 ? '' : 's'} — about ${money(estimate)}`}
+          {progress.failed > 0 && (
+            <p className="mt-2 text-xs text-tt-red">
+              {progress.failed} box(es) failed and were not charged.
+            </p>
+          )}
+          {!progress.done && (
+            <p className="mt-2 text-xs text-tt-muted">Leave this tab open. Nothing is lost if you don&rsquo;t.</p>
+          )}
+          {runId && !progress.done && !buying && (
+            <button onClick={release} className="mt-3 cursor-pointer text-xs text-tt-muted underline">
+              Release the unbought part of this run
             </button>
-          </div>
-        </div>
-      )}
-
-      {plan && wouldBuy === 0 && (
-        <div className="rounded-lg border border-tt-border p-4 text-sm text-tt-muted">
-          Nothing to buy right now.
-          {plan.counts.excluded_too_recent > 0 && (
-            <> {plan.counts.excluded_too_recent} box(es) are still under the{' '}
-            {plan.counts.min_order_age_hours}h age floor — check again later.</>
-          )}
-          {plan.counts.already_in_ledger > 0 && (
-            <> {plan.counts.already_in_ledger} already have labels.</>
           )}
         </div>
       )}
-
-      {/* ── Result ─────────────────────────────────────────────────────────────────── */}
-      {result && <PurchaseSummary result={result} storeId={activeStore} onDone={invalidate} />}
 
       {err && (
         <div className="rounded-md border border-tt-red/40 bg-tt-red/5 px-3 py-2 text-sm text-tt-red">
@@ -413,113 +444,23 @@ export default function LabelsPanel() {
   );
 }
 
-function PurchaseSummary({
-  result, storeId, onDone,
-}: { result: PurchaseResult; storeId: string; onDone: () => void }) {
-  if (!result.authorized) {
-    return (
-      <div className="rounded-lg border border-tt-yellow/40 bg-tt-yellow/5 p-4">
-        <h3 className="text-sm font-semibold text-tt-text">Nothing bought</h3>
-        <p className="mt-1 text-xs text-tt-muted">{result.reason ?? 'Refused.'}</p>
-        <button onClick={onDone} className="mt-3 cursor-pointer text-xs text-tt-muted underline">
-          Start over
-        </button>
-      </div>
-    );
-  }
-  const bought = result.bought ?? [];
-  return (
-    <div className="rounded-lg border border-tt-green/40 bg-tt-green/5 p-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <h3 className="text-sm font-semibold text-tt-text">
-          Bought {result.purchased} label{result.purchased === 1 ? '' : 's'} — {money(result.spent)}
-        </h3>
-        {result.run_id && (
-          <a
-            href={`/api/shipping/labels/pdf?store_id=${encodeURIComponent(storeId)}&run_id=${result.run_id}`}
-            target="_blank" rel="noreferrer"
-            className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black"
-          >
-            Print labels
-          </a>
-        )}
-      </div>
-
-      {result.spend_recent && (
-        <p className="mt-2 text-xs text-tt-muted">
-          Last 7 days {money(result.spend_recent.last_7d.spent)} ·{' '}
-          Last 30 days {money(result.spend_recent.last_30d.spent)}
-        </p>
-      )}
-
-      {(result.remaining ?? 0) > 0 && (
-        <p className="mt-2 text-xs text-tt-muted">
-          {result.remaining} box(es) left. Re-check to buy the next batch.
-          {result.stopped_early && ' (This run hit its time budget.)'}
-        </p>
-      )}
-
-      {bought.length > 0 && (
-        <details className="mt-3 rounded-md border border-tt-border">
-          <summary className="cursor-pointer px-3 py-2 text-xs text-tt-muted">
-            What each label cost
-          </summary>
-          <ul className="border-t border-tt-border px-3 py-2 text-xs">
-            {bought.map((b) => (
-              <li key={b.group_key} className="flex justify-between py-0.5">
-                <span className="text-tt-muted">
-                  {b.ship_type === '3' ? 'combined' : 'single'} · {b.group_key}
-                </span>
-                <span className="text-tt-text">
-                  {b.already_existed ? 'already had a label' : b.price == null ? '—' : money(b.price)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      {(result.failed ?? 0) > 0 && (
-        <div className="mt-3 rounded-md border border-tt-red/40 px-3 py-2 text-xs text-tt-red">
-          {result.failed} box(es) failed and were not charged.
-          <ul className="mt-1 space-y-0.5">
-            {(result.failed_detail ?? []).slice(0, 5).map((f) => (
-              <li key={f.group_key}>{f.group_key}: {f.message}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <button onClick={onDone} className="mt-3 cursor-pointer text-xs text-tt-muted underline">
-        Done
-      </button>
-    </div>
-  );
-}
-
-function Stat({ label, value, hint, big }: {
-  label: string; value: number; hint?: string; big?: boolean;
-}) {
+function Stat({ label, value, big }: { label: string; value: number; big?: boolean }) {
   return (
     <div>
       <div className={`${big ? 'text-2xl' : 'text-lg'} font-semibold text-tt-text`}>
         {value.toLocaleString()}
       </div>
       <div className="text-xs text-tt-muted">{label}</div>
-      {hint && <div className="mt-0.5 text-[11px] text-tt-muted/70">{hint}</div>}
     </div>
   );
 }
 
-function Radio({ name, checked, onChange, label, hint }: {
-  name: string; checked: boolean; onChange: () => void; label: string; hint: string;
+function Radio({ checked, onChange, label, hint }: {
+  checked: boolean; onChange: () => void; label: string; hint: string;
 }) {
   return (
     <label className="flex cursor-pointer items-start gap-2">
-      <input
-        type="radio" name={name} checked={checked} onChange={onChange}
-        className="mt-0.5 cursor-pointer"
-      />
+      <input type="radio" name="unbound" checked={checked} onChange={onChange} className="mt-0.5 cursor-pointer" />
       <span>
         <span className="text-sm text-tt-text">{label}</span>
         <span className="block text-xs text-tt-muted">{hint}</span>

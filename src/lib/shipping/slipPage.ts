@@ -32,6 +32,13 @@ const TITLE_SIZES = [40, 34, 29, 25, 21, 18, 15, 12, 10];
 export interface SlipContent {
   caption: string;
   count: number;
+  /**
+   * A PILE divider rather than a SKU header. Drawn heavier, with a filled bar, because it is
+   * what someone finds while splitting a stack by hand — often at arm's length and without
+   * reading it closely. The extra toner is worth it a handful of times per run; it would not
+   * be on every SKU slip.
+   */
+  banner?: boolean;
 }
 
 /**
@@ -47,6 +54,7 @@ export function addSlipPage(
   slip: SlipContent,
 ): void {
   const page = doc.addPage([size.width, size.height]);
+  const heavy = slip.banner === true;
   const measure: Measure = (t, s) => font.widthOfTextAtSize(t, s);
   const black = rgb(0, 0, 0);
 
@@ -54,8 +62,16 @@ export function addSlipPage(
   page.drawRectangle({
     x: MARGIN, y: MARGIN,
     width: size.width - MARGIN * 2, height: size.height - MARGIN * 2,
-    borderColor: black, borderWidth: BORDER,
+    borderColor: black, borderWidth: heavy ? BORDER * 3 : BORDER,
   });
+  if (heavy) {
+    // A solid bar across the top. Deliberately the only filled area in the whole document, so a
+    // banner is identifiable by silhouette when the stack is fanned.
+    page.drawRectangle({
+      x: MARGIN + BORDER * 3, y: size.height - MARGIN - BORDER * 3 - 26,
+      width: size.width - (MARGIN + BORDER * 3) * 2, height: 26, color: black,
+    });
+  }
 
   const { number, title } = splitCaption(slip.caption);
   const pad = MARGIN + BORDER + 10;
@@ -63,7 +79,7 @@ export function addSlipPage(
   const centred = (text: string, s: number) => (size.width - measure(text, s)) / 2;
 
   // Lay out from the top down.
-  let y = size.height - pad;
+  let y = size.height - pad - (heavy ? 30 : 0);
 
   if (number) {
     const fit = fitText(number, measure, usable, 1, NUMBER_SIZES);

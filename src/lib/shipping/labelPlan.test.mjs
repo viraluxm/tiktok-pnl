@@ -14,7 +14,8 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'lp-')), 'labelPlan.mjs');
 writeFileSync(outFile, outputText);
-const { buildLabelPlan, planPageSequence, isSingleSku, slipCaption, sectionKeyOf, UNBOUND_CAPTION } =
+const { buildLabelPlan, planPageSequence, isSingleSku, slipCaption, sectionKeyOf,
+  UNBOUND_CAPTION, BANNER_SINGLES, BANNER_MIXED } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -144,6 +145,10 @@ console.log('\nA section of ONE still gets its header');
   const slips = planPageSequence(plan).filter((p) => p.kind === 'slip');
   check('…and 7 named slips, no mixed pile', slips.length === 7 && plan.bundles.length === 0,
     String(slips.length));
+  const banners = planPageSequence(plan).filter((p) => p.kind === 'banner');
+  check('…under ONE singles banner, not seven',
+    banners.length === 1 && banners[0].caption === BANNER_SINGLES, String(banners.length));
+  check('…whose count is the whole pile, not one section', banners[0].count === 7);
   check('…each naming its own SKU',
     slips.map((s) => s.caption).sort().join(',') ===
       Array.from({ length: 7 }, (_, i) => `#${300 + i} T${i}`).sort().join(','),
@@ -163,10 +168,12 @@ console.log('\nA section of ONE still gets its header');
   check('only the two combine groups are mixed',
     plan.bundles.map((b) => b.group_key).join(',') === 'gA,gB');
   const shape = planPageSequence(plan)
-    .map((p) => (p.kind === 'slip' ? `SLIP(${p.caption})` : 'L')).join(' ');
+    .map((p) => (p.kind === 'banner' ? `BANNER(${p.caption})`
+      : p.kind === 'slip' ? `SLIP(${p.caption})` : 'L')).join(' ');
   check('the stack reads as four sections, not one mixed pile',
-    shape === 'SLIP(#302 JUMBO UV COLOR CHANGING STRAWBERRY) L SLIP(#306 XL PEANUT IN BAG) L '
-           + 'SLIP(#405 GREEN HALLOWEEN CUBE) L SLIP(MIXED — READ EACH LABEL) L L', shape);
+    shape === `BANNER(${BANNER_SINGLES}) SLIP(#302 JUMBO UV COLOR CHANGING STRAWBERRY) L `
+           + 'SLIP(#306 XL PEANUT IN BAG) L SLIP(#405 GREEN HALLOWEEN CUBE) L '
+           + `BANNER(${BANNER_MIXED}) L L`, shape);
 }
 
 console.log('\nSlip captions');
@@ -195,16 +202,17 @@ console.log('\nPage sequence');
     box('z', [sku('x', 1, 'A'), sku('y', 2, 'B')]),
   ]);
   const seq = planPageSequence(plan);
-  const shape = seq.map((p) => (p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`));
+  const shape = seq.map((p) => (p.kind === 'banner' ? `BANNER(${p.caption}|${p.count})`
+    : p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`));
   // #198 has one box and STILL gets its own slip — only the 2-SKU box 'z' is mixed.
   check('every section is preceded by its slip, single-box ones included',
-    shape.join(' ') === 'SLIP(#248 PUMPKIN|2) L(a) L(b) SLIP(#198 DUMPLING|1) L(c) '
-      + 'SLIP(MIXED — READ EACH LABEL|1) L(z)',
+    shape.join(' ') === `BANNER(${BANNER_SINGLES}|3) SLIP(#248 PUMPKIN|2) L(a) L(b) `
+      + `SLIP(#198 DUMPLING|1) L(c) BANNER(${BANNER_MIXED}|1) L(z)`,
     shape.join(' '));
   check('every box appears exactly once',
     seq.filter((p) => p.kind === 'label').length === 4);
   check('slip counts match their section sizes',
-    seq.filter((p) => p.kind === 'slip').map((s) => s.count).join(',') === '2,1,1');
+    seq.filter((p) => p.kind === 'slip').map((s) => s.count).join(',') === '2,1');
 }
 {
   // Bundles get their own slip. Without it the first bundle label reads as part of the last
@@ -212,13 +220,13 @@ console.log('\nPage sequence');
   const plan = buildLabelPlan([box('z', [sku('x', 1, 'A'), sku('y', 2, 'B')])]);
   const seq = planPageSequence(plan);
   check('a mixed-only run still opens with a slip',
-    seq[0].kind === 'slip' && seq[0].caption === 'MIXED — READ EACH LABEL');
+    seq[0].kind === 'banner' && seq[0].caption === BANNER_MIXED);
 }
 {
   const plan = buildLabelPlan([box('a', [sku('p', 1, 'A')]), box('b', [sku('p', 1, 'A')])]);
   const seq = planPageSequence(plan);
   check('no mixed slip when everything batches',
-    !seq.some((p) => p.kind === 'slip' && p.caption.startsWith('MIXED')));
+    !seq.some((p) => p.caption?.startsWith('MIXED')));
 }
 {
   const plan = buildLabelPlan([]);
@@ -244,10 +252,11 @@ console.log('\nA box with NO SKU is its own third case, not a bundle');
   check('…and mixed holds ONLY the real bundle',
     plan.bundles.map((b) => b.group_key).join(',') === 'mix');
   const seq = planPageSequence(plan);
-  const shape = seq.map((p) => (p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`));
+  const shape = seq.map((p) => (p.kind === 'banner' ? `BANNER(${p.caption}|${p.count})`
+    : p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`));
   check('unbound prints LAST, behind its own header',
-    shape.join(' ') === 'SLIP(#248 PUMPKIN|2) L(a) L(a2) SLIP(MIXED — READ EACH LABEL|1) L(mix) '
-      + `SLIP(${UNBOUND_CAPTION}|2) L(nosku) L(nosku2)`,
+    shape.join(' ') === `BANNER(${BANNER_SINGLES}|2) SLIP(#248 PUMPKIN|2) L(a) L(a2) `
+      + `BANNER(${BANNER_MIXED}|1) L(mix) BANNER(${UNBOUND_CAPTION}|2) L(nosku) L(nosku2)`,
     shape.join(' '));
   check('the header names the WORK, since the contents are what is unknown',
     UNBOUND_CAPTION.includes('LOOK UP'), UNBOUND_CAPTION);
@@ -258,9 +267,9 @@ console.log('\nA box with NO SKU is its own third case, not a bundle');
   const plan = buildLabelPlan([box('n1', []), box('n2', [])]);
   const seq = planPageSequence(plan);
   check('an all-unbound run still opens with the unbound header',
-    seq[0].kind === 'slip' && seq[0].caption === UNBOUND_CAPTION);
+    seq[0].kind === 'banner' && seq[0].caption === UNBOUND_CAPTION);
   check('…and no phantom mixed slip appears',
-    !seq.some((p) => p.kind === 'slip' && p.caption.startsWith('MIXED')));
+    !seq.some((p) => p.caption?.startsWith('MIXED')));
   check('unbound boxes are not counted as headed', plan.batchedBoxes === 0);
 }
 {

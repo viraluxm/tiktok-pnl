@@ -93,6 +93,20 @@ export interface LabelPlan {
 /** Header for the unbound section. Names the action, since the label itself says nothing. */
 export const UNBOUND_CAPTION = 'NO SKU ON FILE — LOOK UP EACH ORDER';
 
+/**
+ * Banners that divide the stack into the three piles that go to three different places.
+ *
+ * A per-SKU slip tells a packer what to grab NEXT. A banner tells whoever splits the stack which
+ * pile they are holding — and that is the whole point of the run: the singles pile goes to a
+ * dedicated prep station where one SKU is packed over and over, and it is 38-51% of a day's
+ * boxes (measured over the 8 days to 2026-09-04). Without a divider that survives being carried
+ * across a warehouse, the split has to be reconstructed by reading labels, which is the work
+ * this exists to remove.
+ */
+export const BANNER_SINGLES = 'SINGLES — ONE SKU EACH';
+export const BANNER_MIXED = 'MIXED — READ EACH LABEL';
+export const BANNER_UNBOUND = UNBOUND_CAPTION;
+
 /** Total units across a box's SKU lines. */
 function unitsIn(box: PlanBox): number {
   return box.skus.reduce((n, s) => n + (Number(s.qty) || 0), 0);
@@ -216,33 +230,38 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
  * Flatten a plan into the page sequence a printer would receive: a slip, then that batch's
  * labels, repeating, then every bundle label.
  */
-export function planPageSequence(plan: LabelPlan): Array<
+export type PlanPageOut =
+  | { kind: 'banner'; caption: string; count: number }
   | { kind: 'slip'; caption: string; count: number }
-  | { kind: 'label'; group_key: string }
-> {
-  const out: Array<
-    | { kind: 'slip'; caption: string; count: number }
-    | { kind: 'label'; group_key: string }
-  > = [];
-  for (const b of plan.batches) {
-    out.push({ kind: 'slip', caption: b.slip, count: b.boxes.length });
-    for (const box of b.boxes) out.push({ kind: 'label', group_key: box.group_key });
+  | { kind: 'label'; group_key: string };
+
+export function planPageSequence(plan: LabelPlan): PlanPageOut[] {
+  const out: PlanPageOut[] = [];
+
+  // ── Singles: one banner for the pile, then a slip per SKU inside it. ──
+  //
+  // Both are needed and they answer different questions. The banner says "this pile goes to the
+  // prep station"; the slips say "these forty are pumpkins, the next twelve are bananas". Only
+  // the banner survives the stack being split and carried.
+  if (plan.batches.length) {
+    out.push({ kind: 'banner', caption: BANNER_SINGLES, count: plan.batchedBoxes });
+    for (const b of plan.batches) {
+      out.push({ kind: 'slip', caption: b.slip, count: b.boxes.length });
+      for (const box of b.boxes) out.push({ kind: 'label', group_key: box.group_key });
+    }
   }
+
+  // ── Mixed: one banner, no per-SKU slips, because there is no single SKU to name. ──
   if (plan.bundles.length) {
-    // The mixed section gets a slip too. Without one, its first label reads as part of the last
-    // SKU batch — the exact confusion slips exist to prevent.
-    //
-    // The caption names the ACTION, not the contents: this section holds multi-SKU boxes,
-    // multi-unit boxes and demoted singletons, and what they share is that each label must be
-    // read individually.
-    out.push({ kind: 'slip', caption: 'MIXED — READ EACH LABEL', count: plan.bundles.length });
+    out.push({ kind: 'banner', caption: BANNER_MIXED, count: plan.bundles.length });
     for (const box of plan.bundles) out.push({ kind: 'label', group_key: box.group_key });
   }
+
+  // ── Unbound: last, behind a banner naming the work rather than the contents. ──
   if (plan.unbound.length) {
-    // Last, and behind a header that names the work rather than the contents — because the
-    // contents are exactly what is not known.
-    out.push({ kind: 'slip', caption: UNBOUND_CAPTION, count: plan.unbound.length });
+    out.push({ kind: 'banner', caption: BANNER_UNBOUND, count: plan.unbound.length });
     for (const box of plan.unbound) out.push({ kind: 'label', group_key: box.group_key });
   }
+
   return out;
 }

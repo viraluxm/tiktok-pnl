@@ -17,8 +17,27 @@ import { describeScope, type LabelScope } from '@/lib/shipping/labelScope';
 
 /** getOrderById accepts at most 50 ids per call. */
 export const CHUNK = 50;
-/** Verification calls per run — 1,000 candidates, a bounded and reviewable size. */
-export const VERIFY_CALL_CAP = 20;
+/**
+ * Verification calls per run.
+ *
+ * This was 20 — a 1,000-order ceiling — which silently truncated the one scope that matters
+ * most. A fulfilment day is about 2,070 orders (Sep 3: 2,070 across 593 boxes), so "all of
+ * yesterday" would have verified half the day and reported a confident, wrong box count, which
+ * the operator would then have authorised.
+ *
+ * 200 calls is 10,000 orders: past any real day with room for a backlog that was never bought
+ * down. The genuine protection is the TIME budget below, not this number — verification is a
+ * read, and 42 calls for a full day is roughly fifteen seconds.
+ */
+export const VERIFY_CALL_CAP = 200;
+
+/**
+ * Stop verifying with this much of the request left, and report the shortfall.
+ *
+ * Truncating is survivable as long as it is VISIBLE: the count that gets authorised must never
+ * be quietly partial. Callers surface not_verified_over_cap.
+ */
+const VERIFY_BUDGET_MS = 60_000;
 /** Heartbeat freshness that counts as "a show is running right now". */
 export const LIVE_WINDOW_MIN = 20;
 export { MIN_ORDER_AGE_HOURS };
@@ -195,9 +214,13 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   const idsToVerify = toVerify.flatMap((b) => b.orders.map((o) => o.order_id));
 
   const liveStatus = new Map<string, string>();
+  const verifyStart = Date.now();
+  let verifiedIds = 0;
   try {
     for (let i = 0; i < idsToVerify.length; i += CHUNK) {
+      if (Date.now() - verifyStart > VERIFY_BUDGET_MS) break;
       const ids = idsToVerify.slice(i, i + CHUNK);
+      verifiedIds += ids.length;
       for (const o of await getOrderById(accessToken, shopCipher, ids)) {
         liveStatus.set(
           String((o as { id: unknown }).id),
@@ -209,10 +232,26 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
     throw new VerifyFailedError(e instanceof Error ? e.message : String(e));
   }
 
+  // Boxes whose orders the loop never got to. idsToVerify is built by walking toVerify in order,
+  // so the shortfall is a suffix: count boxes from the end until the verified ids are accounted
+  // for. Those boxes are then refused below (a missing status reads as "moved on"), so this is
+  // reporting, not gating — but without it a truncated run looks complete.
+  let unreachedBoxes = 0;
+  if (verifiedIds < idsToVerify.length) {
+    let seen = 0;
+    for (const b of toVerify) {
+      seen += b.orders.length;
+      if (seen > verifiedIds) unreachedBoxes++;
+    }
+  }
+
   // ── 6. Every order in a box must still be awaiting shipment. Partial boxes are refused. ──
   const confirmedBoxes: GateBox[] = [];
   const healed: Healed[] = [];
   for (const b of toVerify) {
+    // A box the time budget never reached has no status at all. gateByVerifiedStatus treats a
+    // missing status as "moved on" and refuses the box, which is the correct direction: unread
+    // is not the same as unchanged.
     const v = gateByVerifiedStatus(b, liveStatus);
     if (v.ok) { confirmedBoxes.push(b); continue; }
     excluded.push({ group_key: b.group_key, order_ids: b.orders.map((o) => o.order_id), reason: v.reason });
@@ -306,8 +345,11 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
     candidateBoxCount: allBoxes.length,
     excludedTooRecent,
     excludedShowLive: aged.length - afterLive.length,
-    verifiedCount: idsToVerify.length,
-    notVerifiedOverCap: notVerifiedBoxes,
+    verifiedCount: verifiedIds,
+    // Boxes the run could not look at at all: past the call cap, or past the time budget.
+    // Non-zero means the plan is a PARTIAL view of the scope — narrow it, or run again once
+    // these are bought. Counted as boxes, since that is what the operator authorises.
+    notVerifiedOverCap: notVerifiedBoxes + unreachedBoxes,
     confirmedCount: confirmed.length,
     healed,
     boxes,

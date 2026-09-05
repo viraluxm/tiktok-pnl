@@ -26,12 +26,15 @@ export interface LedgerRow {
   tracking_number: string | null;
   /** Position in the run's print stack, assigned at purchase. Null on pre-migration rows. */
   print_seq?: number | null;
-  /** Section header this box prints under, or null for no section. */
+  /** SKU section this box prints under, or null for no section. */
   slip_caption?: string | null;
+  /** Pile this box prints under. Null on rows written before the column existed. */
+  banner_caption?: string | null;
 }
 
 /** One page of the assembled document. */
 export type AssemblyPage =
+  | { kind: 'banner'; caption: string; count: number }
   | { kind: 'slip'; caption: string; count: number }
   | { kind: 'label'; group_key: string; package_id: string; doc_url: string | null };
 
@@ -43,6 +46,7 @@ export interface AssemblySequence {
   refetch: string[];
   labelCount: number;
   slipCount: number;
+  bannerCount: number;
 }
 
 /**
@@ -56,7 +60,9 @@ export interface AssemblySequence {
  */
 export interface AssemblyItem {
   group_key: string;
-  /** Section header, or null for a box that prints under no header. */
+  /** Pile this box belongs to: singles / mixed / no-SKU. Null for a box with no pile. */
+  banner: string | null;
+  /** SKU section within the pile, or null where the pile has no per-SKU split. */
   caption: string | null;
 }
 
@@ -80,7 +86,11 @@ export function itemsFromLedger(rows: LedgerRow[]): AssemblyItem[] {
     if (aNull !== bNull) return aNull ? 1 : -1;
     if (!aNull && !bNull && as !== bs) return (as as number) - (bs as number);
     return a.group_key.localeCompare(b.group_key);
-  }).map((r) => ({ group_key: r.group_key, caption: r.slip_caption ?? null }));
+  }).map((r) => ({
+    group_key: r.group_key,
+    banner: r.banner_caption ?? null,
+    caption: r.slip_caption ?? null,
+  }));
 }
 
 
@@ -138,7 +148,11 @@ export function buildAssemblySequence(
 
   // Resolve first, keeping each survivor's caption. Sections are then grouped over the
   // survivors, which is why a lost box can never leave a slip overstating its section.
-  const survivors: Array<{ page: AssemblyPage & { kind: 'label' }; caption: string | null }> = [];
+  const survivors: Array<{
+    page: AssemblyPage & { kind: 'label' };
+    banner: string | null;
+    caption: string | null;
+  }> = [];
   for (const it of items) {
     const row = byKey.get(it.group_key);
     const reason = unprintableReason(row);
@@ -146,6 +160,7 @@ export function buildAssemblySequence(
     const stale = needsRefetch(row, nowMs);
     if (stale) refetch.push(row.package_id as string);
     survivors.push({
+      banner: it.banner,
       caption: it.caption,
       page: {
         kind: 'label',
@@ -157,15 +172,27 @@ export function buildAssemblySequence(
     });
   }
 
+  // Group two deep: pile first, then SKU section within it. Counts come from the SURVIVORS at
+  // each level, so a lost box shrinks both its slip and its banner rather than leaving either
+  // overstating what follows.
   const pages: AssemblyPage[] = [];
   let i = 0;
   while (i < survivors.length) {
-    const caption = survivors[i].caption;
+    const banner = survivors[i].banner;
+    let bEnd = i;
+    while (bEnd < survivors.length && survivors[bEnd].banner === banner) bEnd++;
+    if (banner != null) pages.push({ kind: 'banner', caption: banner, count: bEnd - i });
+
     let j = i;
-    while (j < survivors.length && survivors[j].caption === caption) j++;
-    if (caption != null) pages.push({ kind: 'slip', caption, count: j - i });
-    for (let k = i; k < j; k++) pages.push(survivors[k].page);
-    i = j;
+    while (j < bEnd) {
+      const caption = survivors[j].caption;
+      let sEnd = j;
+      while (sEnd < bEnd && survivors[sEnd].caption === caption) sEnd++;
+      if (caption != null) pages.push({ kind: 'slip', caption, count: sEnd - j });
+      for (let k = j; k < sEnd; k++) pages.push(survivors[k].page);
+      j = sEnd;
+    }
+    i = bEnd;
   }
 
   return {
@@ -174,5 +201,6 @@ export function buildAssemblySequence(
     refetch,
     labelCount: survivors.length,
     slipCount: pages.filter((x) => x.kind === 'slip').length,
+    bannerCount: pages.filter((x) => x.kind === 'banner').length,
   };
 }

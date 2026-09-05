@@ -8,18 +8,18 @@
 // halfway through, and no endpoint that quotes a run before committing to it.
 
 /**
- * Hard ceiling on the `limit` a single call may ask for.
+ * Sanity ceiling on one authorised manifest.
  *
- * This bounds the INVOCATION, not the plan: a backlog bigger than this is bought in successive
- * calls, each re-verified against TikTok. Chosen from real volume — the Snore test set held
- * 356 boxes and a normal day is that order of magnitude — so one legitimate day fits in one
- * call while the worst a single call can do stays bounded at roughly $1,600 rather than
- * unbounded.
+ * NOT the primary control any more. The controls that matter are SCOPE (a day or named shows,
+ * so a run means a definite set of work) and the confirm count (so the set was reviewed). This
+ * is the backstop against a scope that resolved to something absurd — a bug, or a store whose
+ * backlog was never bought down.
  *
- * It is the backstop, not the primary control. `limit` is required on every call precisely so
- * that the real ceiling is the one the caller names, visible in the request itself.
+ * 1,500 sits well above real volume: the busiest fulfilment day in the 8 days to 2026-09-04 was
+ * 863 boxes, and a normal day is 474-600. A legitimate day therefore always fits in one
+ * authorisation, which is the point — the operator asked not to split a day across runs.
  */
-export const MAX_BOXES_PER_RUN = 400;
+export const MAX_MANIFEST_BOXES = 1500;
 
 /**
  * Fallback unit price when the ledger holds no prior purchases, in USD.
@@ -78,15 +78,10 @@ export type UnboundPolicy = 'skip' | 'include';
 export interface AuthorizeInput {
   /** LABEL_PURCHASE_ENABLED === '1'. Anything else means log-only. */
   enabled: boolean;
-  /** Boxes this run resolved, after removing everything already in the ledger. */
+  /** Boxes this scope resolved, after removing everything already in the ledger. */
   boxes: number;
   /** The count the caller read on the dry run and is authorising. Null when absent. */
   confirmBoxes: number | null;
-  /**
-   * REQUIRED ceiling on how many of those boxes this invocation may buy. Null when absent,
-   * which is refused — see authorizeRun.
-   */
-  limit: number | null;
   /** Boxes in this run with no SKU on file. */
   unboundCount: number;
   /** What to do about them. Null when the caller has not said, which is refused if any exist. */
@@ -100,8 +95,6 @@ export type AuthorizeRefusal =
   | 'confirm_missing'
   | 'confirm_mismatch'
   | 'unbound_present'
-  | 'limit_missing'
-  | 'limit_invalid'
   | 'over_cap';
 
 export type AuthorizeResult =
@@ -109,30 +102,22 @@ export type AuthorizeResult =
   | { ok: false; code: AuthorizeRefusal; reason: string };
 
 /**
- * Whether a purchase run may proceed, and how many boxes it may buy.
+ * Whether a manifest may be authorised, and how many boxes it covers.
  *
- * TWO INDEPENDENT CHECKS DO THE WORK, AND THEY GUARD DIFFERENT THINGS.
+ * THIS IS THE ONLY GATE, and it runs ONCE per run rather than once per call. Authorising writes
+ * the whole manifest to the ledger as claimed rows and buys nothing; the purchase route then
+ * drains those rows mechanically. That split exists because a fulfilment day is 474-863 boxes
+ * and cannot be bought inside one request — but the operator asked not to split a day across
+ * several approvals, and re-approving between chunks is exactly that.
  *
- * `confirmBoxes` guards against a plan that MOVED. The caller passes the box count it saw on
- * the dry run and it must match exactly, so if a show ended, a sync landed, or another run
- * bought something in between, this refuses rather than buying a plan nobody read.
- * "Approximately what I approved" is not good enough when every difference is a paid label.
- *
- * `limit` guards against a plan that is LARGE. It is a separate concern, and confirmBoxes does
- * nothing for it: a caller that reads the dry run and passes its count straight back through —
- * which is exactly what a "Print labels" button would naturally do — is perfectly consistent
- * and would buy the entire backlog in one click. So `limit` is REQUIRED and has no default.
- * A request cannot express "buy everything"; it has to name a number, and that number is
- * bounded by the cap. The worst a single call can do is therefore always visible in the call
- * itself.
- *
- * Because every invocation is bounded by `limit`, a backlog LARGER than the cap is no longer
- * refused outright — it is bought in successive capped runs, each one re-verified against
- * TikTok. The cap now bounds the invocation rather than the plan, which is the thing that
- * actually spends money.
+ * `confirmBoxes` guards a plan that MOVED: the caller passes the count it saw on the dry run and
+ * it must match exactly, so if a show ended or a sync landed in between, this refuses rather
+ * than authorising a set nobody read. It replaces the old per-call `limit` as the thing standing
+ * between a click and a large purchase — the limit is gone because SCOPE now bounds the run, and
+ * a limit on top would have forced the multiple batches the operator specifically ruled out.
  */
 export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
-  const cap = input.cap ?? MAX_BOXES_PER_RUN;
+  const cap = input.cap ?? MAX_MANIFEST_BOXES;
   if (!input.enabled) {
     return { ok: false, code: 'disabled', reason: 'LABEL_PURCHASE_ENABLED is not 1 — log-only' };
   }
@@ -142,43 +127,29 @@ export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
   if (input.confirmBoxes == null) {
     return {
       ok: false, code: 'confirm_missing',
-      reason: 'confirm_boxes is required — read the dry run and pass the box count it reports',
+      reason: 'confirm_boxes is required — read the check and pass the box count it reports',
     };
   }
   if (input.confirmBoxes !== input.boxes) {
     return {
       ok: false, code: 'confirm_mismatch',
-      reason: `plan moved since it was reviewed: confirm_boxes=${input.confirmBoxes} but ${input.boxes} boxes now resolve — re-read the dry run`,
+      reason: `plan moved since it was reviewed: confirm_boxes=${input.confirmBoxes} but ${input.boxes} boxes now resolve — check again`,
     };
   }
-  // Asked BEFORE limit, because the answer can change what the run contains and therefore what
-  // a sensible limit is. Only fires when unbound boxes actually exist, which is rare.
+  // Asked before the cap, because the answer changes how many boxes the run contains.
   if (input.unboundCount > 0 && input.unboundPolicy == null) {
     return {
       ok: false, code: 'unbound_present',
-      reason: `${input.unboundCount} box(es) in this batch have no SKU on file. Wait for them to be bound and re-run, or pass unbound=skip to buy the rest, or unbound=include to buy them too (their labels tell the picker nothing and must be looked up by hand).`,
+      reason: `${input.unboundCount} box(es) in this batch have no SKU on file. Wait for them to be bound and check again, or pass unbound=skip to buy the rest, or unbound=include to buy them too (their labels tell the picker nothing and must be looked up by hand).`,
     };
   }
-  if (input.limit == null) {
-    return {
-      ok: false, code: 'limit_missing',
-      reason: `limit is required — the most boxes this call may buy (1-${cap}). There is deliberately no default: a request must name its own ceiling rather than inherit "all of them".`,
-    };
-  }
-  if (!Number.isInteger(input.limit) || input.limit < 1) {
-    return {
-      ok: false, code: 'limit_invalid',
-      reason: `limit must be a whole number of at least 1, got ${input.limit}`,
-    };
-  }
-  if (input.limit > cap) {
+  if (input.boxes > cap) {
     return {
       ok: false, code: 'over_cap',
-      reason: `limit=${input.limit} exceeds the ${cap}-box ceiling for one call`,
+      reason: `${input.boxes} boxes exceeds the ${cap}-box ceiling for one run — narrow the scope to a single day or fewer shows`,
     };
   }
-  // A limit above what is left is not an error — it simply buys what there is.
-  return { ok: true, buy: Math.min(input.limit, input.boxes) };
+  return { ok: true, buy: input.boxes };
 }
 
 /**
