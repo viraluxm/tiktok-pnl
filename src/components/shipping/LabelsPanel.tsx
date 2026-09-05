@@ -47,6 +47,7 @@ interface DryRun {
   counts: {
     excluded_too_recent: number; min_order_age_hours: number;
     boxes: number; orders: number; batched_boxes: number; bundle_boxes: number;
+    orders_in_scope: number; orders_pulled_in: number; pulled_in_by_day: Record<string, number>;
     sku_batches: number; unbound_boxes: number; already_in_ledger: number; would_buy: number;
   };
   spend_estimate: {
@@ -339,6 +340,23 @@ export default function LabelsPanel() {
             <Stat label="Singles (prep station)" value={plan.counts.batched_boxes} />
             <Stat label="Mixed" value={plan.counts.bundle_boxes} />
           </div>
+          {plan.counts.orders_pulled_in > 0 && (
+            /* Reconciles against Seller Center, which counts only the orders placed that night.
+               Without this the totals differ and it reads as Lensed being wrong. */
+            <p className="mt-3 rounded-md bg-tt-card px-3 py-2 text-xs text-tt-muted">
+              <span className="text-tt-text">{plan.counts.orders_in_scope.toLocaleString()}</span>
+              {' '}of those orders were placed on the night you picked. The other{' '}
+              <span className="text-tt-text">{plan.counts.orders_pulled_in.toLocaleString()}</span>
+              {' '}come from{' '}
+              {Object.entries(plan.counts.pulled_in_by_day)
+                .sort()
+                .map(([d, n]) => `${fmtDay(d)} (${n})`)
+                .join(', ')}
+              {' '}— they share a combine box with one of this night&rsquo;s orders, and a box is
+              always bought whole so no label covers half a parcel. Buying this night will reduce
+              those nights too.
+            </p>
+          )}
           {plan.counts.excluded_too_recent > 0 && (
             <p className="mt-3 rounded-md bg-tt-card px-3 py-2 text-xs text-tt-muted">
               {plan.counts.excluded_too_recent} box(es) held back — newer than{' '}
@@ -588,6 +606,9 @@ function DayCalendar({ days, today, selected, onToggle }: {
           const info = byDay.get(d);
           const on = selected.has(d);
           const usable = !!info && info.ready > 0;
+          // A night with boxes but none ready is DONE, not missing. Saying so beats having it
+          // silently disappear once its labels are bought — which reads as data going astray.
+          const done = !!info && info.ready === 0;
           return (
             <button
               key={d}
@@ -597,16 +618,19 @@ function DayCalendar({ days, today, selected, onToggle }: {
               className={`rounded-md border px-1 py-1.5 text-center transition-colors ${
                 on ? 'border-tt-green bg-tt-green/10 text-tt-text'
                   : usable ? 'cursor-pointer border-tt-border text-tt-text hover:border-tt-border-hover'
-                    : 'border-transparent text-tt-muted/30'
+                    : done ? 'border-transparent text-tt-muted/60'
+                      : 'border-transparent text-tt-muted/30'
               }`}
-              title={info ? `${info.ready} ready of ${info.boxes} · ${info.orders} orders` : 'nothing to buy'}
+              title={!info ? 'nothing to buy'
+                : info.ready > 0 ? `${info.ready} ready of ${info.boxes} · ${info.orders} orders`
+                  : 'all labels bought for this night'}
             >
               <span className="block text-sm leading-tight">
                 {Number(d.slice(8, 10))}
                 {d === today && <span className="ml-0.5 text-[9px] text-tt-muted">•</span>}
               </span>
               <span className="block text-[10px] leading-tight text-tt-muted">
-                {info?.ready ? info.ready : ''}
+                {info?.ready ? info.ready : done ? '✓' : ''}
               </span>
             </button>
           );

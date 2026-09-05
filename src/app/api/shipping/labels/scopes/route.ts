@@ -146,6 +146,25 @@ export async function GET(req: Request) {
     .filter((l) => l.boxes > 0)
     .sort((a, z) => (Date.parse(z.started_at ?? '') || 0) - (Date.parse(a.started_at ?? '') || 0));
 
+  // ── Nights that are FINISHED still belong in the calendar. ──
+  //
+  // A night with no unbought boxes left is absent from everything above, so it simply vanished
+  // from the picker once its labels were bought — which reads as data going missing rather than
+  // work being done. Recent day-scoped runs are folded back in with ready = 0 so the grid can
+  // show a tick.
+  const { data: doneRuns } = await admin
+    .from('shipping_label_purchases')
+    .select('run_scope')
+    .eq('user_id', user.id).eq('store_id', storeId).eq('status', 'purchased')
+    .not('run_scope', 'is', null)
+    .gte('purchased_at', new Date(Date.now() - LOOKBACK_DAYS * 86_400_000).toISOString());
+  for (const r of doneRuns ?? []) {
+    // Only single-day runs name a night unambiguously; "3 lives" does not map to the grid.
+    const m = /^day (\d{4}-\d{2}-\d{2})$/.exec(String((r as { run_scope: string }).run_scope ?? ''));
+    if (!m) continue;
+    if (!byDay.has(m[1])) byDay.set(m[1], { boxes: 0, ready: 0, orders: 0 });
+  }
+
   const days = [...byDay.entries()]
     .map(([day, b]) => ({ day, ...b }))
     .sort((a, z) => (a.day < z.day ? 1 : -1))

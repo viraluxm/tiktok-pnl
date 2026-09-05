@@ -13,7 +13,7 @@ import {
   groupIntoBoxes, gateByAge, gateByVerifiedStatus, MIN_ORDER_AGE_HOURS, type GateBox,
 } from '@/lib/shipping/candidateGate';
 import { readCandidates } from '@/lib/shipping/labelCandidates';
-import { describeScope, type LabelScope } from '@/lib/shipping/labelScope';
+import { describeScope, dayWindow, dayOf, type LabelScope } from '@/lib/shipping/labelScope';
 
 /** getOrderById accepts at most 50 ids per call. */
 export const CHUNK = 50;
@@ -80,6 +80,19 @@ export interface ResolvedLabelRun {
   candidateBoxCount: number;
   /** Boxes held back because their combine group may still be growing. */
   excludedTooRecent: number;
+  /**
+   * Orders in the run that fall INSIDE the chosen scope, and those dragged in with them.
+   *
+   * A scope selects boxes, and a box is always taken whole — so choosing Thursday also buys the
+   * Friday orders that share a combine group with a Thursday one. Both numbers are real and
+   * they answer different questions: Seller Center filtered to Thursday's shows reported 1,861
+   * where this run covered 2,189, and the 328 difference was entirely Friday orders sharing a
+   * box. Reporting only the total invites exactly that "our count is off" moment.
+   */
+  ordersInScope: number;
+  ordersPulledIn: number;
+  /** Which nights the pulled-in orders came from, e.g. { '2026-09-04': 328 }. */
+  pulledInByDay: Record<string, number>;
   excludedShowLive: number;
   verifiedCount: number;
   notVerifiedOverCap: number;
@@ -339,8 +352,40 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
     boxes.push({ group_key, order_ids: ids, skus: [...merged.values()] });
   }
 
+  // ── Split the confirmed orders into "inside the scope" and "came along with a box". ──
+  //
+  // Done from the GateBoxes, which still carry each order's date; PlanBox does not. Only
+  // meaningful for a day scope — a show scope has no time window to be inside or outside of.
+  const inWindow = (iso: string | null): boolean => {
+    if (scope.kind !== 'day' || !iso) return true;
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return true;
+    return scope.days.some((d) => {
+      const { fromISO, toISO } = dayWindow(d);
+      return t >= Date.parse(fromISO) && t < Date.parse(toISO);
+    });
+  };
+  const keptKeys = new Set(boxes.map((b) => b.group_key));
+  let ordersInScope = 0, ordersPulledIn = 0;
+  const pulledInByDay: Record<string, number> = {};
+  for (const b of confirmedBoxes) {
+    if (!keptKeys.has(b.group_key)) continue;
+    for (const o of b.orders) {
+      if (inWindow(o.order_created_at)) { ordersInScope++; continue; }
+      ordersPulledIn++;
+      const t = o.order_created_at ? Date.parse(o.order_created_at) : NaN;
+      if (Number.isFinite(t)) {
+        const d = dayOf(t);
+        pulledInByDay[d] = (pulledInByDay[d] ?? 0) + 1;
+      }
+    }
+  }
+
   return {
     scope: describeScope(scope),
+    ordersInScope,
+    ordersPulledIn,
+    pulledInByDay,
     candidateCount: rows.length,
     candidateBoxCount: allBoxes.length,
     excludedTooRecent,

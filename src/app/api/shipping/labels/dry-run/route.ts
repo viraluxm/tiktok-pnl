@@ -127,6 +127,11 @@ export async function GET(req: Request) {
       confirmed_label_ready: run.confirmedCount,
       boxes: plan.totalBoxes,
       orders: plan.totalOrders,
+      // Split so the total can be reconciled against Seller Center, which counts only the
+      // orders actually placed that night.
+      orders_in_scope: run.ordersInScope,
+      orders_pulled_in: run.ordersPulledIn,
+      pulled_in_by_day: run.pulledInByDay,
       batched_boxes: plan.batchedBoxes,
       bundle_boxes: plan.bundles.length,
       sku_batches: plan.batches.length,
