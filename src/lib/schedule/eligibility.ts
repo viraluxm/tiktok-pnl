@@ -3,6 +3,28 @@
 // claim.ts / adminShifts.ts calls into these so the two read paths can never disagree on what role
 // a shift represents.
 
+// ── The clock-in eligibility boundary ────────────────────────────────────────
+// The ONLY statuses of a `shift_instances` row that may back a NEW punch (QR issuance, the kiosk's
+// active-schedule window, the worker's clock controls). Derived from the statuses the rest of the
+// system already treats as a live assignment — board.ts's FILLING, getMyShifts, mySchedule,
+// claim.ts's same-day check, sms.ts's busy check and the /s clock-window predicate all use exactly
+// this pair — and from the DB CHECK vocabulary (scheduled, released, claimed, worked, missed,
+// cancelled), of which:
+//   • scheduled / claimed → a live assignment for a specific person. ELIGIBLE.
+//   • released            → no assignee (employee_id NULL); nobody to clock in.
+//   • worked / missed     → the day is already resolved; a new punch would contradict it.
+//   • cancelled           → the manager removed it from the schedule. NEVER eligible.
+// Exported as a shared constant so a future read path cannot drift from this list. NOTE this is
+// deliberately NARROWER than resolveScheduledSpan's set, which also accepts 'worked' because it
+// answers a different question (what span was this person scheduled for, at confirm time).
+export const CLOCK_ELIGIBLE_STATUSES = ['scheduled', 'claimed'] as const;
+
+/** Whether a shift_instances row may back a NEW punch. Released rows are excluded twice over:
+ *  by status and by having no assignee. */
+export function isClockEligibleStatus(status: string | null | undefined): boolean {
+  return status === 'scheduled' || status === 'claimed';
+}
+
 // The pay-role a released/open shift represents:
 //   • released shift (released_by set) → the RELEASER's role (derived; the row carries no role)
 //   • admin one-time open shift (source 'admin_open', no releaser) → the row's OWN `role` (mig 090)

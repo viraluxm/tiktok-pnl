@@ -1,6 +1,6 @@
 'use client';
 
-import type { Employee } from '@/types';
+import type { Employee, ShiftInstance } from '@/types';
 import type { HostAgg } from '@/hooks/useHostPerformance';
 import type { ScheduleLink } from '@/hooks/useScheduleLinks';
 import type { ActiveBadge } from '@/hooks/useBadges';
@@ -10,6 +10,16 @@ import { ScheduleLinkButton } from './ScheduleLinkButton';
 import { LeadPinButton } from './LeadPinButton';
 import { BadgeButton } from './BadgeButton';
 import PersonAvatar from './weekly/PersonAvatar';
+import { fmtDateLA, fmtTimeRangeLA, isOvernight } from '@/lib/schedule/format';
+
+/** What the roster knows about this person's upcoming plan (real shift_instances only). */
+export interface EmployeeScheduleSummary {
+  isLoading: boolean;
+  /** Earliest scheduled/claimed shift that has not ended yet. */
+  nextShift: ShiftInstance | null;
+  /** Working days in the current Mon→Sun week. */
+  weekCount: number;
+}
 
 // Everything about one team member, opened from their roster tile. The roster grid answers
 // "who is on the team"; this answers "tell me about this person" — so the nine columns that used
@@ -27,13 +37,19 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 export default function EmployeeDetailModal({
   employee, hostAgg, link, badge, hourlyRate,
   onClose, onMintLink, onLinkCreated, onIssueBadge, onReissueBadge, onEdit, onDelete,
-  hasOverridePin, onSetOverridePin,
+  hasOverridePin, onSetOverridePin, schedule, onOpenSchedule, scheduleNotice,
 }: {
   employee: Employee;
   hostAgg: HostAgg | undefined;
   link: ScheduleLink | undefined;
   badge: ActiveBadge | null;
   hourlyRate: string;
+  /** Upcoming plan for the SCHEDULE section. */
+  schedule: EmployeeScheduleSummary;
+  /** Opens the weekly Schedule Builder for this person. */
+  onOpenSchedule: () => void;
+  /** Brief confirmation after a save, e.g. "Saved · 5 shifts". */
+  scheduleNotice?: string | null;
   onClose: () => void;
   onMintLink: (employeeId: string) => Promise<{ url: string }>;
   onLinkCreated: () => void;
@@ -82,8 +98,10 @@ export default function EmployeeDetailModal({
           {isHost && <Row label="Below break-even (14d)"><BelowBreakEvenBadge agg={hostAgg} /></Row>}
         </div>
 
+        {/* The link is the employee's persistent portal (schedule, time off, QR clock-in), not
+            only a clock-in credential; the badge is the printed fallback for the same person. */}
         <div className="space-y-2">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">Clock-in credentials</div>
+          <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">Employee access</div>
           <div className="flex flex-wrap items-center gap-2">
             <ScheduleLinkButton
               employeeId={employee.id}
@@ -100,11 +118,44 @@ export default function EmployeeDetailModal({
           </div>
         </div>
 
+        {/* SCHEDULE — the plan (real shift_instances), never pay. Build/Edit open the same builder. */}
+        <div className="mt-4 space-y-2">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">Schedule</div>
+          {schedule.isLoading ? (
+            <p className="text-[13px] text-tt-muted">Loading…</p>
+          ) : schedule.nextShift ? (
+            <div className="space-y-1">
+              <Row label="Next shift">
+                <span>
+                  {fmtDateLA(schedule.nextShift.starts_at)} · {fmtTimeRangeLA(schedule.nextShift.starts_at, schedule.nextShift.ends_at)}
+                  {isOvernight(schedule.nextShift.starts_at, schedule.nextShift.ends_at) && <span className="ml-1 text-tt-muted">🌙</span>}
+                </span>
+              </Row>
+              <Row label="This week">
+                <span className="tabular-nums">
+                  {schedule.weekCount === 0 ? 'Nothing this week' : `${schedule.weekCount} shift${schedule.weekCount === 1 ? '' : 's'} scheduled`}
+                </span>
+              </Row>
+            </div>
+          ) : (
+            <p className="text-[13px] text-tt-muted">No upcoming schedule</p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button" onClick={onOpenSchedule} disabled={employee.status === 'former'}
+              className="rounded-lg bg-tt-cyan/15 px-3 py-1.5 text-[11px] font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/25 disabled:opacity-40"
+            >
+              {schedule.nextShift ? 'Edit Schedule' : 'Build Schedule'}
+            </button>
+            {scheduleNotice && <span className="text-[11px] text-tt-green">{scheduleNotice}</span>}
+          </div>
+        </div>
+
         {/* Only fulfilment staff pick, so only they can authorise a skipped section scan.
             Lives here rather than in the roster grid because this is where per-employee
             actions moved when the table was refactored. */}
         {employee.role?.toLowerCase() === 'fulfillment' && (
-          <div className="space-y-2">
+          <div className="mt-4 space-y-2">
             <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">
               Pick-override authority
             </div>

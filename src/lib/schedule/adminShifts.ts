@@ -25,11 +25,19 @@ export async function postOneTimeShift(input: PostShiftInput): Promise<{ id: str
   const admin = createAdminClient();
 
   // Assigned → look up the employee (role is authoritative from them; typed role is ignored).
+  //
+  // OWNER SCOPE. createAdminClient() bypasses RLS, so the `user_id` filter is the only thing
+  // binding the employee to the calling admin's account: without it, an admin could post a shift
+  // onto another owner's employee (the row would carry OUR user_id but THEIR employee_id, and would
+  // surface on that employee's /s page). Matches the bulk route's employees read.
   let employeeRole: string | null = null;
   let storeId: string | null = null;
   if (input.employeeId) {
     const { data: emp, error } = await admin
-      .from('employees').select('id, role, store_id').eq('id', input.employeeId).maybeSingle();
+      .from('employees').select('id, role, store_id')
+      .eq('id', input.employeeId)
+      .eq('user_id', input.userId)
+      .maybeSingle();
     if (error) throw new ScheduleError('READ_FAILED', error.message);
     if (!emp) throw new ScheduleError('EMPLOYEE_NOT_FOUND');
     employeeRole = emp.role;

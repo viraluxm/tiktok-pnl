@@ -1,12 +1,13 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import type { Employee } from '@/types';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
-import { generateRecurringShifts, PAY_ANCHOR } from '@/lib/employees';
+import { useScheduleBulk, ScheduleRefusedError } from '@/hooks/useScheduleBulk';
+import type { ScheduleEntry } from '@/lib/schedule/schedulePlan';
+import { PAY_ANCHOR } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
 import {
   buildCalendarDays, maxHeadcount,
@@ -67,11 +68,14 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   const [addOnDate, setAddOnDate] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
 
-  const qc = useQueryClient();
+  const { apply: applySchedule } = useScheduleBulk();
   const grid = useMemo(() => monthGridDays(anchor), [anchor]);
 
   const { shifts, addShift, updateShift, deleteShift, confirmShift } = useShifts(grid.gridStart, grid.gridEnd);
-  const { rules, exceptions, upsertException } = useShiftRules();
+  // `upsertException` still feeds the shift editor's skip/modify-occurrence actions for a
+  // rule-materialized PUNCH row (a `shifts` row carrying source_rule_id). The rule/exception LISTS
+  // are no longer read here — this calendar's scheduled layer is shift_instances only.
+  const { upsertException } = useShiftRules();
   const { instances, removeInstance } = useShiftInstances(grid.gridStart, grid.gridEnd);
 
   // Punches = time-clock rows only. Manual one-offs are a correction to the record, so they read
@@ -96,21 +100,20 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
     [shifts],
   );
 
-  // Scheduled = shift_instances ∪ recurring projections, flattened to LA wall clock. Both are
-  // real today (10 active rules, plus admin-posted one-time instances), so the view shows both
-  // and the model gives an instance precedence over a rule for the same person-day.
-  const materialized = useMemo(
-    () => new Set(shifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
-    [shifts],
-  );
-  const generated = useMemo(
-    () => generateRecurringShifts(rules, exceptions, grid.gridStart, grid.gridEnd, materialized),
-    [rules, exceptions, grid.gridStart, grid.gridEnd, materialized],
-  );
+  // Scheduled = REAL `shift_instances` ONLY.
+  //
+  // This view used to union the instances with recurring-rule PROJECTIONS from
+  // generateRecurringShifts(), so a visible planned shift might have had no row behind it — it
+  // could not be edited, removed, or clocked into, and the Schedule Builder could not see it. The
+  // architecture is now "the visible planned schedule IS shift_instances", so the projections are
+  // gone from here. The legacy recurring machinery is untouched and still backs the payroll-side
+  // consumers (see PayView / scheduledSpan / the materializers).
+  //
+  // A released shift has no assignee, and cancelled/missed rows are not coverage. 'worked' stays
+  // visible: the day happened, and the calendar's All view pairs it with its punch.
   const scheduled: CalScheduled[] = useMemo(() => {
     const out: CalScheduled[] = [];
     for (const i of instances) {
-      // A released shift has no assignee and a cancelled/missed one is not coverage.
       if (!i.employee_id || i.released_at) continue;
       if (i.status !== 'scheduled' && i.status !== 'claimed' && i.status !== 'worked') continue;
       out.push({
@@ -123,16 +126,8 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
         source: i.source ?? null,
       });
     }
-    for (const g of generated) {
-      if (g.skipped) continue;
-      out.push({
-        id: g.id, employee_id: g.employee_id, date: g.date,
-        start_time: g.start_time, end_time: g.end_time, origin: 'rule',
-        source: null,
-      });
-    }
     return out;
-  }, [instances, generated]);
+  }, [instances]);
 
   const byDate = useMemo(
     () => buildCalendarDays({
@@ -181,22 +176,26 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
     await confirmShift.mutateAsync({ id: shiftId, confirmed });
   }
 
-  // PLAN. Writes shift_instances via the admin route — non-payable, and what the personal
-  // clock-in links validate against. One row per selected person.
+  // PLAN. One bulk request for the whole crew through the SAME write path the employee Schedule
+  // Builder uses (POST /api/admin/schedule/instances/bulk) — non-payable shift_instances, and what
+  // the personal clock-in links validate against. Someone who already has a shift that day gets
+  // their times updated rather than a duplicate error, so we preview and ask first.
   async function createScheduled(employeeIds: string[], startTime: string, endTime: string) {
-    const roleById = new Map(employees.map((e) => [e.id, e.role]));
-    for (const employeeId of employeeIds) {
-      const res = await fetch('/api/admin/schedule/instances', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: addOnDate, startTime, endTime, employeeId, role: roleById.get(employeeId) ?? null }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error ?? 'Could not post the scheduled shift.');
+    const entries: ScheduleEntry[] = employeeIds.map((employeeId) => ({
+      employeeId, date: addOnDate as string, startTime, endTime,
+    }));
+    try {
+      const dry = await applySchedule.mutateAsync({ entries, dryRun: true });
+      if (dry.updated > 0) {
+        const msg = dry.updated === 1
+          ? '1 of these people already has a shift that day — update their times?'
+          : `${dry.updated} of these people already have a shift that day — update their times?`;
+        if (!window.confirm(msg)) return;
       }
+      await applySchedule.mutateAsync({ entries });
+    } catch (e) {
+      throw new Error(e instanceof ScheduleRefusedError ? e.message : (e as Error).message);
     }
-    await qc.invalidateQueries({ queryKey: ['shift_instances'] });
   }
 
   // PLAN, removed. Deletes ONE `shift_instances` row through the admin route, which re-checks every

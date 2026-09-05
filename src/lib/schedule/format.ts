@@ -25,6 +25,13 @@ export function isOvernight(startsISO: string, endsISO: string): boolean {
   return laDate(endsISO) > laDate(startsISO);
 }
 
+// A short month-day label for a plain calendar date, e.g. 'Sep 7' — used for "Week of Sep 7 – Sep 13".
+export function fmtMonthDay(dateISO: string): string {
+  const [y, m, d] = dateISO.slice(0, 10).split('-').map(Number);
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' })
+    .format(new Date(Date.UTC(y, m - 1, d)));
+}
+
 // A plain calendar date label, e.g. period end 'Mon, Aug 24'.
 export function fmtCalendarDate(dateISO: string): string {
   const [y, m, d] = dateISO.slice(0, 10).split('-').map(Number);

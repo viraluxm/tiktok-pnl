@@ -25,6 +25,12 @@ import HoverCard, { type HoverPayload } from './HoverCard';
 //
 // Defaulting to Scheduled matters. If building next fortnight's schedule wrote payable rows,
 // every future shift would become hours owed with nobody having worked them.
+//
+// The worked mode is deliberately DEMOTED: it lives behind an "Advanced" disclosure with its own
+// warning and a differently-coloured save button, because the two outcomes were previously two
+// equal-weight tabs and picking the wrong one is a silent payroll error. It stays here (rather than
+// being removed) because this modal is currently the only manager surface that can record a missed
+// punch as worked time; a dedicated correction surface is a later change.
 
 type Mode = 'scheduled' | 'worked';
 
@@ -121,7 +127,9 @@ export default function DayAddShiftModal({
       <div onClick={(e) => e.stopPropagation()} className="w-full max-w-2xl rounded-[16px] border border-tt-border bg-tt-card p-5 shadow-2xl backdrop-blur-xl">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h3 className="text-base font-semibold text-tt-text">Add to {dateLabel}</h3>
+            <h3 className="text-base font-semibold text-tt-text">
+              {mode === 'worked' ? `Record worked time on ${dateLabel}` : `Schedule for ${dateLabel}`}
+            </h3>
             <p className="mt-0.5 text-xs text-tt-muted">
               {picked.size === 0 ? 'Pick everyone who shares this shift.' : `${picked.size} selected`}
             </p>
@@ -132,26 +140,12 @@ export default function DayAddShiftModal({
           >✕</button>
         </div>
 
-        {/* Mode. Worded as an outcome, not a table name. */}
-        <div className="mb-4 flex gap-1 rounded-lg bg-white/5 p-0.5" role="group" aria-label="Scheduled shift, or worked hours for a missed punch">
-          <button
-            type="button" onClick={() => { setMode('scheduled'); setOpenEnded(false); }} aria-pressed={mode === 'scheduled'}
-            className={`flex-1 rounded-md px-3 py-2 text-xs font-semibold transition-colors ${mode === 'scheduled' ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'}`}
-          >
-            Scheduled Shift<span className="mt-0.5 block font-normal text-tt-muted">the plan</span>
-          </button>
-          <button
-            type="button" onClick={() => setMode('worked')} aria-pressed={mode === 'worked'}
-            className={`flex-1 rounded-md px-3 py-2 text-xs font-semibold transition-colors ${mode === 'worked' ? 'bg-white/10 text-tt-text' : 'text-tt-muted hover:text-tt-text'}`}
-          >
-            Worked / Missed Punch<span className="mt-0.5 block font-normal text-tt-muted">gets paid</span>
-          </button>
-        </div>
-
-        <p className="mb-4 rounded-lg border border-tt-border bg-white/[0.02] px-3 py-2 text-[11px] leading-snug text-tt-muted">
+        <p className={`mb-4 rounded-lg border px-3 py-2 text-[11px] leading-snug ${
+          mode === 'worked' ? 'border-tt-yellow/40 bg-tt-yellow/10 text-tt-yellow' : 'border-tt-border bg-white/[0.02] text-tt-muted'
+        }`}>
           {mode === 'scheduled'
-            ? 'Add this employee to the schedule. This does not add worked hours to payroll.'
-            : 'Add hours the employee actually worked when no usable time-clock record exists. These hours count toward payroll.'}
+            ? 'Adds these people to the schedule for this day. This never adds worked hours to payroll.'
+            : 'Creates payable worked time — exactly like a punch, counted toward payroll immediately. Use only when no usable time-clock record exists.'}
         </p>
 
         {/* Employee picker */}
@@ -203,12 +197,31 @@ export default function DayAddShiftModal({
           </label>
         </div>
 
-        {mode === 'worked' && (
-          <label className="mt-3 flex items-center gap-2 text-sm text-tt-text">
-            <input type="checkbox" checked={openEnded} onChange={(e) => setOpenEnded(e.target.checked)} className="h-4 w-4" />
-            Currently in shift <span className="text-tt-muted">(no end time yet — they clock out normally)</span>
-          </label>
-        )}
+        {/* Advanced: the payable correction path. Collapsed by default so scheduling a crew never
+            shows a payroll control; opening it is an explicit act. */}
+        <details className="mt-3 rounded-lg border border-tt-border bg-white/[0.02]" open={mode === 'worked'}>
+          <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold text-tt-muted hover:text-tt-text">
+            Advanced · Record worked time instead
+          </summary>
+          <div className="space-y-2 border-t border-tt-border px-3 py-2">
+            <label className="flex items-start gap-2 text-sm text-tt-text">
+              <input
+                type="checkbox" checked={mode === 'worked'} className="mt-0.5 h-4 w-4"
+                onChange={(e) => { setMode(e.target.checked ? 'worked' : 'scheduled'); if (!e.target.checked) setOpenEnded(false); }}
+              />
+              <span>
+                Record as <span className="font-semibold">worked time (payable)</span>
+                <span className="block text-[11px] text-tt-muted">For a missed punch: forgot to clock in/out, or worked before being added. Pays these hours.</span>
+              </span>
+            </label>
+            {mode === 'worked' && (
+              <label className="flex items-center gap-2 pl-6 text-sm text-tt-text">
+                <input type="checkbox" checked={openEnded} onChange={(e) => setOpenEnded(e.target.checked)} className="h-4 w-4" />
+                Currently in shift <span className="text-tt-muted">(no end time yet — they clock out normally)</span>
+              </label>
+            )}
+          </div>
+        </details>
 
         {check && (
           <p className={`mt-3 rounded-lg px-3 py-2 text-[11px] ${check.error ? 'bg-tt-red/10 text-tt-red' : 'bg-white/[0.03] text-tt-muted'}`}>
@@ -230,9 +243,13 @@ export default function DayAddShiftModal({
           >Cancel</button>
           <button
             type="button" onClick={save} disabled={busy || picked.size === 0}
-            className="flex-1 rounded-xl bg-tt-cyan py-2.5 text-sm font-semibold text-black transition-colors hover:bg-tt-cyan/90 disabled:opacity-50"
+            className={`flex-1 rounded-xl py-2.5 text-sm font-semibold text-black transition-colors disabled:opacity-50 ${
+              mode === 'worked' ? 'bg-tt-yellow hover:bg-tt-yellow/90' : 'bg-tt-cyan hover:bg-tt-cyan/90'
+            }`}
           >
-            {busy ? 'Saving…' : picked.size > 1 ? `Add ${picked.size} shifts` : 'Add shift'}
+            {busy ? 'Saving…'
+              : mode === 'worked' ? (picked.size > 1 ? `Record worked time · ${picked.size}` : 'Record worked time')
+                : picked.size > 1 ? `Schedule ${picked.size} people` : 'Schedule shift'}
           </button>
         </div>
       </div>

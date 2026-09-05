@@ -1,9 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { fmt } from '@/lib/calculations';
 import { useEmployees, type EmployeeInput } from '@/hooks/useEmployees';
-import type { Employee, EmployeeStatus } from '@/types';
+import { useShiftInstances } from '@/hooks/useShiftInstances';
+import type { Employee, EmployeeStatus, ShiftInstance } from '@/types';
+import { laTodayISO, addDaysISO } from '@/lib/schedule/timezone';
+import { weekDatesFor, isWorkingInstance, type ScheduleCounts } from '@/lib/schedule/schedulePlan';
+import EmployeeScheduleBuilder from './schedule/EmployeeScheduleBuilder';
 import PerformanceView from './PerformanceView';
 import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
 import ShiftsView from './ShiftsView';
@@ -395,7 +399,49 @@ function RosterView({
 }) {
   const [copiedAll, setCopiedAll] = useState(false);
   const [detail, setDetail] = useState<Employee | null>(null);
+  const [builderFor, setBuilderFor] = useState<Employee | null>(null);
+  const [scheduleNotice, setScheduleNotice] = useState<string | null>(null);
   const anyLinks = employees.some((e) => e.status === 'active' && links[e.id]);
+
+  // Upcoming plan for the whole roster in ONE query: this Mon→Sun week (for the tile counts)
+  // through four weeks out (for "Next shift" in the detail). Real shift_instances only — the same
+  // ['shift_instances', …] cache prefix the builder invalidates on save, so it refreshes itself.
+  // "Now" is captured once when the roster mounts (a useState initializer is the sanctioned place
+  // for an impure read) — good enough to decide which shift is "next" for a roster that is open
+  // for minutes, not days.
+  const [nowMs] = useState(() => Date.now());
+  const today = useMemo(() => laTodayISO(new Date(nowMs)), [nowMs]);
+  const thisWeek = useMemo(() => weekDatesFor(today), [today]);
+  const { instances: upcoming, isLoading: upcomingLoading } = useShiftInstances(thisWeek[0], addDaysISO(today, 28));
+  const { weekCounts, nextShiftById } = useMemo(() => {
+    const weekCounts: Record<string, number> = {};
+    const nextShiftById: Record<string, ShiftInstance> = {};
+    const inWeek = new Set(thisWeek);
+    for (const i of upcoming) {
+      if (!isWorkingInstance(i) || !i.employee_id) continue;
+      if (inWeek.has(i.shift_date)) weekCounts[i.employee_id] = (weekCounts[i.employee_id] ?? 0) + 1;
+      // "Next" = the earliest shift that has not ended yet (an in-progress shift still counts).
+      if (Date.parse(i.ends_at) > nowMs) {
+        const cur = nextShiftById[i.employee_id];
+        if (!cur || i.starts_at < cur.starts_at) nextShiftById[i.employee_id] = i;
+      }
+    }
+    return { weekCounts, nextShiftById };
+  }, [upcoming, thisWeek, nowMs]);
+
+  function openDetail(e: Employee) {
+    setScheduleNotice(null);
+    setDetail(e);
+  }
+
+  function onScheduleSaved(counts: ScheduleCounts, weekCount: number) {
+    const changed = counts.created + counts.updated + counts.removed;
+    setScheduleNotice(
+      changed === 0
+        ? 'No changes'
+        : `Saved · ${counts.created} added${counts.updated ? `, ${counts.updated} changed` : ''}${counts.removed ? `, ${counts.removed} removed` : ''}${weekCount > 1 ? ` over ${weekCount} weeks` : ''}`,
+    );
+  }
 
   async function handleCopyAll() {
     if (await onCopyAll()) {
@@ -433,7 +479,7 @@ function RosterView({
           <button onClick={onDismissWarn} className="shrink-0 text-tt-yellow/70 hover:text-tt-yellow text-xs">Dismiss</button>
         </div>
       )}
-      <RosterGrid employees={employees} isLoading={isLoading} onOpen={setDetail} />
+      <RosterGrid employees={employees} isLoading={isLoading} onOpen={openDetail} weekCounts={upcomingLoading ? undefined : weekCounts} />
 
       {detail && (
         <EmployeeDetailModal
@@ -442,6 +488,13 @@ function RosterView({
           link={links[detail.id]}
           badge={badges[detail.id] ?? null}
           hourlyRate={fmt(detail.hourly_rate)}
+          schedule={{
+            isLoading: upcomingLoading,
+            nextShift: nextShiftById[detail.id] ?? null,
+            weekCount: weekCounts[detail.id] ?? 0,
+          }}
+          onOpenSchedule={() => setBuilderFor(detail)}
+          scheduleNotice={scheduleNotice}
           onClose={() => setDetail(null)}
           onMintLink={onMintLink}
           onLinkCreated={onLinkCreated}
@@ -451,6 +504,16 @@ function RosterView({
           onDelete={onDelete}
           hasOverridePin={leadPins.has(detail.id)}
           onSetOverridePin={onSetLeadPin}
+        />
+      )}
+
+      {/* Stacks above the detail (z-60 vs z-50); closing it returns to the refreshed detail. */}
+      {builderFor && (
+        <EmployeeScheduleBuilder
+          employee={builderFor}
+          employeeLinkToken={links[builderFor.id]?.token ?? null}
+          onClose={() => setBuilderFor(null)}
+          onSaved={onScheduleSaved}
         />
       )}
     </div>
