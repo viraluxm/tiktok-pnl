@@ -226,7 +226,7 @@ console.log('\nPage sequence');
   const plan = buildLabelPlan([box('a', [sku('p', 1, 'A')]), box('b', [sku('p', 1, 'A')])]);
   const seq = planPageSequence(plan);
   check('no mixed slip when everything batches',
-    !seq.some((p) => p.caption?.startsWith('MIXED')));
+    !seq.some((p) => p.caption === BANNER_MIXED));
 }
 {
   const plan = buildLabelPlan([]);
@@ -260,6 +260,11 @@ console.log('\nA box with NO SKU is its own third case, not a bundle');
     shape.join(' '));
   check('the header names the WORK, since the contents are what is unknown',
     UNBOUND_CAPTION.includes('LOOK UP'), UNBOUND_CAPTION);
+  // Every banner names WHERE the pile goes, because that is the decision its reader is making.
+  check('the singles banner names its destination',
+    BANNER_SINGLES.includes('PREP STATION'), BANNER_SINGLES);
+  check('the bundled banner says to pick it normally',
+    BANNER_MIXED.includes('PICK REGULAR'), BANNER_MIXED);
   check('every box is still printed exactly once',
     seq.filter((p) => p.kind === 'label').length === 5);
 }
@@ -269,7 +274,7 @@ console.log('\nA box with NO SKU is its own third case, not a bundle');
   check('an all-unbound run still opens with the unbound header',
     seq[0].kind === 'banner' && seq[0].caption === UNBOUND_CAPTION);
   check('…and no phantom mixed slip appears',
-    !seq.some((p) => p.caption?.startsWith('MIXED')));
+    !seq.some((p) => p.caption === BANNER_MIXED));
   check('unbound boxes are not counted as headed', plan.batchedBoxes === 0);
 }
 {

@@ -103,8 +103,8 @@ export const UNBOUND_CAPTION = 'NO SKU ON FILE — LOOK UP EACH ORDER';
  * across a warehouse, the split has to be reconstructed by reading labels, which is the work
  * this exists to remove.
  */
-export const BANNER_SINGLES = 'SINGLES — ONE SKU EACH';
-export const BANNER_MIXED = 'MIXED — READ EACH LABEL';
+export const BANNER_SINGLES = 'SINGLES — PREP STATION';
+export const BANNER_MIXED = 'BUNDLED ORDERS — PICK REGULAR';
 export const BANNER_UNBOUND = UNBOUND_CAPTION;
 
 /** Total units across a box's SKU lines. */

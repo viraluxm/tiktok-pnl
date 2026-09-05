@@ -16,7 +16,22 @@
 /** Re-fetch a doc_url expiring within this margin. TikTok's are good for ~24h. */
 export const DOC_REFETCH_MARGIN_MS = 60 * 60_000;
 
-/** The ledger fields assembly needs. */
+/**
+ * The exact column list a caller must SELECT to build LedgerRow.
+ *
+ * Lives next to the type because the two drifted once and it was invisible: banner_caption was
+ * added to the migration, the write, this type, the grouping, the renderer and the tests — but
+ * not to the PDF route's select. A missing column reads as `undefined`, which the code treats
+ * as "no banner", so a whole day printed with its pile dividers silently absent. Nothing threw.
+ *
+ * Unit tests cannot catch this class of bug: they construct rows directly and never issue the
+ * query. Keeping the string beside the interface at least puts the two in one field of view.
+ */
+export const LEDGER_COLUMNS =
+  'group_key, status, package_id, doc_url, doc_url_expires_at, tracking_number, '
+  + 'print_seq, slip_caption, banner_caption';
+
+/** The ledger fields assembly needs. Keep in step with LEDGER_COLUMNS above. */
 export interface LedgerRow {
   group_key: string;
   status: string;

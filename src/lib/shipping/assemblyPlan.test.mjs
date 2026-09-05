@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'ap-')), 'assemblyPlan.mjs');
 writeFileSync(outFile, outputText);
-const { buildAssemblySequence, needsRefetch, itemsFromLedger, DOC_REFETCH_MARGIN_MS } =
+const { buildAssemblySequence, needsRefetch, itemsFromLedger, LEDGER_COLUMNS, DOC_REFETCH_MARGIN_MS } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -266,6 +266,29 @@ console.log('\nTwo levels: piles, and SKU sections inside them');
   const seq = buildAssemblySequence(itemsFromLedger(rows), rows, NOW);
   check('a row with no banner still prints', shape(seq) === 'L(legacy)', shape(seq));
   check('…and no empty banner is emitted', seq.bannerCount === 0);
+}
+
+console.log('\nThe column list must cover every field the type declares');
+{
+  // THE BUG THIS EXISTS FOR. banner_caption was added to the migration, the write path, the
+  // LedgerRow type, the grouping, the renderer and these tests — but not to the PDF route's
+  // SELECT. A missing column arrives as `undefined`, which reads as "no banner", so a real day
+  // printed with both pile dividers silently absent and nothing threw.
+  //
+  // No other test could catch it: every one of them builds rows by hand and never issues the
+  // query. This one reads the interface out of the source and checks the string agrees.
+  const src = readFileSync(srcPath, 'utf8');
+  const body = src.slice(
+    src.indexOf('export interface LedgerRow {') + 'export interface LedgerRow {'.length,
+    src.indexOf('}', src.indexOf('export interface LedgerRow {')),
+  );
+  const fields = [...body.matchAll(/^\s*(\w+)\??:/gm)].map((m) => m[1]);
+  check('the interface was parsed', fields.length >= 8, fields.join(','));
+  const missing = fields.filter((f) => !LEDGER_COLUMNS.includes(f));
+  check('every LedgerRow field appears in LEDGER_COLUMNS',
+    missing.length === 0, missing.length ? `MISSING: ${missing.join(', ')}` : 'all present');
+  // And specifically the one that got away.
+  check('banner_caption is in the column list', LEDGER_COLUMNS.includes('banner_caption'));
 }
 
 console.log('\nEdges');

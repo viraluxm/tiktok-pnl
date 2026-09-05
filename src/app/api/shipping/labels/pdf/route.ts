@@ -5,7 +5,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { getPackageDocument } from '@/lib/tiktok/client';
 import {
-  itemsFromLedger, buildAssemblySequence, type LedgerRow,
+  itemsFromLedger, buildAssemblySequence, LEDGER_COLUMNS, type LedgerRow,
 } from '@/lib/shipping/assemblyPlan';
 import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
 
@@ -69,7 +69,7 @@ export async function GET(req: Request) {
 
   const { data: rowData, error } = await admin
     .from('shipping_label_purchases')
-    .select('group_key, status, package_id, doc_url, doc_url_expires_at, tracking_number, print_seq, slip_caption, run_id')
+    .select(`${LEDGER_COLUMNS}, run_id`)
     .eq('user_id', user.id).eq('store_id', storeId)
     .in('run_id', runIds);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
