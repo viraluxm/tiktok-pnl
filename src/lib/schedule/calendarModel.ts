@@ -158,6 +158,38 @@ export function canRemoveScheduled(
   return p.state === 'scheduled';
 }
 
+// ── recurrence: what a stored row already owns ───────────────────────────────
+
+/**
+ * THE INVARIANT: a stored rule-backed `shift_instances` row OWNS its (shift_rule_id, shift_date),
+ * so the read-time recurring rule must not project a second occurrence for that same rule + date.
+ *
+ * Returns those pairs in the key format `generateRecurringShifts()`'s `materialized` argument
+ * already expects (`${rule_id}|${date}`), so suppressing is a matter of passing this in — the
+ * generator itself is untouched.
+ *
+ * STATUS-BLIND, deliberately. Every status owns its date:
+ *   scheduled / claimed → a live assignment; the row is what renders, so a projection would double it
+ *   cancelled           → the manager removed this date; a projection would silently restore it
+ *   released            → dropped by its owner; a projection would re-assign it to them
+ *   worked / missed     → the day is resolved; a projection would contradict the record
+ * Without the cancelled/released half, removing an occurrence writes to the database and then
+ * changes nothing on screen, because the rule immediately re-projects the day it just lost.
+ *
+ * KEYED BY RULE, NOT EMPLOYEE. A release nulls `employee_id`, so an employee key would stop
+ * matching exactly when suppression matters most; `shift_rule_id` survives it.
+ *
+ * Carries no other business logic: callers decide what is visible, this only says what is owned.
+ * The returned Set is a fresh, mutable copy so a caller may add its own keys.
+ */
+export function ruleDatesOwnedByInstances(
+  instances: ReadonlyArray<{ shift_rule_id?: string | null; shift_date: string }>,
+): Set<string> {
+  const keys = new Set<string>();
+  for (const i of instances) if (i.shift_rule_id) keys.add(`${i.shift_rule_id}|${i.shift_date}`);
+  return keys;
+}
+
 // ── time helpers (inlined to keep this file import-free) ──────────────────────
 
 /** 'HH:MM[:SS]' → minutes past local midnight. Malformed → 0. */

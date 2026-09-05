@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { resolveOwnerByScheduleToken } from '@/lib/schedule/teamScheduleToken';
 import { laWallClockOf, laTodayISO } from '@/lib/schedule/timezone';
 import { generateRecurringShifts } from '@/lib/employees';
+import { ruleDatesOwnedByInstances } from '@/lib/schedule/calendarModel';
 import type { ShiftRule, ShiftException } from '@/types';
 import { monthGridDays, startOfMonthISO } from '@/lib/weeklySchedule';
 import TeamScheduleBoard, { type PublicShift } from './TeamScheduleBoard';
@@ -40,7 +41,7 @@ export default async function TeamSchedulePage({
   const [{ data: instances }, { data: employees }, { data: rules }, { data: exceptions }] = await Promise.all([
     admin
       .from('shift_instances')
-      .select('id, employee_id, shift_date, starts_at, ends_at, status, released_at, role')
+      .select('id, employee_id, shift_date, starts_at, ends_at, status, released_at, role, shift_rule_id')
       .eq('user_id', ownerId)
       .gte('shift_date', rangeStart)
       .lte('shift_date', rangeEnd)
@@ -78,13 +79,23 @@ export default async function TeamSchedulePage({
 
   // Rule projections, minus any day already frozen into a real instance, so a materialized day
   // is not counted twice.
+  //
+  // The suppression set is built from ALL instances — BEFORE the display filter above — and keyed
+  // by (rule, date). `takenByInstance` below cannot do this job: it is derived from the VISIBLE
+  // list, so a cancelled or released occurrence is absent from it and the rule would re-project
+  // the very day a manager just removed. The rule key also survives a release, which nulls
+  // employee_id. Both guards are kept: this one owns rule-backed days, that one owns the
+  // employee+date collision for rows with no rule behind them.
+  const ownedByInstance = ruleDatesOwnedByInstances(
+    (instances ?? []) as { shift_rule_id: string | null; shift_date: string }[],
+  );
   const takenByInstance = new Set(shifts.map((s) => `${s.employee_id}|${s.date}`));
   for (const g of generateRecurringShifts(
     (rules ?? []) as ShiftRule[],
     (exceptions ?? []) as ShiftException[],
     rangeStart,
     rangeEnd,
-    new Set(),
+    ownedByInstance,
   )) {
     if (g.skipped) continue;
     if (takenByInstance.has(`${g.employee_id}|${g.date}`)) continue;
