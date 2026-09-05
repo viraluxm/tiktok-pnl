@@ -15,6 +15,7 @@ interface Msg { role: 'user' | 'assistant'; content: string }
 export default function ChatWidget() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -69,7 +70,6 @@ export default function ChatWidget() {
       const decoder = new TextDecoder();
       let buf = '';
       let assistant = '';
-      let started = false;
 
       for (;;) {
         const { done, value } = await reader.read();
@@ -86,13 +86,19 @@ export default function ChatWidget() {
           if (ev.type === 'text' && ev.text) {
             assistant += ev.text;
             setToolNote(null);
+            // Decide push-vs-replace STRUCTURALLY, from the state React hands us — never from an
+            // external flag. React batches these updaters, so a `started` boolean flipped in this
+            // synchronous loop is already true by the time the FIRST updater actually runs, and
+            // the first delta then overwrites the user's own message instead of appending after
+            // it. That is what erased the prompt. `assistant` holds the full accumulated text, so
+            // replacing the trailing assistant bubble is always correct.
             setMsgs((prev) => {
               const copy = [...prev];
-              if (started) copy[copy.length - 1] = { role: 'assistant', content: assistant };
+              const last = copy[copy.length - 1];
+              if (last && last.role === 'assistant') copy[copy.length - 1] = { role: 'assistant', content: assistant };
               else copy.push({ role: 'assistant', content: assistant });
               return copy;
             });
-            started = true;
           } else if (ev.type === 'tool') {
             setToolNote(ev.name === 'get_schedule' ? 'Reading the schedule…' : 'Reading the roster…');
           } else if (ev.type === 'error') {
@@ -129,8 +135,20 @@ export default function ChatWidget() {
       )}
 
       {open && (
-        <div className="fixed z-[60] inset-x-0 bottom-0 top-0 md:inset-auto md:right-6 md:bottom-6 md:top-auto md:w-[420px] md:h-[640px] md:max-h-[calc(100vh-6rem)] flex flex-col bg-tt-card border border-tt-border md:rounded-2xl shadow-2xl shadow-black/50 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-tt-border bg-tt-card pt-[calc(env(safe-area-inset-top)+0.75rem)] md:pt-3">
+        <>
+          {/* Scrim. --color-tt-card is only 70% opaque, so without this the dashboard's charts
+              read straight through the panel and the conversation is hard to follow. Click to close. */}
+          <div
+            className="fixed inset-0 z-[59] bg-black/70 backdrop-blur-sm"
+            onClick={() => { abortRef.current?.abort(); setOpen(false); }}
+            aria-hidden="true"
+          />
+          <div className={`fixed z-[60] flex flex-col bg-[#141414] border border-tt-border shadow-2xl shadow-black/60 overflow-hidden inset-x-0 bottom-0 top-0 md:inset-auto md:rounded-2xl ${
+            expanded
+              ? 'md:left-1/2 md:top-1/2 md:-translate-x-1/2 md:-translate-y-1/2 md:w-[min(1100px,94vw)] md:h-[min(900px,92vh)]'
+              : 'md:right-6 md:bottom-6 md:w-[420px] md:h-[640px] md:max-h-[calc(100vh-6rem)]'
+          }`}>
+          <div className="flex items-center justify-between px-4 py-3 border-b border-tt-border bg-[#141414] pt-[calc(env(safe-area-inset-top)+0.75rem)] md:pt-3">
             <div className="min-w-0">
               <div className="text-sm font-semibold text-tt-text">Lensed Assistant</div>
               <div className="text-[11px] text-tt-muted truncate">
@@ -147,6 +165,18 @@ export default function ChatWidget() {
                 </button>
               )}
               <button
+                onClick={() => setExpanded((v) => !v)}
+                aria-label={expanded ? 'Shrink assistant' : 'Enlarge assistant'}
+                title={expanded ? 'Shrink' : 'Enlarge'}
+                className="hidden md:flex h-8 w-8 rounded-lg text-tt-muted hover:text-tt-text hover:bg-tt-card-hover items-center justify-center cursor-pointer"
+              >
+                {expanded ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3v6H3M15 21v-6h6M3 15h6v6M21 9h-6V3" /></svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" /></svg>
+                )}
+              </button>
+              <button
                 onClick={() => { abortRef.current?.abort(); setOpen(false); }}
                 aria-label="Close assistant"
                 className="h-8 w-8 rounded-lg text-tt-muted hover:text-tt-text hover:bg-tt-card-hover flex items-center justify-center cursor-pointer"
@@ -156,7 +186,7 @@ export default function ChatWidget() {
             </div>
           </div>
 
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+          <div ref={scrollRef} className={`flex-1 overflow-y-auto py-4 space-y-3 ${expanded ? 'px-6 md:px-8' : 'px-4'}`}>
             {msgs.length === 0 && (
               <div className="text-sm text-tt-muted leading-relaxed">
                 {greetingFor(context)}
@@ -210,7 +240,8 @@ export default function ChatWidget() {
               </button>
             </div>
           </div>
-        </div>
+          </div>
+        </>
       )}
     </>
   );
