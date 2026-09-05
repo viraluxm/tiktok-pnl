@@ -6,6 +6,22 @@ import { laTodayISO } from './timezone';
 import { computeDrops, type DropSummary } from './drops';
 import { effectiveShiftRole } from './eligibility';
 
+// TENANT BOUNDARY FOR THIS WHOLE FILE. Every read here runs through createAdminClient(), which
+// bypasses RLS — so an explicit `user_id` filter is the ONLY thing scoping these queries to one
+// account. The owner is never client-supplied: it is `employee.user_id`, carried by the Employee
+// row that resolveEmployeeByToken() looked up from the opaque /s/ token server-side.
+//
+// Most queries below were incidentally safe because they key on `employee.id`, which belongs to
+// exactly one owner. getBoard's released-shift scan was NOT: it selected every released instance in
+// the database and then filtered in JS by role, so another business's shift could reach the board
+// and its releaser's NAME was fetched to render on it. All of them are scoped now — defence in
+// depth, and so that no future edit inherits the assumption.
+function ownerOf(employee: Employee): string {
+  const owner = employee.user_id;
+  if (!owner) throw new Error('board: employee has no user_id — refusing an unscoped query');
+  return owner;
+}
+
 // 24h notice window — a shift may only be released/claimed while it starts MORE than 24h out.
 export const NOTICE_MS = 24 * 60 * 60 * 1000;
 const FILLING = ['scheduled', 'claimed'];
@@ -26,10 +42,13 @@ export async function getMyShifts(employee: Employee): Promise<ShiftInstance[]> 
   const today = laTodayISO();
   const horizonEnd = addDays(today, 14);
 
+  const owner = ownerOf(employee);
+
   const [assigned, releasedByMe] = await Promise.all([
     admin
       .from('shift_instances')
       .select('*')
+      .eq('user_id', owner)
       .eq('employee_id', employee.id)
       .in('status', ['scheduled', 'claimed'])
       .gte('shift_date', today)
@@ -38,6 +57,7 @@ export async function getMyShifts(employee: Employee): Promise<ShiftInstance[]> 
     admin
       .from('shift_instances')
       .select('*')
+      .eq('user_id', owner)
       .eq('released_by', employee.id)
       .eq('status', 'released')
       .gte('shift_date', today)
@@ -65,9 +85,11 @@ export interface PendingClaimView {
 }
 export async function getMyPendingClaims(employee: Employee): Promise<PendingClaimView[]> {
   const admin = createAdminClient();
+  const owner = ownerOf(employee);
   const { data: claims, error } = await admin
     .from('shift_claims')
     .select('id, shift_instance_id, projected_week_hours')
+    .eq('user_id', owner)
     .eq('claimed_by', employee.id)
     .eq('status', 'pending')
     .order('claimed_at', { ascending: true });
@@ -79,6 +101,7 @@ export async function getMyPendingClaims(employee: Employee): Promise<PendingCla
   const { data: insts, error: iErr } = await admin
     .from('shift_instances')
     .select('id, starts_at, ends_at, shift_date')
+    .eq('user_id', owner)
     .in('id', instIds);
   if (iErr) throw new Error(`getMyPendingClaims instances: ${iErr.message}`);
   const byId = new Map((insts ?? []).map((i) => [i.id, i]));
@@ -108,11 +131,16 @@ export function isReleasable(inst: Pick<ShiftInstance, 'status' | 'starts_at'>, 
 // person's shift.
 export async function getBoard(employee: Employee, now = new Date()): Promise<BoardRow[]> {
   const admin = createAdminClient();
+  const owner = ownerOf(employee);
   const thresholdISO = new Date(now.getTime() + NOTICE_MS).toISOString();
 
+  // THE FIX. This previously had no user_id filter, so it returned every released instance in the
+  // database. The JS filters below narrow by role and date but NOT by account, and 'host' /
+  // 'fulfillment' are global strings — so a matching shift from another business reached the board.
   const { data, error } = await admin
     .from('shift_instances')
     .select('*')
+    .eq('user_id', owner)
     .eq('status', 'released')
     .gt('starts_at', thresholdISO)
     .order('starts_at', { ascending: true });
@@ -129,6 +157,7 @@ export async function getBoard(employee: Employee, now = new Date()): Promise<Bo
   const { data: myPending, error: mpErr } = await admin
     .from('shift_claims')
     .select('shift_instance_id')
+    .eq('user_id', owner)
     .eq('claimed_by', employee.id)
     .eq('status', 'pending');
   if (mpErr) throw new Error(`getBoard myPending: ${mpErr.message}`);
@@ -141,9 +170,12 @@ export async function getBoard(employee: Employee, now = new Date()): Promise<Bo
   const releaserIds = [...new Set(candidates.map((c) => c.released_by).filter(Boolean) as string[])];
   const relById = new Map<string, { id: string; name: string; role: string }>();
   if (releaserIds.length) {
+    // Names rendered on the board. Scoped so that even if a foreign instance somehow reached
+    // `candidates`, no foreign employee NAME could be fetched to display beside it.
     const { data: releasers, error: relErr } = await admin
       .from('employees')
       .select('id, name, role')
+      .eq('user_id', owner)
       .in('id', releaserIds);
     if (relErr) throw new Error(`getBoard releasers: ${relErr.message}`);
     for (const r of releasers ?? []) relById.set(r.id, r);
@@ -159,6 +191,7 @@ export async function getBoard(employee: Employee, now = new Date()): Promise<Bo
   const { data: mine, error: mErr } = await admin
     .from('shift_instances')
     .select('shift_date')
+    .eq('user_id', owner)
     .eq('employee_id', employee.id)
     .in('status', FILLING);
   if (mErr) throw new Error(`getBoard mine: ${mErr.message}`);
@@ -183,6 +216,7 @@ export async function getCurrentPeriodDrops(
   const { data, error } = await admin
     .from('attendance_events')
     .select('event_type, shift_date')
+    .eq('user_id', ownerOf(employee))
     .eq('employee_id', employee.id)
     .eq('pay_period_start', period.start);
   if (error) throw new Error(`getCurrentPeriodDrops: ${error.message}`);

@@ -73,6 +73,7 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
   const { data: sameDay, error: sdErr } = await admin
     .from('shift_instances')
     .select('id')
+    .eq('user_id', employee.user_id)
     .eq('employee_id', employee.id)
     .eq('shift_date', inst.shift_date)
     .in('status', ['scheduled', 'claimed'])
@@ -86,6 +87,7 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
   const { data: weekRows, error: wErr } = await admin
     .from('shift_instances')
     .select('starts_at, ends_at')
+    .eq('user_id', employee.user_id)
     .eq('employee_id', employee.id)
     .in('status', ['scheduled', 'claimed'])
     .gte('shift_date', week.start)
@@ -97,9 +99,21 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
 
   if (claimAutoApproves(projected)) {
     // AUTO-APPROVE: projected week <= 40h (40 is straight time, not OT). Atomic claim.
+    //
+    // `released_at: null` is LOAD-BEARING, not tidiness. release.ts is the only writer of
+    // released_at and nothing else clears it, so a row that kept it would stay `released_at != null`
+    // forever — and all three clock gates reject on that field INDEPENDENTLY of status
+    // (clock/route.ts, qrScan.ts, window-state/route.ts). Without this the shift transfers on paper
+    // and its new owner can never clock in: the 'claimed' half of CLOCK_ELIGIBLE_STATUSES would be
+    // unreachable at runtime. Clearing it restores the invariant "a claimed shift is a live
+    // assignment", which is exactly what that status is supposed to mean.
+    //
+    // released_by is deliberately KEPT: it is audit history (who originally dropped this shift), it
+    // is inert once status leaves 'released' — getBoard and getMyShifts both gate on
+    // status='released' before reading it — and it is the only record of the hand-off.
     const { data: won, error: uErr } = await admin
       .from('shift_instances')
-      .update({ status: 'claimed', employee_id: employee.id, source: 'claim' })
+      .update({ status: 'claimed', employee_id: employee.id, source: 'claim', released_at: null })
       .eq('id', instanceId)
       .eq('user_id', employee.user_id)
       .eq('status', 'released')
