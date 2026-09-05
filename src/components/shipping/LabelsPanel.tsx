@@ -80,10 +80,22 @@ export default function LabelsPanel() {
   const [runId, setRunId] = useState<string | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [buying, setBuying] = useState(false);
+  /**
+   * Buy is a two-step, IN-PAGE confirmation — never window.confirm.
+   *
+   * The browser decides whether a native dialog appears at all. Measured here: confirm()
+   * returned false instantly without rendering, so the button silently did nothing and read as
+   * broken. The other failure is worse — a browser that suppresses the dialog by returning true
+   * would have spent $2,259 with no confirmation whatsoever. A last line of defence before an
+   * irreversible purchase cannot be something the page does not control.
+   */
+  const [armed, setArmed] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   /** Any change to what would be bought discards the reviewed plan — never buy an unread plan. */
-  const invalidate = useCallback(() => { setPlan(null); setRunId(null); setProgress(null); }, []);
+  const invalidate = useCallback(() => {
+    setPlan(null); setRunId(null); setProgress(null); setArmed(false);
+  }, []);
 
   const scopeParams = useCallback(() => {
     const p = new URLSearchParams({ store_id: activeStore });
@@ -140,15 +152,7 @@ export default function LabelsPanel() {
   async function buy() {
     if (!plan) return;
     const n = plan.counts.would_buy;
-    const est = plan.spend_estimate.avg_unit_price * n;
-    const ok = window.confirm(
-      `Buy ${n} shipping label${n === 1 ? '' : 's'} for ${storeName}?\n\n`
-      + `Scope: ${plan.scope}\n`
-      + `Estimated ${money(est)} (about ${money(plan.spend_estimate.avg_unit_price)} each).\n\n`
-      + 'This cannot be undone — TikTok charges at purchase and labels cannot be cancelled.',
-    );
-    if (!ok) return;
-
+    setArmed(false);
     setBuying(true); setErr(null);
     try {
       const ap = scopeParams();
@@ -194,7 +198,6 @@ export default function LabelsPanel() {
 
   async function release() {
     if (!runId) return;
-    if (!window.confirm('Release the unbought part of this run? Labels already bought are kept.')) return;
     const p = new URLSearchParams({ store_id: activeStore, run_id: runId });
     const res = await fetch(`/api/shipping/labels/authorize?${p.toString()}`, { method: 'DELETE' });
     const j = await res.json();
@@ -372,13 +375,46 @@ export default function LabelsPanel() {
               ? 'Answer the unbound question above first.'
               : `One go. Roughly ${Math.max(1, Math.round(n / 60))} minute${n > 90 ? 's' : ''} of TikTok calls — leave this tab open.`}
           </p>
-          <button
-            onClick={buy}
-            disabled={blocked || buying}
-            className="mt-3 cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {buying ? 'Buying…' : `Buy ${n} label${n === 1 ? '' : 's'} — about ${money(n * unit)}`}
-          </button>
+
+          {!armed ? (
+            <button
+              onClick={() => setArmed(true)}
+              disabled={blocked || buying}
+              className="mt-3 cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Buy {n} label{n === 1 ? '' : 's'} — about {money(n * unit)}
+            </button>
+          ) : (
+            /* Confirmation lives in the page, not in a browser dialog — see `armed`. */
+            <div className="mt-3 rounded-md border border-tt-yellow/50 bg-tt-yellow/5 p-3">
+              <p className="text-sm font-semibold text-tt-text">
+                Buy {n} label{n === 1 ? '' : 's'} for {storeName}?
+              </p>
+              <ul className="mt-2 space-y-0.5 text-xs text-tt-muted">
+                <li>Scope: {plan.scope}</li>
+                <li>Estimated {money(n * unit)} — about {money(unit)} each</li>
+                <li className="text-tt-yellow">
+                  This cannot be undone. TikTok charges at purchase and labels cannot be cancelled.
+                </li>
+              </ul>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={buy}
+                  disabled={buying}
+                  className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-40"
+                >
+                  {buying ? 'Buying…' : `Yes — buy ${n} and charge ${money(n * unit)}`}
+                </button>
+                <button
+                  onClick={() => setArmed(false)}
+                  disabled={buying}
+                  className="cursor-pointer rounded-md border border-tt-border px-4 py-2 text-sm text-tt-muted hover:text-tt-text"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -421,9 +457,7 @@ export default function LabelsPanel() {
             <p className="mt-2 text-xs text-tt-muted">Leave this tab open. Nothing is lost if you don&rsquo;t.</p>
           )}
           {runId && !progress.done && !buying && (
-            <button onClick={release} className="mt-3 cursor-pointer text-xs text-tt-muted underline">
-              Release the unbought part of this run
-            </button>
+            <ReleaseButton onRelease={release} />
           )}
         </div>
       )}
@@ -518,6 +552,30 @@ function DayCalendar({ days, today, selected, onToggle }: {
         A night runs 4am to 4am; a show ending after midnight stays with the night it started.
         The dot marks today.
       </p>
+    </div>
+  );
+}
+
+/** Two-step release, in-page for the same reason Buy is — a native dialog may never appear. */
+function ReleaseButton({ onRelease }: { onRelease: () => void }) {
+  const [sure, setSure] = useState(false);
+  if (!sure) {
+    return (
+      <button onClick={() => setSure(true)} className="mt-3 cursor-pointer text-xs text-tt-muted underline">
+        Release the unbought part of this run
+      </button>
+    );
+  }
+  return (
+    <div className="mt-3 text-xs">
+      <span className="text-tt-muted">Release the unbought boxes? Labels already bought are kept. </span>
+      <button onClick={() => { setSure(false); onRelease(); }} className="cursor-pointer text-tt-red underline">
+        Release
+      </button>
+      <span className="text-tt-muted"> · </span>
+      <button onClick={() => setSure(false)} className="cursor-pointer text-tt-muted underline">
+        Keep
+      </button>
     </div>
   );
 }
