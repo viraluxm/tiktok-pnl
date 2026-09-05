@@ -10,6 +10,7 @@ import {
   formatClock,
   type TrainerEvent,
 } from './trainerEvents';
+import { PRACTICE_VIDEO_CAPTURE } from '@/lib/training/media';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import { useVideoPublish } from '@/lib/training/useVideoPublish';
 import { shortTrainingSessionLabel } from '@/lib/training/session';
@@ -325,6 +326,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     // Tell the controller the live has ended (stops its elapsed timer + countdown,
     // and is the clean stop-signal a future auto-bidder will hook into).
     broadcastSessionState('complete');
+    // Release the camera + microphone and tear down the LiveKit publish via the
+    // SAME canonical path used on unmount. Without this a finished session kept
+    // capturing and uploading until its tab was closed — with ~20 tabs that is a
+    // large amount of pointless Wi-Fi traffic and a camera light left on. Ordered
+    // after the broadcast so the 'complete' message is queued first. stopStream()
+    // is idempotent (roomRef/streamRef are nulled), so the unmount cleanup and
+    // restartPractice() can both call it again safely.
+    stopStream();
   }
 
   async function startPractice() {
@@ -341,7 +350,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
+        video: PRACTICE_VIDEO_CAPTURE,
         audio: true,
       });
     } catch {
@@ -350,7 +359,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       if (!mountedRef.current) return;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user' },
+          video: PRACTICE_VIDEO_CAPTURE,
           audio: false,
         });
       } catch (err) {

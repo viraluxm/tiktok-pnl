@@ -3,36 +3,36 @@
 import { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import {
-  isValidTrainingSessionId,
   shortTrainingSessionLabel,
   trainingHostPath,
   trainingControllerPath,
   trainingHostUrl,
   trainingControllerUrl,
+  parseLauncherSessions,
+  addLauncherSession,
+  removeLauncherSession,
 } from '@/lib/training/session';
 
-// Launcher storage: a small list of recently created sessions so the admin can
-// reopen them after a reload. Clearly namespaced and capped (not per-session
-// scoped — this IS the cross-session index).
+// Launcher storage: the list of created sessions so the admin can reopen them
+// after a reload. Clearly namespaced (not per-session scoped — this IS the
+// cross-session index) and NEVER truncated: this list is the only record of a
+// session id, so dropping one would strand a running practice live with a
+// published camera and no way to re-open, re-QR or remove it. Sessions leave the
+// list only via the explicit Remove button. List logic lives in
+// @/lib/training/session so it stays pure and unit-testable.
 const LAUNCHER_STORAGE_KEY = 'training:launcher:recent-sessions';
-const MAX_RECENT = 8;
 
 function loadRecent(): string[] {
   try {
-    const raw = localStorage.getItem(LAUNCHER_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    // Drop malformed entries and de-duplicate (preserving order), then cap.
-    return [...new Set(parsed.filter(isValidTrainingSessionId))].slice(0, MAX_RECENT);
+    return parseLauncherSessions(localStorage.getItem(LAUNCHER_STORAGE_KEY));
   } catch {
-    return [];
+    return []; // storage unavailable (private mode / disabled)
   }
 }
 
 function saveRecent(ids: string[]): void {
   try {
-    localStorage.setItem(LAUNCHER_STORAGE_KEY, JSON.stringify(ids.slice(0, MAX_RECENT)));
+    localStorage.setItem(LAUNCHER_STORAGE_KEY, JSON.stringify(ids));
   } catch {
     /* storage unavailable (private mode / quota) — sessions stay in memory */
   }
@@ -60,12 +60,12 @@ export default function PracticeModeLauncher() {
   // and the host joins independently via the card's QR code or host link.
   const createSession = useCallback(() => {
     const sessionId = crypto.randomUUID();
-    persist([sessionId, ...sessions].slice(0, MAX_RECENT));
+    persist(addLauncherSession(sessions, sessionId));
   }, [persist, sessions]);
 
   const removeSession = useCallback(
     (id: string) => {
-      persist(sessions.filter((s) => s !== id));
+      persist(removeLauncherSession(sessions, id));
     },
     [persist, sessions],
   );
