@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'ap-')), 'assemblyPlan.mjs');
 writeFileSync(outFile, outputText);
-const { buildAssemblySequence, needsRefetch, itemsFromLedger, DOC_REFETCH_MARGIN_MS } =
+const { buildAssemblySequence, needsRefetch, itemsFromLedger, LEDGER_COLUMNS, DOC_REFETCH_MARGIN_MS } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -36,11 +36,12 @@ const row = (key, over = {}) => ({
   tracking_number: `trk-${key}`, ...over,
 });
 /** A box to print, under `caption` (null = no header). */
-const item = (key, caption = null) => ({ group_key: key, caption });
-/** Several boxes under one header. */
+const item = (key, caption = null, banner = null) => ({ group_key: key, banner, caption });
+/** Several boxes under one SKU header. */
 const section = (caption, ...keys) => keys.map((k) => item(k, caption));
 const shape = (seq) => seq.pages
-  .map((p) => (p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`)).join(' ');
+  .map((p) => (p.kind === 'banner' ? `BANNER(${p.caption}|${p.count})`
+    : p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`)).join(' ');
 
 console.log('\nDocument freshness');
 {
@@ -213,6 +214,81 @@ console.log('\nRebuilding the stack from the ledger alone');
 }
 {
   check('an empty ledger rebuilds to nothing', itemsFromLedger([]).length === 0);
+}
+
+console.log('\nTwo levels: piles, and SKU sections inside them');
+{
+  // The stack the prep station actually receives: a SINGLES pile split by SKU, then a MIXED
+  // pile that has no SKU split because there is no single SKU to name.
+  const items = [
+    { group_key: 'p1', banner: 'SINGLES — ONE SKU EACH', caption: '#248 PUMPKIN' },
+    { group_key: 'p2', banner: 'SINGLES — ONE SKU EACH', caption: '#248 PUMPKIN' },
+    { group_key: 'b1', banner: 'SINGLES — ONE SKU EACH', caption: '#352 BANANA' },
+    { group_key: 'm1', banner: 'MIXED — READ EACH LABEL', caption: null },
+    { group_key: 'm2', banner: 'MIXED — READ EACH LABEL', caption: null },
+  ];
+  const rows = items.map((i) => row(i.group_key));
+  const seq = buildAssemblySequence(items, rows, NOW);
+  check('the pile banner counts the WHOLE pile, not one section',
+    shape(seq) === 'BANNER(SINGLES — ONE SKU EACH|3) SLIP(#248 PUMPKIN|2) L(p1) L(p2) '
+      + 'SLIP(#352 BANANA|1) L(b1) BANNER(MIXED — READ EACH LABEL|2) L(m1) L(m2)',
+    shape(seq));
+  check('banners are counted', seq.bannerCount === 2, String(seq.bannerCount));
+  check('slips are counted separately', seq.slipCount === 2, String(seq.slipCount));
+}
+{
+  // A lost box must shrink BOTH levels. A banner saying 3 over a pile of 2 sends the prep
+  // station looking for a label that was never bought.
+  const items = [
+    { group_key: 'p1', banner: 'SINGLES', caption: '#248 PUMPKIN' },
+    { group_key: 'p2', banner: 'SINGLES', caption: '#248 PUMPKIN' },
+    { group_key: 'p3', banner: 'SINGLES', caption: '#248 PUMPKIN' },
+  ];
+  const seq = buildAssemblySequence(
+    items, [row('p1'), row('p2'), row('p3', { status: 'claimed', package_id: null })], NOW);
+  check('the banner count shrinks with the pile',
+    shape(seq) === 'BANNER(SINGLES|2) SLIP(#248 PUMPKIN|2) L(p1) L(p2)', shape(seq));
+}
+{
+  // A pile emptied entirely drops its banner too, or the stack opens with a divider for
+  // nothing and the next pile reads as belonging to it.
+  const items = [
+    { group_key: 'x', banner: 'SINGLES', caption: '#1 A' },
+    { group_key: 'm', banner: 'MIXED', caption: null },
+  ];
+  const seq = buildAssemblySequence(items, [row('m')], NOW);
+  check('an emptied pile drops its banner with it',
+    shape(seq) === 'BANNER(MIXED|1) L(m)', shape(seq));
+}
+{
+  // Rows predating banner_caption still print, as one unheaded run.
+  const rows = [row('legacy', { print_seq: 0, slip_caption: null, banner_caption: null })];
+  const seq = buildAssemblySequence(itemsFromLedger(rows), rows, NOW);
+  check('a row with no banner still prints', shape(seq) === 'L(legacy)', shape(seq));
+  check('…and no empty banner is emitted', seq.bannerCount === 0);
+}
+
+console.log('\nThe column list must cover every field the type declares');
+{
+  // THE BUG THIS EXISTS FOR. banner_caption was added to the migration, the write path, the
+  // LedgerRow type, the grouping, the renderer and these tests — but not to the PDF route's
+  // SELECT. A missing column arrives as `undefined`, which reads as "no banner", so a real day
+  // printed with both pile dividers silently absent and nothing threw.
+  //
+  // No other test could catch it: every one of them builds rows by hand and never issues the
+  // query. This one reads the interface out of the source and checks the string agrees.
+  const src = readFileSync(srcPath, 'utf8');
+  const body = src.slice(
+    src.indexOf('export interface LedgerRow {') + 'export interface LedgerRow {'.length,
+    src.indexOf('}', src.indexOf('export interface LedgerRow {')),
+  );
+  const fields = [...body.matchAll(/^\s*(\w+)\??:/gm)].map((m) => m[1]);
+  check('the interface was parsed', fields.length >= 8, fields.join(','));
+  const missing = fields.filter((f) => !LEDGER_COLUMNS.includes(f));
+  check('every LedgerRow field appears in LEDGER_COLUMNS',
+    missing.length === 0, missing.length ? `MISSING: ${missing.join(', ')}` : 'all present');
+  // And specifically the one that got away.
+  check('banner_caption is in the column list', LEDGER_COLUMNS.includes('banner_caption'));
 }
 
 console.log('\nEdges');

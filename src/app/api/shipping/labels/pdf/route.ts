@@ -5,7 +5,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { getPackageDocument } from '@/lib/tiktok/client';
 import {
-  itemsFromLedger, buildAssemblySequence, type LedgerRow,
+  itemsFromLedger, buildAssemblySequence, LEDGER_COLUMNS, type LedgerRow,
 } from '@/lib/shipping/assemblyPlan';
 import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
 
@@ -69,7 +69,7 @@ export async function GET(req: Request) {
 
   const { data: rowData, error } = await admin
     .from('shipping_label_purchases')
-    .select('group_key, status, package_id, doc_url, doc_url_expires_at, tracking_number, print_seq, slip_caption, run_id')
+    .select(`${LEDGER_COLUMNS}, run_id`)
     .eq('user_id', user.id).eq('store_id', storeId)
     .in('run_id', runIds);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -89,11 +89,12 @@ export async function GET(req: Request) {
       pages: seq.pages.length,
       labels: seq.labelCount,
       slips: seq.slipCount,
+      banners: seq.bannerCount,
       needs_refetch: seq.refetch.length,
       missing: seq.missing,
-      sequence: seq.pages.map((p) => (p.kind === 'slip'
-        ? { kind: 'slip', caption: p.caption, count: p.count }
-        : { kind: 'label', group_key: p.group_key })),
+      sequence: seq.pages.map((p) => (p.kind === 'label'
+        ? { kind: 'label', group_key: p.group_key }
+        : { kind: p.kind, caption: p.caption, count: p.count })),
     });
   }
 
@@ -193,8 +194,12 @@ export async function GET(req: Request) {
   }
 
   for (const page of seq.pages) {
-    if (page.kind === 'slip') {
-      addSlipPage(out, font, pageSize, { caption: page.caption, count: page.count });
+    if (page.kind === 'banner' || page.kind === 'slip') {
+      // A banner is drawn heavier than a slip: it is the divider someone finds while splitting
+      // the stack by hand, often without reading it closely.
+      addSlipPage(out, font, pageSize, {
+        caption: page.caption, count: page.count, banner: page.kind === 'banner',
+      });
       continue;
     }
     const bytes = bytesByPackage.get(page.package_id);
@@ -221,6 +226,7 @@ export async function GET(req: Request) {
       // Surfaced in headers so a caller sees an incomplete stack without parsing the PDF.
       'X-Label-Count': String(seq.labelCount),
       'X-Slip-Count': String(seq.slipCount),
+      'X-Banner-Count': String(seq.bannerCount),
       'X-Missing-Count': String(seq.missing.length),
     },
   });

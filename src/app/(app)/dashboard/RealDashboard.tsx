@@ -20,7 +20,7 @@ import { useAdSpend } from '@/hooks/useAdSpend';
 import { computeDashboardMetrics } from '@/lib/calculations';
 import { useReturns } from '@/hooks/useReturns';
 import ShowsTab from '@/components/shows/ShowsTab';
-import ShippingTab from '@/components/shipping/ShippingTab';
+import ShippingTabs from '@/components/shipping/ShippingTabs';
 import EmployeesTab from '@/components/employees/EmployeesTab';
 import type { Entry, DashboardMetrics, ChartData } from '@/types';
 import type { OrderTotals } from '@/hooks/useProductStats';
@@ -479,7 +479,7 @@ export default function RealDashboard() {
 
         {/* Shipping View */}
         {activeView === 'shipping' && (
-          <ShippingTab />
+          <ShippingTabs />
         )}
 
         {/* Team / Employees View */}
