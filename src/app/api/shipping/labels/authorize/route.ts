@@ -153,6 +153,7 @@ export async function POST(req: Request) {
       group_key: m.box.group_key, order_ids: m.box.order_ids,
       status: 'claimed', ship_type: shipTypeFor(m.box),
       print_seq: m.seq, slip_caption: m.caption, banner_caption: m.banner,
+      run_scope: run.scope,
     }));
     const { error } = await admin.from('shipping_label_purchases').insert(rows);
     if (error) {

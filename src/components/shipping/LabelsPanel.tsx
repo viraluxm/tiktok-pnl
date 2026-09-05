@@ -57,6 +57,11 @@ interface DryRun {
   batches: Array<{ slip: string; boxes: number }>;
 }
 interface Progress { total: number; bought: number; failed: number; spent: number; done: boolean }
+interface RunRow {
+  run_id: string; scope: string | null; at: string | null;
+  labels: number; purchased: number; claimed: number; failed: number;
+  singles: number; mixed: number; unbound: number; spent: number; printable: number;
+}
 
 const money = (n: number) => `$${n.toFixed(2)}`;
 const fmtDay = (d: string) => new Date(`${d}T12:00:00Z`)
@@ -93,11 +98,26 @@ export default function LabelsPanel() {
    */
   const [armed, setArmed] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [history, setHistory] = useState<RunRow[] | null>(null);
+  const [historyTotal, setHistoryTotal] = useState(0);
 
   /** Any change to what would be bought discards the reviewed plan — never buy an unread plan. */
   const invalidate = useCallback(() => {
     setPlan(null); setRunId(null); setProgress(null); setArmed(false);
   }, []);
+
+  const loadHistory = useCallback(async () => {
+    if (activeStore === 'all') { setHistory(null); return; }
+    try {
+      const r = await fetch(`/api/shipping/labels/runs?store_id=${encodeURIComponent(activeStore)}`);
+      if (!r.ok) { setHistory(null); return; }
+      const j = await r.json();
+      setHistory(j.runs ?? []);
+      setHistoryTotal(j.total_spent ?? 0);
+    } catch { setHistory(null); }
+  }, [activeStore]);
+
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
 
   const scopeParams = useCallback(() => {
     const p = new URLSearchParams({ store_id: activeStore });
@@ -192,6 +212,7 @@ export default function LabelsPanel() {
         }
       }
       setPlan(null);
+      void loadHistory();
     } catch (e) {
       setErr(`Purchase interrupted: ${e instanceof Error ? e.message : String(e)}. `
         + 'Nothing is lost — re-check to see what remains.');
@@ -474,6 +495,54 @@ export default function LabelsPanel() {
           {err}
         </div>
       )}
+
+      {history && history.length > 0 && (
+        <div className="rounded-lg border border-tt-border p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="text-sm font-semibold text-tt-text">Print history</h3>
+            <span className="text-xs text-tt-muted">
+              {money(historyTotal)} on labels for {storeName}, all time
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-tt-muted">
+            Labels stay printable — reprint a stack any time without buying again.
+          </p>
+          <ul className="mt-3 divide-y divide-tt-border">
+            {history.map((r) => (
+              <li key={r.run_id} className="flex flex-wrap items-center justify-between gap-3 py-2">
+                <span className="min-w-0">
+                  <span className="block text-sm text-tt-text">
+                    {r.scope ?? 'Unnamed run'}
+                    {r.claimed > 0 && (
+                      <span className="ml-2 text-xs text-tt-yellow">
+                        · {r.claimed} unfinished
+                      </span>
+                    )}
+                    {r.failed > 0 && (
+                      <span className="ml-2 text-xs text-tt-red">· {r.failed} failed</span>
+                    )}
+                  </span>
+                  <span className="block text-xs text-tt-muted">
+                    {r.at ? new Date(r.at).toLocaleString('en-US', {
+                      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+                      timeZone: 'America/Los_Angeles',
+                    }) : 'unknown time'}
+                    {' · '}{r.purchased} label{r.purchased === 1 ? '' : 's'}
+                    {' · '}{money(r.spent)}
+                    {r.singles > 0 && ` · ${r.singles} singles`}
+                    {r.mixed > 0 && ` · ${r.mixed} mixed`}
+                  </span>
+                </span>
+                {r.printable > 0 && (
+                  <PrintButton
+                    storeId={activeStore} runId={r.run_id} onError={setErr} small
+                  />
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -576,8 +645,8 @@ function DayCalendar({ days, today, selected, onToggle }: {
  * message. Nothing is lost either way — the labels are already bought and the stack can be
  * rebuilt at any time.
  */
-function PrintButton({ storeId, runId, onError }: {
-  storeId: string; runId: string; onError: (m: string) => void;
+function PrintButton({ storeId, runId, onError, small }: {
+  storeId: string; runId: string; onError: (m: string) => void; small?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   async function open() {
@@ -607,9 +676,11 @@ function PrintButton({ storeId, runId, onError }: {
     <button
       onClick={open}
       disabled={busy}
-      className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-50"
+      className={small
+        ? 'cursor-pointer shrink-0 rounded-md border border-tt-border px-3 py-1.5 text-xs text-tt-text hover:border-tt-border-hover disabled:opacity-50'
+        : 'cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-50'}
     >
-      {busy ? 'Building the stack…' : 'Print labels'}
+      {busy ? 'Building…' : small ? 'Reprint' : 'Print labels'}
     </button>
   );
 }
