@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { isPayableShift, paidShiftHours } from '@/lib/employees';
+import { isPayableShift, paidShiftHours, computePay, payPeriodFor, nextPayday } from '@/lib/employees';
 
 // Read-only, owner-scoped tools for the admin chat assistant.
 //
@@ -54,6 +54,8 @@ async function pageAll<T>(
 export interface ToolCtx {
   admin: SupabaseClient;
   ownerIds: string[];
+  /** Every store the owner set covers. A store-restricted caller gets a narrowed list here. */
+  storeIds: string[];
 }
 
 const ISO_DATE = '^\\d{4}-\\d{2}-\\d{2}$';
@@ -102,6 +104,47 @@ export const TOOL_DEFS: Anthropic.Beta.BetaTool[] = [
         },
       },
       required: ['from', 'to', 'employee_id'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: 'get_pnl',
+    description:
+      'Revenue, platform fee, COGS and GROSS MARGIN for a date range (max 92 days), from the ' +
+      'canonical order-grain view the dashboard reads. Optionally per-store or per-day. ' +
+      'IMPORTANT: this returns GROSS MARGIN (revenue - platform fee - COGS). It is NOT the ' +
+      'dashboard\'s "Net Profit", which additionally subtracts shipping, affiliate fees and ' +
+      'labor. Never call the result net profit. Always report cogs_coverage alongside any margin ' +
+      'figure — partial cost data inflates margin.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', pattern: ISO_DATE, description: 'Start date, inclusive (YYYY-MM-DD, America/Los_Angeles).' },
+        to: { type: 'string', pattern: ISO_DATE, description: 'End date, inclusive (YYYY-MM-DD, America/Los_Angeles).' },
+        store_id: { type: 'string', description: 'A store id to restrict to, or the literal "all".' },
+        group_by: { type: 'string', enum: ['total', 'day', 'store'], description: 'Aggregation level.' },
+      },
+      required: ['from', 'to', 'store_id', 'group_by'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: 'get_pay',
+    description:
+      'Payroll for a biweekly pay period: hours and dollars owed per employee, derived from real ' +
+      'shift rows via the same computePay() the Pay view uses. Pay is DERIVED (hours x rate), never ' +
+      'stored. Use for "what do I owe", "how many hours did X work this period", payday questions.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date_in_period: {
+          type: 'string',
+          description: 'Any date (YYYY-MM-DD) inside the pay period of interest, or "current" for the period containing today.',
+        },
+      },
+      required: ['date_in_period'],
       additionalProperties: false,
     },
     strict: true,
@@ -227,11 +270,191 @@ async function getSchedule(
   };
 }
 
+
+// ── get_pnl ─────────────────────────────────────────────────────────────────
+// Reads `pnl_order_grain` — the same canonical order-grain view the dashboard reads. Deliberately
+// NOT pnl_by_period_as, which computes a DIFFERENT figure (revenue x 0.94 - cogs, auction-sold
+// only). Two live definitions of "profit" that disagree is how the assistant ends up contradicting
+// the screen the admin is looking at.
+//
+// This reports GROSS MARGIN (revenue - platform fee - COGS). The dashboard's "Net Profit" also
+// subtracts shipping, affiliate and labor, so the two are NOT interchangeable and the tool result
+// says so. Cost coverage is returned with every figure: COGS is PARTIAL BY DESIGN (only auction
+// orders carry a cost snapshot), and a partial COGS INFLATES margin rather than erroring.
+//
+// NOTE: lensed_product_stats_totals_as (migration 114) would let this aggregate server-side, but it
+// is NOT APPLIED IN PROD (verified 2026-09-05) — the repo file is not evidence the function exists.
+// Paging the view and aggregating here needs no migration.
+async function getPnl(
+  ctx: ToolCtx,
+  input: { from: string; to: string; store_id?: string; group_by?: string },
+) {
+  const { from, to } = input;
+  const span = daysBetween(from, to);
+  if (!Number.isFinite(span)) throw new Error('from/to must be YYYY-MM-DD dates');
+  if (span < 0) throw new Error('`from` must be on or before `to`');
+  if (span > MAX_RANGE_DAYS) throw new Error(`range too wide: ${span + 1} days requested, max ${MAX_RANGE_DAYS}.`);
+
+  const wantStore = input.store_id && input.store_id !== 'all' ? input.store_id : null;
+  if (wantStore && !ctx.storeIds.includes(wantStore)) {
+    throw new Error(`store ${wantStore} is not in scope`);
+  }
+  const groupBy = input.group_by ?? 'total';
+
+  // Aggregate IN SQL, never by paging the view. `pnl_order_grain` is an expensive multi-CTE view
+  // and PostgREST's 1000-row cap means one page per 1000 orders, re-evaluating the whole view each
+  // time: measured 19.4s for ONE day, 104.1s for a week (past /api/chat's 60s cap), 383.1s for a
+  // month. The same aggregate in SQL: 3.4s for that day. PostgREST server-side aggregates are
+  // disabled here (PGRST123), so the grouping has to live in the database — migration 128.
+  const { data, error } = await ctx.admin.rpc('chat_pnl_totals_as', {
+    p_owner_user_ids: ctx.ownerIds,
+    p_store_ids: wantStore ? [wantStore] : ctx.storeIds,
+    p_from: from,
+    p_to: to,
+    p_group_by: groupBy,
+  });
+  if (error) {
+    const e = error as { code?: string; message?: string };
+    // 42883 = undefined_function. This DB has no migration ledger, so the repo file is not
+    // evidence the function exists (lensed_product_stats_totals_as is committed as migration 114
+    // and is NOT in prod). Say precisely what is missing rather than surfacing a raw PG error.
+    if (e.code === '42883' || /does not exist/i.test(e.message ?? '')) {
+      throw new Error(
+        'P&L is unavailable: database function chat_pnl_totals_as is not installed. ' +
+        'Migration supabase/migrations/128_chat_pnl_totals_as.sql needs to be applied. ' +
+        'Tell the admin this plainly — do not estimate revenue or margin from anything else.',
+      );
+    }
+    throw new Error(`pnl aggregate failed: ${e.message ?? String(error)}`);
+  }
+
+  const n = (v: unknown) => Number(v) || 0;
+  const d = (cents: number) => Math.round(cents) / 100;
+  const buckets = ((data ?? []) as Record<string, unknown>[]).map((r) => {
+    const orders = n(r.orders);
+    const missing = n(r.orders_missing_cost);
+    const revenue = n(r.revenue_cents);
+    const fee = n(r.platform_fee_cents);
+    const cogs = n(r.cogs_cents);
+    const covered = orders - missing;
+    // Revenue with NO cost data at all cannot resolve to a real margin — the figure would be
+    // revenue minus fees and would read as an enormous profit. Withhold it rather than mislead.
+    const costDataUnavailable = revenue > 0 && cogs === 0;
+    return {
+      key: String(r.bucket),
+      orders,
+      units: n(r.units),
+      revenue_dollars: d(revenue),
+      platform_fee_dollars: d(fee),
+      cogs_dollars: d(cogs),
+      gross_margin_dollars: costDataUnavailable ? null : d(revenue - fee - cogs),
+      gross_margin_withheld_reason: costDataUnavailable
+        ? 'revenue present but zero COGS recorded — a margin here would be revenue minus fees and badly overstated'
+        : null,
+      non_auction_merch_dollars: d(n(r.uncaptured_gmv_cents)),
+      cogs_coverage: {
+        orders_with_full_cost: covered,
+        orders_missing_cost: missing,
+        coverage_pct: orders > 0 ? Math.round((covered / orders) * 100) : 0,
+        missing_cost_lines: n(r.missing_cost_lines),
+      },
+    };
+  });
+
+  return {
+    range: { from, to, tz: 'America/Los_Angeles', days: span + 1 },
+    store_id: wantStore ?? 'all',
+    stores_in_scope: ctx.storeIds.length,
+    group_by: groupBy,
+    definition:
+      'gross_margin = revenue - platform_fee - cogs. This is NOT the dashboard\'s Net Profit, which ' +
+      'also subtracts shipping, affiliate fees and labor. Report it as gross margin.',
+    cogs_note:
+      'COGS is partial by design — only auction orders carry a cost snapshot. Always state coverage_pct ' +
+      'next to any margin figure; low coverage means the margin is OVERSTATED.',
+    buckets,
+  };
+}
+
+// ── get_pay ─────────────────────────────────────────────────────────────────
+// Pay is DERIVED (hours x rate), never stored. Uses computePay() from lib/employees so the numbers
+// match the Pay view exactly — a second payroll formula here would be a payroll dispute waiting to
+// happen. Reads REAL shift rows only; isPayableShift() decides what counts (see get_schedule).
+async function getPay(ctx: ToolCtx, input: { date_in_period?: string }) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  const anchor = !input.date_in_period || input.date_in_period === 'current' ? today : input.date_in_period;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor)) throw new Error('date_in_period must be YYYY-MM-DD or "current"');
+
+  // Derive period AND payday from the library's own functions rather than re-deriving the cycle.
+  // payPeriodContaining() would give the period but drops the payday it came from, and PayPeriod
+  // carries only {start, end} — so mirror its internals (probe = D+5, built from LOCAL components
+  // exactly as it does) and keep both halves.
+  const [py, pm, pd] = anchor.split('-').map(Number);
+  const payday = nextPayday(new Date(py, pm - 1, pd + 5));
+  const period = payPeriodFor(payday);
+
+  const emp = await pageAll<Record<string, unknown>>((f: number, t: number) =>
+    ctx.admin.from('employees')
+      .select('id, name, role, status, hourly_rate')
+      .in('user_id', ctx.ownerIds)
+      .order('id', { ascending: true }).range(f, t));
+  if (emp.error) throw new Error(`employees read failed: ${String((emp.error as { message?: string }).message ?? emp.error)}`);
+
+  const sh = await pageAll<Record<string, unknown>>((f: number, t: number) =>
+    ctx.admin.from('shifts')
+      .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at')
+      .in('user_id', ctx.ownerIds)
+      .gte('date', period.start).lte('date', period.end)
+      .order('employee_id', { ascending: true }).range(f, t));
+  if (sh.error) throw new Error(`shifts read failed: ${String((sh.error as { message?: string }).message ?? sh.error)}`);
+
+  const employees = emp.rows as unknown as Parameters<typeof computePay>[0];
+  const shifts = sh.rows as unknown as Parameters<typeof computePay>[1];
+  const pay = computePay(employees, shifts);
+
+  const excluded = sh.rows.filter((r) => !isPayableShift(r as Parameters<typeof isPayableShift>[0]));
+  const unconfirmed = excluded.filter((r) => r.source === 'time_clock' && r.confirmed_at == null).length;
+
+  return {
+    pay_period: { start: period.start, end: period.end, payday },
+    note: 'Pay is derived (hours x rate) from UNROUNDED hours, never stored — quote pay_dollars as given rather than recomputing it from the rounded hours shown here. Only payable shift rows count; see excluded_shifts.',
+    employees: pay
+      .filter((p) => p.hours > 0 || p.employee.status === 'active')
+      .map((p) => ({
+        employee_id: p.employee.id,
+        name: p.employee.name,
+        role: p.employee.role,
+        status: p.employee.status,
+        hourly_rate: p.employee.hourly_rate,
+        // 4dp, not 2dp. pay_dollars is computePay()'s figure, derived from UNROUNDED hours — so
+        // hours rounded to 2dp does not reconcile against it (21.48 x $25 reads $537.00 vs the
+        // true $536.93). Cents, but a model that sanity-checks the arithmetic would "correct" a
+        // correct payroll number, and an admin doing the same mental math would lose trust in it.
+        // 4dp reconciles to under a cent; the system prompt still says to round to 1dp when speaking.
+        hours: Math.round(p.hours * 10000) / 10000,
+        pay_dollars: Math.round(p.pay * 100) / 100,
+      })),
+    totals: {
+      hours: Math.round(pay.reduce((a, p) => a + p.hours, 0) * 10000) / 10000,
+      pay_dollars: Math.round(pay.reduce((a, p) => a + p.pay, 0) * 100) / 100,
+    },
+    excluded_shifts: {
+      count: excluded.length,
+      awaiting_manager_confirmation: unconfirmed,
+      note: unconfirmed > 0
+        ? `${unconfirmed} time-clock punch(es) are NOT yet payable — they need manager confirmation. Say this rather than describing them as unpaid work.`
+        : null,
+    },
+  };
+}
+
 export async function runTool(ctx: ToolCtx, name: string, input: unknown): Promise<unknown> {
   const args = (input ?? {}) as Record<string, never>;
   switch (name) {
     case 'get_roster': return getRoster(ctx, args);
     case 'get_schedule': return getSchedule(ctx, args as never);
+    case 'get_pnl': return getPnl(ctx, args as never);
+    case 'get_pay': return getPay(ctx, args as never);
     default: throw new Error(`unknown tool: ${name}`);
   }
 }

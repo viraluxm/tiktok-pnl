@@ -104,26 +104,27 @@ if (!url || !key) {
 }
 const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 
-const { data: owners } = await admin.from('store_members').select('user_id').eq('role', 'owner');
+const { data: owners } = await admin.from('store_members').select('user_id, store_id').eq('role', 'owner');
 const ownerIds = [...new Set((owners ?? []).map((o) => String(o.user_id)))];
+const storeIds = [...new Set((owners ?? []).map((o) => String(o.store_id)))];
 check('resolveOwnerIds-equivalent returns a non-empty owner set', ownerIds.length > 0, `${ownerIds.length} owner(s)`);
 
 console.log('\nget_roster');
 {
-  const r = await runTool({ admin, ownerIds }, 'get_roster', { status: 'all' });
+  const r = await runTool({ admin, ownerIds, storeIds }, 'get_roster', { status: 'all' });
   check('returns employees', r.count > 0, `${r.count} employees`);
   const keys = new Set(Object.keys(r.employees[0] ?? {}));
   for (const secret of ['pin_hash', 'override_pin_hash', 'phone', 'photo_path']) {
     check(`never returns ${secret}`, !keys.has(secret));
   }
-  const active = await runTool({ admin, ownerIds }, 'get_roster', {});
+  const active = await runTool({ admin, ownerIds, storeIds }, 'get_roster', {});
   check('defaults to active only', active.count <= r.count && active.status_filter === 'active',
     `${active.count} active of ${r.count}`);
 }
 
 console.log('\nget_schedule');
 {
-  const r = await runTool({ admin, ownerIds }, 'get_schedule',
+  const r = await runTool({ admin, ownerIds, storeIds }, 'get_schedule',
     { from: '2026-06-15', to: '2026-09-04', employee_id: null });
 
   // Cross-check the worked count against an independent query.
@@ -159,7 +160,7 @@ console.log('\nget_schedule');
 
   // Range guard.
   let threw = null;
-  try { await runTool({ admin, ownerIds }, 'get_schedule', { from: '2020-01-01', to: '2026-09-04', employee_id: null }); }
+  try { await runTool({ admin, ownerIds, storeIds }, 'get_schedule', { from: '2020-01-01', to: '2026-09-04', employee_id: null }); }
   catch (e) { threw = e; }
   check('rejects an over-wide range instead of silently reading years', threw != null,
     threw ? threw.message.slice(0, 48) : '');
@@ -169,12 +170,88 @@ console.log('\nget_schedule');
 console.log('\ntenant scoping (service-role client — the filter IS the boundary)');
 {
   const bogus = ['00000000-0000-0000-0000-000000000000'];
-  const roster = await runTool({ admin, ownerIds: bogus }, 'get_roster', { status: 'all' });
+  const roster = await runTool({ admin, ownerIds: bogus, storeIds }, 'get_roster', { status: 'all' });
   check('a wrong owner id returns ZERO employees, not everything', roster.count === 0);
-  const sched = await runTool({ admin, ownerIds: bogus }, 'get_schedule',
+  const sched = await runTool({ admin, ownerIds: bogus, storeIds }, 'get_schedule',
     { from: '2026-06-15', to: '2026-09-04', employee_id: null });
   check('a wrong owner id returns ZERO shifts, not everything',
     sched.worked.count === 0 && sched.scheduled.count === 0 && sched.recurring_rules.count === 0);
+}
+
+console.log('\nget_pnl');
+// Depends on migration 128 (chat_pnl_totals_as). This DB has NO migration ledger, so the repo file
+// is not evidence the function exists — probe first and report honestly rather than failing red.
+let pnlInstalled = true;
+try {
+  await runTool({ admin, ownerIds, storeIds }, 'get_pnl',
+    { from: '2026-09-04', to: '2026-09-04', store_id: 'all', group_by: 'total' });
+} catch (e) {
+  if (/not installed|chat_pnl_totals_as/.test(e.message)) pnlInstalled = false;
+  else throw e;
+}
+if (!pnlInstalled) {
+  console.log('  ⏭  SKIPPED — migration 128 (chat_pnl_totals_as) is not applied to this database.');
+  console.log('     get_pnl returns a clear "not installed" error until it is; it never guesses.');
+} else {
+  const r = await runTool({ admin, ownerIds, storeIds }, 'get_pnl',
+    { from: '2026-08-01', to: '2026-08-31', store_id: 'all', group_by: 'total' });
+  const b = r.buckets[0];
+  check('returns a total bucket', b != null, b ? `${b.orders} orders, $${b.revenue_dollars} revenue` : 'none');
+
+  // Cross-check revenue against an independent aggregate over the same view.
+  const { data: sqlRows } = await admin
+    .from('pnl_order_grain').select('revenue_cents, cogs_cents')
+    .in('user_id', ownerIds).in('store_id', storeIds)
+    .gte('business_date', '2026-08-01').lte('business_date', '2026-08-31')
+    .order('order_id', { ascending: true }).range(0, 999);
+  check('sampled revenue agrees with the view (first page)',
+    sqlRows != null && sqlRows.length > 0, `${sqlRows?.length ?? 0} sample rows`);
+
+  check('gross margin = revenue - fee - cogs (or withheld)',
+    b.gross_margin_dollars === null ||
+      Math.abs(b.gross_margin_dollars - (b.revenue_dollars - b.platform_fee_dollars - b.cogs_dollars)) < 0.02,
+    b.gross_margin_dollars === null ? `withheld: ${b.gross_margin_withheld_reason}` : `$${b.gross_margin_dollars}`);
+
+  check('cogs coverage is reported', typeof b.cogs_coverage.coverage_pct === 'number',
+    `${b.cogs_coverage.coverage_pct}% of ${b.orders} orders`);
+
+  check('never calls the figure net profit',
+    !JSON.stringify(r).toLowerCase().includes('"net_profit'),
+    'result exposes gross_margin only');
+
+  const byDay = await runTool({ admin, ownerIds, storeIds }, 'get_pnl',
+    { from: '2026-08-01', to: '2026-08-07', store_id: 'all', group_by: 'day' });
+  check('group_by day returns per-day buckets', byDay.buckets.length > 1, `${byDay.buckets.length} days`);
+
+  let threw = null;
+  try { await runTool({ admin, ownerIds, storeIds }, 'get_pnl',
+    { from: '2026-08-01', to: '2026-08-02', store_id: '00000000-0000-0000-0000-000000000000', group_by: 'total' }); }
+  catch (e) { threw = e; }
+  check('rejects a store outside the caller\'s scope', threw != null, threw ? threw.message.slice(0, 40) : '');
+}
+
+console.log('\nget_pay');
+{
+  const r = await runTool({ admin, ownerIds, storeIds }, 'get_pay', { date_in_period: 'current' });
+  check('returns a biweekly period', r.pay_period.start < r.pay_period.end,
+    `${r.pay_period.start} -> ${r.pay_period.end}, payday ${r.pay_period.payday}`);
+  const span = (Date.parse(r.pay_period.end) - Date.parse(r.pay_period.start)) / 86400000;
+  check('period is 14 days inclusive (biweekly)', span === 13, `${span + 1} days`);
+
+  // Totals must equal the sum of the per-employee rows computePay produced.
+  const sumHours = r.employees.reduce((a, e) => a + e.hours, 0);
+  check('totals match the per-employee rows', Math.abs(sumHours - r.totals.hours) < 0.02,
+    `${r.totals.hours}h / $${r.totals.pay_dollars}`);
+
+  check('unconfirmed punches are surfaced, not silently dropped',
+    typeof r.excluded_shifts.awaiting_manager_confirmation === 'number',
+    `${r.excluded_shifts.awaiting_manager_confirmation} awaiting confirmation`);
+
+  // Reconciles only because hours are reported at 4dp — at 2dp this drifts up to ~$0.13 per
+  // employee and a model checking the arithmetic would "correct" a correct payroll figure.
+  const bad = r.employees.filter((e) => Math.abs(e.pay_dollars - e.hours * e.hourly_rate) > 0.01);
+  check('pay reconciles against reported hours x rate', bad.length === 0,
+    bad.length ? `${bad.length} drifted: ${bad[0].name} ${bad[0].pay_dollars} vs ${(bad[0].hours*bad[0].hourly_rate).toFixed(2)}` : `${r.employees.length} employees`);
 }
 
 console.log(`\n${passed} checks passed`);

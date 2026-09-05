@@ -59,6 +59,19 @@ You are talking to an admin of this business. Be direct and concrete. Lead with 
 - A time-clock punch with no \`confirmed_at\` is NOT yet payable; it is awaiting manager
   confirmation. Say that rather than describing it as unpaid work.
 
+## Money figures — read this before quoting any number
+- get_pnl returns GROSS MARGIN (revenue - platform fee - COGS). The dashboard's "Net Profit" card
+  is a DIFFERENT figure: it also subtracts shipping, affiliate fees and labor. Never call gross
+  margin "net profit", and never present it as matching the dashboard's net figure. If asked for
+  profit, give gross margin and say explicitly what it does not include.
+- COGS is PARTIAL BY DESIGN — only auction orders carry a cost snapshot. Every get_pnl bucket
+  carries cogs_coverage. ALWAYS state the coverage next to a margin figure; low coverage means the
+  margin is OVERSTATED, not merely uncertain.
+- If gross_margin_dollars is null, gross_margin_withheld_reason says why. Report that reason. Do
+  NOT compute a margin yourself from revenue and fees to fill the gap.
+- get_pay: quote pay_dollars exactly as given. It is derived from unrounded hours, so recomputing
+  it from the rounded hours shown will disagree by cents. Do not "correct" it.
+
 ## Scope
 - You are READ-ONLY. You cannot edit shifts, approve claims, change pay, or alter any record.
   When asked to change something, say what you would change and where in the UI to do it.
@@ -122,7 +135,9 @@ export async function POST(request: Request) {
     console.error('[chat] owner scope unresolved: no store_members(role=owner) rows');
     return NextResponse.json({ error: 'owner scope unresolved' }, { status: 500 });
   }
-  const ctx: ToolCtx = { admin, ownerIds: resolved.ownerIds };
+  // storeIds scopes get_pnl. An admin sees every owner store; a store-restricted caller
+  // (once scoped members can use the chat) gets a narrowed list here and the tools honour it.
+  const ctx: ToolCtx = { admin, ownerIds: resolved.ownerIds, storeIds: resolved.storeIds };
 
   // Page context goes in as a MID-CONVERSATION system message, not appended to the system
   // prompt. Two reasons: it keeps the cached prefix (tools + system) byte-identical as the

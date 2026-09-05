@@ -31,6 +31,10 @@ const SERVICE_ROLE_ONLY = new Set([
   // passed explicitly; revoked from authenticated by 084/087). Were unregistered → the check was
   // already red on main before the kiosk PR.
   'lensed_log_auction_as', 'pnl_reorder_by_sku_as',
+  // Admin-assistant P&L aggregate (128) — takes the owner set as a parameter, so a grant to
+  // `authenticated` would expose another owner's revenue and margin. Called only via
+  // createAdminClient() from /api/chat.
+  'chat_pnl_totals_as',
   // Badge/QR kiosk RPCs — service-role only (091/092/095), called via createAdminClient in
   // /api/kiosk/* and the QR scan path. Never granted to anon/authenticated.
   'lensed_kiosk_scan', 'lensed_kiosk_start_break', 'lensed_kiosk_clock_out', 'lensed_kiosk_manual_punch_as',
