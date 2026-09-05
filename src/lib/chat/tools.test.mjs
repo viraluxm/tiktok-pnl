@@ -198,14 +198,20 @@ if (!pnlInstalled) {
   const b = r.buckets[0];
   check('returns a total bucket', b != null, b ? `${b.orders} orders, $${b.revenue_dollars} revenue` : 'none');
 
-  // Cross-check revenue against an independent aggregate over the same view.
-  const { data: sqlRows } = await admin
-    .from('pnl_order_grain').select('revenue_cents, cogs_cents')
-    .in('user_id', ownerIds).in('store_id', storeIds)
-    .gte('business_date', '2026-08-01').lte('business_date', '2026-08-31')
-    .order('order_id', { ascending: true }).range(0, 999);
-  check('sampled revenue agrees with the view (first page)',
-    sqlRows != null && sqlRows.length > 0, `${sqlRows?.length ?? 0} sample rows`);
+  // Internal consistency: the 'total' bucket must equal the sum of the per-day buckets. This is a
+  // real cross-check of the SQL grouping and it costs one extra aggregate.
+  //
+  // NOT cross-checked by paging pnl_order_grain directly — that is the exact path migration 128
+  // exists to replace (19.4s for one day, 383.1s for a month). A paged read of a month here
+  // silently returned ZERO rows rather than erroring, which is the same class of silent-failure
+  // this suite is meant to catch: a check that quietly reads nothing proves nothing.
+  const days = await runTool({ admin, ownerIds, storeIds }, 'get_pnl',
+    { from: '2026-08-01', to: '2026-08-31', store_id: 'all', group_by: 'day' });
+  const dayRevenue = days.buckets.reduce((a, x) => a + x.revenue_dollars, 0);
+  const dayOrders = days.buckets.reduce((a, x) => a + x.orders, 0);
+  check('per-day buckets sum to the total bucket',
+    Math.abs(dayRevenue - b.revenue_dollars) < 0.05 && dayOrders === b.orders,
+    `${days.buckets.length} days -> $${dayRevenue.toFixed(2)} / ${dayOrders} orders`);
 
   check('gross margin = revenue - fee - cogs (or withheld)',
     b.gross_margin_dollars === null ||
