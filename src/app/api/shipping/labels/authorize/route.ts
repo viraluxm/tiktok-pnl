@@ -7,7 +7,7 @@ import { planPageSequence, type PlanBox } from '@/lib/shipping/labelPlan';
 import { resolveLabelRun, shipTypeFor, VerifyFailedError } from '@/lib/shipping/labelRun';
 import { parseScope } from '@/lib/shipping/labelScope';
 import {
-  authorizeRun, estimateSpend, readSpendWindows, MAX_MANIFEST_BOXES, type UnboundPolicy,
+  authorizeRun, estimateSizedSpend, readSpendWindows, MAX_MANIFEST_BOXES, type UnboundPolicy,
 } from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
@@ -123,7 +123,7 @@ export async function POST(req: Request) {
     unbound_policy: unboundPolicy,
     unbound_included: unboundPolicy === 'include',
     max_manifest_boxes: MAX_MANIFEST_BOXES,
-    spend_estimate: await estimateSpend(admin, user.id, storeId, manifest.length),
+    spend_estimate: await estimateSizedSpend(admin, user.id, storeId, manifest.map((m) => m.box.order_ids.length)),
     spend_recent: await readSpendWindows(admin, user.id, storeId),
   };
 

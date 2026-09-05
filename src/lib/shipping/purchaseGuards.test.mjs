@@ -16,7 +16,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 const outFile = join(mkdtempSync(join(tmpdir(), 'pg-')), 'purchaseGuards.mjs');
 writeFileSync(outFile, outputText);
 const {
-  authorizeRun, summarizeSpend, parsePrice, summarizeLedgerSpend,
+  authorizeRun, summarizeSpend, parsePrice, summarizeLedgerSpend, estimateForSizes,
   MAX_MANIFEST_BOXES, FALLBACK_UNIT_PRICE,
 } = await import(pathToFileURL(outFile).href);
 
@@ -151,6 +151,60 @@ console.log('\nUnbound boxes must be answered, never assumed');
   check('the flag still outranks everything',
     authorizeRun({ enabled: false, boxes: 20, confirmBoxes: 20,
       unboundCount: 3, unboundPolicy: null }).code === 'disabled');
+}
+
+console.log('\nPrice follows box SIZE, so the estimate must too');
+{
+  // The real ladder, measured over the first 21 purchases (r = 0.853 against order count).
+  const history = [
+    ...Array(7).fill({ orders: 1, price: 4.01 }),
+    ...Array(4).fill({ orders: 2, price: 4.94 }),
+    { orders: 4, price: 6.10 }, { orders: 4, price: 6.31 },
+    { orders: 7, price: 9.04 }, { orders: 7, price: 10.68 },
+    { orders: 20, price: 11.45 },
+  ];
+
+  // THE MISS THIS FIXES. Wednesday was 15 large combines. A flat $4.24 average predicted $63.60
+  // against an actual $107.65 — 69% low — because the average was built from single-item labels.
+  const flat = summarizeSpend(history.map((h) => h.price), 15).estimated_total;
+  const sized = estimateForSizes(history, [1, 2, 2, 4, 4, 7, 7, 7, 20, 20, 12, 9, 6, 6, 3]).total;
+  check('a size-aware estimate lands far above a flat average for a heavy mix',
+    sized > flat * 1.3, `flat ${flat} vs sized ${sized}`);
+
+  const singles = estimateForSizes(history, Array(10).fill(1));
+  check('ten single-order boxes price at the single-order rate',
+    Math.abs(singles.total - 40.1) < 0.05, String(singles.total));
+  check('…and report it as drawn from history', singles.basis === 'history', singles.basis);
+
+  const big = estimateForSizes(history, [20]);
+  check('a 20-order combine prices at its own rate, not the average',
+    Math.abs(big.total - 11.45) < 0.01, String(big.total));
+
+  // A size never seen borrows its nearest neighbour rather than a fitted line: 21 points do not
+  // support a model that looks more confident than the data.
+  const unseen = estimateForSizes(history, [19]);
+  check('an unseen size borrows the nearest observed one',
+    Math.abs(unseen.total - 11.45) < 0.01 && unseen.basis === 'nearest',
+    `${unseen.total}/${unseen.basis}`);
+  const tie = estimateForSizes([{ orders: 2, price: 5 }, { orders: 4, price: 9 }], [3]);
+  check('a tie goes to the LARGER size, erring toward over-estimating',
+    tie.total === 9, String(tie.total));
+}
+{
+  const history = [{ orders: 1, price: 4 }, { orders: 1, price: 6 }];
+  const e = estimateForSizes(history, [1, 1]);
+  check('the range reports the observed spread, not a made-up interval',
+    e.low === 8 && e.high === 12 && e.total === 10, `${e.low}/${e.total}/${e.high}`);
+  check('samples are reported so a thin history is visible', e.samples === 2);
+}
+{
+  const none = estimateForSizes([], [1, 2, 3]);
+  check('no history falls back to the flat measured price',
+    none.basis === 'fallback' && Math.abs(none.total - 3 * FALLBACK_UNIT_PRICE) < 0.01,
+    String(none.total));
+  check('no boxes estimates zero, not NaN', estimateForSizes([], []).total === 0);
+  check('unusable history rows are dropped',
+    estimateForSizes([{ orders: 0, price: 5 }, { orders: 1, price: -2 }], [1]).basis === 'fallback');
 }
 
 console.log('\nRolling spend, from the ledger');

@@ -49,7 +49,9 @@ interface DryRun {
     boxes: number; orders: number; batched_boxes: number; bundle_boxes: number;
     sku_batches: number; unbound_boxes: number; already_in_ledger: number; would_buy: number;
   };
-  spend_estimate: { avg_unit_price: number; estimated_total: number; basis: string };
+  spend_estimate: {
+    boxes: number; total: number; low: number; high: number; basis: string; samples: number;
+  };
   spend_recent: SpendWindows;
   confirm_boxes: number;
   batches: Array<{ slip: string; boxes: number }>;
@@ -217,7 +219,9 @@ export default function LabelsPanel() {
   const unboundCount = plan?.counts.unbound_boxes ?? 0;
   const blocked = unboundCount > 0 && unbound === 'wait';
   const n = plan?.counts.would_buy ?? 0;
-  const unit = plan?.spend_estimate.avg_unit_price ?? 0;
+  const est = plan?.spend_estimate;
+  // Per-box average implied by the sized estimate, for the "about $X each" line only.
+  const unit = est && est.boxes ? est.total / est.boxes : 0;
 
   return (
     <div className="space-y-4">
@@ -382,7 +386,7 @@ export default function LabelsPanel() {
               disabled={blocked || buying}
               className="mt-3 cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40"
             >
-              Buy {n} label{n === 1 ? '' : 's'} — about {money(n * unit)}
+              Buy {n} label{n === 1 ? '' : 's'} — about {money(est?.total ?? 0)}
             </button>
           ) : (
             /* Confirmation lives in the page, not in a browser dialog — see `armed`. */
@@ -392,9 +396,18 @@ export default function LabelsPanel() {
               </p>
               <ul className="mt-2 space-y-0.5 text-xs text-tt-muted">
                 <li>Scope: {plan.scope}</li>
-                <li>Estimated {money(n * unit)} — about {money(unit)} each</li>
+                <li>
+                  Estimated <span className="text-tt-text">{money(est?.total ?? 0)}</span>
+                  {est && est.high > est.low && (
+                    <> — this mix has cost between {money(est.low)} and {money(est.high)}</>
+                  )}
+                </li>
+                <li>
+                  About {money(unit)} a label. Bigger combine boxes cost more, so the estimate
+                  moves with the mix{est?.basis === 'fallback' ? ' and has no history behind it yet' : ''}.
+                </li>
                 <li className="text-tt-yellow">
-                  This cannot be undone. TikTok charges at purchase and labels cannot be cancelled.
+                  Not a quote — TikTok only prices a label by charging for it. This cannot be undone.
                 </li>
               </ul>
               <div className="mt-3 flex gap-2">
@@ -403,7 +416,7 @@ export default function LabelsPanel() {
                   disabled={buying}
                   className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-40"
                 >
-                  {buying ? 'Buying…' : `Yes — buy ${n} and charge ${money(n * unit)}`}
+                  {buying ? 'Buying…' : `Yes — buy ${n}, about ${money(est?.total ?? 0)}`}
                 </button>
                 <button
                   onClick={() => setArmed(false)}
@@ -433,13 +446,7 @@ export default function LabelsPanel() {
               {progress.done ? 'Bought' : 'Buying'} {progress.bought} of {progress.total} — {money(progress.spent)}
             </h3>
             {progress.done && runId && (
-              <a
-                href={`/api/shipping/labels/pdf?store_id=${encodeURIComponent(activeStore)}&run_id=${runId}`}
-                target="_blank" rel="noreferrer"
-                className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black"
-              >
-                Print labels
-              </a>
+              <PrintButton storeId={activeStore} runId={runId} onError={setErr} />
             )}
           </div>
           <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-tt-card">
@@ -555,6 +562,58 @@ function DayCalendar({ days, today, selected, onToggle }: {
     </div>
   );
 }
+
+/**
+ * Fetch the stack and open it in a tab, rather than linking straight at the route.
+ *
+ * A plain link hands the decision to the browser: even with `Content-Disposition: inline`,
+ * Chrome's "download PDFs instead of opening them" setting saves the file, which is what
+ * happened on the first real run. Fetching to a blob and opening THAT bypasses the header
+ * entirely, so it renders in the viewer and Cmd-P works.
+ *
+ * It also makes failure legible. The route answers a 502 with JSON when it cannot fetch every
+ * document, and a link would have opened a tab full of raw JSON; here that becomes an error
+ * message. Nothing is lost either way — the labels are already bought and the stack can be
+ * rebuilt at any time.
+ */
+function PrintButton({ storeId, runId, onError }: {
+  storeId: string; runId: string; onError: (m: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  async function open() {
+    setBusy(true); onError('');
+    try {
+      const url = `/api/shipping/labels/pdf?store_id=${encodeURIComponent(storeId)}&run_id=${runId}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        let msg = `Could not build the stack (${res.status})`;
+        try { const j = await res.json(); msg = j.error ?? msg; } catch { /* not JSON */ }
+        onError(`${msg} — the labels are bought; try printing again.`);
+        return;
+      }
+      const blob = await res.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const w = window.open(objUrl, '_blank');
+      if (!w) {
+        onError('Your browser blocked the new tab — allow pop-ups for this site, then print again.');
+      }
+      // Revoked late: revoking immediately can race the new tab's load in some browsers.
+      setTimeout(() => URL.revokeObjectURL(objUrl), 60_000);
+    } catch (e) {
+      onError(`Could not build the stack: ${e instanceof Error ? e.message : String(e)}`);
+    } finally { setBusy(false); }
+  }
+  return (
+    <button
+      onClick={open}
+      disabled={busy}
+      className="cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-50"
+    >
+      {busy ? 'Building the stack…' : 'Print labels'}
+    </button>
+  );
+}
+
 
 /** Two-step release, in-page for the same reason Buy is — a native dialog may never appear. */
 function ReleaseButton({ onRelease }: { onRelease: () => void }) {

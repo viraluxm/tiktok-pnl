@@ -220,6 +220,109 @@ export async function readSpendWindows(
   return summarizeLedgerSpend(data ?? [], Date.now(), runTotal);
 }
 
+
+/** One observed purchase: how many orders the box held, and what its label cost. */
+export interface PricePoint { orders: number; price: number }
+
+export interface SizedEstimate {
+  boxes: number;
+  total: number;
+  /** Observed spread, not a confidence interval: the cheapest and dearest this mix has cost. */
+  low: number;
+  high: number;
+  currency: string;
+  /** 'history' when every box size had prior sales, 'nearest' when some borrowed a neighbour. */
+  basis: 'history' | 'nearest' | 'fallback';
+  samples: number;
+}
+
+/**
+ * Estimate a run from the SIZE of each box, not a flat average.
+ *
+ * A flat average cannot work here. Measured over the first 21 real purchases, price tracks how
+ * many orders a box holds with a correlation of 0.853: a single-order box is about $4.01 and a
+ * 20-order combine is $11.45. The Wednesday test run was all large combines, so a $4.24 average
+ * built mostly from single-item labels under-predicted $107.65 by 69%.
+ *
+ * A size with no history borrows the NEAREST size that has some, which is deliberately
+ * non-parametric: with 21 points a fitted line would look more authoritative than the data
+ * supports, and the observed min and max of a real neighbouring bucket are honest numbers. With
+ * no history at all it falls back to the flat measured price.
+ *
+ * The result carries a RANGE because a single number invites being read as a quote, and there is
+ * no quote: Create Packages charges when it is called.
+ */
+export function estimateForSizes(history: PricePoint[], sizes: number[]): SizedEstimate {
+  const clean = history.filter(
+    (h) => Number.isFinite(h.price) && h.price > 0 && Number.isFinite(h.orders) && h.orders > 0,
+  );
+  if (!sizes.length) {
+    return { boxes: 0, total: 0, low: 0, high: 0, currency: 'USD', basis: 'fallback', samples: clean.length };
+  }
+
+  const buckets = new Map<number, number[]>();
+  for (const h of clean) {
+    const arr = buckets.get(h.orders) ?? [];
+    arr.push(h.price);
+    buckets.set(h.orders, arr);
+  }
+
+  const stat = (prices: number[]) => ({
+    mean: prices.reduce((a, b) => a + b, 0) / prices.length,
+    min: Math.min(...prices),
+    max: Math.max(...prices),
+  });
+
+  let borrowed = false;
+  const pick = (size: number) => {
+    const exact = buckets.get(size);
+    if (exact) return stat(exact);
+    if (!buckets.size) return { mean: FALLBACK_UNIT_PRICE, min: FALLBACK_UNIT_PRICE, max: FALLBACK_UNIT_PRICE };
+    borrowed = true;
+    // Nearest populated size; ties go to the LARGER one, which errs toward over-estimating
+    // rather than surprising someone with a bigger bill than the button promised.
+    let best = [...buckets.keys()][0];
+    for (const k of buckets.keys()) {
+      const d = Math.abs(k - size), bd = Math.abs(best - size);
+      if (d < bd || (d === bd && k > best)) best = k;
+    }
+    return stat(buckets.get(best) as number[]);
+  };
+
+  let total = 0, low = 0, high = 0;
+  for (const size of sizes) {
+    const st = pick(size);
+    total += st.mean; low += st.min; high += st.max;
+  }
+  const r = (n: number) => Math.round(n * 100) / 100;
+  return {
+    boxes: sizes.length,
+    total: r(total), low: r(low), high: r(high),
+    currency: 'USD',
+    basis: !clean.length ? 'fallback' : borrowed ? 'nearest' : 'history',
+    samples: clean.length,
+  };
+}
+
+/** Read the size/price history and estimate a run from its actual box sizes. */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+export async function estimateSizedSpend(
+  admin: any, userId: string, storeId: string, sizes: number[],
+): Promise<SizedEstimate> {
+  const { data } = await admin
+    .from('shipping_label_purchases')
+    .select('price_amount, order_ids')
+    .eq('user_id', userId).eq('store_id', storeId).eq('status', 'purchased')
+    .not('price_amount', 'is', null)
+    .order('purchased_at', { ascending: false })
+    .limit(PRICE_SAMPLE_SIZE);
+  const history: PricePoint[] = (data ?? []).map((r: { price_amount: unknown; order_ids: unknown }) => ({
+    orders: Array.isArray(r.order_ids) ? r.order_ids.length : 1,
+    price: Number(r.price_amount),
+  }));
+  return estimateForSizes(history, sizes);
+}
+
 /**
  * Read recent prices out of the ledger and size the run.
  *

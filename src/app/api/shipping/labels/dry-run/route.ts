@@ -7,7 +7,9 @@ import { planPageSequence } from '@/lib/shipping/labelPlan';
 import {
   resolveLabelRun, applyHealed, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
 } from '@/lib/shipping/labelRun';
-import { MAX_MANIFEST_BOXES, estimateSpend, readSpendWindows } from '@/lib/shipping/purchaseGuards';
+import {
+  MAX_MANIFEST_BOXES, estimateSizedSpend, readSpendWindows,
+} from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120;
@@ -101,7 +103,9 @@ export async function GET(req: Request) {
 
   const plan = run.plan;
   const toBuy = run.boxes.filter((b) => !alreadyBought.has(b.group_key));
-  const spend = await estimateSpend(admin, user.id, storeId, toBuy.length);
+  // Estimated from each box's ACTUAL size, because price tracks order count (r = 0.853 over
+  // the first 21 purchases: $4.01 for a single, $11.45 for a 20-order combine).
+  const spend = await estimateSizedSpend(admin, user.id, storeId, toBuy.map((b) => b.order_ids.length));
 
   return NextResponse.json({
     dry_run: true,
