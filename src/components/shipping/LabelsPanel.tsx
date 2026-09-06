@@ -582,9 +582,16 @@ export default function LabelsPanel() {
               </span>
               <span className="flex items-center gap-3">
                 <PrintButton
+                  runIds={[...picked]} onError={setErr} small section="singles"
+                  label="Singles only" onPrinted={() => { void loadHistory(); }}
+                />
+                <PrintButton
+                  runIds={[...picked]} onError={setErr} small section="mixed"
+                  label="Bundles only" onPrinted={() => { void loadHistory(); }}
+                />
+                <PrintButton
                   runIds={[...picked]} onError={setErr} small
-                  label={`Print ${picked.size} runs as one stack`}
-                  onPrinted={() => { void loadHistory(); }}
+                  label="Everything" onPrinted={() => { void loadHistory(); }}
                 />
                 <button onClick={() => setPicked(new Set())} className="cursor-pointer text-xs text-tt-muted underline">
                   Clear
@@ -670,10 +677,28 @@ export default function LabelsPanel() {
                     </button>
                   )}
                   {r.printable > 0 && (
-                    <PrintButton
-                      storeId={activeStore} runId={r.run_id} onError={setErr} small
-                      onPrinted={() => { void loadHistory(); }}
-                    />
+                    <>
+                      {/* Two piles, two files — they are worked by different people at the same
+                          time, so splitting one PDF by hand at the banner is wasted effort. */}
+                      {r.singles > 0 && (
+                        <PrintButton
+                          storeId={activeStore} runId={r.run_id} onError={setErr} small
+                          section="singles" label={`Singles (${r.singles})`}
+                          onPrinted={() => { void loadHistory(); }}
+                        />
+                      )}
+                      {(r.mixed + r.unbound) > 0 && (
+                        <PrintButton
+                          storeId={activeStore} runId={r.run_id} onError={setErr} small
+                          section="mixed" label={`Bundles (${r.mixed + r.unbound})`}
+                          onPrinted={() => { void loadHistory(); }}
+                        />
+                      )}
+                      <PrintButton
+                        storeId={activeStore} runId={r.run_id} onError={setErr} small
+                        onPrinted={() => { void loadHistory(); }}
+                      />
+                    </>
                   )}
                 </span>
               </li>
@@ -830,9 +855,11 @@ function DayCalendar({ days, today, selected, onToggle }: {
  * message. Nothing is lost either way — the labels are already bought and the stack can be
  * rebuilt at any time.
  */
-function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted }: {
+function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted, section }: {
   storeId?: string; runId?: string; runIds?: string[];
   onError: (m: string) => void; small?: boolean; label?: string; onPrinted?: () => void;
+  /** Omit for the whole stack; 'singles' and 'mixed' are the two piles as separate files. */
+  section?: 'singles' | 'mixed';
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
@@ -856,7 +883,8 @@ function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted 
       const many = (runIds?.length ?? 0) > 0;
       const ids = many ? (runIds as string[]).join(',') : (runId as string);
       const base = `/api/shipping/labels/pdf?run_id=${ids}`
-        + (storeId && !many ? `&store_id=${encodeURIComponent(storeId)}` : '');
+        + (storeId && !many ? `&store_id=${encodeURIComponent(storeId)}` : '')
+        + (section ? `&section=${section}` : '');
 
       const fetchPart = async (from?: number, to?: number) => {
         const u = from == null ? base : `${base}&from=${from}&to=${to}`;
