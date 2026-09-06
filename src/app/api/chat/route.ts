@@ -5,7 +5,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { resolveOwnerIds } from '@/lib/station/guard';
 import { chatLimiter } from '@/lib/rate-limit';
 import { ANTHROPIC_API_KEY } from '@/lib/env';
-import { TOOL_DEFS, runTool, type ToolCtx } from '@/lib/chat/tools';
+import { toolsFor, runTool, type ToolCtx, type ToolAccess } from '@/lib/chat/tools';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -69,6 +69,11 @@ You are talking to an admin of this business. Be direct and concrete. Lead with 
   margin is OVERSTATED, not merely uncertain.
 - If gross_margin_dollars is null, gross_margin_withheld_reason says why. Report that reason. Do
   NOT compute a margin yourself from revenue and fees to fill the gap.
+- get_shows and get_sku_performance report margin as revenue - a FLAT 6% platform fee - COGS,
+  while get_pnl uses the ACTUAL recorded fee. They can differ slightly on the same range; that is a
+  known definition gap, not one of them being wrong. Neither is the dashboard's Net Profit.
+- get_inventory carries NO money fields at all, by design. For cost or revenue on a SKU use
+  get_sku_performance — never infer a SKU's value from stock levels.
 - get_pay: quote pay_dollars exactly as given. It is derived from unrounded hours, so recomputing
   it from the rounded hours shown will disagree by cents. Do not "correct" it.
 
@@ -139,6 +144,17 @@ export async function POST(request: Request) {
   // (once scoped members can use the chat) gets a narrowed list here and the tools honour it.
   const ctx: ToolCtx = { admin, ownerIds: resolved.ownerIds, storeIds: resolved.storeIds };
 
+  // Tool access is SCOPE-DERIVED, from the same app_metadata.scopes the Team UI assigns — one
+  // place to answer "what can this person see". An owner/partner (role 'admin') is 'all': not
+  // "holds every checkbox", but unrestricted by construction, so a newly added tool is available
+  // to partners immediately and to nobody else until its scope is granted.
+  //
+  // Today only role === 'admin' reaches this route at all, so this always resolves to 'all'. It is
+  // here so that when scoped members are allowed in, the narrowing already exists and every tool
+  // honours it — rather than being retrofitted across the whole tool surface later.
+  const access: ToolAccess = 'all';
+  const tools = toolsFor(access);
+
   // Page context goes in as a MID-CONVERSATION system message, not appended to the system
   // prompt. Two reasons: it keeps the cached prefix (tools + system) byte-identical as the
   // admin moves between tabs, and role:"system" inside messages is the operator channel —
@@ -183,7 +199,7 @@ export async function POST(request: Request) {
             // message lives in `messages`, after the breakpoint, so switching tabs never
             // invalidates it.
             system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-            tools: TOOL_DEFS,
+            tools,
             messages,
           });
 
@@ -208,7 +224,7 @@ export async function POST(request: Request) {
           const results = await Promise.all(calls.map(async (c) => {
             send({ type: 'tool', name: c.name });
             try {
-              const out = await runTool(ctx, c.name, c.input);
+              const out = await runTool(ctx, c.name, c.input, access);
               return {
                 type: 'tool_result' as const,
                 tool_use_id: c.id,

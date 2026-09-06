@@ -149,7 +149,92 @@ export const TOOL_DEFS: Anthropic.Beta.BetaTool[] = [
     },
     strict: true,
   },
+  {
+    name: 'get_shows',
+    description:
+      'Per-live-show performance for a date range (max 92 days): auctions, units, GMV, COGS and ' +
+      'margin per session. Use for "how did last night\'s show do", comparing shows, best/worst shows.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', pattern: ISO_DATE, description: 'Start date, inclusive (YYYY-MM-DD).' },
+        to: { type: 'string', pattern: ISO_DATE, description: 'End date, inclusive (YYYY-MM-DD).' },
+      },
+      required: ['from', 'to'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: 'get_inventory',
+    description:
+      'Current stock and reorder signals per SKU: qty on hand, lead time, reorder point and ' +
+      'suggested reorder units. Use for "what needs reordering", "how much X do we have", stockouts. ' +
+      'Contains NO revenue or cost — use get_sku_performance for money questions about SKUs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        needs_reorder_only: { type: 'boolean', description: 'True to return only SKUs at or below their reorder point.' },
+      },
+      required: ['needs_reorder_only'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    name: 'get_sku_performance',
+    description:
+      'Per-SKU sales performance for a date range (max 92 days): units sold, revenue, COGS and ' +
+      'margin, alongside stock and reorder fields. Use for best/worst sellers and per-product margin.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', pattern: ISO_DATE, description: 'Start date, inclusive (YYYY-MM-DD).' },
+        to: { type: 'string', pattern: ISO_DATE, description: 'End date, inclusive (YYYY-MM-DD).' },
+        limit: { type: 'integer', description: 'Max SKUs to return, ranked by revenue. Use 20 unless more are needed.' },
+      },
+      required: ['from', 'to', 'limit'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
 ];
+
+
+// ── Tool access is SCOPE-DERIVED ────────────────────────────────────────────
+// Each tool maps to the same capability scope the Team UI already assigns (app_metadata.scopes),
+// so there is exactly ONE place to answer "what can this person see". A separate chat-permissions
+// surface would be a second answer to that question, and the two would drift.
+//
+// 'all' means an unrestricted caller — an owner/partner (role === 'admin'). Admins are not scope
+// filtered at all: they hold every tool by construction, not by holding every checkbox.
+export type ToolAccess = 'all' | string[];
+
+export const TOOL_SCOPES: Record<string, string> = {
+  get_roster: 'team',
+  get_schedule: 'team',
+  get_pay: 'team',
+  get_pnl: 'pnl',
+  get_sku_performance: 'pnl',
+  get_shows: 'shows',
+  get_inventory: 'inventory',
+};
+
+/** The tool definitions a caller may see. Unknown scopes contribute nothing (fail closed). */
+export function toolsFor(access: ToolAccess): Anthropic.Beta.BetaTool[] {
+  if (access === 'all') return TOOL_DEFS;
+  const held = new Set(access);
+  return TOOL_DEFS.filter((t) => held.has(TOOL_SCOPES[t.name] ?? '\u0000none'));
+}
+
+/** Server-side re-check. Never trust that the model only called what it was offered. */
+function assertAllowed(access: ToolAccess, name: string): void {
+  if (access === 'all') return;
+  const need = TOOL_SCOPES[name];
+  if (!need || !access.includes(need)) {
+    throw new Error(`not permitted: ${name} requires the '${need ?? 'unknown'}' scope`);
+  }
+}
 
 const MAX_RANGE_DAYS = 92;
 
@@ -448,13 +533,139 @@ async function getPay(ctx: ToolCtx, input: { date_in_period?: string }) {
   };
 }
 
-export async function runTool(ctx: ToolCtx, name: string, input: unknown): Promise<unknown> {
+
+const TZ = 'America/Los_Angeles';
+
+// ── get_shows ───────────────────────────────────────────────────────────────
+// pnl_by_show_as computes margin as revenue x 0.94 - COGS (a FLAT 6% platform fee), whereas
+// get_pnl uses the ACTUAL platform_fee_cents recorded per order. The two therefore differ slightly
+// on the same range — surfaced in `margin_note` so the difference reads as a known definition gap
+// rather than one of the numbers being wrong.
+async function getShows(ctx: ToolCtx, input: { from: string; to: string }) {
+  const span = daysBetween(input.from, input.to);
+  if (!Number.isFinite(span)) throw new Error('from/to must be YYYY-MM-DD dates');
+  if (span < 0) throw new Error('`from` must be on or before `to`');
+  if (span > MAX_RANGE_DAYS) throw new Error(`range too wide: ${span + 1} days, max ${MAX_RANGE_DAYS}.`);
+
+  const { data, error } = await ctx.admin.rpc('pnl_by_show_as', {
+    p_owner_user_ids: ctx.ownerIds, p_from: input.from, p_to: input.to, p_tz: TZ,
+  });
+  if (error) throw new Error(`shows read failed: ${(error as { message?: string }).message ?? String(error)}`);
+
+  const d = (c: unknown) => Math.round(Number(c) || 0) / 100;
+  return {
+    range: { from: input.from, to: input.to, tz: TZ, days: span + 1 },
+    margin_note:
+      'margin_dollars = GMV - 6% platform fee - COGS. This is NOT the dashboard\'s Net Profit ' +
+      '(which also subtracts shipping, affiliate and labor). It also uses a FLAT 6% fee, whereas ' +
+      'get_pnl uses the actual recorded fee — so the two can differ slightly on the same range.',
+    count: (data ?? []).length,
+    shows: ((data ?? []) as Record<string, unknown>[]).map((r) => ({
+      session_id: r.session_id,
+      title: r.title,
+      started_at: r.started_at,
+      ended_at: r.ended_at,
+      auctions: Number(r.auctions) || 0,
+      units: Number(r.units) || 0,
+      gmv_dollars: d(r.gmv_cents),
+      cogs_dollars: d(r.cogs_cents),
+      margin_dollars: d(r.net_profit_cents),
+    })),
+  };
+}
+
+// ── get_inventory ───────────────────────────────────────────────────────────
+// pnl_reorder_by_sku_as is REVENUE-FREE by construction — it is structurally incapable of emitting
+// price or cost, which is what makes it safe for a restricted caller. Do not join cost onto it here.
+async function getInventory(ctx: ToolCtx, input: { needs_reorder_only?: boolean }) {
+  const { data, error } = await ctx.admin.rpc('pnl_reorder_by_sku_as', {
+    p_owner_user_ids: ctx.ownerIds, p_tz: TZ,
+  });
+  if (error) throw new Error(`inventory read failed: ${(error as { message?: string }).message ?? String(error)}`);
+
+  let rows = ((data ?? []) as Record<string, unknown>[]).map((r) => ({
+    sku_id: r.sku_id,
+    sku_number: r.sku_number,
+    title: r.title,
+    is_active: r.is_active,
+    qty_on_hand: Number(r.qty_on_hand) || 0,
+    lead_time_days: r.lead_time_days,
+    reorder_point: Number(r.reorder_point) || 0,
+    suggested_reorder_units: Number(r.reorder_units) || 0,
+    reorder_window_days: r.reorder_window_days,
+    needs_reorder: (Number(r.qty_on_hand) || 0) <= (Number(r.reorder_point) || 0),
+  }));
+  const total = rows.length;
+  if (input.needs_reorder_only) rows = rows.filter((r) => r.needs_reorder);
+
+  return {
+    note: 'Stock and reorder signals only — carries no revenue or cost by design. Use get_sku_performance for money questions.',
+    total_skus: total,
+    returned: rows.length,
+    needs_reorder_count: rows.filter((r) => r.needs_reorder).length,
+    skus: rows,
+  };
+}
+
+// ── get_sku_performance ─────────────────────────────────────────────────────
+async function getSkuPerformance(ctx: ToolCtx, input: { from: string; to: string; limit?: number }) {
+  const span = daysBetween(input.from, input.to);
+  if (!Number.isFinite(span)) throw new Error('from/to must be YYYY-MM-DD dates');
+  if (span < 0) throw new Error('`from` must be on or before `to`');
+  if (span > MAX_RANGE_DAYS) throw new Error(`range too wide: ${span + 1} days, max ${MAX_RANGE_DAYS}.`);
+
+  const { data, error } = await ctx.admin.rpc('pnl_by_sku_as', {
+    p_owner_user_ids: ctx.ownerIds, p_from: input.from, p_to: input.to, p_tz: TZ,
+  });
+  if (error) throw new Error(`sku performance read failed: ${(error as { message?: string }).message ?? String(error)}`);
+
+  const d = (c: unknown) => Math.round(Number(c) || 0) / 100;
+  const all = ((data ?? []) as Record<string, unknown>[])
+    .map((r) => ({
+      sku_id: r.sku_id,
+      sku_number: r.sku_number,
+      title: r.title,
+      is_active: r.is_active,
+      units_sold: Number(r.units_sold) || 0,
+      revenue_dollars: d(r.revenue_cents),
+      cogs_dollars: d(r.cogs_cents),
+      margin_dollars: d(r.net_profit_cents),
+      qty_on_hand: Number(r.qty_on_hand) || 0,
+      reorder_point: Number(r.reorder_point) || 0,
+    }))
+    .sort((a, b) => b.revenue_dollars - a.revenue_dollars);
+
+  const limit = Math.max(1, Math.min(200, Math.trunc(Number(input.limit) || 20)));
+  return {
+    range: { from: input.from, to: input.to, tz: TZ, days: span + 1 },
+    margin_note:
+      'margin_dollars = revenue - 6% platform fee - COGS. NOT the dashboard\'s Net Profit. ' +
+      'A SKU with no cost recorded shows cogs 0 and an OVERSTATED margin — say so if you see it.',
+    total_skus: all.length,
+    returned: Math.min(limit, all.length),
+    ranked_by: 'revenue_dollars desc',
+    skus: all.slice(0, limit),
+  };
+}
+
+export async function runTool(
+  ctx: ToolCtx,
+  name: string,
+  input: unknown,
+  access: ToolAccess = 'all',
+): Promise<unknown> {
+  // Re-check scope here, not just when building the tool list. The offered list is a hint to the
+  // model; this is the boundary.
+  assertAllowed(access, name);
   const args = (input ?? {}) as Record<string, never>;
   switch (name) {
     case 'get_roster': return getRoster(ctx, args);
     case 'get_schedule': return getSchedule(ctx, args as never);
     case 'get_pnl': return getPnl(ctx, args as never);
     case 'get_pay': return getPay(ctx, args as never);
+    case 'get_shows': return getShows(ctx, args as never);
+    case 'get_inventory': return getInventory(ctx, args as never);
+    case 'get_sku_performance': return getSkuPerformance(ctx, args as never);
     default: throw new Error(`unknown tool: ${name}`);
   }
 }

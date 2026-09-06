@@ -37,7 +37,7 @@ transpile(join(here, '../employees.ts'), 'employees.mjs');
 const toolsUrl = transpile(join(here, 'tools.ts'), 'tools.mjs', [
   ["'@/lib/employees'", "'./employees.mjs'"],
 ]);
-const { runTool, TOOL_DEFS } = await import(toolsUrl);
+const { runTool, TOOL_DEFS, toolsFor, TOOL_SCOPES } = await import(toolsUrl);
 const { isPayableShift } = await import(pathToFileURL(join(outDir, 'employees.mjs')).href);
 
 let passed = 0;
@@ -99,7 +99,51 @@ const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!url || !key) {
   console.log('\n(skipping live reads — SUPABASE env not loaded; use --env-file=.env.local)');
-  console.log(`\n${passed} checks passed`);
+  console.log('\nscope gating');
+{
+  check('every tool declares a scope', TOOL_DEFS.every((t) => TOOL_SCOPES[t.name]),
+    TOOL_DEFS.map((t) => `${t.name}:${TOOL_SCOPES[t.name]}`).join(' '));
+  check('admin ("all") sees every tool', toolsFor('all').length === TOOL_DEFS.length,
+    `${TOOL_DEFS.length} tools`);
+  const teamOnly = toolsFor(['team']).map((t) => t.name).sort();
+  check('a team-only member sees only team tools',
+    teamOnly.join(',') === 'get_pay,get_roster,get_schedule', teamOnly.join(','));
+  check('an unknown scope grants nothing (fail closed)', toolsFor(['nonsense']).length === 0);
+  check('no scope at all grants nothing', toolsFor([]).length === 0);
+
+  // The offered list is a hint; the boundary is the server-side re-check.
+  let denied = null;
+  try { await runTool({ admin, ownerIds, storeIds }, 'get_pnl', { from: '2026-09-04', to: '2026-09-04', store_id: 'all', group_by: 'total' }, ['team']); }
+  catch (e) { denied = e; }
+  check('calling an out-of-scope tool is refused server-side even if requested',
+    denied != null && /not permitted/.test(denied.message), denied ? denied.message.slice(0, 52) : 'NOT DENIED');
+}
+
+console.log('\nget_shows / get_inventory / get_sku_performance');
+{
+  const sh = await runTool({ admin, ownerIds, storeIds }, 'get_shows', { from: '2026-08-25', to: '2026-09-05' });
+  check('get_shows returns sessions', sh.count >= 0, `${sh.count} shows`);
+  check('get_shows never calls it net profit', !JSON.stringify(sh).includes('net_profit'), 'margin_dollars only');
+
+  const inv = await runTool({ admin, ownerIds, storeIds }, 'get_inventory', { needs_reorder_only: false });
+  check('get_inventory returns skus', inv.total_skus > 0, `${inv.total_skus} skus, ${inv.needs_reorder_count} need reorder`);
+  // Scan the DATA ROWS, not the whole payload — the payload includes an explanatory note that
+  // legitimately contains the word "revenue", and matching on that is a false positive.
+  const moneyKeys = [...new Set(inv.skus.flatMap((x) => Object.keys(x)))]
+    .filter((k) => /revenue|cogs|cost|price|margin|profit/i.test(k));
+  check('get_inventory rows carry NO revenue or cost field', moneyKeys.length === 0,
+    moneyKeys.length ? `LEAKED: ${moneyKeys.join(', ')}` : `${Object.keys(inv.skus[0] ?? {}).length} stock-only fields`);
+  const only = await runTool({ admin, ownerIds, storeIds }, 'get_inventory', { needs_reorder_only: true });
+  check('needs_reorder_only narrows the list', only.returned <= inv.returned,
+    `${only.returned} of ${inv.total_skus}`);
+
+  const perf = await runTool({ admin, ownerIds, storeIds }, 'get_sku_performance', { from: '2026-08-01', to: '2026-08-31', limit: 5 });
+  check('get_sku_performance ranks by revenue and honours limit',
+    perf.skus.length <= 5 && perf.skus.every((x, i, a) => i === 0 || a[i-1].revenue_dollars >= x.revenue_dollars),
+    `top ${perf.skus.length} of ${perf.total_skus}`);
+}
+
+console.log(`\n${passed} checks passed`);
   process.exit(0);
 }
 const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
@@ -258,6 +302,50 @@ console.log('\nget_pay');
   const bad = r.employees.filter((e) => Math.abs(e.pay_dollars - e.hours * e.hourly_rate) > 0.01);
   check('pay reconciles against reported hours x rate', bad.length === 0,
     bad.length ? `${bad.length} drifted: ${bad[0].name} ${bad[0].pay_dollars} vs ${(bad[0].hours*bad[0].hourly_rate).toFixed(2)}` : `${r.employees.length} employees`);
+}
+
+console.log('\nscope gating');
+{
+  check('every tool declares a scope', TOOL_DEFS.every((t) => TOOL_SCOPES[t.name]),
+    TOOL_DEFS.map((t) => `${t.name}:${TOOL_SCOPES[t.name]}`).join(' '));
+  check('admin ("all") sees every tool', toolsFor('all').length === TOOL_DEFS.length,
+    `${TOOL_DEFS.length} tools`);
+  const teamOnly = toolsFor(['team']).map((t) => t.name).sort();
+  check('a team-only member sees only team tools',
+    teamOnly.join(',') === 'get_pay,get_roster,get_schedule', teamOnly.join(','));
+  check('an unknown scope grants nothing (fail closed)', toolsFor(['nonsense']).length === 0);
+  check('no scope at all grants nothing', toolsFor([]).length === 0);
+
+  // The offered list is a hint; the boundary is the server-side re-check.
+  let denied = null;
+  try { await runTool({ admin, ownerIds, storeIds }, 'get_pnl', { from: '2026-09-04', to: '2026-09-04', store_id: 'all', group_by: 'total' }, ['team']); }
+  catch (e) { denied = e; }
+  check('calling an out-of-scope tool is refused server-side even if requested',
+    denied != null && /not permitted/.test(denied.message), denied ? denied.message.slice(0, 52) : 'NOT DENIED');
+}
+
+console.log('\nget_shows / get_inventory / get_sku_performance');
+{
+  const sh = await runTool({ admin, ownerIds, storeIds }, 'get_shows', { from: '2026-08-25', to: '2026-09-05' });
+  check('get_shows returns sessions', sh.count >= 0, `${sh.count} shows`);
+  check('get_shows never calls it net profit', !JSON.stringify(sh).includes('net_profit'), 'margin_dollars only');
+
+  const inv = await runTool({ admin, ownerIds, storeIds }, 'get_inventory', { needs_reorder_only: false });
+  check('get_inventory returns skus', inv.total_skus > 0, `${inv.total_skus} skus, ${inv.needs_reorder_count} need reorder`);
+  // Scan the DATA ROWS, not the whole payload — the payload includes an explanatory note that
+  // legitimately contains the word "revenue", and matching on that is a false positive.
+  const moneyKeys = [...new Set(inv.skus.flatMap((x) => Object.keys(x)))]
+    .filter((k) => /revenue|cogs|cost|price|margin|profit/i.test(k));
+  check('get_inventory rows carry NO revenue or cost field', moneyKeys.length === 0,
+    moneyKeys.length ? `LEAKED: ${moneyKeys.join(', ')}` : `${Object.keys(inv.skus[0] ?? {}).length} stock-only fields`);
+  const only = await runTool({ admin, ownerIds, storeIds }, 'get_inventory', { needs_reorder_only: true });
+  check('needs_reorder_only narrows the list', only.returned <= inv.returned,
+    `${only.returned} of ${inv.total_skus}`);
+
+  const perf = await runTool({ admin, ownerIds, storeIds }, 'get_sku_performance', { from: '2026-08-01', to: '2026-08-31', limit: 5 });
+  check('get_sku_performance ranks by revenue and honours limit',
+    perf.skus.length <= 5 && perf.skus.every((x, i, a) => i === 0 || a[i-1].revenue_dollars >= x.revenue_dollars),
+    `top ${perf.skus.length} of ${perf.total_skus}`);
 }
 
 console.log(`\n${passed} checks passed`);
