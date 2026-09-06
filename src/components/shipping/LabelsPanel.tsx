@@ -69,6 +69,7 @@ interface RunRow {
   run_id: string; scope: string | null; at: string | null; store_id: string | null;
   labels: number; purchased: number; claimed: number; failed: number;
   singles: number; mixed: number; unbound: number; spent: number; printable: number;
+  printed: number;
   failures?: Array<{ orders: string[]; code: string | null; reason: string | null }>;
 }
 
@@ -583,6 +584,7 @@ export default function LabelsPanel() {
                 <PrintButton
                   runIds={[...picked]} onError={setErr} small
                   label={`Print ${picked.size} runs as one stack`}
+                  onPrinted={() => { void loadHistory(); }}
                 />
                 <button onClick={() => setPicked(new Set())} className="cursor-pointer text-xs text-tt-muted underline">
                   Clear
@@ -620,6 +622,10 @@ export default function LabelsPanel() {
                     {r.failed > 0 && (
                       <span className="ml-2 text-xs text-tt-red">· {r.failed} failed</span>
                     )}
+                    {/* The state an operator looks for the morning after. A bought run and a
+                        printed run are otherwise identical, and a run that never got printed is
+                        a day of parcels that never ship. */}
+                    {r.printable > 0 && <PrintedBadge printed={r.printed} total={r.printable} />}
                   </span>
                   {(r.failures?.length ?? 0) > 0 && (
                     /* A count is not actionable. These orders were NOT charged and NOT labelled,
@@ -666,6 +672,7 @@ export default function LabelsPanel() {
                   {r.printable > 0 && (
                     <PrintButton
                       storeId={activeStore} runId={r.run_id} onError={setErr} small
+                      onPrinted={() => { void loadHistory(); }}
                     />
                   )}
                 </span>
@@ -823,9 +830,9 @@ function DayCalendar({ days, today, selected, onToggle }: {
  * message. Nothing is lost either way — the labels are already bought and the stack can be
  * rebuilt at any time.
  */
-function PrintButton({ storeId, runId, runIds, onError, small, label }: {
+function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted }: {
   storeId?: string; runId?: string; runIds?: string[];
-  onError: (m: string) => void; small?: boolean; label?: string;
+  onError: (m: string) => void; small?: boolean; label?: string; onPrinted?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
@@ -898,6 +905,8 @@ function PrintButton({ storeId, runId, runIds, onError, small, label }: {
       }
       // Revoked late: revoking at once can race the new tab's load in some browsers.
       setTimeout(() => URL.revokeObjectURL(objUrl), 120_000);
+      // The route marked these labels printed; reload so the badge reflects it immediately.
+      onPrinted?.();
     } catch (e) {
       onError(`${e instanceof Error ? e.message : String(e)} — the labels are bought; try printing again.`);
     } finally { setBusy(false); setNote(''); }
@@ -938,6 +947,31 @@ function ReleaseButton({ onRelease }: { onRelease: () => void }) {
         Keep
       </button>
     </div>
+  );
+}
+
+/** printed / partly / not printed, from the per-label marks. */
+function PrintedBadge({ printed, total }: { printed: number; total: number }) {
+  if (printed === 0) {
+    return (
+      <span className="ml-2 rounded bg-tt-yellow/10 px-1.5 py-0.5 text-[11px] text-tt-yellow">
+        not printed
+      </span>
+    );
+  }
+  if (printed < total) {
+    // A part-served stack is the interesting case: the download stopped halfway and some labels
+    // genuinely never reached paper. Saying "printed" here would hide missing parcels.
+    return (
+      <span className="ml-2 rounded bg-tt-yellow/10 px-1.5 py-0.5 text-[11px] text-tt-yellow">
+        {printed} of {total} printed
+      </span>
+    );
+  }
+  return (
+    <span className="ml-2 rounded bg-tt-green/10 px-1.5 py-0.5 text-[11px] text-tt-green">
+      printed
+    </span>
   );
 }
 
