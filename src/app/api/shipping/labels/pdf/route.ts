@@ -317,6 +317,29 @@ export async function GET(req: Request) {
   }
 
   const pdf = await out.save();
+
+  // ── Mark what was actually served as printed. ──
+  //
+  // After the bytes are built, so a failure earlier does not claim a stack was printed. Only
+  // the labels IN THIS SLICE are marked: the stack is served in parts, and a download that
+  // stops halfway has genuinely printed some and not others.
+  //
+  // `.is('printed_at', null)` keeps the FIRST print. Reprints are routine — a jam, a stack
+  // split between stations — and must not read as new work.
+  const servedPackages = seq.pages
+    .filter((p): p is Extract<typeof p, { kind: 'label' }> => p.kind === 'label')
+    .map((p) => p.package_id)
+    .filter(Boolean);
+  if (servedPackages.length) {
+    const now = new Date().toISOString();
+    for (let i = 0; i < servedPackages.length; i += 200) {
+      await admin.from('shipping_label_purchases')
+        .update({ printed_at: now })
+        .eq('user_id', user.id)
+        .in('package_id', servedPackages.slice(i, i + 200))
+        .is('printed_at', null);
+    }
+  }
   const stamp = new Date().toISOString().slice(0, 10);
   return new NextResponse(Buffer.from(pdf), {
     headers: {

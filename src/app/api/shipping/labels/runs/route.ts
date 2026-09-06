@@ -25,6 +25,7 @@ interface Row {
   run_id: string;
   store_id: string | null;
   order_ids: string[] | null;
+  printed_at: string | null;
   error_code: string | null;
   error_message: string | null;
   run_scope: string | null;
@@ -53,7 +54,7 @@ export async function GET(req: Request) {
   // would quietly drop older runs from the history — the exact runs someone is looking for.
   const SELECT =
     'run_id, run_scope, status, price_amount, purchased_at, created_at, banner_caption, '
-    + 'package_id, store_id, order_ids, error_code, error_message';
+    + 'package_id, store_id, order_ids, error_code, error_message, printed_at';
   const rows = await readAllPaged<Row>(
     (from, to) => {
       /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -72,6 +73,8 @@ export async function GET(req: Request) {
     labels: number; purchased: number; claimed: number; failed: number;
     singles: number; mixed: number; unbound: number; other: number;
     spent: number; printable: number;
+    /** Printable labels that have been served at least once. */
+    printed: number;
     /**
      * What failed and why. A count alone is not actionable: the real refusal seen so far was
      * PRE_COMBINE_PKG_CONTAIN_DIFF_ADDRESS — TikTok grouped two orders from one buyer that ship
@@ -88,7 +91,8 @@ export async function GET(req: Request) {
     const e = byRun.get(id) ?? {
       run_id: id, scope: r.run_scope ?? null, store_id: r.store_id ?? null,
       labels: 0, purchased: 0, claimed: 0, failed: 0,
-      singles: 0, mixed: 0, unbound: 0, other: 0, spent: 0, printable: 0, failures: [],
+      singles: 0, mixed: 0, unbound: 0, other: 0, spent: 0, printable: 0, printed: 0,
+      failures: [],
       at: null,
     };
     e.labels++;
@@ -109,7 +113,10 @@ export async function GET(req: Request) {
     const p = Number(r.price_amount);
     if (Number.isFinite(p) && p > 0) e.spent += p;
     // Only a purchased box with a package_id of ours can be fetched and printed.
-    if (r.status === 'purchased' && r.package_id) e.printable++;
+    if (r.status === 'purchased' && r.package_id) {
+      e.printable++;
+      if (r.printed_at) e.printed++;
+    }
 
     // Compared against the constants, never a text prefix. An earlier version matched
     // startsWith('MIXED') and silently counted zero once the banner was reworded to "BUNDLED
