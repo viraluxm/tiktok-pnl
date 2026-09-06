@@ -65,6 +65,12 @@ const SERVICE_ROLE_ONLY = new Set([
   // any signed-in user call them directly with someone else's p_owner_user_ids and read that
   // owner's P&L. They were missing from this list, not from the database.
   'pnl_by_show_as', 'pnl_show_hourly_as',
+  // Phase 2 pickup approval (129) — same posture again: SECURITY DEFINER, takes p_owner as a
+  // PARAMETER, and has no auth.uid() to trust because service_role has none. Called ONLY via
+  // createAdminClient in /api/admin/schedule/pickups, which resolves the owner from the session
+  // uid (never the request body). Granting `authenticated` would let any signed-in user transfer
+  // another tenant's shift to themselves.
+  'lensed_approve_shift_pickup',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
