@@ -117,11 +117,23 @@ alter table public.shift_instances
     )
   );
 
--- A non-NULL offer_state always carries its generation id, so history is never anonymous.
+-- The three offer columns are ALL-OR-NOTHING. An earlier draft only required offer_id when
+-- offer_state was set, which left two malformed shapes reachable:
+--   • offer_state NULL with a stray offer_id/offered_at — a shift that looks un-offered to every
+--     query but carries the debris of a past cycle, so an audit read cannot tell the two apart;
+--   • offer_state 'transferred'/'closed' with offered_at NULL — history with no start time.
+-- Neither is producible by the Phase 2 code, and there are no historical rows to grandfather (the
+-- columns are new and every one of the 190 live rows will have all three NULL), so tightening this
+-- is free. Combined with shift_instances_offered_is_owned below, the four accepted shapes are
+-- exactly: not-offered, offered, transferred, closed — and nothing else.
 alter table public.shift_instances drop constraint if exists shift_instances_offer_has_id;
+alter table public.shift_instances drop constraint if exists shift_instances_offer_triple_consistent;
 alter table public.shift_instances
-  add constraint shift_instances_offer_has_id
-  check (offer_state is null or offer_id is not null);
+  add constraint shift_instances_offer_triple_consistent
+  check (
+    (offer_state is null and offer_id is null and offered_at is null)
+    or (offer_state is not null and offer_id is not null and offered_at is not null)
+  );
 
 -- The board reads "live offers for this owner"; partial so it costs nothing for the 99% NULL case.
 create index if not exists idx_shift_instances_offered
@@ -320,9 +332,26 @@ begin
   end;
 
   -- ── The winner. ──
+  --
+  -- ORDERING MATTERS FROM HERE DOWN. The assignment has already moved, so a `return` past this
+  -- point would hand the caller a refusal while the transfer stayed committed — a torn state, and
+  -- precisely what this function exists to prevent. Every failure below therefore RAISES, which
+  -- aborts the function and rolls the whole transfer back. (The EMPLOYEE_DOUBLE_BOOKED handler
+  -- above can safely `return` because its exception block rolls back the instance update itself
+  -- and nothing else had been written yet.)
   update public.shift_claims
      set status = 'approved', approved_by = p_owner, approved_at = now()
    where id = p_claim_id and status = 'pending';
+  -- Row count IS checked: a predicate that matches nothing must never be mistaken for success.
+  -- Unreachable in practice — the claim is held FOR UPDATE from the top of this function and was
+  -- verified 'pending' there — so reaching it means the row changed under a held lock.
+  if not found then
+    raise exception 'PICKUP_WINNER_VANISHED claim=% shift=%', p_claim_id, p_shift_instance_id;
+  end if;
+  -- NOTE: idx_shift_claims_one_approved_pickup can also fire on this statement if another pickup
+  -- for this shift is somehow already approved. That unique_violation is deliberately NOT caught:
+  -- an unhandled error aborts the transaction and rolls the transfer back, which is the correct
+  -- outcome. Catching it would leave the assignment moved with no approved claim behind it.
 
   -- ── The rivals: same shift, same cycle, still pending. Closed honestly, not "rejected". ──
   update public.shift_claims

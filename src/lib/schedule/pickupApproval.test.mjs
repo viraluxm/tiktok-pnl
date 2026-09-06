@@ -172,6 +172,11 @@ console.log('\n8. MIGRATION 129 — the invariants the code relies on are actual
   check('offered ⇒ employee_id NOT NULL', /offered_is_owned[\s\S]*?employee_id is not null/.test(code));
   check('offered ⇒ released_at IS NULL', /offered_is_owned[\s\S]*?released_at is null/.test(code));
   check('offered ⇒ offer_id + offered_at present', /offered_is_owned[\s\S]*?offer_id is not null[\s\S]*?offered_at is not null/.test(code));
+  // The offer columns are all-or-nothing, so the two malformed shapes an earlier draft allowed —
+  // a stray offered_at under a NULL offer_state, and a terminal state with no offered_at — are
+  // both unrepresentable.
+  check('offer_state / offer_id / offered_at are ALL-OR-NOTHING',
+    /offer_triple_consistent[\s\S]*?\(offer_state is null and offer_id is null and offered_at is null\)[\s\S]*?or \(offer_state is not null and offer_id is not null and offered_at is not null\)/.test(code));
   check("offered ⇒ status in ('scheduled','claimed')", /offered_is_owned[\s\S]*?status in \('scheduled', 'claimed'\)/.test(code));
   check('pickup_request ⇒ offer_id NOT NULL', /pickup_has_offer[\s\S]*?kind = 'pickup_request' and offer_id is not null/.test(code));
   check('pickup_request can NEVER be auto_approved', /pickup_never_auto[\s\S]*?status <> 'auto_approved'/.test(code));
@@ -189,6 +194,14 @@ console.log('\n8. MIGRATION 129 — the invariants the code relies on are actual
   check('the RPC supersedes rivals in the same statement set', /status = 'superseded'[\s\S]*?kind = 'pickup_request'/.test(code));
   check('the RPC re-asserts the offer CAS on the transfer', /offer_state = 'offered'[\s\S]*?offer_id = p_offer_id/.test(code));
   check('the RPC clears released_at on transfer (the #217 invariant)', /released_at = null/.test(code));
+  // Every mutation must check its own row count. A predicate matching nothing must never read as
+  // success — and past the assignment update a refusal would be a torn state, so it RAISES instead.
+  check('the winner update checks row count and RAISES rather than returning',
+    /set status = 'approved'[\s\S]*?if not found then[\s\S]*?raise exception 'PICKUP_WINNER_VANISHED/.test(code));
+  check('the rivals update captures its row count', /status = 'superseded'[\s\S]*?get diagnostics v_superseded = row_count/.test(code));
+  check('the assignment update checks row count before continuing', /offer_state = 'transferred'[\s\S]*?if not found then[\s\S]*?OFFER_CHANGED/.test(code));
+  check('the only post-transfer failure path is a RAISE, never a silent refusal',
+    !/OFFER_CHANGED[\s\S]*?set status = 'approved'[\s\S]*?return jsonb_build_object\('ok', false/.test(code));
   check('the migration writes NO payroll table', !/from\s+shifts|into\s+shifts|update\s+public\.shifts/.test(code));
   check('and is additive — no DROP COLUMN / DROP TABLE anywhere', !/drop column|drop table/i.test(code));
 }
