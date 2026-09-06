@@ -23,6 +23,7 @@ const MAX_LIMIT = 100;
 
 interface Row {
   run_id: string;
+  store_id: string | null;
   run_scope: string | null;
   status: string;
   price_amount: number | string | null;
@@ -38,26 +39,33 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const url = new URL(req.url);
+  // store_id is OPTIONAL here. Omitting it lists runs across every shop, which is what the
+  // cross-shop print picker needs: the prep station does not care which shop a label came from.
   const storeId = url.searchParams.get('store_id');
-  if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
   const limit = Math.max(1, Math.min(MAX_LIMIT, Number(url.searchParams.get('limit')) || DEFAULT_LIMIT));
 
   const admin = createAdminClient();
 
   // Paged: a busy month is well past PostgREST's silent 1000-row cap, and a truncated read here
   // would quietly drop older runs from the history — the exact runs someone is looking for.
+  const SELECT =
+    'run_id, run_scope, status, price_amount, purchased_at, created_at, banner_caption, '
+    + 'package_id, store_id';
   const rows = await readAllPaged<Row>(
-    (from, to) => admin.from('shipping_label_purchases')
-      .select('run_id, run_scope, status, price_amount, purchased_at, created_at, banner_caption, package_id')
-      .eq('user_id', user.id).eq('store_id', storeId)
-      .order('created_at', { ascending: false })
-      .order('run_id', { ascending: true })
-      .range(from, to),
+    (from, to) => {
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const base: any = admin.from('shipping_label_purchases').select(SELECT).eq('user_id', user.id);
+      const scoped = storeId ? base.eq('store_id', storeId) : base;
+      return scoped
+        .order('created_at', { ascending: false })
+        .order('run_id', { ascending: true })
+        .range(from, to);
+    },
     'label runs history',
   );
 
   const byRun = new Map<string, {
-    run_id: string; scope: string | null;
+    run_id: string; scope: string | null; store_id: string | null;
     labels: number; purchased: number; claimed: number; failed: number;
     singles: number; mixed: number; unbound: number; other: number;
     spent: number; printable: number;
@@ -67,7 +75,7 @@ export async function GET(req: Request) {
   for (const r of rows) {
     const id = String(r.run_id);
     const e = byRun.get(id) ?? {
-      run_id: id, scope: r.run_scope ?? null,
+      run_id: id, scope: r.run_scope ?? null, store_id: r.store_id ?? null,
       labels: 0, purchased: 0, claimed: 0, failed: 0,
       singles: 0, mixed: 0, unbound: 0, other: 0, spent: 0, printable: 0,
       at: null,

@@ -5,8 +5,9 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { getPackageDocument } from '@/lib/tiktok/client';
 import {
-  itemsFromLedger, buildAssemblySequence, LEDGER_COLUMNS, type LedgerRow,
+  itemsFromLedger, itemsFromLedgerMerged, buildAssemblySequence, LEDGER_COLUMNS, type LedgerRow,
 } from '@/lib/shipping/assemblyPlan';
+import { BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION } from '@/lib/shipping/labelPlan';
 import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
 
 export const dynamic = 'force-dynamic';
@@ -70,10 +71,12 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const url = new URL(req.url);
+  // store_id is OPTIONAL. Runs may span shops: labels are bought per shop because each has its
+  // own TikTok connection, but the prep station packs by SKU and does not care which shop an
+  // order came from. Omitting it prints the given runs together.
   const storeId = url.searchParams.get('store_id');
   const runParam = url.searchParams.get('run_id');
   const preview = url.searchParams.get('preview') === '1';
-  if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
   if (!runParam) return NextResponse.json({ error: 'run_id is required' }, { status: 400 });
 
   // Several runs may be printed as one stack — a limited purchase run produces several. Each
@@ -89,17 +92,27 @@ export async function GET(req: Request) {
   const { data: rowData, error } = await admin
     .from('shipping_label_purchases')
     .select(`${LEDGER_COLUMNS}, run_id`)
-    .eq('user_id', user.id).eq('store_id', storeId)
+    .eq('user_id', user.id)
     .in('run_id', runIds);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const rows = (rowData ?? []) as Row[];
+  let rows = (rowData ?? []) as Row[];
+  // A store filter still applies when one is given, so single-shop printing is unchanged.
+  if (storeId) rows = rows.filter((r) => String(r.store_id ?? '') === storeId);
   if (!rows.length) {
     return NextResponse.json({ error: 'No purchases found for that run', run_ids: runIds }, { status: 404 });
   }
 
-  // Resolve run by run, so each purchase run is a contiguous block in the printed order.
-  const items = runIds.flatMap((rid) => itemsFromLedger(rows.filter((r) => r.run_id === rid)));
+  // ── One run keeps its own order; several are MERGED. ──
+  //
+  // A single run already prints in the order it was planned. Several runs are regrouped by SKU
+  // across all of them, which is the whole point of printing shops together: 108 of 190 SKUs
+  // sell in more than one shop, so per-shop stacks leave the same SKU in several piles and the
+  // prep station walks it repeatedly.
+  const merge = runIds.length > 1 && url.searchParams.get('merge') !== '0';
+  const items = merge
+    ? itemsFromLedgerMerged(rows, [BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION])
+    : runIds.flatMap((rid) => itemsFromLedger(rows.filter((r) => r.run_id === rid)));
   const seq = buildAssemblySequence(items, rows);
 
   // ── Slice by label index. ──
@@ -162,31 +175,68 @@ export async function GET(req: Request) {
   // silently producing a stack with a hole in it.
   const freshUrls = new Map<string, string>();
   if (seq.refetch.length) {
-    const { data: conn } = await admin
-      .from('tiktok_connections').select('*')
-      .eq('user_id', user.id).eq('store_id', storeId).maybeSingle();
-    if (!conn) return NextResponse.json({ error: 'Store not connected' }, { status: 404 });
-    const fresh = await getFreshToken(admin, conn as ConnRow, { skewMinutes: 30 });
-    const token = fresh.accessToken as string;
-    const cipher = (fresh.shopCipher ?? (conn as { shop_cipher: string }).shop_cipher) as string;
+    // ── Each label is refreshed with ITS OWN shop's token. ──
+    //
+    // A merged stack spans shops, and every shop is a separate TikTok connection: using one
+    // shop's token to ask for another's document fails, and would have failed as a per-package
+    // error that reads like a transient blip rather than a wiring mistake. Packages are grouped
+    // by store and each group uses the credentials for that store.
+    const storeOfPackage = new Map<string, string>();
+    for (const r of rows) {
+      if (r.package_id && r.store_id) storeOfPackage.set(String(r.package_id), String(r.store_id));
+    }
+    const byStore = new Map<string, string[]>();
+    for (const packageId of seq.refetch) {
+      const sid = storeOfPackage.get(packageId);
+      if (!sid) continue;
+      const arr = byStore.get(sid) ?? [];
+      arr.push(packageId);
+      byStore.set(sid, arr);
+    }
 
     const failures: string[] = [];
-    await pooled(seq.refetch, FETCH_CONCURRENCY, async (packageId) => {
-      try {
-        const doc = await getPackageDocument(token, cipher, packageId);
-        if (!doc.doc_url) { failures.push(packageId); return; }
-        freshUrls.set(packageId, doc.doc_url);
-        await admin.from('shipping_label_purchases')
-          .update({
-            doc_url: doc.doc_url,
-            doc_url_expires_at: new Date(Date.now() + 23 * 3_600_000).toISOString(),
-            tracking_number: doc.tracking_number, doc_error: null,
-          })
-          .eq('user_id', user.id).eq('store_id', storeId).eq('package_id', packageId);
-      } catch (e) {
-        failures.push(`${packageId}: ${e instanceof Error ? e.message : String(e)}`);
+    for (const [sid, packageIds] of byStore) {
+      const { data: conn } = await admin
+        .from('tiktok_connections').select('*')
+        .eq('user_id', user.id).eq('store_id', sid).maybeSingle();
+      if (!conn) {
+        failures.push(`store ${sid} is not connected (${packageIds.length} labels)`);
+        continue;
       }
-    });
+      const fresh = await getFreshToken(admin, conn as ConnRow, { skewMinutes: 30 });
+      const token = fresh.accessToken as string;
+      const cipher = (fresh.shopCipher ?? (conn as { shop_cipher: string }).shop_cipher) as string;
+
+      await pooled(packageIds, FETCH_CONCURRENCY, async (packageId) => {
+        try {
+          const doc = await getPackageDocument(token, cipher, packageId);
+          if (!doc.doc_url) { failures.push(packageId); return; }
+          freshUrls.set(packageId, doc.doc_url);
+          await admin.from('shipping_label_purchases')
+            .update({
+              doc_url: doc.doc_url,
+              doc_url_expires_at: new Date(Date.now() + 23 * 3_600_000).toISOString(),
+              tracking_number: doc.tracking_number, doc_error: null,
+            })
+            .eq('user_id', user.id).eq('store_id', sid).eq('package_id', packageId);
+
+          // Write the tracking number where the PACK STATION reads it. Without this the
+          // scanner cannot find a freshly bought label until the 30-minute sync cron catches
+          // up, and someone has to remember to press "Fetch label tracking" first.
+          if (doc.tracking_number) {
+            const row = rows.find((r) => String(r.package_id) === packageId);
+            for (const oid of row?.order_ids ?? []) {
+              await admin.from('synced_order_ids')
+                .update({ tracking_number: doc.tracking_number })
+                .eq('user_id', user.id).eq('store_id', sid).eq('order_id', oid)
+                .is('tracking_number', null);
+            }
+          }
+        } catch (e) {
+          failures.push(`${packageId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      });
+    }
     if (failures.length) {
       return NextResponse.json(
         {
