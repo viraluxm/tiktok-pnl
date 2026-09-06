@@ -693,9 +693,14 @@ function DayCalendar({ days, today, selected, onToggle }: {
           const info = byDay.get(d);
           const on = selected.has(d);
           const usable = !!info && info.ready > 0;
-          // A night with boxes but none ready is DONE, not missing. Saying so beats having it
-          // silently disappear once its labels are bought — which reads as data going astray.
-          const done = !!info && info.ready === 0;
+          // THREE states, not two. `ready === 0` alone conflates two opposite situations:
+          //   boxes === 0 — every label for that night is bought. Genuinely done.
+          //   boxes  >  0 — nothing is bought and everything is under the age floor because the
+          //                 show only just finished. WAITING, and buyable in a few hours.
+          // Calling the second one done was actively misleading: lotsofsteals showed a tick on a
+          // night holding 148 unbought boxes and 394 orders, which invites skipping it entirely.
+          const done = !!info && info.ready === 0 && info.boxes === 0;
+          const waiting = !!info && info.ready === 0 && info.boxes > 0;
           return (
             <button
               key={d}
@@ -705,19 +710,23 @@ function DayCalendar({ days, today, selected, onToggle }: {
               className={`rounded-md border px-1 py-1.5 text-center transition-colors ${
                 on ? 'border-tt-green bg-tt-green/10 text-tt-text'
                   : usable ? 'cursor-pointer border-tt-border text-tt-text hover:border-tt-border-hover'
-                    : done ? 'border-transparent text-tt-muted/60'
-                      : 'border-transparent text-tt-muted/30'
+                    : waiting ? 'border-tt-yellow/30 text-tt-yellow/70'
+                      : done ? 'border-transparent text-tt-muted/60'
+                        : 'border-transparent text-tt-muted/30'
               }`}
               title={!info ? 'nothing to buy'
                 : info.ready > 0 ? `${info.ready} ready of ${info.boxes} · ${info.orders} orders`
-                  : 'all labels bought for this night'}
+                  : waiting
+                    ? `${info.boxes} boxes not ready yet — every order is under the age floor, so `
+                      + 'their combine groups may still be growing. Check back in a few hours.'
+                    : 'all labels bought for this night'}
             >
               <span className="block text-sm leading-tight">
                 {Number(d.slice(8, 10))}
                 {d === today && <span className="ml-0.5 text-[9px] text-tt-muted">•</span>}
               </span>
-              <span className="block text-[10px] leading-tight text-tt-muted">
-                {info?.ready ? info.ready : done ? '✓' : ''}
+              <span className={`block text-[10px] leading-tight ${waiting ? 'text-tt-yellow/70' : 'text-tt-muted'}`}>
+                {info?.ready ? info.ready : done ? '✓' : waiting ? 'wait' : ''}
               </span>
             </button>
           );
