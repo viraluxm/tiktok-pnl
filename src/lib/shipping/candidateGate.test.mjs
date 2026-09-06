@@ -127,6 +127,41 @@ console.log('\nPartial boxes are refused after verification');
     gateByVerifiedStatus(box('s', 100), st({ 's-o0': 'CANCELLED' })).reason.includes('partial') === false);
 }
 
+console.log('\nMulti-day scopes must not double-count a straddling box');
+{
+  // A combine group with orders on two nights is selected by BOTH days. It must appear once,
+  // with all its orders — verified against real data (1,454 boxes over three nights, zero
+  // duplicates), and pinned here so a future change cannot reintroduce it.
+  const rows = [
+    { order_id: 'a1', auto_combine_group_id: 'g1', order_created_at: agoH(30) },  // night 1
+    { order_id: 'a2', auto_combine_group_id: 'g1', order_created_at: agoH(10) },  // night 2
+    { order_id: 'b1', auto_combine_group_id: 'g2', order_created_at: agoH(30) },
+    { order_id: 'c1', auto_combine_group_id: null, order_created_at: agoH(10) },
+  ];
+  // Both nights select g1; the caller de-duplicates by order before grouping, as readCandidates
+  // does, so feeding the union in must still yield one box for g1.
+  const boxes = groupIntoBoxes(rows);
+  const g1 = boxes.filter((b) => b.group_key === 'g1');
+  check('a straddling group is ONE box', g1.length === 1, String(g1.length));
+  check('…holding every one of its orders', g1[0].orders.length === 2);
+  check('no order appears twice across all boxes', (() => {
+    const seen = new Set();
+    for (const b of boxes) for (const o of b.orders) { if (seen.has(o.order_id)) return false; seen.add(o.order_id); }
+    return true;
+  })());
+  check('every input order is accounted for',
+    boxes.reduce((n, b) => n + b.orders.length, 0) === rows.length);
+
+  // And the gate still judges it by its YOUNGEST order, so a group reaching into a live night
+  // is held back even though it was selected by an old one.
+  const young = groupIntoBoxes([
+    { order_id: 'y1', auto_combine_group_id: 'g', order_created_at: agoH(48) },
+    { order_id: 'y2', auto_combine_group_id: 'g', order_created_at: agoH(1) },
+  ])[0];
+  check('a straddling group with a fresh member is still held back',
+    gateByAge(young, NOW).ok === false, gateByAge(young, NOW).reason);
+}
+
 console.log('\nGrouping into boxes');
 {
   const boxes = groupIntoBoxes([

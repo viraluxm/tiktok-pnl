@@ -90,7 +90,11 @@ console.log('\nSCOPE bounds a run now, not a per-call limit');
 
 console.log('\nThe ceiling is a sanity backstop, not the control');
 {
-  check('the ceiling is 1500', MAX_MANIFEST_BOXES === 1500);
+  check('the ceiling is 3000', MAX_MANIFEST_BOXES === 3000);
+  // Three unbought nights came to 1,454 boxes on real data, so the old 1,500 was close enough
+  // to bite on an ordinary catch-up.
+  check('three real nights (1,454 boxes) fit with room to spare',
+    authorizeRun(okRun(1454)).ok === true);
   check('exactly at the ceiling is allowed', authorizeRun(okRun(MAX_MANIFEST_BOXES)).ok === true);
   const over = authorizeRun(okRun(MAX_MANIFEST_BOXES + 1));
   check('one over is refused', over.ok === false && over.code === 'over_cap', over.code);

@@ -12,7 +12,7 @@ import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-// GET /api/shipping/labels/pdf?store_id=…&run_id=…[&preview=1]
+// GET /api/shipping/labels/pdf?store_id=…&run_id=…[&preview=1][&from=0&to=59]
 //
 // The printable stack for a purchase run: a separator slip, then that SKU's labels, repeating,
 // with bundles last. Returns one PDF sized to the labels themselves.
@@ -28,9 +28,28 @@ export const maxDuration = 300;
 //
 // `preview=1` returns the sequence as JSON instead of a PDF — the same resolution, no
 // downloads, for checking what a stack will contain before sending it to a printer.
+//
+// IT RETURNS A SLICE, NOT ALWAYS THE WHOLE STACK. A serverless response is capped at 4.5MB and
+// a label page is roughly 55KB, so about 60 labels is the ceiling — measured: 1,400 labels
+// assemble in 2.4s but produce a 96MB file, which cannot be returned at all. Buying a day's
+// labels and then being unable to print them is the worst possible failure, so the route slices
+// by `from`/`to` over the LABEL index and reports `parts` so a caller can fetch them all and
+// stitch them together. Slicing on labels rather than pages keeps a label's own pages intact.
+//
+// Every slice carries the banners and slips for the sections it contains, so a part is
+// self-describing even if the parts are printed separately.
 
 /** Concurrent label downloads. Enough to be quick, few enough not to look like abuse. */
 const FETCH_CONCURRENCY = 6;
+
+/**
+ * Labels per response.
+ *
+ * Vercel returns at most 4.5MB and a label page is around 55KB, so 60 leaves headroom for the
+ * slips and banners that ride along with them. Measured against the real stack: 15 labels came
+ * to ~1MB.
+ */
+const LABELS_PER_PART = 60;
 
 type Row = LedgerRow & { run_id: string };
 
@@ -83,11 +102,42 @@ export async function GET(req: Request) {
   const items = runIds.flatMap((rid) => itemsFromLedger(rows.filter((r) => r.run_id === rid)));
   const seq = buildAssemblySequence(items, rows);
 
+  // ── Slice by label index. ──
+  //
+  // The window is over LABELS, not pages, so a label's pages are never split across parts. The
+  // banner and slip that head a section are carried into whichever part holds its labels.
+  const labelIdx: number[] = [];
+  seq.pages.forEach((p, i) => { if (p.kind === 'label') labelIdx.push(i); });
+  const totalLabels = labelIdx.length;
+  const parts = Math.max(1, Math.ceil(totalLabels / LABELS_PER_PART));
+  const fromRaw = Number(url.searchParams.get('from'));
+  const toRaw = Number(url.searchParams.get('to'));
+  const from = Number.isFinite(fromRaw) && fromRaw > 0 ? Math.floor(fromRaw) : 0;
+  const to = Number.isFinite(toRaw) && toRaw > 0
+    ? Math.min(Math.floor(toRaw), totalLabels - 1)
+    : totalLabels - 1;
+
+  if (totalLabels && (from > 0 || to < totalLabels - 1)) {
+    const firstPage = labelIdx[from] ?? 0;
+    const lastPage = labelIdx[to] ?? seq.pages.length - 1;
+    // Reach back for the section headers this slice sits under, so a part opens by saying what
+    // it holds rather than starting mid-pile with an unlabelled label.
+    const heads: typeof seq.pages = [];
+    for (let i = firstPage - 1; i >= 0; i--) {
+      if (seq.pages[i].kind === 'label') break;
+      heads.unshift(seq.pages[i]);
+    }
+    seq.pages = [...heads, ...seq.pages.slice(firstPage, lastPage + 1)];
+  }
+
   if (preview) {
     return NextResponse.json({
       run_ids: runIds,
       pages: seq.pages.length,
       labels: seq.labelCount,
+      total_labels: totalLabels,
+      labels_per_part: LABELS_PER_PART,
+      parts,
       slips: seq.slipCount,
       banners: seq.bannerCount,
       needs_refetch: seq.refetch.length,
@@ -225,6 +275,10 @@ export async function GET(req: Request) {
       'Cache-Control': 'no-store',
       // Surfaced in headers so a caller sees an incomplete stack without parsing the PDF.
       'X-Label-Count': String(seq.labelCount),
+      // So a caller knows how many more slices to fetch without a second round trip.
+      'X-Total-Labels': String(totalLabels),
+      'X-Parts': String(parts),
+      'X-Labels-Per-Part': String(LABELS_PER_PART),
       'X-Slip-Count': String(seq.slipCount),
       'X-Banner-Count': String(seq.bannerCount),
       'X-Missing-Count': String(seq.missing.length),

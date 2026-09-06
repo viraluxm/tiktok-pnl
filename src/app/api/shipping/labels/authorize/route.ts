@@ -11,7 +11,10 @@ import {
 } from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120;
+// Verification of a 3,000-box manifest is ~10,000 orders, or 200 concurrent calls at roughly
+// 16s per 100 — plus the candidate and SKU reads and 15 chunked inserts. 120s was cutting it
+// close enough to truncate; the ceiling is the most this platform allows.
+export const maxDuration = 300;
 
 // POST   /api/shipping/labels/authorize?store_id=…&confirm_boxes=N[&day=|&session_ids=][&unbound=]
 // DELETE /api/shipping/labels/authorize?store_id=…&run_id=…

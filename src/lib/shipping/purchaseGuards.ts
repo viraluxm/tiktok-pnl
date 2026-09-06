@@ -10,16 +10,21 @@
 /**
  * Sanity ceiling on one authorised manifest.
  *
- * NOT the primary control any more. The controls that matter are SCOPE (a day or named shows,
- * so a run means a definite set of work) and the confirm count (so the set was reviewed). This
- * is the backstop against a scope that resolved to something absurd — a bug, or a store whose
- * backlog was never bought down.
+ * NOT the primary control. The controls that matter are SCOPE (a day or named shows, so a run
+ * means a definite set of work) and the confirm count (so the set was reviewed). This is the
+ * backstop against a scope that resolved to something absurd — a bug, or a store whose backlog
+ * was never bought down.
  *
- * 1,500 sits well above real volume: the busiest fulfilment day in the 8 days to 2026-09-04 was
- * 863 boxes, and a normal day is 474-600. A legitimate day therefore always fits in one
- * authorisation, which is the point — the operator asked not to split a day across runs.
+ * 3,000 is set from what the pipeline can actually carry, not from a guess. The binding
+ * constraint upstream is verification: VERIFY_CALL_CAP x CHUNK = 10,000 orders, which at the
+ * measured 3.4 orders per box is about 2,900 boxes. Everything downstream scales past that —
+ * the manifest inserts in chunks of 200, the drain is chunked and resumable, and the PDF is
+ * sliced and stitched client-side.
+ *
+ * For context on real volume: three unbought nights came to 1,454 boxes, and 1,500 was close
+ * enough to bite. The busiest single fulfilment day measured was 863.
  */
-export const MAX_MANIFEST_BOXES = 1500;
+export const MAX_MANIFEST_BOXES = 3000;
 
 /**
  * Fallback unit price when the ledger holds no prior purchases, in USD.
