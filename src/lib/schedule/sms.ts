@@ -126,6 +126,7 @@ export async function broadcastShiftReleased(args: {
   const { data: busy } = await admin
     .from('shift_instances')
     .select('employee_id')
+    .eq('user_id', args.ownerUserId)
     .in('employee_id', ids)
     .eq('shift_date', args.shiftDate)
     .in('status', ['scheduled', 'claimed']);
@@ -133,9 +134,12 @@ export async function broadcastShiftReleased(args: {
   eligible = eligible.filter((e) => !busyIds.has(e.id));
 
   // Each recipient's active token → their personal link.
+  // Reads ACCESS TOKENS to build each recipient's personal link — owner-scoped so a bearer
+  // credential can never be selected outside the broadcasting account.
   const { data: tokens } = await admin
     .from('employee_access_tokens')
     .select('employee_id, token')
+    .eq('user_id', args.ownerUserId)
     .in('employee_id', eligible.map((e) => e.id))
     .eq('active', true);
   const tokenByEmp = new Map<string, string>();

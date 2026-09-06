@@ -53,10 +53,14 @@ export async function releaseShift(
   }
 
   // Read to validate ownership + timing and to carry shift facts into the event + broadcast.
+  // `instanceId` is CLIENT-SUPPLIED. The employee_id check below is what authorises the release,
+  // but scoping the read to the owner as well means a foreign id is never even fetched — defence in
+  // depth on a service-role query, matching the discipline in claim.ts and board.ts.
   const { data: inst, error } = await admin
     .from('shift_instances')
     .select('id, employee_id, status, starts_at, ends_at, shift_date, store_id, user_id')
     .eq('id', instanceId)
+    .eq('user_id', employee.user_id)
     .maybeSingle();
   if (error) throw new ScheduleError('READ_FAILED', error.message);
   if (!inst || inst.employee_id !== employee.id) throw new ScheduleError('NOT_YOUR_SHIFT');
@@ -71,6 +75,7 @@ export async function releaseShift(
   const { data: events, error: evReadErr } = await admin
     .from('attendance_events')
     .select('event_type, shift_date')
+    .eq('user_id', employee.user_id)
     .eq('employee_id', employee.id)
     .eq('pay_period_start', periodStart);
   if (evReadErr) throw new ScheduleError('READ_FAILED', evReadErr.message);
@@ -87,6 +92,7 @@ export async function releaseShift(
     .from('shift_instances')
     .update({ status: 'released', released_at: nowISO, released_by: employee.id, employee_id: null })
     .eq('id', instanceId)
+    .eq('user_id', employee.user_id)
     .eq('employee_id', employee.id)
     .eq('status', 'scheduled')
     .select('id, shift_date')

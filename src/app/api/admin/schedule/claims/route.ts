@@ -21,7 +21,8 @@ export async function GET() {
   const gate = await requireAdmin();
   if ('error' in gate) return gate.error;
   try {
-    const claims = await listPendingClaims();
+    // Owner scope comes from the SESSION, never from the request.
+    const claims = await listPendingClaims(gate.user.id);
     return NextResponse.json({ ok: true, claims });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
