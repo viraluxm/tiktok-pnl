@@ -12,7 +12,9 @@ import {
 } from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120;
+// Matches /authorize: the two must resolve the same scope, and a check that truncates where
+// the authorise does not would show the operator a smaller plan than they then buy.
+export const maxDuration = 300;
 
 // GET /api/shipping/labels/dry-run?store_id=…[&heal=1][&unbound=include]
 //
