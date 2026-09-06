@@ -173,6 +173,39 @@ export default function LabelsPanel() {
    * One click. The loop is internal because the approval is not: authorising claims the whole
    * manifest, and each drain request only turns claims into labels.
    */
+
+  /**
+   * Work through an authorised manifest until it is empty.
+   *
+   * Separate from buy() so an interrupted run can be picked up again. A day is ~23 minutes of
+   * calls, and a closed tab used to strand the manifest as claimed rows with nothing in the UI
+   * offering to continue — the labels were safe but invisible.
+   */
+  const drain = useCallback(async (
+    id: string, total: number, startBought = 0, startFailed = 0, startSpent = 0,
+  ) => {
+    setRunId(id);
+    setProgress({ total, bought: startBought, failed: startFailed, spent: startSpent, done: false });
+    let bought = startBought, failed = startFailed, spent = startSpent, guard = 0;
+    for (;;) {
+      if (guard++ > Math.ceil(total / DRAIN_CHUNK) + 20) {
+        setErr('Drain stopped making progress — re-open this tab to resume the run'); break;
+      }
+      const dp = new URLSearchParams({ store_id: activeStore, run_id: id, limit: String(DRAIN_CHUNK) });
+      const dRes = await fetch(`/api/shipping/labels/purchase?${dp.toString()}`, { method: 'POST' });
+      const d = await dRes.json();
+      if (!dRes.ok) { setErr(d.error ?? `Purchase failed (${dRes.status})`); break; }
+      if (d.code === 'disabled') { setErr(d.reason); break; }
+      bought += d.purchased ?? 0; failed += d.failed ?? 0; spent += d.spent ?? 0;
+      setProgress({ total, bought, failed, spent: Math.round(spent * 100) / 100, done: !!d.done });
+      if (d.done) break;
+      if ((d.purchased ?? 0) === 0 && (d.failed ?? 0) === 0) {
+        setErr('Nothing left to buy in this run'); break;
+      }
+    }
+    void loadHistory();
+  }, [activeStore, loadHistory]);
+
   async function buy() {
     if (!plan) return;
     const n = plan.counts.would_buy;
@@ -191,28 +224,7 @@ export default function LabelsPanel() {
       const id = aJson.run_id as string;
       setRunId(id);
       const total = (aJson.claimed as number) || n;
-      setProgress({ total, bought: 0, failed: 0, spent: 0, done: false });
-
-      // Drain. Each pass reports what remains, so progress reflects the ledger rather than a
-      // guess, and a stalled pass surfaces instead of looping forever.
-      let bought = 0, failed = 0, spent = 0, guard = 0;
-      for (;;) {
-        if (guard++ > Math.ceil(total / DRAIN_CHUNK) + 10) {
-          setErr('Drain stopped making progress — re-open this tab to resume the run'); break;
-        }
-        const dp = new URLSearchParams({ store_id: activeStore, run_id: id, limit: String(DRAIN_CHUNK) });
-        const dRes = await fetch(`/api/shipping/labels/purchase?${dp.toString()}`, { method: 'POST' });
-        const d = await dRes.json();
-        if (!dRes.ok) { setErr(d.error ?? `Purchase failed (${dRes.status})`); break; }
-        if (d.code === 'disabled') { setErr(d.reason); break; }
-        bought += d.purchased ?? 0; failed += d.failed ?? 0; spent += d.spent ?? 0;
-        setProgress({ total, bought, failed, spent: Math.round(spent * 100) / 100, done: !!d.done });
-        if (d.done) break;
-        // No forward progress and nothing failed means the manifest is stuck, not slow.
-        if ((d.purchased ?? 0) === 0 && (d.failed ?? 0) === 0) {
-          setErr('Nothing left to buy in this run'); break;
-        }
-      }
+      await drain(id, total, 0, 0, 0);
       setPlan(null);
       void loadHistory();
     } catch (e) {
@@ -567,11 +579,24 @@ export default function LabelsPanel() {
                     {r.mixed > 0 && ` · ${r.mixed} mixed`}
                   </span>
                 </span>
-                {r.printable > 0 && (
-                  <PrintButton
-                    storeId={activeStore} runId={r.run_id} onError={setErr} small
-                  />
-                )}
+                <span className="flex shrink-0 gap-2">
+                  {/* An unfinished manifest is money already approved but not yet spent, and its
+                      labels do not exist until it is drained. Offering it here is the only way
+                      back into a run whose tab was closed. */}
+                  {r.claimed > 0 && !buying && (
+                    <button
+                      onClick={() => { void drain(r.run_id, r.labels, r.purchased, r.failed, r.spent); }}
+                      className="cursor-pointer rounded-md border border-tt-yellow/50 px-3 py-1.5 text-xs text-tt-yellow hover:border-tt-yellow"
+                    >
+                      Finish {r.claimed} left
+                    </button>
+                  )}
+                  {r.printable > 0 && (
+                    <PrintButton
+                      storeId={activeStore} runId={r.run_id} onError={setErr} small
+                    />
+                  )}
+                </span>
               </li>
             ))}
           </ul>
@@ -689,29 +714,76 @@ function PrintButton({ storeId, runId, onError, small }: {
   storeId: string; runId: string; onError: (m: string) => void; small?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+
+  /**
+   * Fetch every part and stitch them into ONE file in the browser.
+   *
+   * The route can only return about 60 labels per response — a serverless reply is capped at
+   * 4.5MB and a label page is roughly 55KB, so a 1,400-label stack would be a 96MB body that
+   * cannot be sent at all. Merging client-side keeps each response small while still handing
+   * over a single PDF, which is what actually gets printed.
+   *
+   * pdf-lib is imported dynamically so its ~350KB stays out of the dashboard bundle until
+   * someone prints.
+   */
   async function open() {
-    setBusy(true); onError('');
+    setBusy(true); onError(''); setNote('');
     try {
-      const url = `/api/shipping/labels/pdf?store_id=${encodeURIComponent(storeId)}&run_id=${runId}`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        let msg = `Could not build the stack (${res.status})`;
-        try { const j = await res.json(); msg = j.error ?? msg; } catch { /* not JSON */ }
-        onError(`${msg} — the labels are bought; try printing again.`);
-        return;
+      const base = `/api/shipping/labels/pdf?store_id=${encodeURIComponent(storeId)}&run_id=${runId}`;
+
+      const fetchPart = async (from?: number, to?: number) => {
+        const u = from == null ? base : `${base}&from=${from}&to=${to}`;
+        const res = await fetch(u);
+        if (!res.ok) {
+          let msg = `Could not build the stack (${res.status})`;
+          try { const j = await res.json(); msg = j.error ?? msg; } catch { /* not JSON */ }
+          throw new Error(msg);
+        }
+        return {
+          bytes: new Uint8Array(await res.arrayBuffer()),
+          parts: Number(res.headers.get('X-Parts') ?? '1') || 1,
+          per: Number(res.headers.get('X-Labels-Per-Part') ?? '60') || 60,
+          total: Number(res.headers.get('X-Total-Labels') ?? '0') || 0,
+        };
+      };
+
+      setNote('Building…');
+      const first = await fetchPart();
+      let merged: Uint8Array<ArrayBufferLike> = first.bytes;
+
+      if (first.parts > 1) {
+        const { PDFDocument } = await import('pdf-lib');
+        const out = await PDFDocument.create();
+        const add = async (bytes: Uint8Array<ArrayBufferLike>) => {
+          const src = await PDFDocument.load(bytes);
+          for (const p of await out.copyPages(src, src.getPageIndices())) out.addPage(p);
+        };
+        // Part 1 is the un-sliced response, which for a multi-part stack is the whole thing —
+        // so refetch it as an explicit slice rather than double-adding every label.
+        for (let i = 0; i < first.parts; i++) {
+          setNote(`Building… part ${i + 1} of ${first.parts}`);
+          const from = i * first.per;
+          const to = Math.min(from + first.per - 1, first.total - 1);
+          const part = await fetchPart(from, to);
+          await add(part.bytes);
+        }
+        merged = await out.save();
       }
-      const blob = await res.blob();
+
+      const blob = new Blob([merged as unknown as BlobPart], { type: 'application/pdf' });
       const objUrl = URL.createObjectURL(blob);
       const w = window.open(objUrl, '_blank');
       if (!w) {
         onError('Your browser blocked the new tab — allow pop-ups for this site, then print again.');
       }
-      // Revoked late: revoking immediately can race the new tab's load in some browsers.
-      setTimeout(() => URL.revokeObjectURL(objUrl), 60_000);
+      // Revoked late: revoking at once can race the new tab's load in some browsers.
+      setTimeout(() => URL.revokeObjectURL(objUrl), 120_000);
     } catch (e) {
-      onError(`Could not build the stack: ${e instanceof Error ? e.message : String(e)}`);
-    } finally { setBusy(false); }
+      onError(`${e instanceof Error ? e.message : String(e)} — the labels are bought; try printing again.`);
+    } finally { setBusy(false); setNote(''); }
   }
+
   return (
     <button
       onClick={open}
@@ -720,7 +792,7 @@ function PrintButton({ storeId, runId, onError, small }: {
         ? 'cursor-pointer shrink-0 rounded-md border border-tt-border px-3 py-1.5 text-xs text-tt-text hover:border-tt-border-hover disabled:opacity-50'
         : 'cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-50'}
     >
-      {busy ? 'Building…' : small ? 'Reprint' : 'Print labels'}
+      {busy ? (note || 'Building…') : small ? 'Reprint' : 'Print labels'}
     </button>
   );
 }
