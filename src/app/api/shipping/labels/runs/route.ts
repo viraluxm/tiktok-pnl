@@ -24,6 +24,9 @@ const MAX_LIMIT = 100;
 interface Row {
   run_id: string;
   store_id: string | null;
+  order_ids: string[] | null;
+  error_code: string | null;
+  error_message: string | null;
   run_scope: string | null;
   status: string;
   price_amount: number | string | null;
@@ -50,7 +53,7 @@ export async function GET(req: Request) {
   // would quietly drop older runs from the history — the exact runs someone is looking for.
   const SELECT =
     'run_id, run_scope, status, price_amount, purchased_at, created_at, banner_caption, '
-    + 'package_id, store_id';
+    + 'package_id, store_id, order_ids, error_code, error_message';
   const rows = await readAllPaged<Row>(
     (from, to) => {
       /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -69,6 +72,14 @@ export async function GET(req: Request) {
     labels: number; purchased: number; claimed: number; failed: number;
     singles: number; mixed: number; unbound: number; other: number;
     spent: number; printable: number;
+    /**
+     * What failed and why. A count alone is not actionable: the real refusal seen so far was
+     * PRE_COMBINE_PKG_CONTAIN_DIFF_ADDRESS — TikTok grouped two orders from one buyer that ship
+     * to different addresses, so no single parcel can cover them. Nothing was charged, the box
+     * returns to the buyable count, and someone has to ship those orders separately. None of
+     * that is knowable from "1 failed".
+     */
+    failures: Array<{ orders: string[]; code: string | null; reason: string | null }>;
     at: string | null;
   }>();
 
@@ -77,13 +88,23 @@ export async function GET(req: Request) {
     const e = byRun.get(id) ?? {
       run_id: id, scope: r.run_scope ?? null, store_id: r.store_id ?? null,
       labels: 0, purchased: 0, claimed: 0, failed: 0,
-      singles: 0, mixed: 0, unbound: 0, other: 0, spent: 0, printable: 0,
+      singles: 0, mixed: 0, unbound: 0, other: 0, spent: 0, printable: 0, failures: [],
       at: null,
     };
     e.labels++;
     if (r.status === 'purchased') e.purchased++;
     else if (r.status === 'claimed') e.claimed++;
-    else if (r.status === 'failed') e.failed++;
+    else if (r.status === 'failed') {
+      e.failed++;
+      // Capped: a run that failed wholesale should not return thousands of rows to a summary.
+      if (e.failures.length < 25) {
+        e.failures.push({
+          orders: r.order_ids ?? [],
+          code: r.error_code ?? null,
+          reason: r.error_message ?? null,
+        });
+      }
+    }
 
     const p = Number(r.price_amount);
     if (Number.isFinite(p) && p > 0) e.spent += p;
