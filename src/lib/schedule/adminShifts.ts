@@ -339,3 +339,152 @@ async function notifyClaimer(ownerId: string, employeeId: string, instanceId: st
     console.error(`[schedule] notifyClaimer(${outcome}) failed:`, (e as Error).message);
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// PHASE 2 — SHIFT PICKUP REQUESTS (migration 129)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// These are DISTINCT from the legacy OT claim flow above and never share a query with it: every
+// statement filters kind='pickup_request'. The two coexist in shift_claims because a manager wants
+// one queue, not because they behave alike.
+
+export interface PickupRequestRow {
+  claim_id: string;
+  shift_instance_id: string;
+  offer_id: string;
+  shift_date: string;
+  starts_at: string;
+  ends_at: string;
+  /** who dropped it — still the assigned, responsible employee until this is approved */
+  offered_by_name: string;
+  requester_name: string;
+  requested_at: string;
+}
+
+/** Pending pickup requests for ONE owner. Owner-scoped in every query, per the #217 discipline. */
+export async function listPickupRequests(ownerId: string): Promise<PickupRequestRow[]> {
+  const admin = createAdminClient();
+  const { data: claims, error } = await admin
+    .from('shift_claims')
+    .select('id, shift_instance_id, claimed_by, claimed_at, offer_id')
+    .eq('user_id', ownerId)
+    .eq('kind', 'pickup_request')
+    .eq('status', 'pending')
+    .order('claimed_at', { ascending: true });
+  if (error) throw new ScheduleError('READ_FAILED', error.message);
+  const rows = claims ?? [];
+  if (rows.length === 0) return [];
+
+  const instIds = [...new Set(rows.map((r) => r.shift_instance_id as string))];
+  const { data: insts } = await admin
+    .from('shift_instances')
+    .select('id, shift_date, starts_at, ends_at, employee_id, offer_id, offer_state')
+    .eq('user_id', ownerId)
+    .in('id', instIds);
+  const instById = new Map((insts ?? []).map((i) => [i.id as string, i]));
+
+  const empIds = [
+    ...new Set([
+      ...rows.map((r) => r.claimed_by as string),
+      ...(insts ?? []).map((i) => i.employee_id as string).filter(Boolean),
+    ]),
+  ];
+  const { data: emps } = await admin
+    .from('employees')
+    .select('id, name')
+    .eq('user_id', ownerId)
+    .in('id', empIds);
+  const nameById = new Map((emps ?? []).map((e) => [e.id as string, e.name as string]));
+
+  return rows
+    .map((r) => {
+      const i = instById.get(r.shift_instance_id as string);
+      // Drop rows whose offer cycle has moved on — a stale request is not actionable and showing it
+      // would invite a manager to approve something the RPC would refuse anyway.
+      if (!i || i.offer_state !== 'offered' || i.offer_id !== r.offer_id) return null;
+      return {
+        claim_id: r.id as string,
+        shift_instance_id: i.id as string,
+        offer_id: r.offer_id as string,
+        shift_date: i.shift_date as string,
+        starts_at: i.starts_at as string,
+        ends_at: i.ends_at as string,
+        offered_by_name: nameById.get(i.employee_id as string) ?? 'Unknown',
+        requester_name: nameById.get(r.claimed_by as string) ?? 'Unknown',
+        requested_at: r.claimed_at as string,
+      };
+    })
+    .filter((x): x is PickupRequestRow => x !== null);
+}
+
+/**
+ * APPROVE a pickup — the assignment transfer.
+ *
+ * Delegates the whole multi-row change to lensed_approve_shift_pickup (migration 129) because it
+ * must be atomic: the winning claim, every rival claim, the assignment and the offer's terminal
+ * state all move together or not at all. Doing it as separate PostgREST writes permits exactly the
+ * half-states the product must never show — a claim approved with the assignment unmoved, or an
+ * assignment moved with rivals still pending and un-reapprovable because the CAS pre-state is gone.
+ *
+ * The RPC returns {ok:false, reason} for a refusal rather than raising, so a stale or already-taken
+ * offer reaches the manager as a sentence instead of a 500.
+ * rpc-grants: lensed_approve_shift_pickup
+ */
+const PICKUP_APPROVE_MESSAGES: Record<string, string> = {
+  CLAIM_NOT_FOUND: 'That pickup request no longer exists.',
+  CLAIM_NOT_PENDING: 'That request has already been decided.',
+  ALREADY_APPROVED: 'That request was already approved.',
+  SHIFT_NOT_FOUND: 'That shift no longer exists.',
+  OFFER_NOT_OPEN: 'This shift is no longer being offered.',
+  STALE_OFFER: 'This shift was re-offered — reload the queue.',
+  OFFER_CHANGED: 'This shift changed while you were deciding — reload the queue.',
+  SHIFT_UNOWNED: 'That shift has no assigned employee.',
+  ALREADY_ASSIGNED: 'That employee already has this shift.',
+  EMPLOYEE_UNAVAILABLE: 'That employee is no longer active.',
+  EMPLOYEE_DOUBLE_BOOKED: 'That employee is already scheduled that day.',
+};
+
+export async function approvePickup(input: {
+  ownerId: string;
+  claimId: string;
+  shiftInstanceId: string;
+  offerId: string;
+}): Promise<{ shift_instance_id: string; employee_id: string; superseded: number }> {
+  const admin = createAdminClient();
+  const { data, error } = await admin.rpc('lensed_approve_shift_pickup', {
+    p_owner: input.ownerId,
+    p_shift_instance_id: input.shiftInstanceId,
+    p_claim_id: input.claimId,
+    p_offer_id: input.offerId,
+  });
+  if (error) throw new ScheduleError('APPROVE_FAILED', error.message);
+  const r = (data ?? {}) as { ok?: boolean; reason?: string; employee_id?: string; superseded?: number };
+  if (!r.ok) {
+    const reason = r.reason ?? 'APPROVE_FAILED';
+    throw new ScheduleError(reason, PICKUP_APPROVE_MESSAGES[reason] ?? 'That pickup could not be approved.');
+  }
+  return {
+    shift_instance_id: input.shiftInstanceId,
+    employee_id: r.employee_id as string,
+    superseded: r.superseded ?? 0,
+  };
+}
+
+/**
+ * DECLINE one pickup request. Assignment is untouched, the offer stays OPEN, and other pending
+ * requests are untouched — declining one person is not withdrawing the shift. Only this claim moves
+ * pending → rejected, and only if it is still pending and still belongs to this owner.
+ */
+export async function declinePickup(input: { ownerId: string; claimId: string }): Promise<void> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from('shift_claims')
+    .update({ status: 'rejected', approved_by: input.ownerId, approved_at: new Date().toISOString() })
+    .eq('id', input.claimId)
+    .eq('user_id', input.ownerId)
+    .eq('kind', 'pickup_request')
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
+  if (error) throw new ScheduleError('DECLINE_FAILED', error.message);
+  if (!data) throw new ScheduleError('NOT_PENDING', 'That request has already been decided.');
+}

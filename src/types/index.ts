@@ -254,9 +254,25 @@ export interface ShiftInstance {
   excused_by: string | null; // auth.users id (manager action)
   excused_note: string | null;
   created_at: string;
+  // ── Phase 2 offer lifecycle (migration 129). ORTHOGONAL to `status`.
+  // 'offered' means the shift is on the pickup board AND STILL OWNED by employee_id — it does NOT
+  // imply status='released'. offer_id is the generation id: a pickup request or approval carrying
+  // an older one can never act on a re-offered shift.
+  offer_state?: OfferState;
+  offer_id?: string | null;
+  offered_at?: string | null;
 }
 
-export type ShiftClaimStatus = 'auto_approved' | 'pending' | 'approved' | 'rejected';
+/** Phase 2 offer lifecycle. NULL/absent = not offered (the overwhelming majority, forever). */
+export type OfferState = 'offered' | 'transferred' | 'closed' | null;
+
+// 'superseded' (migration 129): a pending PICKUP request that lost the race when the manager
+// approved a rival. Distinct from 'rejected' — nobody declined it — because the worker sees the
+// difference and the claim-rejected SMS says "wasn't approved", which would be a lie here.
+export type ShiftClaimStatus = 'auto_approved' | 'pending' | 'approved' | 'rejected' | 'superseded';
+
+/** 'ot_claim' = the legacy over-40h approval flow. 'pickup_request' = a Phase 2 Pick Up Shift. */
+export type ShiftClaimKind = 'ot_claim' | 'pickup_request';
 
 export interface ShiftClaim {
   id: string;
@@ -268,6 +284,10 @@ export interface ShiftClaim {
   projected_week_hours: number | null; // snapshot at claim time
   approved_by: string | null; // auth.users id (manager action)
   approved_at: string | null;
+  // ── migration 129. A pickup_request always carries the offer cycle it belongs to; an ot_claim
+  // never does (DB CHECK enforces both directions).
+  kind?: ShiftClaimKind;
+  offer_id?: string | null;
 }
 
 export interface EmployeeAccessToken {

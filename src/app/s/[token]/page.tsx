@@ -13,12 +13,22 @@ import {
 import { scheduleIsEmpty } from '@/lib/schedule/eligibility';
 import { DROP_CAP } from '@/lib/schedule/drops';
 import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate, isOvernight } from '@/lib/schedule/format';
-import { ReleaseButton, ClaimButton } from './parts';
+// ClaimButton only. The legacy ReleaseButton is deliberately no longer rendered: Phase 2's
+// "Drop Shift" is the employee's one drop affordance, and offering a shift the Phase 1 way would
+// null employee_id and strip the worker's responsibility — the exact thing Phase 2 forbids. The
+// /s/[token]/release endpoint and ReleaseButton itself are left in place, unreferenced from this
+// page, so nothing that still points at them breaks.
+import { ClaimButton } from './parts';
 import { ClockControls } from './ClockControls';
 import TimeOffButton from './TimeOffButton';
 import { ScheduleAutoRefresh } from './ScheduleAutoRefresh';
 import MySchedule from './MySchedule';
+import TeamSchedule from './TeamSchedule';
+import ScheduleTabs from './ScheduleTabs';
+import { DropShiftButton } from './phase2Parts';
 import { getWeekSchedule, resolveWeekStart } from '@/lib/schedule/mySchedule';
+import { getTeamSchedule, resolveTeamWeek } from '@/lib/schedule/teamSchedule';
+import { getAvailableShifts, getMyPickupRequests } from '@/lib/schedule/offer';
 import { laTodayISO } from '@/lib/schedule/timezone';
 
 export const dynamic = 'force-dynamic';
@@ -33,10 +43,14 @@ export default async function SchedulePage({
   searchParams,
 }: {
   params: Promise<{ token: string }>;
-  searchParams: Promise<{ week?: string | string[] }>;
+  searchParams: Promise<{ week?: string | string[]; view?: string | string[] }>;
 }) {
   const { token } = await params;
-  const { week } = await searchParams;
+  const { week, view } = await searchParams;
+  // Two views on ONE permanent link — never a second token, never a login. `?view=team` is the only
+  // switch; anything else is My Schedule, so a mangled URL degrades to the default rather than 404s.
+  const rawView = Array.isArray(view) ? view[0] : view;
+  const isTeamView = rawView === 'team';
 
   const ip = (await headers()).get('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
   if (!guardPublicReadAllowed(token, ip)) {
@@ -55,13 +69,23 @@ export default async function SchedulePage({
   const nowMs = now.getTime();
   const todayISO = laTodayISO(now);
   const weekStart = resolveWeekStart(week, todayISO);
-  const [myShifts, board, pendingClaims, { period, drops }, weekSchedule] = await Promise.all([
-    getMyShifts(employee),
-    getBoard(employee),
-    getMyPendingClaims(employee),
-    getCurrentPeriodDrops(employee),
-    getWeekSchedule(employee, weekStart),
-  ]);
+  const teamWeekStart = resolveTeamWeek(week, todayISO);
+  const [myShifts, board, pendingClaims, { period, drops }, weekSchedule, teamWeek, available, myPickups] =
+    await Promise.all([
+      getMyShifts(employee),
+      getBoard(employee),
+      getMyPendingClaims(employee),
+      getCurrentPeriodDrops(employee),
+      getWeekSchedule(employee, weekStart),
+      getTeamSchedule(employee, teamWeekStart),
+      getAvailableShifts(employee, now),
+      getMyPickupRequests(employee),
+    ]);
+  // Offered shifts are STILL MINE, so they stay in My Schedule and are merely marked. This is the
+  // lookup the card below uses to draw that badge and to hide a second Drop control.
+  const offeredIds = new Set(
+    myShifts.filter((s) => (s as { offer_state?: string | null }).offer_state === 'offered').map((s) => s.id),
+  );
 
   const periodEndLabel = fmtCalendarDate(period.end);
   const atCap = drops.drops >= DROP_CAP;
@@ -82,6 +106,28 @@ export default async function SchedulePage({
   // MY SCHEDULE always renders — it is the answer to "when do I work", week by week, and a week of
   // "Off" is a real answer. The action cards below only appear when there is something to act on.
   const mySchedule = <MySchedule token={token} schedule={weekSchedule} todayISO={todayISO} />;
+  const tabs = <ScheduleTabs token={token} active={isTeamView ? 'team' : 'mine'} availableCount={available.length} />;
+
+  // TEAM SCHEDULE is its own view of the same page and the same token. Clock controls live on My
+  // Schedule, so this branch renders no punch UI at all.
+  if (isTeamView) {
+    return (
+      <Shell>
+        {pageHeader}
+        {tabs}
+        <TeamSchedule token={token} week={teamWeek} available={available} todayISO={todayISO} />
+      </Shell>
+    );
+  }
+
+  const pickupBanner = myPickups.length > 0 && (
+    <div key="pickups" className="mb-6 rounded-lg border border-tt-cyan/40 bg-tt-cyan/10 px-4 py-3">
+      <p className="text-sm font-semibold text-tt-cyan">Pickup requested</p>
+      <p className="mt-0.5 text-xs text-tt-muted">
+        Waiting for manager approval · {myPickups.length} shift{myPickups.length === 1 ? '' : 's'}
+      </p>
+    </div>
+  );
 
   // Nothing to act on in any section → just the schedule. (Previously an empty-state sentence;
   // the week view now says the same thing more usefully.)
@@ -89,8 +135,10 @@ export default async function SchedulePage({
     return (
       <Shell>
         {pageHeader}
+        {tabs}
+        {pickupBanner}
         {mySchedule}
-        <Empty>Nothing to claim or approve right now.</Empty>
+        <Empty>Nothing to pick up or approve right now.</Empty>
       </Shell>
     );
   }
@@ -136,8 +184,12 @@ export default async function SchedulePage({
                   <span className="text-xs text-tt-yellow">Released · waiting for pickup</span>
                 ) : s.status === 'claimed' ? (
                   <span className="text-xs text-tt-green">Picked up</span>
+                ) : offeredIds.has(s.id) ? (
+                  // Offered, and still theirs. Say so plainly — the worker must not think they are
+                  // off the hook, and there is no second Drop control to press.
+                  <span className="shrink-0 text-xs text-tt-yellow">Offered · still yours</span>
                 ) : releasableNow ? (
-                  <ReleaseButton token={token} instanceId={s.id} periodEnd={periodEndLabel} atCap={atCap} dropsUsed={drops.drops} dropCap={DROP_CAP} />
+                  <DropShiftButton token={token} instanceId={s.id} startsAt={s.starts_at} endsAt={s.ends_at} />
                 ) : null}
               </div>
             </div>
@@ -176,6 +228,8 @@ export default async function SchedulePage({
   return (
     <Shell>
       {pageHeader}
+      {tabs}
+      {pickupBanner}
       {mySchedule}
 
       {/* An in-flight OT claim leads (the viewer just filed it and wants to see it landed), then:
