@@ -102,10 +102,14 @@ export default function LabelsPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [history, setHistory] = useState<RunRow[] | null>(null);
   const [historyTotal, setHistoryTotal] = useState(0);
-  /** Runs ticked for a combined print. May span shops — that is the point. */
+  /**
+   * Runs ticked for a combined print. May span shops — that is the point.
+   *
+   * There is no "combine these" mode to switch on: ticking runs IS the gesture, and the history
+   * always lists every shop. An earlier version gated both behind one checkbox, which conflated
+   * "show me other shops" with "let me combine" and hid the shop name until it was on.
+   */
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  /** When on, the history lists every shop so runs from several can print as one stack. */
-  const [allShops, setAllShops] = useState(false);
 
   /** Any change to what would be bought discards the reviewed plan — never buy an unread plan. */
   const invalidate = useCallback(() => {
@@ -113,16 +117,16 @@ export default function LabelsPanel() {
   }, []);
 
   const loadHistory = useCallback(async () => {
-    if (activeStore === 'all' && !allShops) { setHistory(null); return; }
     try {
-      const q = allShops ? '' : `?store_id=${encodeURIComponent(activeStore)}`;
-      const r = await fetch(`/api/shipping/labels/runs${q}`);
+      // Always every shop: a stack is printable whatever shop bought it, and the spend record
+      // is more use whole than sliced by whichever shop happens to be selected.
+      const r = await fetch('/api/shipping/labels/runs');
       if (!r.ok) { setHistory(null); return; }
       const j = await r.json();
       setHistory(j.runs ?? []);
       setHistoryTotal(j.total_spent ?? 0);
     } catch { setHistory(null); }
-  }, [activeStore, allShops]);
+  }, []);
 
   useEffect(() => { void loadHistory(); }, [loadHistory]);
 
@@ -250,8 +254,9 @@ export default function LabelsPanel() {
   if (activeStore === 'all') {
     return (
       <div className="rounded-lg border border-tt-border p-6 text-sm text-tt-muted">
-        Pick a specific shop above. Labels are bought per shop, so &ldquo;All stores&rdquo; has
-        nothing to buy.
+        Pick a specific shop above to buy labels — each shop is a separate TikTok connection.
+        Printing is not restricted that way: any shop&rsquo;s history lists every run, and
+        ticking several prints them as one stack.
       </div>
     );
   }
@@ -552,28 +557,14 @@ export default function LabelsPanel() {
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-sm font-semibold text-tt-text">Print history</h3>
             <span className="text-xs text-tt-muted">
-              {money(historyTotal)} on labels for {allShops ? 'all shops' : storeName}, all time
+              {money(historyTotal)} on labels across all shops, all time
             </span>
           </div>
           <p className="mt-1 text-xs text-tt-muted">
-            Labels stay printable — reprint a stack any time without buying again.
+            Labels stay printable — reprint a stack any time without buying again. Tick two or
+            more to print them as one stack; singles are regrouped by SKU across shops, so the
+            same item is one pile instead of one per shop.
           </p>
-
-          {/* Labels are BOUGHT per shop — each is its own TikTok connection — but the prep
-              station packs by SKU and does not care which shop an order came from. */}
-          <label className="mt-2 flex cursor-pointer items-start gap-2">
-            <input
-              type="checkbox" checked={allShops} className="mt-0.5 cursor-pointer"
-              onChange={(e) => { setAllShops(e.target.checked); setPicked(new Set()); }}
-            />
-            <span>
-              <span className="text-sm text-tt-text">Show every shop, and print them together</span>
-              <span className="block text-xs text-tt-muted">
-                Tick runs below to combine them into one stack. Singles are regrouped by SKU
-                across shops, so the same item is one pile instead of one per shop.
-              </span>
-            </span>
-          </label>
 
           {picked.size > 0 && (
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-tt-green/40 bg-tt-green/5 px-3 py-2">
@@ -608,7 +599,7 @@ export default function LabelsPanel() {
                 )}
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm text-tt-text">
-                    {allShops && r.store_id && (
+                    {r.store_id && (
                       <span className="mr-2 rounded bg-tt-card px-1.5 py-0.5 text-[11px] text-tt-muted">
                         {storesData?.stores?.find((x) => x.id === r.store_id)?.name ?? 'shop'}
                       </span>
@@ -702,9 +693,14 @@ function DayCalendar({ days, today, selected, onToggle }: {
           const info = byDay.get(d);
           const on = selected.has(d);
           const usable = !!info && info.ready > 0;
-          // A night with boxes but none ready is DONE, not missing. Saying so beats having it
-          // silently disappear once its labels are bought — which reads as data going astray.
-          const done = !!info && info.ready === 0;
+          // THREE states, not two. `ready === 0` alone conflates two opposite situations:
+          //   boxes === 0 — every label for that night is bought. Genuinely done.
+          //   boxes  >  0 — nothing is bought and everything is under the age floor because the
+          //                 show only just finished. WAITING, and buyable in a few hours.
+          // Calling the second one done was actively misleading: lotsofsteals showed a tick on a
+          // night holding 148 unbought boxes and 394 orders, which invites skipping it entirely.
+          const done = !!info && info.ready === 0 && info.boxes === 0;
+          const waiting = !!info && info.ready === 0 && info.boxes > 0;
           return (
             <button
               key={d}
@@ -714,19 +710,23 @@ function DayCalendar({ days, today, selected, onToggle }: {
               className={`rounded-md border px-1 py-1.5 text-center transition-colors ${
                 on ? 'border-tt-green bg-tt-green/10 text-tt-text'
                   : usable ? 'cursor-pointer border-tt-border text-tt-text hover:border-tt-border-hover'
-                    : done ? 'border-transparent text-tt-muted/60'
-                      : 'border-transparent text-tt-muted/30'
+                    : waiting ? 'border-tt-yellow/30 text-tt-yellow/70'
+                      : done ? 'border-transparent text-tt-muted/60'
+                        : 'border-transparent text-tt-muted/30'
               }`}
               title={!info ? 'nothing to buy'
                 : info.ready > 0 ? `${info.ready} ready of ${info.boxes} · ${info.orders} orders`
-                  : 'all labels bought for this night'}
+                  : waiting
+                    ? `${info.boxes} boxes not ready yet — every order is under the age floor, so `
+                      + 'their combine groups may still be growing. Check back in a few hours.'
+                    : 'all labels bought for this night'}
             >
               <span className="block text-sm leading-tight">
                 {Number(d.slice(8, 10))}
                 {d === today && <span className="ml-0.5 text-[9px] text-tt-muted">•</span>}
               </span>
-              <span className="block text-[10px] leading-tight text-tt-muted">
-                {info?.ready ? info.ready : done ? '✓' : ''}
+              <span className={`block text-[10px] leading-tight ${waiting ? 'text-tt-yellow/70' : 'text-tt-muted'}`}>
+                {info?.ready ? info.ready : done ? '✓' : waiting ? 'wait' : ''}
               </span>
             </button>
           );
