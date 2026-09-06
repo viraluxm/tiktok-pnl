@@ -109,19 +109,23 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
   // calendar's card model carries no `source` and can be stale, and getting this branch wrong
   // in either direction corrupts pay.
   const updateShift = useMutation({
-    mutationFn: async ({ id, start_time, end_time }: { id: string; start_time?: string; end_time?: string | null }) => {
+    mutationFn: async ({ id, start_time, end_time, break_minutes }: {
+      id: string; start_time?: string; end_time?: string | null; break_minutes?: number;
+    }) => {
       // Nothing to change → do not touch the row at all (see buildShiftEditPatch).
-      if (start_time === undefined && end_time === undefined) return null;
+      if (start_time === undefined && end_time === undefined && break_minutes === undefined) return null;
 
+      // break_minutes is read back for the same reason source/date are: the patch builder compares
+      // the edit against what is STORED, so a break-only save can tell "unchanged" from "set to 0".
       const { data: row, error: readErr } = await supabase
         .from('shifts')
-        .select('source, date, start_time, end_time')
+        .select('source, date, start_time, end_time, break_minutes')
         .eq('id', id)
         .single();
       if (readErr) throw readErr;
 
       // Which layer the correction lands in is decided in ONE place, unit-tested directly.
-      const patch = buildShiftEditPatch(row as EditableShiftRow, { start_time, end_time });
+      const patch = buildShiftEditPatch(row as EditableShiftRow, { start_time, end_time, break_minutes });
       if (patch == null) return null;
 
       const { data, error } = await supabase

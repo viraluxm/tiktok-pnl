@@ -71,6 +71,8 @@ export interface EditableShiftRow {
   end_time: string | null;
   clock_in_at?: string | null;
   clock_out_at?: string | null;
+  /** Current unpaid break. Absent/null reads as 0 — the column is NOT NULL DEFAULT 0. */
+  break_minutes?: number | null;
 }
 
 // 'HH:MM' from an 'HH:MM' / 'HH:MM:SS' time string — the granularity the operator's
@@ -101,6 +103,44 @@ export interface ShiftEditPatch {
   end_time?: string | null;
   clock_in_at?: string;
   clock_out_at?: string;
+  break_minutes?: number;
+}
+
+// Rejected before any write. paidShiftHours() floors at 0, so a break >= the span would not
+// error — it would silently pay the person nothing. That is exactly the failure this refuses.
+export const BREAK_TOO_LONG_ERROR = 'Break must be shorter than the shift.';
+export const BREAK_INVALID_ERROR = 'Break must be a whole number of minutes, 0 or more.';
+
+// The span, in minutes, that PAY will use for this row after the edit — the same branch
+// paidShiftHours() takes, so validation cannot accept a break that pay would then floor to zero:
+//   * time_clock  → the punch instants (post-edit when the times changed, else the stored pair).
+//                   Their span has no 24h ceiling, which is the whole reason pay reads them.
+//   * manual/etc. → the wall clock, overnight-wrapped.
+// Returns null when no span can be determined (an open shift), which callers treat as "cannot
+// validate an upper bound" rather than as zero.
+function paySpanMinutes(
+  row: EditableShiftRow,
+  nextStart: string,
+  nextEnd: string | null,
+  instants: PunchInstants | null,
+): number | null {
+  if (nextEnd == null) return null; // open shift — no completed span
+  if (row.source === 'time_clock') {
+    const inAt = instants ? instants.clock_in_at : row.clock_in_at;
+    const outAt = instants ? instants.clock_out_at : row.clock_out_at;
+    if (inAt && outAt) {
+      const mins = (Date.parse(outAt) - Date.parse(inAt)) / 60_000;
+      return Number.isFinite(mins) ? mins : null;
+    }
+  }
+  const toMin = (t: string) => {
+    const [h, m] = t.split(':');
+    return (Number(h) || 0) * 60 + (Number(m) || 0);
+  };
+  const startM = toMin(nextStart);
+  let endM = toMin(nextEnd);
+  if (endM <= startM) endM += 1440; // overnight
+  return endM - startM;
 }
 
 // The exact column patch for a start/end-time edit. THE single place that decides which layer a
@@ -123,9 +163,11 @@ export interface ShiftEditPatch {
 // not on the end value alone — otherwise the out instant would be left a day late.
 export function buildShiftEditPatch(
   row: EditableShiftRow,
-  edit: { start_time?: string; end_time?: string | null },
+  edit: { start_time?: string; end_time?: string | null; break_minutes?: number },
 ): ShiftEditPatch | null {
-  if (edit.start_time === undefined && edit.end_time === undefined) return null;
+  if (edit.start_time === undefined && edit.end_time === undefined && edit.break_minutes === undefined) {
+    return null;
+  }
 
   // What the form opened at — the SAME basis the modal prefilled from.
   const current = shiftEditPrefill(row);
@@ -133,26 +175,60 @@ export function buildShiftEditPatch(
   const nextEnd = edit.end_time !== undefined ? edit.end_time : current.end;
   const startChanged = nextStart !== current.start;
 
+  // ── the TIME half: exactly the pre-existing rules, untouched ──
+  // Computed first because the break's upper bound is the span this edit RESULTS in, not the
+  // span it started from — editing 4pm–2am down to 4pm–6pm must invalidate a 3-hour break.
+  const timePatch: ShiftEditPatch = {};
+  let instants: PunchInstants | null = null;
+
   if (row.source !== 'time_clock') {
     // Manual rows: wall clock only, unchanged behaviour — but still skip a genuine no-op.
-    const patch: ShiftEditPatch = {};
-    if (edit.start_time !== undefined && startChanged) patch.start_time = edit.start_time;
+    if (edit.start_time !== undefined && startChanged) timePatch.start_time = edit.start_time;
     if (edit.end_time !== undefined && (edit.end_time === null ? current.end !== '' : hhmm(edit.end_time) !== current.end)) {
-      patch.end_time = edit.end_time;
+      timePatch.end_time = edit.end_time;
     }
-    return Object.keys(patch).length === 0 ? null : patch;
+  } else {
+    // Reopening would null clock_out_at and violate shifts_time_clock_has_instants (097).
+    // Only a genuine end-time edit can reopen; a break-only save leaves nextEnd as prefilled.
+    if (nextEnd == null) throw new Error(REOPEN_PUNCH_ERROR);
+    const endChanged = hhmm(nextEnd) !== current.end;
+    const overnightFlipped =
+      isOvernight(nextStart, hhmm(nextEnd)) !== isOvernight(current.start, current.end);
+    if (startChanged || endChanged || overnightFlipped) {
+      instants = punchInstantsForWallClock(row.date, nextStart, hhmm(nextEnd));
+      timePatch.start_time = nextStart;
+      timePatch.end_time = hhmm(nextEnd);
+      if (startChanged) timePatch.clock_in_at = instants.clock_in_at;
+      if (endChanged || overnightFlipped) timePatch.clock_out_at = instants.clock_out_at;
+    }
   }
 
-  // Reopening would null clock_out_at and violate shifts_time_clock_has_instants (097).
-  if (nextEnd == null) throw new Error(REOPEN_PUNCH_ERROR);
-  const endChanged = hhmm(nextEnd) !== current.end;
-  const overnightFlipped =
-    isOvernight(nextStart, hhmm(nextEnd)) !== isOvernight(current.start, current.end);
-  if (!startChanged && !endChanged && !overnightFlipped) return null; // instants untouched
+  // ── the BREAK half ──
+  // Independent of the time half by design: a break-only correction must emit ONLY break_minutes,
+  // leaving start_time/end_time/clock_in_at/clock_out_at exactly as stored. Rewriting an untouched
+  // endpoint would truncate a real punch to the minute (see the note above), so a manager fixing a
+  // forgotten break-return must not silently disturb the punch that was recorded correctly.
+  //
+  // confirmed_at / confirmed_by are never emitted here on any path — the BEFORE UPDATE guard in
+  // migration 070 rejects them outside the confirm RPCs, and confirmation is not a break concern.
+  let breakPatch: number | undefined;
+  if (edit.break_minutes !== undefined) {
+    const next = edit.break_minutes;
+    if (!Number.isFinite(next) || !Number.isInteger(next) || next < 0) {
+      throw new Error(BREAK_INVALID_ERROR);
+    }
+    const currentBreak = row.break_minutes ?? 0;
+    if (next !== currentBreak) {
+      // Validate against the RESULTING pay span, never the stored one.
+      const span = paySpanMinutes(row, nextStart, nextEnd, instants);
+      // A break equal to the span pays zero; longer pays zero too (paidShiftHours floors). Both
+      // are refused here so the manager sees why instead of silently wiping the shift's pay.
+      if (span != null && next >= span) throw new Error(BREAK_TOO_LONG_ERROR);
+      breakPatch = next;
+    }
+  }
 
-  const instants = punchInstantsForWallClock(row.date, nextStart, hhmm(nextEnd));
-  const patch: ShiftEditPatch = { start_time: nextStart, end_time: hhmm(nextEnd) };
-  if (startChanged) patch.clock_in_at = instants.clock_in_at;
-  if (endChanged || overnightFlipped) patch.clock_out_at = instants.clock_out_at;
-  return patch;
+  const patch: ShiftEditPatch = { ...timePatch };
+  if (breakPatch !== undefined) patch.break_minutes = breakPatch;
+  return Object.keys(patch).length === 0 ? null : patch;
 }

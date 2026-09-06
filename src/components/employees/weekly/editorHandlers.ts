@@ -11,7 +11,7 @@ export function makeEditorHandlers(p: {
   employees: Employee[];
   nameById: (id: string) => string;
   addShift: Mutation<{ employee_id: string; date: string; start_time: string; end_time: string | null }>;
-  updateShift: Mutation<{ id: string; start_time?: string; end_time?: string | null }>;
+  updateShift: Mutation<{ id: string; start_time?: string; end_time?: string | null; break_minutes?: number }>;
   deleteShift: Mutation<string>;
   upsertException: Mutation<{
     rule_id: string;
