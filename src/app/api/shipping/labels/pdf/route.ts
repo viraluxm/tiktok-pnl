@@ -13,7 +13,7 @@ import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-// GET /api/shipping/labels/pdf?store_id=…&run_id=…[&preview=1][&from=0&to=59]
+// GET /api/shipping/labels/pdf?run_id=…[&store_id=][&section=singles|mixed][&preview=1][&from=&to=]
 //
 // The printable stack for a purchase run: a separator slip, then that SKU's labels, repeating,
 // with bundles last. Returns one PDF sized to the labels themselves.
@@ -39,6 +39,12 @@ export const maxDuration = 300;
 //
 // Every slice carries the banners and slips for the sections it contains, so a part is
 // self-describing even if the parts are printed separately.
+//
+// `section` splits the stack into the two piles that go to two different places: `singles` is
+// the prep-station file where one SKU is packed over and over, `mixed` is everything that has
+// to be read — bundles and boxes with no SKU on file. They are separate PDFs rather than one
+// because they are worked by different people at the same time, and one file has to be split by
+// hand at the banner. Omitting it prints the whole stack, banners and all, as before.
 
 /** Concurrent label downloads. Enough to be quick, few enough not to look like abuse. */
 const FETCH_CONCURRENCY = 6;
@@ -77,7 +83,12 @@ export async function GET(req: Request) {
   const storeId = url.searchParams.get('store_id');
   const runParam = url.searchParams.get('run_id');
   const preview = url.searchParams.get('preview') === '1';
+  const sectionRaw = url.searchParams.get('section');
   if (!runParam) return NextResponse.json({ error: 'run_id is required' }, { status: 400 });
+  if (sectionRaw != null && sectionRaw !== 'singles' && sectionRaw !== 'mixed') {
+    return NextResponse.json({ error: "section must be 'singles' or 'mixed'" }, { status: 400 });
+  }
+  const section = sectionRaw as 'singles' | 'mixed' | null;
 
   // Several runs may be printed as one stack — a limited purchase run produces several. Each
   // run stays a contiguous block in the order given, so a stack always matches a review.
@@ -114,6 +125,25 @@ export async function GET(req: Request) {
     ? itemsFromLedgerMerged(rows, [BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION])
     : runIds.flatMap((rid) => itemsFromLedger(rows.filter((r) => r.run_id === rid)));
   const seq = buildAssemblySequence(items, rows);
+
+  // ── Keep only the requested pile. ──
+  //
+  // Filtered on the BANNER, which is the pile's identity, so the two files together are exactly
+  // the whole stack — nothing dropped, nothing duplicated. Done before the label index is built,
+  // so the part count and headers describe the file actually being returned.
+  if (section) {
+    const wanted = (b: string) => (section === 'singles'
+      ? b === BANNER_SINGLES
+      : b === BANNER_MIXED || b === UNBOUND_CAPTION);
+    const kept: typeof seq.pages = [];
+    let keeping = false;
+    for (const p of seq.pages) {
+      if (p.kind === 'banner') keeping = wanted(p.caption);
+      if (keeping) kept.push(p);
+    }
+    seq.pages = kept;
+    seq.labelCount = kept.filter((p) => p.kind === 'label').length;
+  }
 
   // ── Slice by label index. ──
   //
@@ -344,10 +374,12 @@ export async function GET(req: Request) {
   return new NextResponse(Buffer.from(pdf), {
     headers: {
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `inline; filename="labels-${stamp}-${seq.labelCount}.pdf"`,
+      'Content-Disposition':
+        `inline; filename="labels-${stamp}-${section ?? 'all'}-${seq.labelCount}.pdf"`,
       'Cache-Control': 'no-store',
       // Surfaced in headers so a caller sees an incomplete stack without parsing the PDF.
       'X-Label-Count': String(seq.labelCount),
+      'X-Section': section ?? 'all',
       // So a caller knows how many more slices to fetch without a second round trip.
       'X-Total-Labels': String(totalLabels),
       'X-Parts': String(parts),

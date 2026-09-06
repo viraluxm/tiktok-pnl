@@ -365,6 +365,53 @@ console.log('\nMerging runs from several shops into one pile per SKU');
   check('an unbannered row still prints in a merge', seq.labelCount === 1, shape(seq));
 }
 
+console.log('\nSplitting the stack into two files loses nothing');
+{
+  // The route filters seq.pages on the BANNER. Reproduced here so the invariant that matters —
+  // singles + mixed == the whole stack, with no label dropped or duplicated — is pinned.
+  const SINGLES = 'SINGLES — PREP STATION';
+  const MIXED = 'BUNDLED ORDERS — PICK REGULAR';
+  const NOSKU = 'NO SKU ON FILE — LOOK UP EACH ORDER';
+  const rows = [
+    row('s1', { banner_caption: SINGLES, slip_caption: '#1 A', print_seq: 0 }),
+    row('s2', { banner_caption: SINGLES, slip_caption: '#1 A', print_seq: 1 }),
+    row('s3', { banner_caption: SINGLES, slip_caption: '#2 B', print_seq: 2 }),
+    row('m1', { banner_caption: MIXED, slip_caption: null, print_seq: 3 }),
+    row('m2', { banner_caption: MIXED, slip_caption: null, print_seq: 4 }),
+    row('u1', { banner_caption: NOSKU, slip_caption: null, print_seq: 5 }),
+  ];
+  const seq = buildAssemblySequence(itemsFromLedger(rows), rows, NOW);
+
+  const filterTo = (want) => {
+    const kept = []; let keeping = false;
+    for (const p of seq.pages) {
+      if (p.kind === 'banner') keeping = want(p.caption);
+      if (keeping) kept.push(p);
+    }
+    return kept;
+  };
+  const singles = filterTo((b) => b === SINGLES);
+  const mixed = filterTo((b) => b === MIXED || b === NOSKU);
+
+  const labelsOf = (pp) => pp.filter((p) => p.kind === 'label').map((p) => p.group_key);
+  const all = labelsOf(seq.pages);
+  const both = [...labelsOf(singles), ...labelsOf(mixed)];
+
+  check('the two files together hold every label',
+    both.slice().sort().join(',') === all.slice().sort().join(','), both.join(','));
+  check('…and none twice', new Set(both).size === both.length);
+  check('singles holds only the singles pile',
+    labelsOf(singles).join(',') === 's1,s2,s3', labelsOf(singles).join(','));
+  check('mixed holds bundles AND no-SKU, which are both "read each label" work',
+    labelsOf(mixed).join(',') === 'm1,m2,u1', labelsOf(mixed).join(','));
+  check('each file keeps its own banners so it is self-describing',
+    singles.some((p) => p.kind === 'banner' && p.caption === SINGLES)
+      && mixed.some((p) => p.kind === 'banner' && p.caption === MIXED)
+      && mixed.some((p) => p.kind === 'banner' && p.caption === NOSKU));
+  check('the singles file keeps its per-SKU slips',
+    singles.filter((p) => p.kind === 'slip').length === 2);
+}
+
 console.log('\nEdges');
 {
   const empty = buildAssemblySequence([], [], NOW);
