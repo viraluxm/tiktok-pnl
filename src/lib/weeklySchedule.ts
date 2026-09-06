@@ -232,6 +232,8 @@ export interface WeekShiftCard {
   source: string | null;
   clock_in_at: string | null;
   clock_out_at: string | null;
+  /** Stored unpaid break. The edit modal prefills from this; 0 on generated recurring rows. */
+  break_minutes: number;
   startMin: number;
   endMin: number; // overnight-extended (+1440); for open shifts, equals startMin
 }
@@ -263,6 +265,7 @@ function cardFromShift(s: ShiftRow): WeekShiftCard {
     modified: false,
     ruleId: s.source_rule_id ?? null,
     source: s.source ?? null,
+    break_minutes: s.break_minutes ?? 0,
     clock_in_at: s.clock_in_at ?? null,
     clock_out_at: s.clock_out_at ?? null,
     hours: paidFromInstants
@@ -288,8 +291,9 @@ function cardFromGenerated(g: GeneratedRow): WeekShiftCard {
     isFrozen: false,
     modified: g.modified,
     ruleId: g.rule_id,
-    // A projected recurring instance has no stored row, so no source and no instants.
+    // A projected recurring instance has no stored row, so no source, no instants and no break.
     source: null,
+    break_minutes: 0,
     clock_in_at: null,
     clock_out_at: null,
     hours: durationHours(g.start_time, g.end_time),
