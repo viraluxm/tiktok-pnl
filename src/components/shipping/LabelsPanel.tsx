@@ -60,7 +60,7 @@ interface DryRun {
 }
 interface Progress { total: number; bought: number; failed: number; spent: number; done: boolean }
 interface RunRow {
-  run_id: string; scope: string | null; at: string | null;
+  run_id: string; scope: string | null; at: string | null; store_id: string | null;
   labels: number; purchased: number; claimed: number; failed: number;
   singles: number; mixed: number; unbound: number; spent: number; printable: number;
 }
@@ -102,6 +102,10 @@ export default function LabelsPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [history, setHistory] = useState<RunRow[] | null>(null);
   const [historyTotal, setHistoryTotal] = useState(0);
+  /** Runs ticked for a combined print. May span shops — that is the point. */
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  /** When on, the history lists every shop so runs from several can print as one stack. */
+  const [allShops, setAllShops] = useState(false);
 
   /** Any change to what would be bought discards the reviewed plan — never buy an unread plan. */
   const invalidate = useCallback(() => {
@@ -109,15 +113,16 @@ export default function LabelsPanel() {
   }, []);
 
   const loadHistory = useCallback(async () => {
-    if (activeStore === 'all') { setHistory(null); return; }
+    if (activeStore === 'all' && !allShops) { setHistory(null); return; }
     try {
-      const r = await fetch(`/api/shipping/labels/runs?store_id=${encodeURIComponent(activeStore)}`);
+      const q = allShops ? '' : `?store_id=${encodeURIComponent(activeStore)}`;
+      const r = await fetch(`/api/shipping/labels/runs${q}`);
       if (!r.ok) { setHistory(null); return; }
       const j = await r.json();
       setHistory(j.runs ?? []);
       setHistoryTotal(j.total_spent ?? 0);
     } catch { setHistory(null); }
-  }, [activeStore]);
+  }, [activeStore, allShops]);
 
   useEffect(() => { void loadHistory(); }, [loadHistory]);
 
@@ -547,17 +552,67 @@ export default function LabelsPanel() {
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-sm font-semibold text-tt-text">Print history</h3>
             <span className="text-xs text-tt-muted">
-              {money(historyTotal)} on labels for {storeName}, all time
+              {money(historyTotal)} on labels for {allShops ? 'all shops' : storeName}, all time
             </span>
           </div>
           <p className="mt-1 text-xs text-tt-muted">
             Labels stay printable — reprint a stack any time without buying again.
           </p>
+
+          {/* Labels are BOUGHT per shop — each is its own TikTok connection — but the prep
+              station packs by SKU and does not care which shop an order came from. */}
+          <label className="mt-2 flex cursor-pointer items-start gap-2">
+            <input
+              type="checkbox" checked={allShops} className="mt-0.5 cursor-pointer"
+              onChange={(e) => { setAllShops(e.target.checked); setPicked(new Set()); }}
+            />
+            <span>
+              <span className="text-sm text-tt-text">Show every shop, and print them together</span>
+              <span className="block text-xs text-tt-muted">
+                Tick runs below to combine them into one stack. Singles are regrouped by SKU
+                across shops, so the same item is one pile instead of one per shop.
+              </span>
+            </span>
+          </label>
+
+          {picked.size > 0 && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-tt-green/40 bg-tt-green/5 px-3 py-2">
+              <span className="text-xs text-tt-text">
+                {picked.size} run{picked.size === 1 ? '' : 's'} selected ·{' '}
+                {history.filter((r) => picked.has(r.run_id)).reduce((t, r) => t + r.printable, 0)} labels
+              </span>
+              <span className="flex items-center gap-3">
+                <PrintButton
+                  runIds={[...picked]} onError={setErr} small
+                  label={`Print ${picked.size} runs as one stack`}
+                />
+                <button onClick={() => setPicked(new Set())} className="cursor-pointer text-xs text-tt-muted underline">
+                  Clear
+                </button>
+              </span>
+            </div>
+          )}
           <ul className="mt-3 divide-y divide-tt-border">
             {history.map((r) => (
               <li key={r.run_id} className="flex flex-wrap items-center justify-between gap-3 py-2">
-                <span className="min-w-0">
+                {r.printable > 0 && (
+                  <input
+                    type="checkbox" className="mt-1 cursor-pointer" checked={picked.has(r.run_id)}
+                    onChange={(e) => setPicked((prev) => {
+                      const next = new Set(prev);
+                      if (e.target.checked) next.add(r.run_id); else next.delete(r.run_id);
+                      return next;
+                    })}
+                    aria-label={`Select ${r.scope ?? 'run'} for a combined print`}
+                  />
+                )}
+                <span className="min-w-0 flex-1">
                   <span className="block text-sm text-tt-text">
+                    {allShops && r.store_id && (
+                      <span className="mr-2 rounded bg-tt-card px-1.5 py-0.5 text-[11px] text-tt-muted">
+                        {storesData?.stores?.find((x) => x.id === r.store_id)?.name ?? 'shop'}
+                      </span>
+                    )}
                     {r.scope ?? 'Unnamed run'}
                     {r.claimed > 0 && (
                       <span className="ml-2 text-xs text-tt-yellow">
@@ -710,8 +765,9 @@ function DayCalendar({ days, today, selected, onToggle }: {
  * message. Nothing is lost either way — the labels are already bought and the stack can be
  * rebuilt at any time.
  */
-function PrintButton({ storeId, runId, onError, small }: {
-  storeId: string; runId: string; onError: (m: string) => void; small?: boolean;
+function PrintButton({ storeId, runId, runIds, onError, small, label }: {
+  storeId?: string; runId?: string; runIds?: string[];
+  onError: (m: string) => void; small?: boolean; label?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
@@ -730,7 +786,12 @@ function PrintButton({ storeId, runId, onError, small }: {
   async function open() {
     setBusy(true); onError(''); setNote('');
     try {
-      const base = `/api/shipping/labels/pdf?store_id=${encodeURIComponent(storeId)}&run_id=${runId}`;
+      // No store_id when runs are combined: they may come from different shops, and the route
+      // resolves each label's credentials from its own store.
+      const many = (runIds?.length ?? 0) > 0;
+      const ids = many ? (runIds as string[]).join(',') : (runId as string);
+      const base = `/api/shipping/labels/pdf?run_id=${ids}`
+        + (storeId && !many ? `&store_id=${encodeURIComponent(storeId)}` : '');
 
       const fetchPart = async (from?: number, to?: number) => {
         const u = from == null ? base : `${base}&from=${from}&to=${to}`;
@@ -792,7 +853,7 @@ function PrintButton({ storeId, runId, onError, small }: {
         ? 'cursor-pointer shrink-0 rounded-md border border-tt-border px-3 py-1.5 text-xs text-tt-text hover:border-tt-border-hover disabled:opacity-50'
         : 'cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-50'}
     >
-      {busy ? (note || 'Building…') : small ? 'Reprint' : 'Print labels'}
+      {busy ? (note || 'Building…') : label ?? (small ? 'Reprint' : 'Print labels')}
     </button>
   );
 }

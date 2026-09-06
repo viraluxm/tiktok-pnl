@@ -29,7 +29,7 @@ export const DOC_REFETCH_MARGIN_MS = 60 * 60_000;
  */
 export const LEDGER_COLUMNS =
   'group_key, status, package_id, doc_url, doc_url_expires_at, tracking_number, '
-  + 'print_seq, slip_caption, banner_caption';
+  + 'print_seq, slip_caption, banner_caption, store_id, order_ids';
 
 /** The ledger fields assembly needs. Keep in step with LEDGER_COLUMNS above. */
 export interface LedgerRow {
@@ -45,6 +45,10 @@ export interface LedgerRow {
   slip_caption?: string | null;
   /** Pile this box prints under. Null on rows written before the column existed. */
   banner_caption?: string | null;
+  /** Which shop bought it. Only needed when merging runs from several shops. */
+  store_id?: string | null;
+  /** Orders this box covers — used to write tracking back where the pack station reads it. */
+  order_ids?: string[] | null;
 }
 
 /** One page of the assembled document. */
@@ -108,6 +112,76 @@ export function itemsFromLedger(rows: LedgerRow[]): AssemblyItem[] {
   }));
 }
 
+
+/**
+ * Rebuild a stack from SEVERAL runs, regrouping the singles by SKU across all of them.
+ *
+ * WHY THIS EXISTS. Labels are bought per shop — each has its own TikTok connection — but the
+ * prep station does not care which shop an order came from. Measured over 7 days, 108 of 190
+ * SKUs sell in more than one shop and the top sellers are in all four, so printing per shop
+ * leaves the same SKU in four separate piles and the packer walks it four times. Merging turns
+ * "12 pink popsicles here, 10 there" into one pile of 22.
+ *
+ * It works with no extra data because slip_caption is already the SKU's identity, written at
+ * purchase. Rows are regrouped on (banner, caption) rather than on run order.
+ *
+ * Sections are ordered LARGEST FIRST for the same reason the planner does it: the long
+ * mechanical runs come while the packer is freshest. Ties break on caption so two prints of the
+ * same selection are identical.
+ */
+export function itemsFromLedgerMerged(
+  rows: LedgerRow[],
+  /**
+   * Pile order, most-important first — normally [SINGLES, MIXED, NO SKU]. Passed in rather than
+   * imported so this file stays import-free and testable standalone; the caller already knows
+   * the banner constants. Anything not listed follows in name order.
+   */
+  bannerOrder: readonly string[] = [],
+): AssemblyItem[] {
+  // Bucket by pile, then by SKU section within it.
+  const piles = new Map<string, Map<string, LedgerRow[]>>();
+  const NO_BANNER = '\u0000none';
+  const NO_CAPTION = '\u0000none';
+  for (const r of rows) {
+    const b = r.banner_caption ?? NO_BANNER;
+    const c = r.slip_caption ?? NO_CAPTION;
+    const pile = piles.get(b) ?? new Map<string, LedgerRow[]>();
+    const sec = pile.get(c) ?? [];
+    sec.push(r);
+    pile.set(c, sec);
+    piles.set(b, pile);
+  }
+
+  // Piles keep the planner's running order — singles, then mixed, then unbound — by sorting on
+  // the size of the pile only after that intent is preserved. Ordering by name would be
+  // arbitrary, so the known banners are pinned and anything unrecognised follows.
+  const rank = (b: string) => {
+    if (b === NO_BANNER) return bannerOrder.length + 1;
+    const i = bannerOrder.indexOf(b);
+    return i === -1 ? bannerOrder.length : i;
+  };
+  const banners = [...piles.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+
+  const out: AssemblyItem[] = [];
+  for (const b of banners) {
+    const pile = piles.get(b) as Map<string, LedgerRow[]>;
+    const sections = [...pile.entries()].sort(
+      (x, y) => y[1].length - x[1].length || x[0].localeCompare(y[0]),
+    );
+    for (const [caption, secRows] of sections) {
+      // Stable within a section so a reprint matches the first print exactly.
+      const sorted = secRows.slice().sort((x, y) => x.group_key.localeCompare(y.group_key));
+      for (const r of sorted) {
+        out.push({
+          group_key: r.group_key,
+          banner: b === NO_BANNER ? null : b,
+          caption: caption === NO_CAPTION ? null : caption,
+        });
+      }
+    }
+  }
+  return out;
+}
 
 /**
  * Whether a purchased row's label document must be fetched again before assembly.

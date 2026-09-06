@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'ap-')), 'assemblyPlan.mjs');
 writeFileSync(outFile, outputText);
-const { buildAssemblySequence, needsRefetch, itemsFromLedger, LEDGER_COLUMNS, DOC_REFETCH_MARGIN_MS } =
+const { buildAssemblySequence, needsRefetch, itemsFromLedger, itemsFromLedgerMerged, LEDGER_COLUMNS, DOC_REFETCH_MARGIN_MS } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -287,8 +287,82 @@ console.log('\nThe column list must cover every field the type declares');
   const missing = fields.filter((f) => !LEDGER_COLUMNS.includes(f));
   check('every LedgerRow field appears in LEDGER_COLUMNS',
     missing.length === 0, missing.length ? `MISSING: ${missing.join(', ')}` : 'all present');
+
+  // A name-by-name check is not enough: a botched edit once produced
+  // 'tracking_number, , store_id' + 'print_seq, …' — an empty column and two names fused
+  // together — and every name was still "present". PostgREST would have rejected the query.
+  const parts = LEDGER_COLUMNS.split(',').map((x) => x.trim());
+  check('the column list has no empty entries', parts.every((x) => x.length > 0),
+    JSON.stringify(parts.filter((x) => !x)));
+  check('no two column names are fused together',
+    parts.every((x) => /^[a-z_][a-z0-9_]*$/.test(x)),
+    parts.filter((x) => !/^[a-z_][a-z0-9_]*$/.test(x)).join(' | '));
+  check('no column is listed twice', new Set(parts).size === parts.length);
   // And specifically the one that got away.
   check('banner_caption is in the column list', LEDGER_COLUMNS.includes('banner_caption'));
+}
+
+console.log('\nMerging runs from several shops into one pile per SKU');
+{
+  const SINGLES = 'SINGLES — PREP STATION';
+  const MIXED = 'BUNDLED ORDERS — PICK REGULAR';
+  const ORDER = [SINGLES, MIXED];
+  // The real shape: labels are bought per shop, but 108 of 190 SKUs sell in more than one and
+  // the top sellers are in all four. Printed per shop, the same SKU sits in several piles and
+  // the prep station walks it repeatedly.
+  const rows = [
+    row('snore-a', { store_id: 's1', banner_caption: SINGLES, slip_caption: '#106 PINK POPSICLE', print_seq: 0 }),
+    row('snore-b', { store_id: 's1', banner_caption: SINGLES, slip_caption: '#106 PINK POPSICLE', print_seq: 1 }),
+    row('snore-c', { store_id: 's1', banner_caption: SINGLES, slip_caption: '#428 SOAP BAR', print_seq: 2 }),
+    row('lots-a',  { store_id: 's2', banner_caption: SINGLES, slip_caption: '#106 PINK POPSICLE', print_seq: 0 }),
+    row('lots-b',  { store_id: 's2', banner_caption: MIXED,   slip_caption: null, print_seq: 1 }),
+    row('snore-m', { store_id: 's1', banner_caption: MIXED,   slip_caption: null, print_seq: 3 }),
+  ];
+  const seq = buildAssemblySequence(itemsFromLedgerMerged(rows, ORDER), rows, NOW);
+
+  check('the same SKU from two shops becomes ONE pile',
+    shape(seq).includes('SLIP(#106 PINK POPSICLE|3)'), shape(seq));
+  check('…and the bigger SKU section prints first',
+    shape(seq).indexOf('#106 PINK POPSICLE') < shape(seq).indexOf('#428 SOAP BAR'));
+  check('mixed from both shops merges too',
+    shape(seq).includes(`BANNER(${MIXED}|2)`), shape(seq));
+  check('the singles banner counts every shop\'s singles',
+    shape(seq).includes(`BANNER(${SINGLES}|4)`), shape(seq));
+  check('every label still appears exactly once', seq.labelCount === 6);
+  check('no box is lost in the merge', seq.missing.length === 0);
+}
+{
+  const SINGLES = 'SINGLES — PREP STATION';
+  const MIXED = 'BUNDLED ORDERS — PICK REGULAR';
+  // Piles keep the planner's running order — singles first, mixed after — regardless of which
+  // pile happens to be larger. Ordering piles by size would send the packer to the read-each-one
+  // pile first, which is the opposite of the point.
+  const rows = [
+    row('m1', { banner_caption: MIXED, slip_caption: null }),
+    row('m2', { banner_caption: MIXED, slip_caption: null }),
+    row('m3', { banner_caption: MIXED, slip_caption: null }),
+    row('s1', { banner_caption: SINGLES, slip_caption: '#1 A' }),
+  ];
+  const seq = buildAssemblySequence(itemsFromLedgerMerged(rows, [SINGLES, MIXED]), rows, NOW);
+  check('singles come before mixed even when mixed is bigger',
+    shape(seq).indexOf(SINGLES) < shape(seq).indexOf(MIXED), shape(seq));
+}
+{
+  // Determinism: two prints of the same selection must be identical, whatever order the rows
+  // arrive in — a reprint that reorders the stack is a reprint nobody can trust.
+  const SINGLES = 'SINGLES — PREP STATION';
+  const rows = ['d', 'a', 'c', 'b'].map((k) =>
+    row(k, { banner_caption: SINGLES, slip_caption: '#5 E' }));
+  const one = itemsFromLedgerMerged(rows, [SINGLES]).map((i) => i.group_key).join(',');
+  const two = itemsFromLedgerMerged(rows.slice().reverse(), [SINGLES]).map((i) => i.group_key).join(',');
+  check('a merged stack is deterministic', one === two && one === 'a,b,c,d', one);
+}
+{
+  check('merging nothing yields nothing', itemsFromLedgerMerged([], []).length === 0);
+  const seq = buildAssemblySequence(
+    itemsFromLedgerMerged([row('x', { banner_caption: null, slip_caption: null })], []), 
+    [row('x', { banner_caption: null, slip_caption: null })], NOW);
+  check('an unbannered row still prints in a merge', seq.labelCount === 1, shape(seq));
 }
 
 console.log('\nEdges');
