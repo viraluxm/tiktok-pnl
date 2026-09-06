@@ -108,12 +108,19 @@ console.log('\n1. DROP writes an OFFER and nothing else');
   eq('the read was owner-scoped', log()[0].f('eq', 'user_id'), OWNER);
 }
 
-console.log('\n2. DROP still counts toward the drop cap (attendance trail preserved)');
+console.log('\n2. OFFERING COSTS NOTHING — no attendance event at drop time');
 {
+  // THE PRODUCT RULE. Offering a shift is asking for cover, not giving the shift up: the worker is
+  // still assigned, still clock-eligible, and still on the hook if nobody takes it. An earlier
+  // draft wrote the legacy 'released' event right here, which charged a drop the moment they asked
+  // — and left the charge standing forever if no coworker ever picked it up.
+  //
+  // The bookkeeping now happens exactly once, at TRANSFER, inside lensed_approve_shift_pickup
+  // (migration 130), atomically with the assignment change.
   const ev = writes().find((r) => r.table === 'attendance_events');
-  eq('a released event is written, same as the legacy path', ev.payload.event_type, 'released');
-  eq('owner + employee + instance stamped', [ev.payload.user_id, ev.payload.employee_id, ev.payload.shift_instance_id], [OWNER, ME.id, 'inst-1']);
-  check('and it carries a pay_period_start so computeDrops keeps working', typeof ev.payload.pay_period_start === 'string');
+  check('NO attendance_events row is written when a shift is offered', ev === undefined);
+  const tables = [...new Set(writes().map((r) => r.table))].sort();
+  eq('the offer writes shift_instances and nothing else', tables.join(), 'shift_instances');
 }
 
 console.log('\n3. DROP refusals never write');
@@ -226,9 +233,13 @@ console.log('\n8. PAYROLL INVARIANT across the whole module');
   const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
   check('offer.ts never writes shifts', !/from\('shifts'\)/.test(src));
   check('offer.ts never touches employee_time_entries in code', !/employee_time_entries/.test(src));
-  check('the only tables it names in code are shift_instances / shift_claims / attendance_events / employees',
+  // attendance_events is GONE from this module entirely — comments stripped above, so the prose
+  // explaining the removal cannot keep this assertion green on its own.
+  check('offer.ts no longer writes attendance_events anywhere',
+    !/from\('attendance_events'\)/.test(src));
+  check('the only tables it names in code are shift_instances / shift_claims / employees',
     [...new Set([...src.matchAll(/from\('([a-z_]+)'\)/g)].map((m) => m[1]))].sort().join() ===
-    ['attendance_events', 'employees', 'shift_claims', 'shift_instances'].join());
+    ['employees', 'shift_claims', 'shift_instances'].join());
   const tables = new Set(log().filter((r) => r.op !== 'select').map((r) => r.table));
   check('no payroll table was written in any scenario above', !tables.has('shifts') && !tables.has('employee_time_entries'));
 }

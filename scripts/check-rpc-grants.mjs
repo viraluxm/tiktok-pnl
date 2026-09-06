@@ -71,6 +71,16 @@ const SERVICE_ROLE_ONLY = new Set([
   // uid (never the request body). Granting `authenticated` would let any signed-in user transfer
   // another tenant's shift to themselves.
   'lensed_approve_shift_pickup',
+  // Phase 2 Cancel Offer (130) — service-role only for the same reason as the approval RPC: it is
+  // SECURITY DEFINER, takes p_owner AND p_employee_id as parameters, and is called only via
+  // createAdminClient from the public /s/[token]/cancel-offer route, which resolves BOTH from the
+  // permanent employee token. Granting `authenticated` would let any signed-in user close another
+  // tenant's offer and supersede its pickup requests.
+  //
+  // NOTE: until migration 130 is applied, this function does not exist live and the checker will
+  // report it as MISSING. That failure is expected and is the correct signal — the fix is to apply
+  // 130, never to grant it to authenticated.
+  'lensed_cancel_shift_offer',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;

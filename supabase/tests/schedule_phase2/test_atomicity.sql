@@ -32,7 +32,7 @@ begin
   c := mkc(s, bob, 'pending', 'pickup_request', o1);
   select * into before_i from public.shift_instances where id = s;
 
-  res := public.lensed_approve_shift_pickup(A, s, c, o1);
+  res := public.lensed_approve_shift_pickup(A, s, c, o1, date '2026-09-07');
   perform t_eq('double-book: refused',                       res->>'ok',     'false');
   perform t_eq('double-book: reason EMPLOYEE_DOUBLE_BOOKED', res->>'reason', 'EMPLOYEE_DOUBLE_BOOKED');
   perform t_eq('double-book: instance FULLY unchanged',
@@ -57,7 +57,7 @@ begin
   select * into before_i from public.shift_instances where id = s;
 
   begin
-    res := public.lensed_approve_shift_pickup(A, s, c, o2);
+    res := public.lensed_approve_shift_pickup(A, s, c, o2, date '2026-09-07');
     caught := 'NO EXCEPTION — returned '||res::text;
   exception when others then
     caught := SQLSTATE;   -- 23505 unique_violation
@@ -86,7 +86,7 @@ begin
       cx := mkc(sx, carol, 'pending', 'pickup_request', ox);
       update public.shift_instances set offer_id = gen_random_uuid() where id = sx;  -- new generation
       select * into snap from public.shift_instances where id = sx;
-      res := public.lensed_approve_shift_pickup(A, sx, cx, ox);
+      res := public.lensed_approve_shift_pickup(A, sx, cx, ox, date '2026-09-07');
       if res->>'ok' = 'false'
          and (select i from public.shift_instances i where i.id=sx) is distinct from snap then
         ok_all := false;

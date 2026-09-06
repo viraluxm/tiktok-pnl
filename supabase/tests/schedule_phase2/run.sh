@@ -28,6 +28,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MIGDIR="$SCRIPT_DIR/../../migrations"
 MIG129="$MIGDIR/129_schedule_phase2_offer_lifecycle.sql"
+MIG130="$MIGDIR/130_schedule_phase2_attendance_and_cancel.sql"
 CONTAINER="lensed_phase2_test_$$"
 IMAGE="postgres:16-alpine"
 DB="db"
@@ -41,6 +42,7 @@ psqlf(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=
 psqlq(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA "$@"; }
 
 [ -f "$MIG129" ] || { echo "✗ migration not found: $MIG129"; exit 1; }
+[ -f "$MIG130" ] || { echo "✗ migration not found: $MIG130"; exit 1; }
 
 echo "▶ starting $IMAGE ..."
 docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=postgres "$IMAGE" >/dev/null || {
@@ -83,6 +85,24 @@ else
 fi
 [ "$FAILED" -eq 0 ] || { echo "❌ migration did not apply — aborting"; exit 1; }
 
+echo "── apply migration 130 VERBATIM (additive follow-up; also carries its own begin/commit) ──"
+APPLY130_LOG=/tmp/p2_apply130.$$
+if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG130" >"$APPLY130_LOG" 2>&1; then
+  echo "  ✓ applied — $(grep -c '^NOTICE' "$APPLY130_LOG" || true) notices, ended with $(tail -1 "$APPLY130_LOG")"
+else
+  echo "  ✗ MIGRATION 130 FAILED TO APPLY:"; sed 's/^/    /' "$APPLY130_LOG"; FAILED=1
+fi
+[ "$FAILED" -eq 0 ] || { echo "❌ migration 130 did not apply — aborting"; exit 1; }
+
+# 130 REPLACES the approval RPC with a 5-arg version and must leave no 4-arg overload behind: a
+# stale 4-arg function would still be callable and would write no attendance rows at all.
+OVERLOADS=$(psqlq -c "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_approve_shift_pickup'")
+[ "$OVERLOADS" = "1" ] && echo "  ✓ exactly one approval overload (the 4-arg version was dropped)" \
+  || { echo "  ✗ $OVERLOADS approval overloads present (expected 1)"; FAILED=1; }
+SIG=$(psqlq -c "select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_approve_shift_pickup'")
+[ "$SIG" = "lensed_approve_shift_pickup(uuid,uuid,uuid,uuid,date)" ] && echo "  ✓ signature: $SIG" \
+  || { echo "  ✗ unexpected signature: $SIG"; FAILED=1; }
+
 echo "── catalog: 129 must be purely ADDITIVE ──"
 psqlf -q -f - < "$CATALOG_SQL" > /tmp/p2_after.$$ 2>&1
 # The ONLY acceptable removal is the shift_claims status CHECK, replaced by a strict superset.
@@ -96,7 +116,8 @@ for want in 'COL shift_instances.offer_state' 'COL shift_instances.offer_id' 'CO
             'shift_claims_pickup_never_auto' 'superseded' \
             'idx_shift_claims_one_approved_pickup' 'idx_shift_claims_one_pending_pickup_per_employee' \
             'idx_shift_claims_pending_pickup' 'idx_shift_instances_offered' \
-            'lensed_approve_shift_pickup(uuid,uuid,uuid,uuid) sec=definer cfg=search_path=public'; do
+            'lensed_approve_shift_pickup(uuid,uuid,uuid,uuid,date) sec=definer cfg=search_path=public' \
+            'lensed_cancel_shift_offer(uuid,uuid,uuid,uuid) sec=definer cfg=search_path=public'; do
   grep -qF "$want" /tmp/p2_after.$$ || { echo "  ✗ MISSING from catalog: $want"; FAILED=1; }
 done
 echo "  ✓ all expected objects present"
@@ -114,31 +135,38 @@ echo "── RPC: happy path, replay, refusal paths ──"
 psqlf -q < "$SCRIPT_DIR/test_rpc.sql"         2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
 echo "── atomicity / torn-state regression ──"
 psqlf -q < "$SCRIPT_DIR/test_atomicity.sql"   2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
+echo "── attendance bookkeeping (migration 130) ──"
+psqlf -q < "$SCRIPT_DIR/test_attendance.sql"  2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
+echo "── Cancel Offer + re-offer lifecycle (migration 130) ──"
+psqlf -q < "$SCRIPT_DIR/test_cancel.sql"      2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
 
 # ── GRANTS ─────────────────────────────────────────────────────────────────────────────────────
 # 129 revokes from public/anon/authenticated and grants ONLY service_role. A stray grant here
 # would let any signed-in user transfer another tenant's shift, since the RPC takes p_owner as a
 # parameter and cannot consult auth.uid().
 echo "── grants: service_role ONLY ──"
-FN='public.lensed_approve_shift_pickup(uuid,uuid,uuid,uuid)'
-for role in service_role authenticated anon public; do
-  got=$(psqlq -c "select has_function_privilege('$role','$FN','execute')")
-  want=$([ "$role" = "service_role" ] && echo t || echo f)
-  if [ "$got" = "$want" ]; then echo "  ✓ $role EXECUTE = $got"
-  else echo "  ✗ $role EXECUTE = $got (expected $want)"; FAILED=1; fi
+for FN in 'public.lensed_approve_shift_pickup(uuid,uuid,uuid,uuid,date)' \
+          'public.lensed_cancel_shift_offer(uuid,uuid,uuid,uuid)'; do
+  echo "  ── $FN ──"
+  for role in service_role authenticated anon public; do
+    got=$(psqlq -c "select has_function_privilege('$role','$FN','execute')")
+    want=$([ "$role" = "service_role" ] && echo t || echo f)
+    if [ "$got" = "$want" ]; then echo "    ✓ $role EXECUTE = $got"
+    else echo "    ✗ $role EXECUTE = $got (expected $want)"; FAILED=1; fi
+  done
 done
 # Live enforcement, not just the catalog bit.
 for role in authenticated anon; do
   out=$(docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA -c \
-        "set role $role; select public.lensed_approve_shift_pickup('$OWNER_A'::uuid, gen_random_uuid(), gen_random_uuid(), gen_random_uuid());" 2>&1 || true)
-  case "$out" in *"permission denied for function"*) echo "  ✓ SET ROLE $role → permission denied";;
+        "set role $role; select public.lensed_cancel_shift_offer('$OWNER_A'::uuid, gen_random_uuid(), gen_random_uuid(), gen_random_uuid());" 2>&1 || true)
+  case "$out" in *"permission denied for function"*) echo "  ✓ SET ROLE $role → permission denied (cancel)";;
                  *) echo "  ✗ SET ROLE $role was NOT blocked: $out"; FAILED=1;; esac
 done
 # SECURITY DEFINER really is load-bearing: service_role has no table privileges here, yet the call
 # reaches business logic (a clean refusal) rather than a permission error.
 out=$(docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA -c \
-      "set role service_role; select public.lensed_approve_shift_pickup('$OWNER_A'::uuid, gen_random_uuid(), gen_random_uuid(), gen_random_uuid());" 2>&1 || true)
-case "$out" in *CLAIM_NOT_FOUND*) echo "  ✓ SET ROLE service_role → executes under SECURITY DEFINER";;
+      "set role service_role; select public.lensed_cancel_shift_offer('$OWNER_A'::uuid, gen_random_uuid(), gen_random_uuid(), gen_random_uuid());" 2>&1 || true)
+case "$out" in *SHIFT_NOT_FOUND*) echo "  ✓ SET ROLE service_role → executes under SECURITY DEFINER";;
                *) echo "  ✗ service_role call failed: $out"; FAILED=1;; esac
 
 # ── CONCURRENCY ────────────────────────────────────────────────────────────────────────────────
@@ -167,7 +195,7 @@ race_session(){ # $1 = claim key
 begin;
 select '$1 -> '||public.lensed_approve_shift_pickup('$OWNER_A'::uuid,
   (select v from race_ids where k='shift'), (select v from race_ids where k='$1'),
-  (select v from race_ids where k='offer'))::text;
+  (select v from race_ids where k='offer'), date '2026-09-07')::text;
 select pg_sleep(1.5);
 commit;
 SQL
@@ -183,6 +211,71 @@ LEFTOVER=$(psqlq -c "select count(*) from public.shift_claims where shift_instan
 [ "$WINNERS"  = "1" ] && echo "  ✓ exactly one approved pickup"            || { echo "  ✗ approved pickups = $WINNERS (expected 1)"; FAILED=1; }
 [ "$AGREES"   = "t" ] && echo "  ✓ assignment agrees with the approved claim" || { echo "  ✗ assignment disagrees with the approved claim"; FAILED=1; }
 [ "$LEFTOVER" = "0" ] && echo "  ✓ no pending requests left in the cycle"   || { echo "  ✗ $LEFTOVER pending left"; FAILED=1; }
+
+# ── APPROVE vs CANCEL RACE ─────────────────────────────────────────────────────────────────────
+# The two RPCs take the SAME advisory key, so they serialize. Whoever gets there first wins outright
+# and the loser must refuse cleanly. The forbidden outcomes are a transfer that also reads as
+# cancelled, and an approved pickup surviving a successful cancel.
+race_pair(){ # $1 = which action goes first ("approve" | "cancel")
+  psqlf -q >/dev/null 2>&1 <<SQL
+delete from public.attendance_events; delete from public.shift_claims; delete from public.shift_instances;
+truncate race_ids;
+with s as (insert into public.shift_instances(user_id,employee_id,shift_date,starts_at,ends_at,status,offer_state,offer_id,offered_at)
+           values ('$OWNER_A','e1111111-0000-4000-8000-000000000001','2027-08-01',
+                   '2027-08-01 09:00Z','2027-08-01 17:00Z','scheduled','offered',gen_random_uuid(),now()) returning id, offer_id),
+     cb as (insert into public.shift_claims(user_id,shift_instance_id,claimed_by,status,kind,offer_id)
+            select '$OWNER_A',id,'e2222222-0000-4000-8000-000000000002','pending','pickup_request',offer_id from s returning id)
+insert into race_ids(k,v) select 'shift',id from s union all select 'offer',offer_id from s union all select 'cb',id from cb;
+SQL
+  local first=$1
+  ( docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA <<SQL
+begin;
+$( [ "$first" = approve ] \
+  && echo "select 'A -> '||public.lensed_approve_shift_pickup('$OWNER_A'::uuid,(select v from race_ids where k='shift'),(select v from race_ids where k='cb'),(select v from race_ids where k='offer'), date '2026-09-07')::text;" \
+  || echo "select 'C -> '||public.lensed_cancel_shift_offer('$OWNER_A'::uuid,'e1111111-0000-4000-8000-000000000001'::uuid,(select v from race_ids where k='shift'),(select v from race_ids where k='offer'))::text;" )
+select pg_sleep(1.5);
+commit;
+SQL
+  ) > /tmp/p2_r1.$$ 2>&1 &
+  local P1=$!
+  sleep 1
+  ( docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA <<SQL
+$( [ "$first" = approve ] \
+  && echo "select 'C -> '||public.lensed_cancel_shift_offer('$OWNER_A'::uuid,'e1111111-0000-4000-8000-000000000001'::uuid,(select v from race_ids where k='shift'),(select v from race_ids where k='offer'))::text;" \
+  || echo "select 'A -> '||public.lensed_approve_shift_pickup('$OWNER_A'::uuid,(select v from race_ids where k='shift'),(select v from race_ids where k='cb'),(select v from race_ids where k='offer'), date '2026-09-07')::text;" )
+SQL
+  ) > /tmp/p2_r2.$$ 2>&1 &
+  local P2=$!
+  wait "$P1" "$P2" 2>/dev/null || true
+  grep -hE '^[AC] ->' /tmp/p2_r1.$$ /tmp/p2_r2.$$ | sed 's/^/      /'
+}
+
+echo "── race: APPROVE starts first, CANCEL joins ──"
+race_pair approve
+STATE=$(psqlq -c "select employee_id||'|'||status||'|'||offer_state from public.shift_instances where id=(select v from race_ids where k='shift')")
+EV=$(psqlq -c "select count(*) from public.attendance_events")
+[ "$STATE" = "e2222222-0000-4000-8000-000000000002|claimed|transferred" ] \
+  && echo "    ✓ approve won: shift transferred, offer terminal 'transferred'" \
+  || { echo "    ✗ unexpected state: $STATE"; FAILED=1; }
+[ "$EV" = "2" ] && echo "    ✓ exactly the attendance pair written" || { echo "    ✗ $EV attendance events (expected 2)"; FAILED=1; }
+grep -q 'OFFER_NOT_OPEN\|NOT_YOUR_SHIFT' /tmp/p2_r2.$$ && echo "    ✓ cancel refused cleanly" || { echo "    ✗ cancel did not refuse"; FAILED=1; }
+
+echo "── race: CANCEL starts first, APPROVE joins ──"
+race_pair cancel
+STATE=$(psqlq -c "select employee_id||'|'||status||'|'||offer_state from public.shift_instances where id=(select v from race_ids where k='shift')")
+EV=$(psqlq -c "select count(*) from public.attendance_events")
+APPROVED=$(psqlq -c "select count(*) from public.shift_claims where kind='pickup_request' and status in ('approved','auto_approved')")
+[ "$STATE" = "e1111111-0000-4000-8000-000000000001|scheduled|closed" ] \
+  && echo "    ✓ cancel won: shift still the offerer's, offer 'closed'" \
+  || { echo "    ✗ unexpected state: $STATE"; FAILED=1; }
+[ "$EV" = "0" ] && echo "    ✓ NO attendance event (cancelling costs nothing)" || { echo "    ✗ $EV attendance events (expected 0)"; FAILED=1; }
+[ "$APPROVED" = "0" ] && echo "    ✓ no approved pickup survived the cancel" || { echo "    ✗ $APPROVED approved pickups after cancel"; FAILED=1; }
+# The refusal is CLAIM_NOT_PENDING, not OFFER_NOT_OPEN: cancel supersedes the pending claim, and
+# approve validates the CLAIM before it looks at the offer, so the more specific reason wins. Both
+# are honest refusals — what matters is that it refused and wrote nothing.
+grep -qE '"ok": false' /tmp/p2_r2.$$ && grep -qE 'CLAIM_NOT_PENDING|OFFER_NOT_OPEN|STALE_OFFER' /tmp/p2_r2.$$ \
+  && echo "    ✓ approve refused cleanly ($(grep -oE '"reason": "[A-Z_]+"' /tmp/p2_r2.$$ | head -1))" \
+  || { echo "    ✗ approve did not refuse: $(cat /tmp/p2_r2.$$)"; FAILED=1; }
 
 # ── OUT-OF-TRANSACTION ROLLBACK ────────────────────────────────────────────────────────────────
 # The true PostgREST shape: an autocommit call whose error aborts the implicit transaction. A
@@ -200,7 +293,7 @@ with s as (insert into public.shift_instances(user_id,employee_id,shift_date,sta
 insert into race_ids(k,v) select 'shift',id from s union all select 'offer',offer_id from s union all select 'cb',id from cb;
 SQL
 docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA -c \
-  "select public.lensed_approve_shift_pickup('$OWNER_A'::uuid,(select v from race_ids where k='shift'),(select v from race_ids where k='cb'),(select v from race_ids where k='offer'))::text;" >/tmp/p2_tear.$$ 2>&1
+  "select public.lensed_approve_shift_pickup('$OWNER_A'::uuid,(select v from race_ids where k='shift'),(select v from race_ids where k='cb'),(select v from race_ids where k='offer'), date '2026-09-07')::text;" >/tmp/p2_tear.$$ 2>&1
 grep -q 'idx_shift_claims_one_approved_pickup' /tmp/p2_tear.$$ \
   && echo "  ✓ post-assignment unique_violation raised (not swallowed)" \
   || { echo "  ✗ expected an uncaught unique_violation; got: $(cat /tmp/p2_tear.$$)"; FAILED=1; }
@@ -219,7 +312,8 @@ psqlf -q >/dev/null 2>&1 <<SQL
 update public.shift_instances set offer_state='offered', offer_id=gen_random_uuid(), offered_at=now()
  where id=(select v from race_ids where k='shift');
 SQL
-if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG129" >/dev/null 2>&1; then
+if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG129" >/dev/null 2>&1 \
+   && docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG130" >/dev/null 2>&1; then
   psqlf -q -f - < "$CATALOG_SQL" > /tmp/p2_after2.$$ 2>&1
   if diff -q /tmp/p2_after.$$ /tmp/p2_after2.$$ >/dev/null; then echo "  ✓ re-apply clean; catalog byte-identical"
   else echo "  ✗ catalog DRIFTED on re-apply:"; diff /tmp/p2_after.$$ /tmp/p2_after2.$$ | sed 's/^/    /'; FAILED=1; fi

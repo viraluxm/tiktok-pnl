@@ -13,7 +13,7 @@ select 'IDX '||indexdef from pg_indexes where schemaname='public'
 select 'FN  '||p.oid::regprocedure||' sec='||case when p.prosecdef then 'definer' else 'invoker' end
        ||' cfg='||coalesce(array_to_string(p.proconfig,','),'-')
   from pg_proc p join pg_namespace n on n.oid=p.pronamespace
- where n.nspname='public' and p.proname like 'lensed_approve%' order by 1;
+ where n.nspname='public' and p.proname in ('lensed_approve_shift_pickup','lensed_cancel_shift_offer') order by 1;
 select 'ACL '||p.oid::regprocedure||' '||coalesce(array_to_string(p.proacl::text[],' | '),'DEFAULT')
   from pg_proc p join pg_namespace n on n.oid=p.pronamespace
- where n.nspname='public' and p.proname like 'lensed_approve%' order by 1;
+ where n.nspname='public' and p.proname in ('lensed_approve_shift_pickup','lensed_cancel_shift_offer') order by 1;

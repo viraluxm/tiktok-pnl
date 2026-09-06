@@ -1,4 +1,4 @@
--- lensed_approve_shift_pickup: happy path, replay, and every refusal path (migration 129, sec. 3).
+-- lensed_approve_shift_pickup: happy path, replay, and every refusal path (migration 129, extended by 130).
 --
 -- The refusal assertions all go through t_refuse, which additionally proves the instance and its
 -- claims were NOT mutated. A refusal that moved something is the torn state this RPC exists to
@@ -24,7 +24,7 @@ begin
   cb := mkc(s, bob,   'pending', 'pickup_request', o1);
   cc := mkc(s, carol, 'pending', 'pickup_request', o1);
 
-  res := public.lensed_approve_shift_pickup(A, s, cb, o1);
+  res := public.lensed_approve_shift_pickup(A, s, cb, o1, date '2026-09-07');
   perform t_eq('happy: ok=true',                     res->>'ok',                   'true');
   perform t_eq('happy: employee_id = winner (Bob)',  res->>'employee_id',          bob::text);
   perform t_eq('happy: previous_employee_id=Alice',  res->>'previous_employee_id', alice::text);
@@ -50,7 +50,7 @@ begin
   perform t_eq('happy: rival claim superseded',   (select status      from public.shift_claims where id=cc), 'superseded');
 
   -- ═══ REPLAY: approving twice must not double-write ═══
-  res := public.lensed_approve_shift_pickup(A, s, cb, o1);
+  res := public.lensed_approve_shift_pickup(A, s, cb, o1, date '2026-09-07');
   perform t_eq('replay: second approve refuses',  res->>'ok',     'false');
   perform t_eq('replay: reason ALREADY_APPROVED', res->>'reason', 'ALREADY_APPROVED');
   perform t_eq('replay: no double-write (still Bob)',
@@ -74,7 +74,7 @@ declare
 begin
   -- A null owner is a CALLER FAULT, not a business refusal, so it raises rather than returning.
   begin
-    res := public.lensed_approve_shift_pickup(null, gen_random_uuid(), gen_random_uuid(), gen_random_uuid());
+    res := public.lensed_approve_shift_pickup(null, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), date '2026-09-07');
     perform t_eq('null owner: should have raised', 'no raise', 'INVALID_OWNER');
   exception when others then
     perform t_eq('null owner RAISES INVALID_OWNER', SQLERRM, 'INVALID_OWNER');

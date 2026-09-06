@@ -1,7 +1,6 @@
 import 'server-only';
 import { randomUUID } from 'node:crypto';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { payPeriodStartFor } from '@/lib/employees';
 import type { Employee } from '@/types';
 import { laTodayISO } from './timezone';
 import { ScheduleError } from './release';
@@ -12,8 +11,9 @@ import {
 
 // Phase 2 offer lifecycle — the DB-bound half of Drop Shift / Available Shifts / Pick Up Shift.
 //
-// Writes ONLY shift_instances (the offer marker) and shift_claims (the pickup request), plus the
-// same attendance_events trail the legacy release path writes so drop counting keeps working.
+// Writes ONLY shift_instances (the offer marker) and shift_claims (the pickup request). It writes
+// NO attendance_events: offering is not dropping, so nothing is charged until a manager actually
+// approves a transfer (that pair is written by lensed_approve_shift_pickup — migration 130).
 // It never writes `shifts` and never touches employee_time_entries — scheduling is not payroll.
 //
 // SCOPING: these run service-role from PUBLIC token routes, so RLS is not the boundary. The
@@ -85,23 +85,16 @@ export async function offerShift(employee: Employee, instanceId: string): Promis
   if (uErr) throw new ScheduleError('OFFER_FAILED', uErr.message);
   if (!updated) throw new ScheduleError('ALREADY_OFFERED', DROP_REFUSAL_MESSAGES.ALREADY_OFFERED);
 
-  // Drop counting. The same 'released' event the legacy path writes, so computeDrops() keeps
-  // working unchanged and an offer still counts toward the cap the UI warns about. pay_period_start
-  // keys on the ACTION time, matching release.ts, so an offer and an offsetting pickup net out in
-  // the same period. Best-effort: the offer itself already succeeded and must not be undone by a
-  // bookkeeping failure, so this logs loudly rather than throwing.
-  const { error: evErr } = await admin.from('attendance_events').insert({
-    user_id: employee.user_id,
-    employee_id: employee.id,
-    shift_instance_id: instanceId,
-    shift_date: updated.shift_date,
-    event_type: 'released',
-    pay_period_start: payPeriodStartFor(laTodayISO(now)),
-  });
-  if (evErr) {
-    console.error(`[schedule] OFFER_EVENT_FAILED instance=${instanceId} employee=${employee.id}: ${evErr.message} (shift IS offered but has no attendance_event)`);
-  }
-
+  // NO ATTENDANCE EVENT HERE — deliberately, and this is the whole point of the offer lifecycle.
+  //
+  // An earlier draft wrote the legacy 'released' event right here so computeDrops() would keep
+  // working unchanged. That charged the offerer a drop for merely OFFERING, while they were still
+  // fully responsible for the shift and still clock-eligible for it — and if nobody picked it up,
+  // the drop stood anyway. Offering is not dropping.
+  //
+  // The bookkeeping now happens at TRANSFER time, inside lensed_approve_shift_pickup (migration
+  // 130), which writes the 'released'/'claimed' pair atomically with the assignment change. See
+  // that migration's header for why those are the correct two rows and whose ledger each hits.
   return {
     status: 'offered',
     offer_id: offerId,
@@ -282,4 +275,66 @@ export async function getMyPickupRequests(employee: Employee): Promise<
         : null;
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
+}
+
+// ── Cancel Offer ──────────────────────────────────────────────────────────────────────────────
+
+export const CANCEL_OFFER_MESSAGES: Record<string, string> = {
+  SHIFT_NOT_FOUND: 'That shift no longer exists.',
+  NOT_YOUR_SHIFT: 'That shift is not yours to cancel.',
+  OFFER_NOT_OPEN: 'That shift is not currently offered.',
+  ALREADY_TRANSFERRED: 'A manager already approved someone for this shift.',
+  STALE_OFFER: 'This shift was re-offered — reload and try again.',
+  OFFER_CHANGED: 'That offer changed while you were deciding — reload and try again.',
+  CANCEL_FAILED: 'That offer could not be cancelled.',
+};
+
+export interface CancelOfferResult {
+  status: 'cancelled';
+  offer_id: string;
+  /** pending pickup requests from this cycle that were closed. */
+  superseded: number;
+}
+
+/**
+ * CANCEL an offer the employee themselves opened — "actually, I'll keep it".
+ *
+ * The shift never stopped being theirs, so cancelling restores nothing: employee_id, status and
+ * released_at are already correct and the RPC leaves all three untouched. What it does do is close
+ * the cycle and supersede that cycle's pending requests, which must happen together — a closed
+ * offer with live requests would keep the manager queue actionable for a shift nobody is offering,
+ * and would leave the requester permanently unable to ask again after a re-offer (the pending
+ * uniqueness index is keyed on the SHIFT, not the cycle).
+ *
+ * NO attendance event and NO payroll row: cancelling is the opposite of dropping.
+ *
+ * SECURITY: `employee` is resolved from the permanent token by the route — never from the request
+ * body — and the RPC re-asserts it against the row's current owner, so a worker with a valid token
+ * of their own still cannot cancel somebody else's offer.
+ *
+ * rpc-grants: lensed_cancel_shift_offer
+ */
+export async function cancelOffer(
+  employee: Employee,
+  instanceId: string,
+  offerId: string,
+): Promise<CancelOfferResult> {
+  const admin = createAdminClient();
+  const { data, error } = await admin.rpc('lensed_cancel_shift_offer', {
+    p_owner: employee.user_id,
+    p_employee_id: employee.id,
+    p_shift_instance_id: instanceId,
+    p_offer_id: offerId,
+  });
+  if (error) throw new ScheduleError('CANCEL_FAILED', error.message);
+
+  const r = (data ?? {}) as { ok?: boolean; reason?: string; offer_state?: string; superseded?: number };
+  if (!r.ok) {
+    // An offer that is already 'transferred' is not a generic "not open" — the worker needs to know
+    // the shift is gone, not that their tap missed.
+    const reason =
+      r.reason === 'OFFER_NOT_OPEN' && r.offer_state === 'transferred' ? 'ALREADY_TRANSFERRED' : (r.reason ?? 'CANCEL_FAILED');
+    throw new ScheduleError(reason, CANCEL_OFFER_MESSAGES[reason] ?? CANCEL_OFFER_MESSAGES.CANCEL_FAILED);
+  }
+  return { status: 'cancelled', offer_id: offerId, superseded: r.superseded ?? 0 };
 }

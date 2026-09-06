@@ -419,11 +419,17 @@ export async function listPickupRequests(ownerId: string): Promise<PickupRequest
 /**
  * APPROVE a pickup — the assignment transfer.
  *
- * Delegates the whole multi-row change to lensed_approve_shift_pickup (migration 129) because it
- * must be atomic: the winning claim, every rival claim, the assignment and the offer's terminal
- * state all move together or not at all. Doing it as separate PostgREST writes permits exactly the
- * half-states the product must never show — a claim approved with the assignment unmoved, or an
- * assignment moved with rivals still pending and un-reapprovable because the CAS pre-state is gone.
+ * Delegates the whole multi-row change to lensed_approve_shift_pickup (migration 129, extended by
+ * 130) because it must be atomic: the winning claim, every rival claim, the assignment, the offer's
+ * terminal state AND the attendance pair all move together or not at all. Doing it as separate
+ * PostgREST writes permits exactly the half-states the product must never show — a claim approved
+ * with the assignment unmoved, or an assignment moved with rivals still pending and
+ * un-reapprovable because the CAS pre-state is gone.
+ *
+ * ATTENDANCE (migration 130): the transfer is the ONLY moment drop bookkeeping happens. Offering a
+ * shift writes nothing. `pay_period_start` is computed HERE, not in SQL, because the biweekly
+ * PAY_ANCHOR arithmetic lives only in src/lib/employees.ts — forking it into PL/pgSQL would let
+ * drops silently land in the wrong period. That is why the RPC takes a 5th argument.
  *
  * The RPC returns {ok:false, reason} for a refusal rather than raising, so a stale or already-taken
  * offer reaches the manager as a sentence instead of a 500.
@@ -431,10 +437,10 @@ export async function listPickupRequests(ownerId: string): Promise<PickupRequest
  */
 const PICKUP_APPROVE_MESSAGES: Record<string, string> = {
   CLAIM_NOT_FOUND: 'That pickup request no longer exists.',
-  CLAIM_NOT_PENDING: 'That request has already been decided.',
+  CLAIM_NOT_PENDING: 'That request is no longer open — someone else was approved, or the employee cancelled the offer.',
   ALREADY_APPROVED: 'That request was already approved.',
   SHIFT_NOT_FOUND: 'That shift no longer exists.',
-  OFFER_NOT_OPEN: 'This shift is no longer being offered.',
+  OFFER_NOT_OPEN: 'This shift is no longer being offered — it was cancelled or already taken.',
   STALE_OFFER: 'This shift was re-offered — reload the queue.',
   OFFER_CHANGED: 'This shift changed while you were deciding — reload the queue.',
   SHIFT_UNOWNED: 'That shift has no assigned employee.',
@@ -448,16 +454,21 @@ export async function approvePickup(input: {
   claimId: string;
   shiftInstanceId: string;
   offerId: string;
-}): Promise<{ shift_instance_id: string; employee_id: string; superseded: number }> {
+}): Promise<{ shift_instance_id: string; employee_id: string; superseded: number; attendance_events: number }> {
   const admin = createAdminClient();
   const { data, error } = await admin.rpc('lensed_approve_shift_pickup', {
     p_owner: input.ownerId,
     p_shift_instance_id: input.shiftInstanceId,
     p_claim_id: input.claimId,
     p_offer_id: input.offerId,
+    // ACTION time, matching release.ts and claim.ts, so a drop and its offsetting pickup net out
+    // in the same period.
+    p_pay_period_start: payPeriodStartFor(laTodayISO()),
   });
   if (error) throw new ScheduleError('APPROVE_FAILED', error.message);
-  const r = (data ?? {}) as { ok?: boolean; reason?: string; employee_id?: string; superseded?: number };
+  const r = (data ?? {}) as {
+    ok?: boolean; reason?: string; employee_id?: string; superseded?: number; attendance_events?: number;
+  };
   if (!r.ok) {
     const reason = r.reason ?? 'APPROVE_FAILED';
     throw new ScheduleError(reason, PICKUP_APPROVE_MESSAGES[reason] ?? 'That pickup could not be approved.');
@@ -466,6 +477,7 @@ export async function approvePickup(input: {
     shift_instance_id: input.shiftInstanceId,
     employee_id: r.employee_id as string,
     superseded: r.superseded ?? 0,
+    attendance_events: r.attendance_events ?? 0,
   };
 }
 

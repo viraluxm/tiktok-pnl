@@ -74,6 +74,13 @@ console.log('\n1. APPROVE delegates to the transactional RPC with the full CAS t
   eq('the transactional function', globalThis.__RPC[0].fn, 'lensed_approve_shift_pickup');
   eq('owner comes from the SESSION, not the body', globalThis.__RPC[0].args.p_owner, OWNER);
   eq('and it carries shift + claim + offer generation', [globalThis.__RPC[0].args.p_shift_instance_id, globalThis.__RPC[0].args.p_claim_id, globalThis.__RPC[0].args.p_offer_id], ['inst-1', 'claim-1', 'offer-A']);
+  // The 5th argument (migration 130). pay_period_start is computed in TypeScript because the
+  // biweekly PAY_ANCHOR arithmetic lives only in src/lib/employees.ts — if the RPC ever computed it
+  // in SQL instead, drops could silently land in the wrong pay period.
+  check('a pay_period_start is passed to the RPC',
+    typeof globalThis.__RPC[0].args.p_pay_period_start === 'string'
+    && /^\d{4}-\d{2}-\d{2}$/.test(globalThis.__RPC[0].args.p_pay_period_start),
+    String(globalThis.__RPC[0].args.p_pay_period_start));
   eq('the new assignee is returned', r.employee_id, 'emp-b');
   check('NO direct table write happens in the helper — the RPC owns the transaction', writes().length === 0);
 }
@@ -82,9 +89,9 @@ console.log('\n2. APPROVE refusals become manager-readable sentences, never a 50
 {
   for (const [reason, needle] of [
     ['STALE_OFFER', /re-offered/i],
-    ['OFFER_NOT_OPEN', /no longer being offered/i],
+    ['OFFER_NOT_OPEN', /no longer being offered/i],   // covers cancelled AND already-taken
     ['OFFER_CHANGED', /changed while you were deciding/i],
-    ['CLAIM_NOT_PENDING', /already been decided/i],
+    ['CLAIM_NOT_PENDING', /no longer open/i],
     ['ALREADY_APPROVED', /already approved/i],
     ['EMPLOYEE_DOUBLE_BOOKED', /already scheduled that day/i],
     ['EMPLOYEE_UNAVAILABLE', /no longer active/i],

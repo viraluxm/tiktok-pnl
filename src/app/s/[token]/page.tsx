@@ -25,7 +25,7 @@ import { ScheduleAutoRefresh } from './ScheduleAutoRefresh';
 import MySchedule from './MySchedule';
 import TeamSchedule from './TeamSchedule';
 import ScheduleTabs from './ScheduleTabs';
-import { DropShiftButton } from './phase2Parts';
+import { DropShiftButton, CancelOfferButton } from './phase2Parts';
 import { getWeekSchedule, resolveWeekStart } from '@/lib/schedule/mySchedule';
 import { getTeamSchedule, resolveTeamWeek } from '@/lib/schedule/teamSchedule';
 import { getAvailableShifts, getMyPickupRequests } from '@/lib/schedule/offer';
@@ -81,10 +81,14 @@ export default async function SchedulePage({
       getAvailableShifts(employee, now),
       getMyPickupRequests(employee),
     ]);
-  // Offered shifts are STILL MINE, so they stay in My Schedule and are merely marked. This is the
-  // lookup the card below uses to draw that badge and to hide a second Drop control.
-  const offeredIds = new Set(
-    myShifts.filter((s) => (s as { offer_state?: string | null }).offer_state === 'offered').map((s) => s.id),
+  // Offered shifts are STILL MINE, so they stay in My Schedule and are merely marked. This maps
+  // instance id -> the CURRENT offer_id, which the card needs so Cancel Offer can name the exact
+  // cycle it is closing; a stale tab then fails the CAS instead of cancelling a newer offer.
+  const offeredOfferIdById = new Map(
+    myShifts
+      .map((s) => s as { id: string; offer_state?: string | null; offer_id?: string | null })
+      .filter((s) => s.offer_state === 'offered' && s.offer_id)
+      .map((s) => [s.id, s.offer_id as string]),
   );
 
   const periodEndLabel = fmtCalendarDate(period.end);
@@ -180,14 +184,27 @@ export default async function SchedulePage({
             <div className="flex items-center justify-between gap-3">
               <ShiftFacts inst={s} />
               <div className="shrink-0">
-                {s.status === 'released' ? (
+                {/* OFFERED IS CHECKED FIRST, before status. A shift may legitimately be
+                    status='claimed' AND offer_state='offered' (claimed via the legacy OT flow, then
+                    offered), and in that state the live offer is what the worker needs to act on —
+                    testing status first would show a dead "Picked up" label with no way to cancel. */}
+                {offeredOfferIdById.has(s.id) ? (
+                  // Offered, and still theirs. Say so plainly — the worker must not think they are
+                  // off the hook — and give them the way back out.
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-xs text-tt-yellow">Offered · still yours</span>
+                    <CancelOfferButton
+                      token={token}
+                      instanceId={s.id}
+                      offerId={offeredOfferIdById.get(s.id) as string}
+                      startsAt={s.starts_at}
+                      endsAt={s.ends_at}
+                    />
+                  </div>
+                ) : s.status === 'released' ? (
                   <span className="text-xs text-tt-yellow">Released · waiting for pickup</span>
                 ) : s.status === 'claimed' ? (
                   <span className="text-xs text-tt-green">Picked up</span>
-                ) : offeredIds.has(s.id) ? (
-                  // Offered, and still theirs. Say so plainly — the worker must not think they are
-                  // off the hook, and there is no second Drop control to press.
-                  <span className="shrink-0 text-xs text-tt-yellow">Offered · still yours</span>
                 ) : releasableNow ? (
                   <DropShiftButton token={token} instanceId={s.id} startsAt={s.starts_at} endsAt={s.ends_at} />
                 ) : null}

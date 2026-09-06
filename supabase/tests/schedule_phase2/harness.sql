@@ -102,7 +102,9 @@ begin
   select * into before_i from public.shift_instances where id = p_shift;
   select jsonb_agg(jsonb_build_object('id',id,'s',status) order by id) into before_c
     from public.shift_claims where shift_instance_id = p_shift;
-  res := public.lensed_approve_shift_pickup(p_owner, p_shift, p_claim, p_oid);
+  -- Fixed pay period: these assertions are about refusal + non-mutation, not about which period a
+  -- (never-written) attendance row would land in.
+  res := public.lensed_approve_shift_pickup(p_owner, p_shift, p_claim, p_oid, date '2026-09-07');
   select * into after_i from public.shift_instances where id = p_shift;
   select jsonb_agg(jsonb_build_object('id',id,'s',status) order by id) into after_c
     from public.shift_claims where shift_instance_id = p_shift;
