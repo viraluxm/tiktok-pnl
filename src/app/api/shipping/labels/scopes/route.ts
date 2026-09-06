@@ -71,21 +71,25 @@ export async function GET(req: Request) {
     if (days.size) daysOfBox.set(b.group_key, [...days]);
   }
 
-  type Bucket = { boxes: number; ready: number; orders: number };
-  const bump = (m: Map<string, Bucket>, key: string, ready: boolean, orders: number) => {
-    const b = m.get(key) ?? { boxes: 0, ready: 0, orders: 0 };
+  type Bucket = {
+    boxes: number; ready: number; orders: number;
+    /** Held orders belonging to a show that is broadcasting right now. */
+    heldLiveNow: number;
+    /** Held orders from a show that has ENDED but whose combine window is still open. */
+    heldRecent: number;
+  };
+  const bump = (
+    m: Map<string, Bucket>, key: string, ready: boolean, orders: number,
+    heldLiveNow = 0, heldRecent = 0,
+  ) => {
+    const b = m.get(key) ?? { boxes: 0, ready: 0, orders: 0, heldLiveNow: 0, heldRecent: 0 };
     b.boxes++; b.orders += orders; if (ready) b.ready++;
+    b.heldLiveNow += heldLiveNow; b.heldRecent += heldRecent;
     m.set(key, b);
   };
 
-  const byDay = new Map<string, Bucket>();
-  for (const b of boxes) {
-    for (const day of daysOfBox.get(b.group_key) ?? []) {
-      bump(byDay, day, readyByGroup.get(b.group_key) ?? false, b.orders.length);
-    }
-  }
-
-  // ── Which live each order came from. ──
+  // ── Which live each order came from. Needed before the day buckets, so a held box can say
+  // WHICH kind of held it is. ──
   const orderIds = candidates.map((c) => c.order_id);
   const items = await readAllPagedIn<{ client_idempotency_key: string | null; session_id: string | null }, string>(
     orderIds,
@@ -126,8 +130,42 @@ export async function GET(req: Request) {
   );
   const LIVE_WINDOW_MS = 20 * 60_000;
 
+  // ── Now the day buckets, with held orders split by WHY they are held. ──
+  //
+  // "Not ready" reads as one thing but covers two, and the operator's mental model is the first:
+  //   - the show is broadcasting right now, so its orders are obviously not printable;
+  //   - the show ENDED, but TikTok can still add orders to its boxes for about a day.
+  // Measured 2026-09-05 on lotsofsteals: 409 held orders were from a running show and 115 from
+  // shows that had already finished. Saying only "too recent" leaves the second group looking
+  // like a mistake.
+  const liveSessionIds = new Set(
+    sessions
+      .filter((x) => {
+        const seen = x.last_seen_at ? Date.parse(x.last_seen_at) : NaN;
+        return Number.isFinite(seen) && Date.now() - seen < LIVE_WINDOW_MS;
+      })
+      .map((x) => String(x.id)),
+  );
+
+  const byDay = new Map<string, Bucket>();
+  for (const b of boxes) {
+    const ready = readyByGroup.get(b.group_key) ?? false;
+    let liveNow = 0, recent = 0;
+    if (!ready) {
+      for (const o of b.orders) {
+        const sid = sessionOfOrder.get(o.order_id);
+        if (sid && liveSessionIds.has(sid)) liveNow++;
+        else recent++;
+      }
+    }
+    for (const day of daysOfBox.get(b.group_key) ?? []) {
+      bump(byDay, day, ready, b.orders.length, liveNow, recent);
+    }
+  }
+
   const lives = sessions.map((s) => {
-    const b = bySession.get(String(s.id)) ?? { boxes: 0, ready: 0, orders: 0 };
+    const b = bySession.get(String(s.id))
+      ?? { boxes: 0, ready: 0, orders: 0, heldLiveNow: 0, heldRecent: 0 };
     const seen = s.last_seen_at ? Date.parse(s.last_seen_at) : NaN;
     return {
       id: String(s.id),
@@ -162,7 +200,9 @@ export async function GET(req: Request) {
     // Only single-day runs name a night unambiguously; "3 lives" does not map to the grid.
     const m = /^day (\d{4}-\d{2}-\d{2})$/.exec(String((r as { run_scope: string }).run_scope ?? ''));
     if (!m) continue;
-    if (!byDay.has(m[1])) byDay.set(m[1], { boxes: 0, ready: 0, orders: 0 });
+    if (!byDay.has(m[1])) {
+      byDay.set(m[1], { boxes: 0, ready: 0, orders: 0, heldLiveNow: 0, heldRecent: 0 });
+    }
   }
 
   const days = [...byDay.entries()]

@@ -30,7 +30,13 @@ const DRAIN_CHUNK = 50;
 type UnboundChoice = 'wait' | 'skip' | 'include';
 type ScopeKind = 'day' | 'lives';
 
-interface DayScope { day: string; boxes: number; ready: number; orders: number }
+interface DayScope {
+  day: string; boxes: number; ready: number; orders: number;
+  /** Held orders whose show is broadcasting right now. */
+  heldLiveNow: number;
+  /** Held orders from a show that ended, but whose combine window is still open. */
+  heldRecent: number;
+}
 interface LiveScope {
   id: string; channel: string | null; started_at: string | null; ended_at: string | null;
   running: boolean; day: string | null; boxes: number; ready: number; orders: number;
@@ -63,6 +69,7 @@ interface RunRow {
   run_id: string; scope: string | null; at: string | null; store_id: string | null;
   labels: number; purchased: number; claimed: number; failed: number;
   singles: number; mixed: number; unbound: number; spent: number; printable: number;
+  failures?: Array<{ orders: string[]; code: string | null; reason: string | null }>;
 }
 
 const money = (n: number) => `$${n.toFixed(2)}`;
@@ -614,6 +621,25 @@ export default function LabelsPanel() {
                       <span className="ml-2 text-xs text-tt-red">· {r.failed} failed</span>
                     )}
                   </span>
+                  {(r.failures?.length ?? 0) > 0 && (
+                    /* A count is not actionable. These orders were NOT charged and NOT labelled,
+                       the box is buyable again, and someone has to deal with the reason — so the
+                       reason and the order ids belong here, not in the database. */
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-xs text-tt-red">
+                        What failed, and why
+                      </summary>
+                      <ul className="mt-1 space-y-1 text-[11px] text-tt-muted">
+                        {(r.failures ?? []).map((f, i) => (
+                          <li key={i}>
+                            <span className="text-tt-red">{f.reason ?? `code ${f.code}`}</span>
+                            {' — '}nothing charged, and this box is buyable again.
+                            <span className="block font-mono">{f.orders.join(', ')}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   <span className="block text-xs text-tt-muted">
                     {r.at ? new Date(r.at).toLocaleString('en-US', {
                       month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
@@ -717,8 +743,9 @@ function DayCalendar({ days, today, selected, onToggle }: {
               title={!info ? 'nothing to buy'
                 : info.ready > 0 ? `${info.ready} ready of ${info.boxes} · ${info.orders} orders`
                   : waiting
-                    ? `${info.boxes} boxes not ready yet — every order is under the age floor, so `
-                      + 'their combine groups may still be growing. Check back in a few hours.'
+                    ? `${info.boxes} boxes not ready yet`
+                      + (info.heldLiveNow ? ` · ${info.heldLiveNow} orders from a show on air now` : '')
+                      + (info.heldRecent ? ` · ${info.heldRecent} from shows that just ended — TikTok can still add to their boxes` : '')
                     : 'all labels bought for this night'}
             >
               <span className="block text-sm leading-tight">
@@ -732,6 +759,37 @@ function DayCalendar({ days, today, selected, onToggle }: {
           );
         })}
       </div>
+      {(() => {
+        // Spell out WHY a night is held, in the terms the work is actually thought about: a show
+        // on air now versus one that has ended but whose combine window is still open. Measured
+        // on a real evening, 409 held orders were the first and 115 the second — calling both
+        // "too recent" made the second look like a mistake.
+        const heldLive = days.reduce((n, d) => n + (d.heldLiveNow ?? 0), 0);
+        const heldRecent = days.reduce((n, d) => n + (d.heldRecent ?? 0), 0);
+        if (!heldLive && !heldRecent) return null;
+        return (
+          <p className="mt-2 rounded-md border border-tt-yellow/30 bg-tt-yellow/5 px-3 py-2 text-xs text-tt-muted">
+            <span className="text-tt-yellow">Held back:</span>{' '}
+            {heldLive > 0 && (
+              <>
+                <span className="text-tt-text">{heldLive.toLocaleString()}</span> order
+                {heldLive === 1 ? '' : 's'} from a show that is on air right now
+              </>
+            )}
+            {heldLive > 0 && heldRecent > 0 && ', and '}
+            {heldRecent > 0 && (
+              <>
+                <span className="text-tt-text">{heldRecent.toLocaleString()}</span> from shows that
+                have ended but are still inside TikTok&rsquo;s combine window — it can keep adding
+                orders to those boxes for about a day, and a box bought early gets a label covering
+                only part of the parcel
+              </>
+            )}
+            . These become buyable on their own; nothing needs doing.
+          </p>
+        );
+      })()}
+
       <p className="mt-2 text-xs text-tt-muted">
         {selected.size === 0 && 'Pick one or more nights.'}
         {selected.size === 1 && `1 night · ${total} labels ready`}
