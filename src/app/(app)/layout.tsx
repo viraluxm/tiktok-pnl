@@ -6,6 +6,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 import { useExtensionAuth } from '@/hooks/useExtensionAuth';
+import { ChatContextProvider } from '@/lib/chat/context';
+import ChatWidget from '@/components/chat/ChatWidget';
 
 export default function AppLayout({
   children,
@@ -87,5 +89,13 @@ export default function AppLayout({
     );
   }
 
-  return <>{children}</>;
+  // Admin assistant. The provider must wrap `children` so the dashboard tabs can publish
+  // which view is open (they are React state, not routes — see lib/chat/context.tsx).
+  // ChatWidget renders null for non-admins; /api/chat re-checks the role server-side.
+  return (
+    <ChatContextProvider>
+      {children}
+      <ChatWidget />
+    </ChatContextProvider>
+  );
 }
