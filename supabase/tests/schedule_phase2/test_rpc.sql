@@ -134,4 +134,42 @@ begin
   end;
 end $$;
 
+-- ═══════════════════════════════════════════════════════════════════════════════════════════════
+-- A PENDING REQUESTER IS NOT SCHEDULE-BOUND CLOCK-ELIGIBLE
+-- ═══════════════════════════════════════════════════════════════════════════════════════════════
+-- Asking for a shift must grant NOTHING until a manager approves. The QR/kiosk clock path resolves
+-- an instance by id and requires (employee_id = the puncher, status in CLOCK_ELIGIBLE_STATUSES,
+-- released_at IS NULL) — so the test that matters is that a pending pickup leaves employee_id on
+-- the OFFERER. Elsewhere we prove the offerer keeps eligibility and the winner gains it; this pins
+-- the third case, that the loser/pending requester never had it.
+do $$
+declare
+  A     uuid := 'a0000000-0000-4000-8000-000000000001';
+  alice uuid := 'e1111111-0000-4000-8000-000000000001';  -- offerer
+  bob   uuid := 'e2222222-0000-4000-8000-000000000002';  -- requester
+  o uuid := gen_random_uuid();
+  s uuid; c uuid; inst public.shift_instances;
+begin
+  s := mk(alice, '2027-02-14', 'scheduled', 'offered', o, now());
+  c := mkc(s, bob, 'pending', 'pickup_request', o);   -- request filed, nothing approved
+
+  select * into inst from public.shift_instances where id = s;
+  perform t_eq('pending: instance still assigned to the OFFERER', inst.employee_id, alice);
+  perform t_eq('pending: requester holds NO assignment on it', inst.employee_id = bob, false);
+  -- The clock predicate, spelled out exactly as the three gates apply it.
+  perform t_eq('pending: requester is NOT clock-eligible for this shift',
+    (inst.employee_id = bob and inst.status in ('scheduled','claimed') and inst.released_at is null), false);
+  perform t_eq('pending: OFFERER is still clock-eligible for it',
+    (inst.employee_id = alice and inst.status in ('scheduled','claimed') and inst.released_at is null), true);
+  perform t_eq('pending: the request itself is the only new row', 
+    (select status from public.shift_claims where id = c), 'pending');
+
+  -- ...and after approval the eligibility flips exactly once, in the same direction.
+  perform public.lensed_approve_shift_pickup(A, s, c, o, date '2026-09-07');
+  select * into inst from public.shift_instances where id = s;
+  perform t_eq('approved: requester IS now clock-eligible',
+    (inst.employee_id = bob and inst.status in ('scheduled','claimed') and inst.released_at is null), true);
+  perform t_eq('approved: former owner is NO LONGER eligible', inst.employee_id = alice, false);
+end $$;
+
 select t_report('RPC happy path, replay, and refusal paths');

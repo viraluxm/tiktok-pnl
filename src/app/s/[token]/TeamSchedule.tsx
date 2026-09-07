@@ -55,7 +55,10 @@ export default function TeamSchedule({
           <div className="space-y-2">
             {available.map((a) => (
               <div key={a.id} className="rounded-lg border border-tt-border bg-tt-card px-4 py-3">
-                <div className="flex items-center justify-between gap-3">
+                {/* flex-wrap: the right slot is either a compact button OR a full sentence
+                    ("You already work that day"), and the sentence plus the date/time/role line
+                    overflows a 375px screen. Wrapping keeps the desktop layout identical. */}
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
                   <div className="min-w-0">
                     <p className="text-sm font-medium text-tt-text">
                       {dayHeading(a.shift_date).slice(0, 3)} {fmtMonthDay(a.shift_date)}

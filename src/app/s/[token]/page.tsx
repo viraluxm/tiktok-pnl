@@ -124,11 +124,24 @@ export default async function SchedulePage({
     );
   }
 
+  // WHICH shift, not just how many. getMyPickupRequests already returns the span, and a worker
+  // who asked for cover needs to see the date to know whether to keep their evening free — a bare
+  // count made them go hunting through Team Schedule to find out what they had asked for.
   const pickupBanner = myPickups.length > 0 && (
     <div key="pickups" className="mb-6 rounded-lg border border-tt-cyan/40 bg-tt-cyan/10 px-4 py-3">
-      <p className="text-sm font-semibold text-tt-cyan">Pickup requested</p>
-      <p className="mt-0.5 text-xs text-tt-muted">
-        Waiting for manager approval · {myPickups.length} shift{myPickups.length === 1 ? '' : 's'}
+      <p className="text-sm font-semibold text-tt-cyan">
+        Pickup requested{myPickups.length > 1 ? ` · ${myPickups.length}` : ''}
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {myPickups.map((p) => (
+          <li key={p.claim_id} className="text-xs text-tt-muted">
+            {fmtDateLA(p.starts_at)} · {fmtTimeRangeLA(p.starts_at, p.ends_at)}
+            {isOvernight(p.starts_at, p.ends_at) && <span className="ml-1">🌙 +1d</span>}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1.5 text-xs text-tt-muted">
+        Waiting for manager approval — not yours until it&rsquo;s approved.
       </p>
     </div>
   );
@@ -181,7 +194,12 @@ export default async function SchedulePage({
           nowMs <= new Date(s.ends_at).getTime() + 60 * 60_000;
         return (
           <Card key={s.id}>
-            <div className="flex items-center justify-between gap-3">
+            {/* flex-wrap, not a plain row: the OFFERED state puts a badge AND a Cancel Offer
+                button on the right, which together leave only a few pixels of headroom at 375px
+                and overflow at 320px or with a wider time string ("11:00 AM – 11:00 PM").
+                Wrapping costs nothing on desktop (it still fits one line) and drops the controls
+                to their own line when they cannot fit. */}
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
               <ShiftFacts inst={s} />
               <div className="shrink-0">
                 {/* OFFERED IS CHECKED FIRST, before status. A shift may legitimately be
