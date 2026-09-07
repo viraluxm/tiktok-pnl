@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { formatTime12 } from '@/lib/weeklySchedule';
 import { confirmErrorMessage } from '@/lib/timeclock';
-import { canRemoveScheduled, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
+import { canRemoveScheduled, canAddWorkedTime, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
 import PersonAvatar from './PersonAvatar';
 
 // One person's day as a TILE: avatar on top, name under it, the facts under that.
@@ -34,6 +34,7 @@ export default function PersonCard({
   onConfirm,
   onEdit,
   onRemoveScheduled,
+  onAddWorkedTime,
 }: {
   person: DayPerson;
   /** Shown only in the pending overlay, where cards span many days. */
@@ -46,6 +47,13 @@ export default function PersonCard({
    * Remove action, which is how the pending-confirmations overlay keeps its punch-only vocabulary.
    */
   onRemoveScheduled?: (instanceId: string) => void;
+  /**
+   * ASK to record worked time for a tile that shows "Did not clock in". The container owns the
+   * form (it knows the date and holds the modal); this tile only surfaces the affordance — the
+   * same split as onRemoveScheduled. Absent → no action, which is how the pending-confirmations
+   * overlay keeps its punch-only vocabulary.
+   */
+  onAddWorkedTime?: (person: DayPerson) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -56,6 +64,9 @@ export default function PersonCard({
   // calendarModel (canRemoveScheduled) so it is pure and unit-tested; a tile with any punch is
   // excluded there, which is what keeps this action away from worked/payroll rows.
   const canRemove = !!onRemoveScheduled && canRemoveScheduled(person);
+  // Mutually exclusive with canRemove by construction: canRemoveScheduled needs state
+  // 'scheduled', canAddWorkedTime needs 'no_show'. A tile can never offer both.
+  const canAddWorked = !!onAddWorkedTime && canAddWorkedTime(person);
 
   async function run(confirmed: boolean) {
     if (!punch) return;
@@ -128,6 +139,18 @@ export default function PersonCard({
             type="button" onClick={() => onRemoveScheduled(scheduled.id)}
             className="flex-1 rounded-lg border border-tt-border px-2 py-1.5 text-[11px] font-semibold text-tt-muted transition-colors hover:border-tt-red/40 hover:bg-tt-red/10 hover:text-tt-red"
           >Remove Shift</button>
+        </div>
+      )}
+
+      {/* THE MISSED-PUNCH CORRECTION. Only on a past scheduled day with no punch at all, so it can
+          never appear beside worked time that already exists. Wording is deliberate: this records
+          what the manager says was worked, it does not invent a clock-in. */}
+      {canAddWorked && (
+        <div className="mt-2 flex w-full">
+          <button
+            type="button" onClick={() => onAddWorkedTime(person)}
+            className="flex-1 rounded-lg border border-tt-yellow/40 bg-tt-yellow/10 px-2 py-1.5 text-[11px] font-semibold text-tt-yellow transition-colors hover:bg-tt-yellow/20"
+          >Add Worked Time</button>
         </div>
       )}
 

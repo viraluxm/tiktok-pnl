@@ -11,8 +11,9 @@ import { PAY_ANCHOR } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
 import {
   buildCalendarDays, maxHeadcount,
-  type CalPunch, type CalScheduled, type CalendarView,
+  type CalPunch, type CalScheduled, type CalendarView, type DayPerson,
 } from '@/lib/schedule/calendarModel';
+import { workedTimePrefill, type WorkedTimePrefill } from '@/lib/shifts/manualWorked';
 import {
   monthGridDays, monthTitle, addMonthsISO, startOfMonthISO, isInMonth, localTodayISO,
   WEEKDAY_LABELS, parseYMD, indexWeekCards, type RoleFilterValue, type WeekShiftCard,
@@ -66,6 +67,11 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   // which is the whole point of asking early. Denied days are excluded: that person is working.
   const timeOffByDate = useMemo(() => indexTimeOffByDate(timeOffRows), [timeOffRows]);
   const [addOnDate, setAddOnDate] = useState<string | null>(null);
+  // Set ONLY when the day-add modal was reached from a "Did not clock in" tile, so it opens
+  // straight into the Worked / Missed Punch lane with that person and their planned span filled
+  // in. Cleared on every other route into the modal, so `+ Add a shift on this day` still opens
+  // the neutral, Scheduled-by-default form it always did.
+  const [workedPrefill, setWorkedPrefill] = useState<WorkedTimePrefill | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
 
   const { apply: applySchedule } = useScheduleBulk();
@@ -206,10 +212,34 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   }
 
   // PAYABLE. Writes a `shifts` row — the same thing a punch produces, so only for corrections.
-  async function createWorked(employeeIds: string[], startTime: string, endTime: string | null) {
+  // addShift is the guarded RPC path (migration 130): it refuses worked time that overlaps worked
+  // time the person already has, atomically, so two managers cannot both succeed. Creating for a
+  // crew stays sequential precisely so ONE person's conflict is reported as their own.
+  async function createWorked(
+    employeeIds: string[], startTime: string, endTime: string | null, breakMinutes: number,
+  ) {
     for (const employee_id of employeeIds) {
-      await addShift.mutateAsync({ employee_id, date: addOnDate as string, start_time: startTime, end_time: endTime });
+      await addShift.mutateAsync({
+        employee_id, date: addOnDate as string,
+        start_time: startTime, end_time: endTime, break_minutes: breakMinutes,
+      });
     }
+  }
+
+  // Open the day-add modal with NOTHING seeded — the neutral route (`+ Add a shift on this day`
+  // and the grid's own add affordance). Clearing the prefill matters: a stale one would silently
+  // reopen the payable lane for the wrong person.
+  function openPlainAdd(date: string) {
+    setWorkedPrefill(null);
+    setAddOnDate(date);
+  }
+
+  // Open it as a MISSED-PUNCH CORRECTION for one person, seeded from their planned span.
+  function openWorkedTime(person: DayPerson, date: string) {
+    const prefill = workedTimePrefill(person, date);
+    if (!prefill) return; // no scheduled span to copy — canAddWorkedTime already excludes this
+    setWorkedPrefill(prefill);
+    setAddOnDate(date);
   }
 
   return (
@@ -281,7 +311,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
         payAnchor={PAY_ANCHOR}
         peak={peak}
         onOpenDay={setOpenDate}
-        onAddDay={setAddOnDate}
+        onAddDay={openPlainAdd}
         timeOffByDate={timeOffByDate}
         onOpenTimeOff={() => setShowTimeOff(true)}
       />
@@ -334,18 +364,26 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           onClose={() => setOpenDate(null)}
           onConfirm={handleConfirm}
           onEdit={openEditor}
-          onAddShift={setAddOnDate}
+          onAddShift={openPlainAdd}
           onRemoveScheduled={removeScheduled}
+          onAddWorkedTime={openWorkedTime}
         />
       )}
 
       {addOnDate && (
         <DayAddShiftModal
+          // The prefills seed state at MOUNT, so a changing key is what makes a second
+          // "Add Worked Time" (different person, or after a plain open) actually reseed the form.
+          key={workedPrefill ? `worked:${workedPrefill.employeeIds[0]}:${addOnDate}` : `plain:${addOnDate}`}
           dateLabel={fullDateLabel(addOnDate)}
           employees={employees}
-          onClose={() => setAddOnDate(null)}
+          onClose={() => { setAddOnDate(null); setWorkedPrefill(null); }}
           onCreateScheduled={createScheduled}
           onCreateWorked={createWorked}
+          initialMode={workedPrefill ? 'worked' : undefined}
+          initialEmployeeIds={workedPrefill?.employeeIds}
+          initialStart={workedPrefill?.start}
+          initialEnd={workedPrefill?.end}
         />
       )}
 

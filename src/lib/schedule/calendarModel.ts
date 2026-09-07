@@ -158,6 +158,35 @@ export function canRemoveScheduled(
   return p.state === 'scheduled';
 }
 
+// ── the Add Worked Time rule ─────────────────────────────────────────────────
+
+/**
+ * Should this person-day tile offer "Add Worked Time"? Pure for the same reason
+ * canRemoveScheduled is: the affordance rule is testable on its own, and the component stays dumb.
+ *
+ * Every clause is load-bearing:
+ *   • no punch     — a tile that already has a worked/`shifts` row keeps its Edit / Confirm
+ *                    vocabulary. Offering "add worked time" beside existing worked time is how you
+ *                    get two payable rows for one shift, which is the exact bug this feature is
+ *                    fenced against.
+ *   • scheduled    — the prefill copies the planned span. With nothing planned there is nothing to
+ *                    prefill from, and the manager should use the Add-shift modal directly.
+ *   • state 'no_show' — classify() only returns this for a PAST scheduled day with no punch, which
+ *                    is precisely "did not clock in". Today and future stay out deliberately: a
+ *                    shift that has not happened yet must not be one click from being paid, and a
+ *                    same-day miss becomes correctable the moment the day turns over.
+ *
+ * This is an AFFORDANCE rule, never the boundary. lensed_create_manual_worked_shift (migration
+ * 130) re-derives the real constraint — no overlapping worked time — inside one transaction.
+ */
+export function canAddWorkedTime(
+  p: Pick<DayPerson, 'punch' | 'scheduled' | 'state'>,
+): boolean {
+  if (p.punch) return false;
+  if (!p.scheduled) return false;
+  return p.state === 'no_show';
+}
+
 // ── recurrence: what a stored row already owns ───────────────────────────────
 
 /**

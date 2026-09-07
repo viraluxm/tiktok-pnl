@@ -133,14 +133,41 @@ function paySpanMinutes(
       return Number.isFinite(mins) ? mins : null;
     }
   }
+  return wallClockSpanMinutes(nextStart, nextEnd);
+}
+
+// The wall-clock span in minutes, overnight-wrapped — the same `end <= start ⇒ next day` rule as
+// shiftHours()/isOvernight(). Exported because CREATING a manual worked shift needs the identical
+// upper bound for its break, and a second copy of the wrap rule is exactly how two paths drift.
+// Returns null for an open shift (no completed span), which callers read as "no upper bound".
+export function wallClockSpanMinutes(startTime: string, endTime: string | null): number | null {
+  if (endTime == null) return null;
   const toMin = (t: string) => {
     const [h, m] = t.split(':');
     return (Number(h) || 0) * 60 + (Number(m) || 0);
   };
-  const startM = toMin(nextStart);
-  let endM = toMin(nextEnd);
+  const startM = toMin(startTime);
+  let endM = toMin(endTime);
   if (endM <= startM) endM += 1440; // overnight
   return endM - startM;
+}
+
+// THE break invariant, in two halves so each is asserted exactly where the edit path already
+// asserts it (shape always; the span bound only once a change is known to be real — a no-op save
+// must not start failing because a stored break happens to equal its span).
+//
+// Shared with the manual-worked CREATION path so the two cannot drift. The RPC re-asserts both
+// server-side; these give the manager the message before a round trip.
+export function assertBreakShape(next: number): void {
+  if (!Number.isFinite(next) || !Number.isInteger(next) || next < 0) {
+    throw new Error(BREAK_INVALID_ERROR);
+  }
+}
+
+export function assertBreakFitsSpan(next: number, spanMinutes: number | null): void {
+  // A break equal to the span pays zero; longer pays zero too (paidShiftHours floors). Both are
+  // refused so the manager sees why instead of silently wiping the shift's pay.
+  if (spanMinutes != null && next >= spanMinutes) throw new Error(BREAK_TOO_LONG_ERROR);
 }
 
 // The exact column patch for a start/end-time edit. THE single place that decides which layer a
@@ -214,16 +241,11 @@ export function buildShiftEditPatch(
   let breakPatch: number | undefined;
   if (edit.break_minutes !== undefined) {
     const next = edit.break_minutes;
-    if (!Number.isFinite(next) || !Number.isInteger(next) || next < 0) {
-      throw new Error(BREAK_INVALID_ERROR);
-    }
+    assertBreakShape(next);
     const currentBreak = row.break_minutes ?? 0;
     if (next !== currentBreak) {
       // Validate against the RESULTING pay span, never the stored one.
-      const span = paySpanMinutes(row, nextStart, nextEnd, instants);
-      // A break equal to the span pays zero; longer pays zero too (paidShiftHours floors). Both
-      // are refused here so the manager sees why instead of silently wiping the shift's pay.
-      if (span != null && next >= span) throw new Error(BREAK_TOO_LONG_ERROR);
+      assertBreakFitsSpan(next, paySpanMinutes(row, nextStart, nextEnd, instants));
       breakPatch = next;
     }
   }

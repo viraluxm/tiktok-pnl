@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { CalendarDay } from '@/lib/schedule/calendarModel';
+import type { CalendarDay, DayPerson } from '@/lib/schedule/calendarModel';
 import PersonCard from './PersonCard';
 
 // The day overlay — a grid of person tiles rather than a stack of rows. At 10–20 people a day,
@@ -15,6 +15,7 @@ export default function DayPeopleModal({
   onEdit,
   onAddShift,
   onRemoveScheduled,
+  onAddWorkedTime,
 }: {
   day: CalendarDay;
   dateLabel: string;
@@ -24,6 +25,12 @@ export default function DayPeopleModal({
   onAddShift: (date: string) => void;
   /** Remove a one-off scheduled shift. Absent → the tiles offer no Remove action. */
   onRemoveScheduled?: (instanceId: string) => Promise<void>;
+  /**
+   * Record worked time for someone who did not clock in. Absent → the tiles offer no such action.
+   * The overlay closes as it fires, the same handoff `+ Add a shift on this day` already uses,
+   * because the destination is the Worked / Missed Punch form rather than an in-place edit.
+   */
+  onAddWorkedTime?: (person: DayPerson, date: string) => void;
 }) {
   // The confirmation lives HERE, not on the tile: this component already knows the human date
   // label, and a full sentence does not fit in a 5-across avatar tile. PersonCard only asks.
@@ -84,6 +91,9 @@ export default function DayPeopleModal({
                 onEdit={onEdit}
                 onRemoveScheduled={
                   onRemoveScheduled ? (instanceId) => { setErr(null); setPending({ instanceId, name: p.name }); } : undefined
+                }
+                onAddWorkedTime={
+                  onAddWorkedTime ? (person) => { onClose(); onAddWorkedTime(person, day.date); } : undefined
                 }
               />
             ))}
