@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Local DB verification for MANUAL WORKED SHIFT CREATION (migration 130).
+# Local DB verification for MANUAL WORKED SHIFT CREATION (migration 131).
 #
 # Boots a throwaway Postgres in Docker, applies the base stub + the REAL employee/shift/time-clock
-# /scheduling migrations + the REAL 130, then proves the overlap guard: identical and partial
+# /scheduling migrations + the REAL 131, then proves the overlap guard: identical and partial
 # overlaps refused, legitimate split shifts allowed, touching endpoints allowed, overnight handled
 # across calendar dates, punches blocking manual entry, break validation, tenancy, and that no
 # punch/audit row is ever fabricated. Finishes with a genuine TWO-SESSION RACE.
@@ -60,11 +60,16 @@ for m in 044_create_employees_and_shifts 047_create_recurring_shifts 052_shifts_
     || { echo "  ✗ migration $m failed to apply:"; echo "$err" | head -3 | sed 's/^/      /'; FAILED=1; }
 done
 
-echo "── apply the migration under test: 130 (verbatim, its own begin/commit) ──"
-run "$MIGDIR/130_manual_worked_shift_rpc.sql" >/dev/null || { echo "  ✗ 130 FAILED TO APPLY"; FAILED=1; }
+echo "── apply the migration under test: 131 (verbatim, its own begin/commit) ──"
+run "$MIGDIR/131_manual_worked_shift_rpc.sql" >/dev/null || { echo "  ✗ 131 FAILED TO APPLY"; FAILED=1; }
 
 echo "── run manual-worked assertions (overlap · split · overnight · break · tenancy) ──"
 run "$SCRIPT_DIR/test_manual_worked.sql" || FAILED=1
+
+# LAST of the SQL files: it enables RLS and drops to the `authenticated` role to reproduce the
+# real production posture, which changes the world for anything that runs after it.
+echo "── tenant isolation under REAL RLS as the authenticated role ──"
+run "$SCRIPT_DIR/test_tenancy_rls.sql" || FAILED=1
 
 # ── the race, which needs two real connections ───────────────────────────────
 # Session A opens a transaction, calls the RPC (taking the per-employee advisory lock and

@@ -65,7 +65,7 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
   // PostgREST cannot express `INSERT … WHERE NOT EXISTS`, so two managers saving at once both read
   // "no conflict" and both write.
   //
-  // lensed_create_manual_worked_shift (migration 130) takes a per-employee advisory lock, re-reads
+  // lensed_create_manual_worked_shift (migration 131) takes a per-employee advisory lock, re-reads
   // the employee's worked intervals, refuses an OVERLAP (not a same-day collision — split shifts
   // stay legal) and inserts, all in one transaction. This is the ONLY client-side write that
   // creates a `shifts` row, so routing it here protects BOTH the day-card "Add Worked Time"

@@ -1,6 +1,6 @@
 import { BREAK_INVALID_ERROR, BREAK_TOO_LONG_ERROR } from './punchEdit';
 
-// The client half of the manual-worked creation path (migration 130's
+// The client half of the manual-worked creation path (migration 131's
 // lensed_create_manual_worked_shift): what the manager sees when the server refuses, and what the
 // "Add Worked Time" button prefills the form with.
 //

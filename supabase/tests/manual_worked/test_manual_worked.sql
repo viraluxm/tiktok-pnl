@@ -1,4 +1,4 @@
--- DB proof for lensed_create_manual_worked_shift (migration 130).
+-- DB proof for lensed_create_manual_worked_shift (migration 131).
 --
 -- The product rule under test: a manager may record worked time for someone who did not clock in,
 -- but may NOT create worked time that overlaps worked time the person already has — while

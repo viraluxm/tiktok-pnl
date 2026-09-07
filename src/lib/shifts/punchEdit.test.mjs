@@ -392,7 +392,7 @@ console.log('\n10 — raw punch log untouched');
 
   const rpcs = [...hookCode.matchAll(/\.rpc\(([^)]*)\)/g)].map((m) => m[1].trim());
   // TWO call sites, and only these two: the dynamic confirm/unconfirm pair (`fn`), and the
-  // guarded manual-worked creator that REPLACED addShift's raw insert (migration 130). This guard
+  // guarded manual-worked creator that REPLACED addShift's raw insert (migration 131). This guard
   // exists to catch an unreviewed third write path appearing in the hook, so it is widened by
   // exactly the one call that was added — not relaxed to "any rpc".
   check('LOOKUP GUARD: both RPC call sites are present', rpcs.length === 2, rpcs.join(' | '));

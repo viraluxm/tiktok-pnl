@@ -1,4 +1,14 @@
--- 130 — Atomic, overlap-guarded creation of a MANUAL WORKED shift.
+-- 131_manual_worked_shift_rpc.sql — Atomic, overlap-guarded creation of a MANUAL WORKED shift.
+--
+-- ⚠️ NOT APPLIED. This DB has NO migration ledger — migrations are applied BY HAND and the repo
+--    file is the only record, so a reused prefix is a real skip/double-apply hazard here.
+--    ➜ RE-INSPECT THE LIVE SCHEMA BEFORE APPLYING.
+--
+--    RENUMBERED 130 → 131. Prefix 130 was taken by the separate Phase 2 scheduling migration
+--    `130_schedule_phase2_attendance_and_cancel.sql`, which is ALREADY APPLIED TO PRODUCTION
+--    (verified live: lensed_cancel_shift_offer exists). 129 is likewise live. 131 was free across
+--    origin/main, every local and remote branch, and every worktree on disk at renumbering time.
+--    Nothing about the SQL below changed with the rename.
 --
 -- WHY THIS EXISTS
 -- ---------------

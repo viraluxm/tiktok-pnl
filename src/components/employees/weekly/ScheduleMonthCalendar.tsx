@@ -212,7 +212,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   }
 
   // PAYABLE. Writes a `shifts` row — the same thing a punch produces, so only for corrections.
-  // addShift is the guarded RPC path (migration 130): it refuses worked time that overlaps worked
+  // addShift is the guarded RPC path (migration 131): it refuses worked time that overlaps worked
   // time the person already has, atomically, so two managers cannot both succeed. Creating for a
   // crew stays sequential precisely so ONE person's conflict is reported as their own.
   async function createWorked(

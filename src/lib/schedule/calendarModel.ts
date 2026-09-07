@@ -177,7 +177,24 @@ export function canRemoveScheduled(
  *                    same-day miss becomes correctable the moment the day turns over.
  *
  * This is an AFFORDANCE rule, never the boundary. lensed_create_manual_worked_shift (migration
- * 130) re-derives the real constraint — no overlapping worked time — inside one transaction.
+ * 131) re-derives the real constraint — no overlapping worked time — inside one transaction.
+ */
+/*
+ * FUTURE ENHANCEMENT (deliberately NOT in v1 — product decision 2026-09-06).
+ *
+ * A same-day shift whose scheduled END has already passed, with no punch, is a genuine
+ * missed-punch too, and today it must wait until midnight to be correctable. Widening this to
+ * `today && scheduled end has passed && no punch` is the obvious next step — but it is NOT a
+ * one-line change to this predicate.
+ *
+ * `state` here is DAY-granular: classify() only turns a plan into 'no_show' once the whole day is
+ * behind us, so this function has no notion of "the shift ended two hours ago". Making it
+ * time-aware means deciding what "ended" means for an overnight span, which clock the browser is
+ * trusted to use (the LA business timezone, not the device), and how long a grace window a worker
+ * gets to punch late before a manager can pay them manually. Getting that wrong turns a
+ * still-active shift into one-click payable time, which is exactly the hazard v1 is fencing out.
+ *
+ * So: a separate time-aware UX audit, not a widened boolean.
  */
 export function canAddWorkedTime(
   p: Pick<DayPerson, 'punch' | 'scheduled' | 'state'>,
