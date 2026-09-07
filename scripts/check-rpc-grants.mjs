@@ -35,6 +35,12 @@ const SERVICE_ROLE_ONLY = new Set([
   // `authenticated` would expose another owner's revenue and margin. Called only via
   // createAdminClient() from /api/chat.
   'chat_pnl_totals_as',
+  // pnl_by_sku_as — newly called by the admin assistant's get_sku_performance via
+  // createAdminClient. It takes the owner set as a parameter, and prod grants it to
+  // postgres|service_role only. It is security INVOKER over RLS-protected tables, so a grant to
+  // `authenticated` would not itself leak rows — but the chat never calls it as the caller, so the
+  // grant the check asks for would widen reach for no benefit. Registered here instead.
+  'pnl_by_sku_as',
   // Badge/QR kiosk RPCs — service-role only (091/092/095), called via createAdminClient in
   // /api/kiosk/* and the QR scan path. Never granted to anon/authenticated.
   'lensed_kiosk_scan', 'lensed_kiosk_start_break', 'lensed_kiosk_clock_out', 'lensed_kiosk_manual_punch_as',
