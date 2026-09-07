@@ -179,6 +179,48 @@ console.log('\nget_fulfillment');
     r.caveats.some((c) => /set-aside/i.test(c)), `${r.caveats.length} caveats`);
 }
 
+console.log('\nget_orders');
+{
+  const t0 = Date.now();
+  const sum = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: 'none', from: '2026-08-29', to: '2026-09-05', status: 'all', limit: 5 });
+  const secs = (Date.now() - t0) / 1000;
+  check('summary returns counts by status', sum.total_orders_in_range > 0,
+    `${sum.total_orders_in_range} orders in range, ${secs.toFixed(1)}s`);
+  check('summary is fast enough for a chat turn (< 20s)', secs < 20, `${secs.toFixed(1)}s`);
+
+  const summed = Object.values(sum.counts_by_status).reduce((a, b) => a + b, 0);
+  check('counts_by_status sums to the total', summed === sum.total_orders_in_range,
+    `${summed} vs ${sum.total_orders_in_range}`);
+
+  check('sample is capped and labelled as a sample', sum.sample.returned <= 5 && /SAMPLE|sample/i.test(sum.sample.note),
+    `${sum.sample.returned} returned`);
+  check('never dumps the full order set', sum.sample.returned < sum.total_orders_in_range,
+    `${sum.sample.returned} of ${sum.total_orders_in_range}`);
+
+  const st = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: 'none', from: '2026-08-29', to: '2026-09-05', status: 'AWAITING_SHIPMENT', limit: 5 });
+  check('status filter narrows the sample',
+    st.sample.orders.every((o) => o.status === 'AWAITING_SHIPMENT'),
+    `${st.sample.returned} awaiting shipment of ${st.counts_by_status.AWAITING_SHIPMENT}`);
+
+  // Round-trip: an id from the sample must resolve in lookup mode.
+  const anyId = sum.sample.orders[0]?.order_id;
+  const one = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: String(anyId), from: '', to: '', status: 'all', limit: 1 });
+  check('lookup finds a known order', one.found === true && one.mode === 'lookup',
+    `${anyId} -> ${one.line_count} line(s)`);
+
+  const missing = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: 'NOT-A-REAL-ORDER-ID', from: '', to: '', status: 'all', limit: 1 });
+  check('an unknown order says not found rather than guessing',
+    missing.found === false && /do not guess/i.test(missing.note), 'found:false with a no-guess note');
+
+  check('tracking caveats are declared', sum.caveats.length >= 3 &&
+    sum.caveats.some((c) => /stale/i.test(c)) && sum.caveats.some((c) => /capture_events/i.test(c)),
+    `${sum.caveats.length} caveats`);
+}
+
 console.log(`\n${passed} checks passed`);
   process.exit(0);
 }
@@ -416,6 +458,48 @@ console.log('\nget_fulfillment');
 
   check('the set-aside blind spot is declared',
     r.caveats.some((c) => /set-aside/i.test(c)), `${r.caveats.length} caveats`);
+}
+
+console.log('\nget_orders');
+{
+  const t0 = Date.now();
+  const sum = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: 'none', from: '2026-08-29', to: '2026-09-05', status: 'all', limit: 5 });
+  const secs = (Date.now() - t0) / 1000;
+  check('summary returns counts by status', sum.total_orders_in_range > 0,
+    `${sum.total_orders_in_range} orders in range, ${secs.toFixed(1)}s`);
+  check('summary is fast enough for a chat turn (< 20s)', secs < 20, `${secs.toFixed(1)}s`);
+
+  const summed = Object.values(sum.counts_by_status).reduce((a, b) => a + b, 0);
+  check('counts_by_status sums to the total', summed === sum.total_orders_in_range,
+    `${summed} vs ${sum.total_orders_in_range}`);
+
+  check('sample is capped and labelled as a sample', sum.sample.returned <= 5 && /SAMPLE|sample/i.test(sum.sample.note),
+    `${sum.sample.returned} returned`);
+  check('never dumps the full order set', sum.sample.returned < sum.total_orders_in_range,
+    `${sum.sample.returned} of ${sum.total_orders_in_range}`);
+
+  const st = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: 'none', from: '2026-08-29', to: '2026-09-05', status: 'AWAITING_SHIPMENT', limit: 5 });
+  check('status filter narrows the sample',
+    st.sample.orders.every((o) => o.status === 'AWAITING_SHIPMENT'),
+    `${st.sample.returned} awaiting shipment of ${st.counts_by_status.AWAITING_SHIPMENT}`);
+
+  // Round-trip: an id from the sample must resolve in lookup mode.
+  const anyId = sum.sample.orders[0]?.order_id;
+  const one = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: String(anyId), from: '', to: '', status: 'all', limit: 1 });
+  check('lookup finds a known order', one.found === true && one.mode === 'lookup',
+    `${anyId} -> ${one.line_count} line(s)`);
+
+  const missing = await runTool({ admin, ownerIds, storeIds }, 'get_orders',
+    { order_id: 'NOT-A-REAL-ORDER-ID', from: '', to: '', status: 'all', limit: 1 });
+  check('an unknown order says not found rather than guessing',
+    missing.found === false && /do not guess/i.test(missing.note), 'found:false with a no-guess note');
+
+  check('tracking caveats are declared', sum.caveats.length >= 3 &&
+    sum.caveats.some((c) => /stale/i.test(c)) && sum.caveats.some((c) => /capture_events/i.test(c)),
+    `${sum.caveats.length} caveats`);
 }
 
 console.log(`\n${passed} checks passed`);

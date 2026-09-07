@@ -220,6 +220,27 @@ export const TOOL_DEFS: Anthropic.Beta.BetaTool[] = [
     },
     strict: true,
   },
+  {
+    name: 'get_orders',
+    description:
+      'Orders: either ONE order by id (full detail incl. status and tracking), or a bounded ' +
+      'summary for a date range — counts by status plus the most recent matching orders. ' +
+      'Use for "where is order X", "how many are awaiting shipment", "what shipped yesterday". ' +
+      'Never asks for every order: the summary is counts plus a capped sample.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        order_id: { type: 'string', description: 'A specific TikTok order id for full detail, or the literal "none" to summarise a range instead.' },
+        from: { type: 'string', description: 'Range start YYYY-MM-DD (ignored when order_id is given).' },
+        to: { type: 'string', description: 'Range end YYYY-MM-DD (ignored when order_id is given).' },
+        status: { type: 'string', description: 'Restrict the sample to one status (e.g. AWAITING_SHIPMENT), or "all".' },
+        limit: { type: 'integer', description: 'Max sample orders to return, 1-100. Use 10 unless more are needed.' },
+      },
+      required: ['order_id', 'from', 'to', 'status', 'limit'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
 ];
 
 
@@ -241,6 +262,7 @@ export const TOOL_SCOPES: Record<string, string> = {
   get_shows: 'shows',
   get_inventory: 'inventory',
   get_fulfillment: 'team',
+  get_orders: 'pnl',
 };
 
 /** The tool definitions a caller may see. Unknown scopes contribute nothing (fail closed). */
@@ -774,6 +796,106 @@ async function getFulfillment(ctx: ToolCtx, input: { date?: string }) {
   };
 }
 
+
+// ── get_orders ──────────────────────────────────────────────────────────────
+// Two modes, both BOUNDED. There is no "list every order" path: ~201k rows exist and a chat answer
+// that tried would either time out or silently truncate at PostgREST's 1000-row cap.
+//   • order_id given  -> full detail for that one order.
+//   • otherwise       -> COUNT per status over the range (server-side counts, no row transfer)
+//                        plus a capped, newest-first sample.
+//
+// STATUS SOURCE: synced_order_ids.status — the live, updated status. NOT capture_events.order_status,
+// which is a WRITE-ONCE frozen snapshot taken at capture time; reading that as current status is
+// what caused the 198-row paid-but-not_sold correction.
+const ORDER_STATUSES = [
+  'COMPLETED', 'DELIVERED', 'IN_TRANSIT', 'AWAITING_COLLECTION',
+  'AWAITING_SHIPMENT', 'CANCELLED', 'ON_HOLD', 'UNPAID',
+] as const;
+
+async function getOrders(
+  ctx: ToolCtx,
+  input: { order_id?: string; from?: string; to?: string; status?: string; limit?: number },
+) {
+  const cols = 'order_id, order_date, order_created_at, status, gmv, shipping, units, sku_name, tracking_number, store_id, auto_combine_group_id';
+
+  // ── single-order lookup ───────────────────────────────────────────────────
+  const wantId = input.order_id && input.order_id !== 'none' ? input.order_id.trim() : null;
+  if (wantId) {
+    const { data, error } = await ctx.admin
+      .from('synced_order_ids').select(cols)
+      .in('user_id', ctx.ownerIds).in('store_id', ctx.storeIds)
+      .eq('order_id', wantId).limit(20);
+    if (error) throw new Error(`order lookup failed: ${(error as { message?: string }).message ?? String(error)}`);
+    const rows = data ?? [];
+    if (!rows.length) {
+      return { mode: 'lookup', order_id: wantId, found: false,
+        note: 'No order with that id in scope. It may belong to a different store, or not be synced yet — do not guess at its status.' };
+    }
+    // An order can hold several SKU lines; each is a row here.
+    return {
+      mode: 'lookup', order_id: wantId, found: true, line_count: rows.length,
+      lines: rows,
+      tracking_note:
+        'tracking_number can be STALE: TikTok re-labels combined shipments, replacing one tracking ' +
+        'number with several, and a stale value looks valid but 404s at the carrier. Treat it as ' +
+        'the last value Lensed synced, not as proof of the current label.',
+    };
+  }
+
+  // ── range summary ─────────────────────────────────────────────────────────
+  const from = input.from, to = input.to;
+  if (!from || !to) throw new Error('from and to are required when order_id is "none"');
+  const span = daysBetween(from, to);
+  if (!Number.isFinite(span)) throw new Error('from/to must be YYYY-MM-DD dates');
+  if (span < 0) throw new Error('`from` must be on or before `to`');
+  if (span > MAX_RANGE_DAYS) throw new Error(`range too wide: ${span + 1} days, max ${MAX_RANGE_DAYS}.`);
+
+  // COUNT per status: head:true transfers no rows, so this stays fast over ~201k orders.
+  const counts: Record<string, number> = {};
+  let total = 0;
+  for (const st of ORDER_STATUSES) {
+    const { count, error } = await ctx.admin
+      .from('synced_order_ids').select('order_id', { count: 'exact', head: true })
+      .in('user_id', ctx.ownerIds).in('store_id', ctx.storeIds)
+      .gte('order_date', from).lte('order_date', to)
+      .eq('status', st);
+    if (error) throw new Error(`order count failed: ${(error as { message?: string }).message ?? String(error)}`);
+    counts[st] = count ?? 0;
+    total += count ?? 0;
+  }
+
+  const limit = Math.max(1, Math.min(100, Math.trunc(Number(input.limit) || 10)));
+  const wantStatus = input.status && input.status !== 'all' ? input.status.toUpperCase() : null;
+  let q = ctx.admin.from('synced_order_ids').select(cols)
+    .in('user_id', ctx.ownerIds).in('store_id', ctx.storeIds)
+    .gte('order_date', from).lte('order_date', to)
+    .order('order_created_at', { ascending: false, nullsFirst: false })
+    .limit(limit);
+  if (wantStatus) q = q.eq('status', wantStatus);
+  const { data: sample, error: sErr } = await q;
+  if (sErr) throw new Error(`order sample failed: ${(sErr as { message?: string }).message ?? String(sErr)}`);
+
+  const withTracking = (sample ?? []).filter((r) => r.tracking_number != null).length;
+  return {
+    mode: 'summary',
+    range: { from, to, tz: TZ, days: span + 1 },
+    status_filter: wantStatus ?? 'all',
+    total_orders_in_range: total,
+    counts_by_status: counts,
+    sample: {
+      note: `Newest ${(sample ?? []).length} of ${wantStatus ? counts[wantStatus] ?? 0 : total} matching orders — a SAMPLE, never the full set. Do not compute totals from it; use counts_by_status.`,
+      returned: (sample ?? []).length,
+      with_tracking: withTracking,
+      orders: sample ?? [],
+    },
+    caveats: [
+      'AWAITING_SHIPMENT and ON_HOLD legitimately have no tracking number yet, and CANCELLED orders mostly never got one — missing tracking on those is expected, not a fault.',
+      'tracking_number can be stale after TikTok re-labels a combined shipment; it is the last value synced, not proof of the current label.',
+      'Status comes from synced_order_ids (live). capture_events.order_status is a frozen capture-time snapshot and must never be read as current status.',
+    ],
+  };
+}
+
 export async function runTool(
   ctx: ToolCtx,
   name: string,
@@ -793,6 +915,7 @@ export async function runTool(
     case 'get_inventory': return getInventory(ctx, args as never);
     case 'get_sku_performance': return getSkuPerformance(ctx, args as never);
     case 'get_fulfillment': return getFulfillment(ctx, args as never);
+    case 'get_orders': return getOrders(ctx, args as never);
     default: throw new Error(`unknown tool: ${name}`);
   }
 }
