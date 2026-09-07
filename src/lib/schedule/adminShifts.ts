@@ -25,11 +25,19 @@ export async function postOneTimeShift(input: PostShiftInput): Promise<{ id: str
   const admin = createAdminClient();
 
   // Assigned → look up the employee (role is authoritative from them; typed role is ignored).
+  //
+  // OWNER SCOPE. createAdminClient() bypasses RLS, so the `user_id` filter is the only thing
+  // binding the employee to the calling admin's account: without it, an admin could post a shift
+  // onto another owner's employee (the row would carry OUR user_id but THEIR employee_id, and would
+  // surface on that employee's /s page). Matches the bulk route's employees read.
   let employeeRole: string | null = null;
   let storeId: string | null = null;
   if (input.employeeId) {
     const { data: emp, error } = await admin
-      .from('employees').select('id, role, store_id').eq('id', input.employeeId).maybeSingle();
+      .from('employees').select('id, role, store_id')
+      .eq('id', input.employeeId)
+      .eq('user_id', input.userId)
+      .maybeSingle();
     if (error) throw new ScheduleError('READ_FAILED', error.message);
     if (!emp) throw new ScheduleError('EMPLOYEE_NOT_FOUND');
     employeeRole = emp.role;
@@ -160,22 +168,31 @@ export interface PendingClaimRow {
   instance_status: string;
 }
 
-export async function listPendingClaims(): Promise<PendingClaimRow[]> {
+// TENANT BOUNDARY: `ownerId` is the acting manager's auth uid, taken from the session by the route
+// and never from client input. createAdminClient() bypasses RLS, so these explicit user_id filters
+// ARE the boundary — without them this listed every account's pending claims and rendered other
+// businesses' employee names.
+export async function listPendingClaims(ownerId: string): Promise<PendingClaimRow[]> {
+  if (!ownerId) throw new ScheduleError('OWNER_REQUIRED', 'Owner scope is required.');
   const admin = createAdminClient();
   const { data, error } = await admin
     .from('shift_claims')
     .select('id, claimed_by, projected_week_hours, shift_instance_id, status')
+    .eq('user_id', ownerId)
     .eq('status', 'pending')
     .order('claimed_at', { ascending: true });
   if (error) throw new ScheduleError('READ_FAILED', error.message);
   const claims = data ?? [];
   if (claims.length === 0) return [];
 
+  // The two hydration reads are scoped too. shift_claims.user_id is denormalised at insert, so the
+  // instance read re-asserts ownership against the authority; a claim whose instance belongs to
+  // another owner hydrates to nothing rather than leaking its date, times or the claimer's name.
   const instIds = [...new Set(claims.map((c) => c.shift_instance_id))];
   const empIds = [...new Set(claims.map((c) => c.claimed_by))];
   const [insts, emps] = await Promise.all([
-    admin.from('shift_instances').select('id, shift_date, starts_at, ends_at, status').in('id', instIds),
-    admin.from('employees').select('id, name').in('id', empIds),
+    admin.from('shift_instances').select('id, shift_date, starts_at, ends_at, status').eq('user_id', ownerId).in('id', instIds),
+    admin.from('employees').select('id, name').eq('user_id', ownerId).in('id', empIds),
   ]);
   const instById = new Map((insts.data ?? []).map((i) => [i.id, i]));
   const nameById = new Map((emps.data ?? []).map((e) => [e.id, e.name]));
@@ -196,21 +213,37 @@ export async function listPendingClaims(): Promise<PendingClaimRow[]> {
 // APPROVE: assign the instance to the claimer (atomic conditional flip) and write the withheld
 // 'claimed' attendance_event. If the instance is no longer 'released' (taken/changed), fail loudly
 // and leave the claim pending for the admin to see.
+// `approverId` is BOTH the acting manager's auth uid and the owning account — an admin session is
+// the account. It is used for scope, not only for the approved_by stamp it previously carried.
 export async function approveClaim(claimId: string, approverId: string): Promise<void> {
+  if (!approverId) throw new ScheduleError('OWNER_REQUIRED', 'Owner scope is required.');
+  const ownerId = approverId;
   const admin = createAdminClient();
   const { data: claim, error } = await admin
     .from('shift_claims')
     .select('id, shift_instance_id, claimed_by, status, user_id')
     .eq('id', claimId)
+    .eq('user_id', ownerId)
     .maybeSingle();
   if (error) throw new ScheduleError('READ_FAILED', error.message);
+  // A foreign claim is indistinguishable from a missing one — the manager learns nothing about
+  // another account's data from the response.
   if (!claim) throw new ScheduleError('NOT_FOUND');
   if (claim.status !== 'pending') throw new ScheduleError('NOT_PENDING');
 
+  // `released_at: null` — see the identical note in claim.ts. Without it the approved claimer can
+  // never clock in, because every clock gate rejects a non-null released_at regardless of status.
+  // released_by is kept as the audit record of who dropped the shift.
+  //
+  // `.eq('user_id', ownerId)` proves the OWNERSHIP CHAIN the claim row alone cannot: shift_claim →
+  // shift_instance → user_id must equal the acting manager. The claim read above is already scoped,
+  // but shift_claims.user_id is denormalised at insert; the instance is the authority, so the flip
+  // re-asserts it. A foreign instance matches 0 rows and nothing mutates.
   const { data: won, error: uErr } = await admin
     .from('shift_instances')
-    .update({ status: 'claimed', employee_id: claim.claimed_by, source: 'claim' })
+    .update({ status: 'claimed', employee_id: claim.claimed_by, source: 'claim', released_at: null })
     .eq('id', claim.shift_instance_id)
+    .eq('user_id', ownerId)
     .eq('status', 'released')
     .select('id, shift_date, user_id')
     .maybeSingle();
@@ -220,7 +253,8 @@ export async function approveClaim(claimId: string, approverId: string): Promise
   const { error: cErr } = await admin
     .from('shift_claims')
     .update({ status: 'approved', approved_by: approverId, approved_at: new Date().toISOString() })
-    .eq('id', claimId);
+    .eq('id', claimId)
+    .eq('user_id', ownerId);
   if (cErr) {
     console.error(`[schedule] APPROVE claim record failed claim=${claimId}: ${cErr.message}`);
     throw new ScheduleError('APPROVE_RECORD_FAILED', cErr.message);
@@ -239,44 +273,63 @@ export async function approveClaim(claimId: string, approverId: string): Promise
     throw new ScheduleError('EVENT_WRITE_FAILED', evErr.message);
   }
 
-  await notifyClaimer(claim.claimed_by, claim.shift_instance_id, 'approved');
+  await notifyClaimer(ownerId, claim.claimed_by, claim.shift_instance_id, 'approved');
 }
 
 // REJECT: mark the claim rejected, leave the instance 'released' so someone else can take it, and
 // tell the claimer.
 export async function rejectClaim(claimId: string, approverId: string): Promise<void> {
+  if (!approverId) throw new ScheduleError('OWNER_REQUIRED', 'Owner scope is required.');
+  const ownerId = approverId;
   const admin = createAdminClient();
   const { data: claim, error } = await admin
     .from('shift_claims')
     .select('id, claimed_by, shift_instance_id, status')
     .eq('id', claimId)
+    .eq('user_id', ownerId)
     .maybeSingle();
   if (error) throw new ScheduleError('READ_FAILED', error.message);
   if (!claim) throw new ScheduleError('NOT_FOUND');
   if (claim.status !== 'pending') throw new ScheduleError('NOT_PENDING');
 
+  // Reject writes no instance row, so unlike approve there is no flip to carry the ownership
+  // re-assertion. Prove the chain explicitly instead: shift_claim → shift_instance → user_id.
+  // shift_claims.user_id is denormalised at insert; the instance is the authority.
+  const { data: inst, error: iErr } = await admin
+    .from('shift_instances')
+    .select('id')
+    .eq('id', claim.shift_instance_id)
+    .eq('user_id', ownerId)
+    .maybeSingle();
+  if (iErr) throw new ScheduleError('READ_FAILED', iErr.message);
+  if (!inst) throw new ScheduleError('NOT_FOUND');
+
   const { error: uErr } = await admin
     .from('shift_claims')
     .update({ status: 'rejected', approved_by: approverId, approved_at: new Date().toISOString() })
-    .eq('id', claimId);
+    .eq('id', claimId)
+    .eq('user_id', ownerId);
   if (uErr) throw new ScheduleError('REJECT_FAILED', uErr.message);
   // Instance intentionally left 'released' — back on the board for someone else.
-  await notifyClaimer(claim.claimed_by, claim.shift_instance_id, 'rejected');
+  await notifyClaimer(ownerId, claim.claimed_by, claim.shift_instance_id, 'rejected');
 }
 
 // Best-effort claimer SMS (log-only until SMS_SEND_ENABLED). Never throws into the admin action.
-async function notifyClaimer(employeeId: string, instanceId: string, outcome: 'approved' | 'rejected'): Promise<void> {
+// `ownerId` is threaded in so the three reads below are owner-scoped. This helper reads a phone
+// number and an ACCESS TOKEN — a bearer credential — so it must never be able to address another
+// account's rows, even though its callers only ever pass ids they have already owner-verified.
+async function notifyClaimer(ownerId: string, employeeId: string, instanceId: string, outcome: 'approved' | 'rejected'): Promise<void> {
   try {
     const admin = createAdminClient();
     const [{ data: emp }, { data: inst }] = await Promise.all([
-      admin.from('employees').select('phone').eq('id', employeeId).maybeSingle(),
-      admin.from('shift_instances').select('starts_at, ends_at').eq('id', instanceId).maybeSingle(),
+      admin.from('employees').select('phone').eq('id', employeeId).eq('user_id', ownerId).maybeSingle(),
+      admin.from('shift_instances').select('starts_at, ends_at').eq('id', instanceId).eq('user_id', ownerId).maybeSingle(),
     ]);
     if (!emp?.phone || !inst) return;
     const { sendSms, claimApprovedMessage, tokenLink } = await import('./sms');
     const { fmtDateLA, fmtTimeRangeLA } = await import('./format');
     const { data: tok } = await admin
-      .from('employee_access_tokens').select('token').eq('employee_id', employeeId).eq('active', true).limit(1).maybeSingle();
+      .from('employee_access_tokens').select('token').eq('employee_id', employeeId).eq('user_id', ownerId).eq('active', true).limit(1).maybeSingle();
     const link = tok?.token ? tokenLink(tok.token) : '';
     const body = outcome === 'approved'
       ? claimApprovedMessage({ starts_at: inst.starts_at, ends_at: inst.ends_at }, link)

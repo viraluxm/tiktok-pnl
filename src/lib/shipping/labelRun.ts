@@ -7,16 +7,46 @@
 // impossible rather than merely unlikely.
 
 import { getOrderById } from '@/lib/tiktok/client';
-import { readAllPaged } from '@/lib/db/readAll';
+import { readAllPagedIn } from '@/lib/db/readAll';
 import { buildLabelPlan, type LabelPlan, type PlanBox, type PlanSkuLine } from '@/lib/shipping/labelPlan';
 import {
   groupIntoBoxes, gateByAge, gateByVerifiedStatus, MIN_ORDER_AGE_HOURS, type GateBox,
 } from '@/lib/shipping/candidateGate';
+import { readCandidates } from '@/lib/shipping/labelCandidates';
+import { describeScope, dayWindow, dayOf, type LabelScope } from '@/lib/shipping/labelScope';
 
 /** getOrderById accepts at most 50 ids per call. */
 export const CHUNK = 50;
-/** Verification calls per run — 1,000 candidates, a bounded and reviewable size. */
-export const VERIFY_CALL_CAP = 20;
+/**
+ * Verification calls per run.
+ *
+ * This was 20 — a 1,000-order ceiling — which silently truncated the one scope that matters
+ * most. A fulfilment day is about 2,070 orders (Sep 3: 2,070 across 593 boxes), so "all of
+ * yesterday" would have verified half the day and reported a confident, wrong box count, which
+ * the operator would then have authorised.
+ *
+ * 200 calls is 10,000 orders: past any real day with room for a backlog that was never bought
+ * down. The genuine protection is the TIME budget below, not this number — verification is a
+ * read, and 42 calls for a full day is roughly fifteen seconds.
+ */
+export const VERIFY_CALL_CAP = 200;
+
+/**
+ * Verification calls in flight at once.
+ *
+ * Verification is read-only and idempotent, so it parallelises safely — and must, because doing
+ * it one call at a time truncated real runs against the time budget. Six keeps a three-night
+ * scope (96 calls) around 16 seconds instead of 96.
+ */
+export const VERIFY_CONCURRENCY = 6;
+
+/**
+ * Stop verifying with this much of the request left, and report the shortfall.
+ *
+ * Truncating is survivable as long as it is VISIBLE: the count that gets authorised must never
+ * be quietly partial. Callers surface not_verified_over_cap.
+ */
+const VERIFY_BUDGET_MS = 60_000;
 /** Heartbeat freshness that counts as "a show is running right now". */
 export const LIVE_WINDOW_MIN = 20;
 export { MIN_ORDER_AGE_HOURS };
@@ -39,13 +69,39 @@ export interface LabelRunOptions {
   shopCipher: string;
   /** Short tag used in read labels and logs, e.g. 'dry-run' or 'purchase'. */
   tag: string;
+  /**
+   * When 'include', boxes with no SKU are planned alongside the rest (behind their own
+   * header). Anything else leaves them out of the plan but still reports them, so the dry run
+   * and the purchase agree about what they are looking at.
+   */
+  includeUnbound?: boolean;
+  /**
+   * Which slice of the backlog to consider: everything, one fulfilment day, or specific lives.
+   * Narrowing only — every safety gate still applies to whatever it selects.
+   */
+  scope?: LabelScope;
 }
 
 export interface ResolvedLabelRun {
+  /** Human description of what this run was pointed at, for the summary and logs. */
+  scope: string;
   candidateCount: number;
   candidateBoxCount: number;
   /** Boxes held back because their combine group may still be growing. */
   excludedTooRecent: number;
+  /**
+   * Orders in the run that fall INSIDE the chosen scope, and those dragged in with them.
+   *
+   * A scope selects boxes, and a box is always taken whole — so choosing Thursday also buys the
+   * Friday orders that share a combine group with a Thursday one. Both numbers are real and
+   * they answer different questions: Seller Center filtered to Thursday's shows reported 1,861
+   * where this run covered 2,189, and the 328 difference was entirely Friday orders sharing a
+   * box. Reporting only the total invites exactly that "our count is off" moment.
+   */
+  ordersInScope: number;
+  ordersPulledIn: number;
+  /** Which nights the pulled-in orders came from, e.g. { '2026-09-04': 328 }. */
+  pulledInByDay: Record<string, number>;
   excludedShowLive: number;
   verifiedCount: number;
   notVerifiedOverCap: number;
@@ -53,15 +109,17 @@ export interface ResolvedLabelRun {
   /** Status corrections TikTok implied. The caller decides whether to write them. */
   healed: Healed[];
   boxes: PlanBox[];
+  /**
+   * Boxes with no SKU on file. Returned SEPARATELY rather than dropped, because the caller has
+   * to decide about them: unbound is usually a timing state (the team binds after a show), so
+   * silently excluding these orders would leave them unshipped while everything around them
+   * went out.
+   */
+  unboundBoxes: PlanBox[];
   plan: LabelPlan;
   excluded: Excluded[];
 }
 
-type Candidate = {
-  order_id: string;
-  auto_combine_group_id: string | null;
-  order_created_at: string | null;
-};
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Admin = any;
@@ -79,23 +137,18 @@ type Admin = any;
  * cached status is exactly what this step exists to distrust.
  */
 export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Promise<ResolvedLabelRun> {
-  const { userId, storeId, accessToken, shopCipher, tag } = opts;
+  const {
+    userId, storeId, accessToken, shopCipher, tag,
+    includeUnbound = false, scope = { kind: 'all' },
+  } = opts;
   const nowMs = Date.now();
 
-  // ── 1. Candidates, from Lensed. Paged: PostgREST silently caps a response at 1000 rows. ──
-  const rows = (await readAllPaged<Candidate>(
-    (from, to) => admin.from('synced_order_ids')
-      .select('order_id, auto_combine_group_id, order_created_at')
-      .eq('user_id', userId).eq('store_id', storeId)
-      .eq('status', 'AWAITING_SHIPMENT').is('tracking_number', null)
-      .order('order_id', { ascending: true })
-      .range(from, to),
-    `labels ${tag} candidates`,
-  )).map((c) => ({
-    order_id: String(c.order_id),
-    auto_combine_group_id: c.auto_combine_group_id ?? null,
-    order_created_at: c.order_created_at ?? null,
-  }));
+  // ── 1. Candidates, from Lensed, narrowed by scope. ──
+  //
+  // Shared with the scope picker (labelCandidates) so the dropdown's counts and the run's
+  // candidates cannot drift — a picker advertising boxes the run then declines would make the
+  // whole selection step untrustworthy.
+  const rows = await readCandidates(admin, userId, storeId, scope, tag);
 
   const excluded: Excluded[] = [];
 
@@ -135,10 +188,11 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
       .gte('last_seen_at', new Date(nowMs - LIVE_WINDOW_MIN * 60_000).toISOString());
     const liveIds = (liveSessions ?? []).map((s: { id: unknown }) => String(s.id));
     if (liveIds.length) {
-      const liveItems = await readAllPaged<{ client_idempotency_key: string | null }>(
-        (from, to) => admin.from('live_auction_items')
+      const liveItems = await readAllPagedIn<{ client_idempotency_key: string | null }, string>(
+        liveIds,
+        (chunk, from, to) => admin.from('live_auction_items')
           .select('client_idempotency_key')
-          .eq('user_id', userId).in('session_id', liveIds)
+          .eq('user_id', userId).in('session_id', chunk)
           .order('id', { ascending: true })
           .range(from, to),
         `labels ${tag} live-session items`,
@@ -182,24 +236,70 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   const idsToVerify = toVerify.flatMap((b) => b.orders.map((o) => o.order_id));
 
   const liveStatus = new Map<string, string>();
-  try {
-    for (let i = 0; i < idsToVerify.length; i += CHUNK) {
-      const ids = idsToVerify.slice(i, i + CHUNK);
-      for (const o of await getOrderById(accessToken, shopCipher, ids)) {
-        liveStatus.set(
-          String((o as { id: unknown }).id),
-          String((o as { status: unknown }).status || '').toUpperCase(),
-        );
+  const verifyStart = Date.now();
+  let verifiedIds = 0;
+
+  // ── Verified CONCURRENTLY. ──
+  //
+  // These are read-only, idempotent GETs, so unlike purchases there is no reason to serialise
+  // them — and serialising was silently truncating real runs. A three-night scope is 4,787
+  // orders, or 96 sequential calls at roughly a second each, which overran the budget and left
+  // ~417 boxes unverified. Unverified reads as "moved on", so the check quietly reported 983
+  // buyable boxes when 1,400 were.
+  //
+  // The budget stays as a backstop, checked between chunks rather than only before them.
+  const chunks: string[][] = [];
+  for (let i = 0; i < idsToVerify.length; i += CHUNK) chunks.push(idsToVerify.slice(i, i + CHUNK));
+
+  let nextChunk = 0;
+  let verifyError: unknown = null;
+  const worker = async () => {
+    for (;;) {
+      if (verifyError) return;
+      if (Date.now() - verifyStart > VERIFY_BUDGET_MS) return;
+      const idx = nextChunk++;
+      if (idx >= chunks.length) return;
+      const ids = chunks[idx];
+      try {
+        const got = await getOrderById(accessToken, shopCipher, ids);
+        for (const o of got) {
+          liveStatus.set(
+            String((o as { id: unknown }).id),
+            String((o as { status: unknown }).status || '').toUpperCase(),
+          );
+        }
+        verifiedIds += ids.length;
+      } catch (e) {
+        verifyError = e;
+        return;
       }
     }
-  } catch (e) {
-    throw new VerifyFailedError(e instanceof Error ? e.message : String(e));
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(VERIFY_CONCURRENCY, chunks.length) }, worker),
+  );
+  if (verifyError) {
+    throw new VerifyFailedError(
+      verifyError instanceof Error ? verifyError.message : String(verifyError),
+    );
+  }
+
+  // Boxes whose orders were never verified. With concurrency the shortfall is no longer a clean
+  // suffix, so this counts boxes by whether every one of their orders actually came back.
+  let unreachedBoxes = 0;
+  if (verifiedIds < idsToVerify.length) {
+    for (const b of toVerify) {
+      if (b.orders.some((o) => !liveStatus.has(o.order_id))) unreachedBoxes++;
+    }
   }
 
   // ── 6. Every order in a box must still be awaiting shipment. Partial boxes are refused. ──
   const confirmedBoxes: GateBox[] = [];
   const healed: Healed[] = [];
   for (const b of toVerify) {
+    // A box the time budget never reached has no status at all. gateByVerifiedStatus treats a
+    // missing status as "moved on" and refuses the box, which is the correct direction: unread
+    // is not the same as unchanged.
     const v = gateByVerifiedStatus(b, liveStatus);
     if (v.ok) { confirmedBoxes.push(b); continue; }
     excluded.push({ group_key: b.group_key, order_ids: b.orders.map((o) => o.order_id), reason: v.reason });
@@ -220,22 +320,29 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   const confirmedIds = confirmed.map((c) => c.order_id);
   const linesByOrder = new Map<string, PlanSkuLine[]>();
   if (confirmedIds.length) {
-    const items = await readAllPaged<{ id: string; client_idempotency_key: string }>(
-      (from, to) => admin.from('live_auction_items')
+    // Chunked: an .in() list past ~750 ids blows undici's 16KB header cap and fails as an
+    // opaque `TypeError: fetch failed`. A 400-box run averages 2.6 orders per box, so this
+    // read routinely carries a thousand ids.
+    const items = await readAllPagedIn<{ id: string; client_idempotency_key: string }, string>(
+      confirmedIds,
+      (chunk, from, to) => admin.from('live_auction_items')
         .select('id, client_idempotency_key')
-        .eq('user_id', userId).in('client_idempotency_key', confirmedIds)
+        .eq('user_id', userId).in('client_idempotency_key', chunk)
         .order('id', { ascending: true }).range(from, to),
       `labels ${tag} auction items`,
     );
     const itemToOrder = new Map(items.map((i) => [String(i.id), String(i.client_idempotency_key)]));
     if (items.length) {
-      const skuRows = await readAllPaged<{
+      // Same ceiling, and worse here: item ids are 36-character UUIDs, so this list hits 16KB
+      // in roughly a third as many entries as the order-id read above.
+      const skuRows = await readAllPagedIn<{
         auction_item_id: string; inventory_sku_id: string; qty: number;
         sku_number_snapshot: number | null; title_snapshot: string | null;
-      }>(
-        (from, to) => admin.from('live_auction_item_skus')
+      }, string>(
+        items.map((i) => String(i.id)),
+        (chunk, from, to) => admin.from('live_auction_item_skus')
           .select('auction_item_id, inventory_sku_id, qty, sku_number_snapshot, title_snapshot')
-          .eq('user_id', userId).in('auction_item_id', items.map((i) => String(i.id)))
+          .eq('user_id', userId).in('auction_item_id', chunk)
           .order('auction_item_id', { ascending: true }).range(from, to),
         `labels ${tag} sku lines`,
       );
@@ -255,6 +362,7 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
   }
 
   const boxes: PlanBox[] = [];
+  const unboundBoxes: PlanBox[] = [];
   for (const { group_key, orders } of confirmedBoxes) {
     const ids = orders.map((o) => o.order_id);
     // Merge the box's SKU lines, summing quantities per SKU, so a combine group holding two
@@ -269,22 +377,63 @@ export async function resolveLabelRun(admin: Admin, opts: LabelRunOptions): Prom
       }
     }
     if (merged.size === 0) {
-      excluded.push({ group_key, order_ids: ids, reason: 'no SKUs bound — cannot classify' });
+      // Kept, not dropped. The caller decides — see LabelRunOptions.includeUnbound.
+      const box = { group_key, order_ids: ids, skus: [] as PlanSkuLine[] };
+      unboundBoxes.push(box);
+      if (includeUnbound) boxes.push(box);
+      else excluded.push({ group_key, order_ids: ids, reason: 'no SKU on file — held back' });
       continue;
     }
     boxes.push({ group_key, order_ids: ids, skus: [...merged.values()] });
   }
 
+  // ── Split the confirmed orders into "inside the scope" and "came along with a box". ──
+  //
+  // Done from the GateBoxes, which still carry each order's date; PlanBox does not. Only
+  // meaningful for a day scope — a show scope has no time window to be inside or outside of.
+  const inWindow = (iso: string | null): boolean => {
+    if (scope.kind !== 'day' || !iso) return true;
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return true;
+    return scope.days.some((d) => {
+      const { fromISO, toISO } = dayWindow(d);
+      return t >= Date.parse(fromISO) && t < Date.parse(toISO);
+    });
+  };
+  const keptKeys = new Set(boxes.map((b) => b.group_key));
+  let ordersInScope = 0, ordersPulledIn = 0;
+  const pulledInByDay: Record<string, number> = {};
+  for (const b of confirmedBoxes) {
+    if (!keptKeys.has(b.group_key)) continue;
+    for (const o of b.orders) {
+      if (inWindow(o.order_created_at)) { ordersInScope++; continue; }
+      ordersPulledIn++;
+      const t = o.order_created_at ? Date.parse(o.order_created_at) : NaN;
+      if (Number.isFinite(t)) {
+        const d = dayOf(t);
+        pulledInByDay[d] = (pulledInByDay[d] ?? 0) + 1;
+      }
+    }
+  }
+
   return {
+    scope: describeScope(scope),
+    ordersInScope,
+    ordersPulledIn,
+    pulledInByDay,
     candidateCount: rows.length,
     candidateBoxCount: allBoxes.length,
     excludedTooRecent,
     excludedShowLive: aged.length - afterLive.length,
-    verifiedCount: idsToVerify.length,
-    notVerifiedOverCap: notVerifiedBoxes,
+    verifiedCount: verifiedIds,
+    // Boxes the run could not look at at all: past the call cap, or past the time budget.
+    // Non-zero means the plan is a PARTIAL view of the scope — narrow it, or run again once
+    // these are bought. Counted as boxes, since that is what the operator authorises.
+    notVerifiedOverCap: notVerifiedBoxes + unreachedBoxes,
     confirmedCount: confirmed.length,
     healed,
     boxes,
+    unboundBoxes,
     plan: buildLabelPlan(boxes),
     excluded,
   };

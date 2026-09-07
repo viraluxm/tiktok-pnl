@@ -26,6 +26,23 @@
 export const PAGE_SIZE = 1000;
 
 /**
+ * Ids per `.in(...)` filter.
+ *
+ * A SECOND, UNRELATED CEILING, and a nastier one. `.in()` is sent in the QUERY STRING, so a long
+ * id list becomes a long URL — and Node's HTTP client (undici) caps request headers at 16KB.
+ * Cross it and the call fails as `TypeError: fetch failed`: no status, no PostgREST error, just
+ * an opaque network-shaped exception that reads like a blip and disappears on a smaller data set.
+ *
+ * Measured 2026-09-04 against live data with 18-character order ids (~21 bytes each once commas
+ * are encoded): 700 ids succeeded at roughly 14.8KB, 800 failed at roughly 16.8KB. curl survives
+ * well past 1000, which is exactly why this is easy to "disprove" from a shell and still ship.
+ *
+ * 200 keeps a chunk near 4KB — a quarter of the ceiling, leaving room for longer ids and for
+ * whatever else the query carries — at the cost of one extra round trip per 200 ids.
+ */
+export const IN_CHUNK = 200;
+
+/**
  * Page ceiling. 500 pages is 500,000 rows — far beyond any read here — so hitting it means a
  * builder that ignores its range and returns the same page forever. Throwing beats spinning.
  */
@@ -117,4 +134,39 @@ export async function readPages<T>(
   // Every page was full and the cap is spent. There may or may not be more; either way this
   // read stops here WITHOUT issuing the out-of-range request that caused the outage.
   return { rows, reachedCap: true };
+}
+
+/**
+ * Read an `.in(...)`-filtered query to exhaustion, chunking the id list.
+ *
+ * Two ceilings apply to a filtered read and they need different treatment: the 1000-ROW response
+ * cap is handled by paging (readAllPaged), and the ~16KB URL cap is handled here by splitting the
+ * ids. Callers that only page will work fine until the day an id list crosses 750 entries, then
+ * fail as an opaque `fetch failed` — which is how this was found.
+ *
+ * `makeQuery` receives one chunk of ids plus the usual inclusive row range. Results are
+ * concatenated in chunk order; de-duplicate downstream if the same row could match two chunks
+ * (it cannot when chunking a set of distinct ids, which is the only intended use).
+ *
+ * An empty id list issues NO query and returns nothing — `.in()` with an empty array matches
+ * nothing anyway, and a round trip to prove it is waste.
+ */
+export async function readAllPagedIn<T, Id>(
+  ids: readonly Id[],
+  makeQuery: (chunk: Id[], from: number, to: number) => PromiseLike<PagedResult<T>>,
+  label: string,
+  chunkSize: number = IN_CHUNK,
+): Promise<T[]> {
+  if (!ids.length) return [];
+  const size = Math.max(1, chunkSize);
+  const out: T[] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    const chunk = ids.slice(i, i + size) as Id[];
+    const rows = await readAllPaged<T>(
+      (from, to) => makeQuery(chunk, from, to),
+      `${label} [ids ${i}-${i + chunk.length - 1}]`,
+    );
+    out.push(...rows);
+  }
+  return out;
 }

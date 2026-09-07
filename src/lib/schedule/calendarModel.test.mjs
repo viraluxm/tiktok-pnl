@@ -10,7 +10,7 @@ const { outputText } = ts.transpileModule(src, { compilerOptions: { module: ts.M
 const out = join(mkdtempSync(join(tmpdir(), 'cm-')), 'cm.mjs'); writeFileSync(out, outputText);
 const {
   buildCalendarDays, punchHours, wallHours, densityLevel, isPaydayISO, formatDelta, initialsOf,
-  canRemoveScheduled,
+  canRemoveScheduled, ruleDatesOwnedByInstances,
 } = await import(pathToFileURL(out).href);
 
 let passed = 0;
@@ -197,5 +197,35 @@ check('buildCalendarDays → same day WITH a worked row is not removable',
   canRemoveScheduled(withPunch.get('2026-09-20').people[0]) === false);
 // The source must actually survive the assembly, or every tile would silently lose its Remove.
 check('assembly carries scheduled.source through', planOnly.get('2026-09-20').people[0].scheduled.source === 'admin_open');
+
+console.log('\nruleDatesOwnedByInstances — a stored rule-backed row owns its (rule, date)');
+const inst = (o = {}) => ({ shift_rule_id: 'r1', shift_date: '2026-09-11', ...o });
+const keys = (rows) => [...ruleDatesOwnedByInstances(rows)].sort();
+
+// STATUS-BLIND is the whole point: every status owns its date. The cancelled/released half is what
+// stops a removed occurrence being re-projected by its own rule.
+for (const status of ['scheduled', 'claimed', 'cancelled', 'released', 'worked', 'missed']) {
+  check(`'${status}' owns its (rule, date)`, keys([inst({ status })]).join() === 'r1|2026-09-11');
+}
+// Keyed by RULE, not employee — a release nulls employee_id, so an employee key would stop matching
+// exactly when suppression matters most.
+check('a released row with employee_id NULL still owns its date',
+  keys([inst({ status: 'released', employee_id: null })]).join() === 'r1|2026-09-11');
+
+// Only rule-backed rows own anything: a one-off admin_open instance has no rule to suppress.
+check('shift_rule_id null → owns nothing', keys([inst({ shift_rule_id: null })]).length === 0);
+check('shift_rule_id undefined → owns nothing', keys([{ shift_date: '2026-09-11' }]).length === 0);
+check('empty input → empty set', keys([]).length === 0);
+
+// Shape: the key format generateRecurringShifts()'s `materialized` argument expects.
+check('key format is `${rule_id}|${date}`', keys([inst()])[0] === 'r1|2026-09-11');
+check('distinct rules and dates are distinct keys',
+  keys([inst(), inst({ shift_rule_id: 'r2' }), inst({ shift_date: '2026-09-12' })]).length === 3);
+check('duplicates collapse', keys([inst(), inst()]).length === 1);
+
+// Fresh mutable copy, so a caller may add its own keys (the payroll-row case on other surfaces).
+const owned = ruleDatesOwnedByInstances([inst()]);
+owned.add('r9|2026-01-01');
+check('returns a fresh mutable Set', owned.size === 2 && ruleDatesOwnedByInstances([inst()]).size === 1);
 
 console.log(`\n${passed} checks passed\n`);

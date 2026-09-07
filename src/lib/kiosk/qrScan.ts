@@ -1,6 +1,7 @@
 import 'server-only';
 import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isClockEligibleStatus } from '@/lib/schedule/eligibility';
 
 // Consume a rotating-QR clock code (LNS1…) at the station and punch it through the SAME model as the
 // badge kiosk (lensed_kiosk_manual_punch_as, punch_method='qr') — never a parallel time record. The
@@ -56,6 +57,29 @@ export async function consumeQrClockCode(admin: SupabaseClient, ownerId: string,
       purpose: ex?.purpose ?? null, code, station_id: stationId, outcome: 'rejected', reason,
     });
     return NextResponse.json({ code: reason.toUpperCase(), error: message }, { status });
+  }
+
+  // RE-VERIFY the shift is still clock-eligible. A code is valid for 45s, and in that window a
+  // manager can remove the day in the Schedule Builder (leaving the row 'cancelled') or a release
+  // can strip the assignee. Issuance checked this too, but issuance is not the moment of the punch —
+  // this is. The code is already consumed (single-use), so a refusal here is reported and audited
+  // exactly like the punch_error path below and the worker requests a fresh one.
+  const { data: si } = await admin
+    .from('shift_instances')
+    .select('status, released_at')
+    .eq('id', consumed.shift_instance_id)
+    .eq('user_id', ownerId)
+    .maybeSingle();
+  if (!si || si.released_at || !isClockEligibleStatus(si.status as string)) {
+    await audit(admin, {
+      user_id: ownerId, employee_id: consumed.employee_id, shift_instance_id: consumed.shift_instance_id,
+      purpose: consumed.purpose, code, station_id: stationId, outcome: 'rejected',
+      reason: !si ? 'shift_missing' : si.released_at ? 'released' : `not_eligible_${si.status}`,
+    });
+    return NextResponse.json(
+      { code: 'SHIFT_NOT_ELIGIBLE', error: 'That shift is no longer on the schedule — see a supervisor.' },
+      { status: 409 },
+    );
   }
 
   const action = PURPOSE_TO_ACTION[String(consumed.purpose)];

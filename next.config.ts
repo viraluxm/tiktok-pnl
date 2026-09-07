@@ -10,11 +10,12 @@ const nextConfig: NextConfig = {
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
           {
-            // camera=(self) allows getUserMedia on this same-origin app
-            // (needed by /admin/training/live-simulator). microphone and
-            // geolocation stay disabled.
+            // camera=(self) and microphone=(self) allow getUserMedia on this
+            // same-origin app only (needed by /admin/training/live-simulator so a
+            // trainer can hear the practice host). Neither is delegated to any
+            // third-party origin or iframe. geolocation stays disabled.
             key: "Permissions-Policy",
-            value: "camera=(self), microphone=(), geolocation=()",
+            value: "camera=(self), microphone=(self), geolocation=()",
           },
           {
             key: "Strict-Transport-Security",

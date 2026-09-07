@@ -70,3 +70,40 @@ export function trainingHostUrl(origin: string, sessionId: string): string {
 export function trainingControllerUrl(origin: string, sessionId: string): string {
   return new URL(trainingControllerPath(sessionId), origin).toString();
 }
+
+// ---- Launcher session index -------------------------------------------------
+// The launcher's localStorage list is the ONLY place a practice session id is
+// ever recorded (there is no DB and no server-side registry), so it must never
+// silently drop an id: a dropped id means a still-running practice live with a
+// published camera that can no longer be re-opened, QR'd or removed.
+//
+// These helpers are therefore NON-DESTRUCTIVE by design — they validate and
+// de-duplicate but never truncate. An id leaves the list only when the admin
+// explicitly removes it. There is no technical need for a cap: an id serialises
+// to ~39 bytes, so even several hundred sessions stay far under the ~5 MiB
+// origin quota (40 ids ≈ 1.5 KB ≈ 0.03%). Kept pure so they're unit-testable.
+
+// Parse a raw localStorage value into a clean id list. Tolerates the previously
+// capped arrays, junk entries and malformed JSON; order is preserved.
+export function parseLauncherSessions(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.filter(isValidTrainingSessionId))];
+  } catch {
+    return [];
+  }
+}
+
+// Newest-first insert. Re-adding an existing id moves it to the front rather
+// than duplicating it. Never evicts.
+export function addLauncherSession(existing: string[], sessionId: string): string[] {
+  if (!isValidTrainingSessionId(sessionId)) return [...existing];
+  return [sessionId, ...existing.filter((id) => id !== sessionId)];
+}
+
+// Explicit, single-item removal — the only way an id leaves the list.
+export function removeLauncherSession(existing: string[], sessionId: string): string[] {
+  return existing.filter((id) => id !== sessionId);
+}

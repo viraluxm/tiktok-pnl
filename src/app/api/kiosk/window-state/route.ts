@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireTimeclockScope, clientIp } from '@/lib/kiosk/guard';
+import { CLOCK_ELIGIBLE_STATUSES } from '@/lib/schedule/eligibility';
 import { kioskIpLimiter } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
@@ -27,13 +28,17 @@ export async function GET(req: Request) {
   const nowPlus45 = new Date(now + 45 * 60_000).toISOString();
   const nowMinus60 = new Date(now - 60 * 60_000).toISOString();
 
-  // (A) an assigned, non-released scheduled shift whose [start-45m, end+60m] window contains now.
+  // (A) an assigned, CLOCK-ELIGIBLE, non-released shift whose [start-45m, end+60m] window contains
+  //     now. The status filter matters: a cancelled day (a manager removed it in the Schedule
+  //     Builder) is not an active schedule and must not hold the kiosk awake. See
+  //     CLOCK_ELIGIBLE_STATUSES.
   const { data: win, error: e1 } = await admin
     .from('shift_instances')
     .select('id')
     .eq('user_id', ownerId)
     .not('employee_id', 'is', null)
     .is('released_at', null)
+    .in('status', CLOCK_ELIGIBLE_STATUSES)
     .lte('starts_at', nowPlus45)
     .gte('ends_at', nowMinus60)
     .limit(1)

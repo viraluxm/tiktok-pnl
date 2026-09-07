@@ -17,13 +17,26 @@ import { ReleaseButton, ClaimButton } from './parts';
 import { ClockControls } from './ClockControls';
 import TimeOffButton from './TimeOffButton';
 import { ScheduleAutoRefresh } from './ScheduleAutoRefresh';
+import MySchedule from './MySchedule';
+import { getWeekSchedule, resolveWeekStart } from '@/lib/schedule/mySchedule';
+import { laTodayISO } from '@/lib/schedule/timezone';
 
 export const dynamic = 'force-dynamic';
 
 // PUBLIC employee schedule page. No Supabase auth session is EVER established here (service-role
 // only, scoped by the token's employee_id; middleware excludes /s/*). See CLAUDE.md.
-export default async function SchedulePage({ params }: { params: Promise<{ token: string }> }) {
+//
+// `?week=YYYY-MM-DD` picks the Mon→Sun week shown in MY SCHEDULE (any date inside it; anything
+// malformed falls back to the current week). Everything else on the page is unaffected by it.
+export default async function SchedulePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ token: string }>;
+  searchParams: Promise<{ week?: string | string[] }>;
+}) {
   const { token } = await params;
+  const { week } = await searchParams;
 
   const ip = (await headers()).get('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
   if (!guardPublicReadAllowed(token, ip)) {
@@ -37,29 +50,50 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
   // Always resolve every section, THEN decide what to render from what's actually there. The empty
   // state is a fallback for genuinely-nothing, never a gate on having recurring rules — a no-rules
   // employee with a one-time assigned shift or a claimable board shift must see it.
-  const [myShifts, board, pendingClaims, { period, drops }] = await Promise.all([
+  // One request-time clock for the whole render (server component, evaluated per request).
+  const now = new Date();
+  const nowMs = now.getTime();
+  const todayISO = laTodayISO(now);
+  const weekStart = resolveWeekStart(week, todayISO);
+  const [myShifts, board, pendingClaims, { period, drops }, weekSchedule] = await Promise.all([
     getMyShifts(employee),
     getBoard(employee),
     getMyPendingClaims(employee),
     getCurrentPeriodDrops(employee),
+    getWeekSchedule(employee, weekStart),
   ]);
-
-  // Nothing in any section → the empty state. Reworded from "No schedule set yet" (which implied a
-  // permanent absence of schedule) to just "nothing pending right now".
-  if (scheduleIsEmpty({ myShifts: myShifts.length, board: board.length, pending: pendingClaims.length })) {
-    return (
-      <Shell>
-        <header className="mb-6 flex items-start justify-between gap-3">
-          <h1 className="text-xl font-semibold text-tt-text">{employee.name}</h1>
-          <TimeOffButton token={token} />
-        </header>
-        <Empty>Nothing scheduled right now.</Empty>
-      </Shell>
-    );
-  }
 
   const periodEndLabel = fmtCalendarDate(period.end);
   const atCap = drops.drops >= DROP_CAP;
+
+  const pageHeader = (
+    <header className="mb-6 flex items-start justify-between gap-3">
+      <div>
+        <h1 className="text-xl font-semibold text-tt-text">{employee.name}</h1>
+        <p className="mt-1 text-sm text-tt-muted">Pay period ends {periodEndLabel}</p>
+        <p className={`mt-1 text-sm font-medium ${atCap ? 'text-tt-red' : 'text-tt-muted'}`}>
+          {drops.drops} of {DROP_CAP} drops used
+          {drops.excused > 0 ? ` · ${drops.excused} excused` : ''}
+        </p>
+      </div>
+      <TimeOffButton token={token} />
+    </header>
+  );
+  // MY SCHEDULE always renders — it is the answer to "when do I work", week by week, and a week of
+  // "Off" is a real answer. The action cards below only appear when there is something to act on.
+  const mySchedule = <MySchedule token={token} schedule={weekSchedule} todayISO={todayISO} />;
+
+  // Nothing to act on in any section → just the schedule. (Previously an empty-state sentence;
+  // the week view now says the same thing more usefully.)
+  if (scheduleIsEmpty({ myShifts: myShifts.length, board: board.length, pending: pendingClaims.length })) {
+    return (
+      <Shell>
+        {pageHeader}
+        {mySchedule}
+        <Empty>Nothing to claim or approve right now.</Empty>
+      </Shell>
+    );
+  }
 
   const pending = pendingClaims.length > 0 && (
     <Section
@@ -89,7 +123,6 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
         // ADDITIVE: clock controls for an assigned shift in its clock window [start-45m, end+60m].
         // Release/within24 above are untouched — a within24 shift shows BOTH "contact a manager"
         // (for release) and the clock button (the worker can still clock in).
-        const nowMs = Date.now();
         const inClockWindow =
           (s.status === 'scheduled' || s.status === 'claimed') &&
           nowMs >= new Date(s.starts_at).getTime() - 45 * 60_000 &&
@@ -142,21 +175,13 @@ export default async function SchedulePage({ params }: { params: Promise<{ token
 
   return (
     <Shell>
-      <header className="mb-6 flex items-start justify-between gap-3">
-        <div>
-        <h1 className="text-xl font-semibold text-tt-text">{employee.name}</h1>
-        <p className="mt-1 text-sm text-tt-muted">Pay period ends {periodEndLabel}</p>
-        <p className={`mt-1 text-sm font-medium ${atCap ? 'text-tt-red' : 'text-tt-muted'}`}>
-          {drops.drops} of {DROP_CAP} drops used
-          {drops.excused > 0 ? ` · ${drops.excused} excused` : ''}
-        </p>
-      </div>
-        <TimeOffButton token={token} />
-      </header>
+      {pageHeader}
+      {mySchedule}
 
       {/* An in-flight OT claim leads (the viewer just filed it and wants to see it landed), then:
           a non-empty board (time-sensitive, usually arrived-from-SMS) leads; an empty board sinks
-          below the actual schedule (fix #1). */}
+          below the actual schedule (fix #1). The action cards keep release/claim/clock-in exactly
+          as before — MY SCHEDULE above is the read-only week view. */}
       {pending}
       {board.length > 0 ? [openShifts, yourShifts] : [yourShifts, openShifts]}
     </Shell>

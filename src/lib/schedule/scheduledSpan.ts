@@ -1,6 +1,7 @@
 import { generateRecurringShifts, shiftHours } from '@/lib/employees';
 import type { ShiftRule, ShiftException, ShiftInstance } from '@/types';
 import { instanceHours } from './hours';
+import { ruleDatesOwnedByInstances } from './calendarModel';
 
 // Scheduled-span resolution for a given (employee_id, date) — used to VALIDATE a punch at confirm
 // time (display/review only; never pay). Precedence:
@@ -20,7 +21,7 @@ const FILLING = new Set(['scheduled', 'claimed', 'worked']); // a real assignmen
 export function resolveScheduledSpan(args: {
   employeeId: string;
   date: string; // 'YYYY-MM-DD' (LA-local)
-  instances: Pick<ShiftInstance, 'employee_id' | 'shift_date' | 'starts_at' | 'ends_at' | 'status'>[];
+  instances: Pick<ShiftInstance, 'employee_id' | 'shift_date' | 'starts_at' | 'ends_at' | 'status' | 'shift_rule_id'>[];
   rules: ShiftRule[];
   exceptions: ShiftException[];
 }): ScheduledSpan | null {
@@ -31,9 +32,20 @@ export function resolveScheduledSpan(args: {
   if (inst) return { hours: instanceHours(inst.starts_at, inst.ends_at), source: 'instance' };
 
   // 2. Rule projection for that single day (generateRecurringShifts honours active/start_date/skip/modified).
+  //
+  // Suppressed for any date a stored rule-backed instance already owns. Without this, an occurrence
+  // the manager CANCELLED (or the worker RELEASED) fails the FILLING test above and then reappears
+  // here as a phantom rule span — which is what a punch gets scored against at confirm time, so the
+  // clocked-vs-scheduled delta would be measured against a shift nobody was expected to work.
+  // A date with NO stored instance is unaffected: the normal rule fallback still runs.
   const empRules = args.rules.filter((r) => r.employee_id === args.employeeId);
-  const projected = generateRecurringShifts(empRules, args.exceptions, args.date, args.date, new Set())
-    .find((g) => !g.skipped);
+  const projected = generateRecurringShifts(
+    empRules,
+    args.exceptions,
+    args.date,
+    args.date,
+    ruleDatesOwnedByInstances(args.instances),
+  ).find((g) => !g.skipped);
   if (projected) return { hours: shiftHours(projected.start_time, projected.end_time), source: 'rule' };
 
   // 3. No scheduled span.

@@ -1,17 +1,22 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { parseScope } from '@/lib/shipping/labelScope';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { planPageSequence } from '@/lib/shipping/labelPlan';
 import {
   resolveLabelRun, applyHealed, shipTypeFor, VerifyFailedError, MIN_ORDER_AGE_HOURS,
 } from '@/lib/shipping/labelRun';
-import { MAX_BOXES_PER_RUN, estimateSpend } from '@/lib/shipping/purchaseGuards';
+import {
+  MAX_MANIFEST_BOXES, estimateSizedSpend, readSpendWindows,
+} from '@/lib/shipping/purchaseGuards';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120;
+// Matches /authorize: the two must resolve the same scope, and a check that truncates where
+// the authorise does not would show the operator a smaller plan than they then buy.
+export const maxDuration = 300;
 
-// GET /api/shipping/labels/dry-run?store_id=…[&heal=1]
+// GET /api/shipping/labels/dry-run?store_id=…[&heal=1][&unbound=include]
 //
 // What a label run WOULD buy, and the order it would print. Buys nothing.
 //
@@ -34,7 +39,19 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const storeId = url.searchParams.get('store_id');
   const heal = url.searchParams.get('heal') === '1';
+  // Mirrors the purchase route's `unbound` parameter, so whatever you review here is what you
+  // authorise there and confirm_boxes always lines up.
+  const includeUnbound = url.searchParams.get('unbound') === 'include';
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
+
+  // Which slice of the backlog: everything, one fulfilment day, or specific lives. A malformed
+  // value is REFUSED rather than falling back to the whole backlog — see parseScope.
+  const parsed = parseScope({
+    day: url.searchParams.get('day'),
+    sessionIds: url.searchParams.get('session_ids'),
+  });
+  if ('error' in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 });
+  const scope = parsed.scope;
 
   const admin = createAdminClient();
 
@@ -53,6 +70,8 @@ export async function GET(req: Request) {
       accessToken: fresh.accessToken as string,
       shopCipher: (fresh.shopCipher ?? (conn as { shop_cipher: string }).shop_cipher) as string,
       tag: 'dry-run',
+      scope,
+      includeUnbound,
     });
   } catch (e) {
     if (e instanceof VerifyFailedError) {
@@ -61,7 +80,15 @@ export async function GET(req: Request) {
         { status: 502 },
       );
     }
-    throw e;
+    // Anything else is reported as JSON rather than rethrown into a bare 500. A dry run whose
+    // only symptom is "failed" costs a trip to the server log to learn anything at all — which
+    // is exactly what happened when an .in() list crossed undici's header cap and surfaced as
+    // `TypeError: fetch failed`.
+    console.error('[labels/dry-run] failed', e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : String(e) },
+      { status: 500 },
+    );
   }
 
   if (heal && run.healed.length) await applyHealed(admin, user.id, storeId, run.healed);
@@ -78,12 +105,26 @@ export async function GET(req: Request) {
 
   const plan = run.plan;
   const toBuy = run.boxes.filter((b) => !alreadyBought.has(b.group_key));
-  const spend = await estimateSpend(admin, user.id, storeId, toBuy.length);
+
+  // The stack in print order, and from it the exact set of boxes this check is proposing.
+  // reviewed_keys is the approval token: /authorize buys the INTERSECTION of these keys with
+  // whatever it resolves, so a box that appears after this response is read can never be bought
+  // and ordinary drift cannot block the purchase. A bare count cannot do both — see authorizeRun.
+  const pageSequence = planPageSequence(plan);
+  const reviewedKeys = pageSequence
+    .filter((pg): pg is typeof pg & { group_key: string } =>
+      pg.kind === 'label' && typeof (pg as { group_key?: string }).group_key === 'string')
+    .map((pg) => pg.group_key)
+    .filter((k) => !alreadyBought.has(k));
+  // Estimated from each box's ACTUAL size, because price tracks order count (r = 0.853 over
+  // the first 21 purchases: $4.01 for a single, $11.45 for a 20-order combine).
+  const spend = await estimateSizedSpend(admin, user.id, storeId, toBuy.map((b) => b.order_ids.length));
 
   return NextResponse.json({
     dry_run: true,
     purchased: 0,
     store_id: storeId,
+    scope: run.scope,
     verified_against_tiktok: true,
     healed: heal ? run.healed.length : 0,
     heal_available: !heal && run.healed.length > 0 ? run.healed.length : 0,
@@ -99,6 +140,11 @@ export async function GET(req: Request) {
       confirmed_label_ready: run.confirmedCount,
       boxes: plan.totalBoxes,
       orders: plan.totalOrders,
+      // Split so the total can be reconciled against Seller Center, which counts only the
+      // orders actually placed that night.
+      orders_in_scope: run.ordersInScope,
+      orders_pulled_in: run.ordersPulledIn,
+      pulled_in_by_day: run.pulledInByDay,
       batched_boxes: plan.batchedBoxes,
       bundle_boxes: plan.bundles.length,
       sku_batches: plan.batches.length,
@@ -106,6 +152,10 @@ export async function GET(req: Request) {
       // labels — worth printing, since each says what to grab, but not a mechanical run.
       single_box_sections: plan.singleBoxSections,
       multi_unit_boxes: plan.multiUnitBoxes,
+      // Boxes with no SKU on file. Non-zero means the purchase route will REFUSE until you
+      // answer: wait for the team to bind and re-run, or pass unbound=skip / unbound=include.
+      unbound_boxes: run.unboundBoxes.length,
+      unbound_included: includeUnbound,
       // Boxes a purchase run would actually buy: the plan minus anything already in the ledger.
       already_in_ledger: alreadyBought.size,
       would_buy: toBuy.length,
@@ -114,19 +164,18 @@ export async function GET(req: Request) {
     },
     // Spend is ESTIMATED, never quoted: no TikTok endpoint prices a label without buying it.
     spend_estimate: spend,
-    max_boxes_per_run: MAX_BOXES_PER_RUN,
-    // Pass BOTH of these to the purchase route to authorise a run:
-    //   ?confirm_boxes= proves the plan has not moved since this was read
-    //   ?limit=         states the most boxes that call may buy, and is REQUIRED
-    // suggested_limit is only a suggestion. A smaller limit is always safe, and is the right
-    // choice for a first run — nothing is lost but a second call.
+    // What the last week and month actually cost, so this run is judged against real numbers.
+    spend_recent: await readSpendWindows(admin, user.id, storeId),
+    max_manifest_boxes: MAX_MANIFEST_BOXES,
+    // POST these back to /authorize as `reviewed_keys` — they ARE the approval, and only their
+    // intersection with what authorise resolves may be bought. There is no per-call limit any
+    // more: SCOPE bounds a run, and the manifest that authorising writes is what the purchase
+    // route drains.
+    reviewed_keys: reviewedKeys,
+    // Retained for display and for reconciling against reviewed_keys.length. NOT the gate.
     confirm_boxes: toBuy.length,
-    suggested_limit: Math.min(toBuy.length, MAX_BOXES_PER_RUN),
-    // How many capped calls this backlog would take. A plan larger than the cap is not
-    // refused; it is bought in successive runs, each re-verified against TikTok.
-    calls_needed_at_cap: Math.ceil(toBuy.length / MAX_BOXES_PER_RUN),
     batches: plan.batches.map((b) => ({ slip: b.slip, sku_number: b.sku_number, boxes: b.boxes.length })),
-    page_sequence: planPageSequence(plan),
+    page_sequence: pageSequence,
     excluded: run.excluded,
   });
 }

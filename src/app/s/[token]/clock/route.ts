@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto';
 import { guardPublicWrite, guardPublicReadAllowed, clientIp } from '@/lib/schedule/publicRoute';
 import { resolveEmployeeByToken } from '@/lib/schedule/tokens';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { isClockEligibleStatus } from '@/lib/schedule/eligibility';
 import { clockCodeLimiter } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
@@ -71,17 +72,21 @@ export async function POST(req: Request, { params }: { params: Promise<{ token: 
     return NextResponse.json({ error: 'Not available' }, { status: 403 });
   }
 
-  // 2. shift belongs to this worker and is not released; 3. now() within [start-45m, end+60m].
+  // 2. shift belongs to this worker, is CLOCK-ELIGIBLE and not released; 3. now() within
+  //    [start-45m, end+60m]. The status gate is load-bearing: a manager who removes a claimed or
+  //    recurring day from the schedule leaves the row as 'cancelled' (Schedule Builder), and a
+  //    cancelled day must never mint a clock code. See CLOCK_ELIGIBLE_STATUSES.
   const { data: si, error: siErr } = await admin
     .from('shift_instances')
-    .select('id, starts_at, ends_at, released_at')
+    .select('id, starts_at, ends_at, released_at, status')
     .eq('id', shiftInstanceId)
     .eq('employee_id', employee.id)
     .eq('user_id', ownerId)
     .maybeSingle();
   if (siErr) return NextResponse.json({ error: siErr.message }, { status: 500 });
-  if (!si || si.released_at) {
-    await auditIssue(admin, { user_id: ownerId, employee_id: employee.id, shift_instance_id: shiftInstanceId, purpose, outcome: 'rejected', reason: si ? 'released' : 'not_your_shift' });
+  if (!si || si.released_at || !isClockEligibleStatus(si.status as string)) {
+    const reason = !si ? 'not_your_shift' : si.released_at ? 'released' : `not_eligible_${si.status}`;
+    await auditIssue(admin, { user_id: ownerId, employee_id: employee.id, shift_instance_id: shiftInstanceId, purpose, outcome: 'rejected', reason });
     return NextResponse.json({ error: 'Not your shift' }, { status: 403 });
   }
   const now = Date.now();

@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'ap-')), 'assemblyPlan.mjs');
 writeFileSync(outFile, outputText);
-const { buildAssemblySequence, needsRefetch, itemsFromLedger, DOC_REFETCH_MARGIN_MS } =
+const { buildAssemblySequence, needsRefetch, itemsFromLedger, itemsFromLedgerMerged, LEDGER_COLUMNS, DOC_REFETCH_MARGIN_MS } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -36,11 +36,12 @@ const row = (key, over = {}) => ({
   tracking_number: `trk-${key}`, ...over,
 });
 /** A box to print, under `caption` (null = no header). */
-const item = (key, caption = null) => ({ group_key: key, caption });
-/** Several boxes under one header. */
+const item = (key, caption = null, banner = null) => ({ group_key: key, banner, caption });
+/** Several boxes under one SKU header. */
 const section = (caption, ...keys) => keys.map((k) => item(k, caption));
 const shape = (seq) => seq.pages
-  .map((p) => (p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`)).join(' ');
+  .map((p) => (p.kind === 'banner' ? `BANNER(${p.caption}|${p.count})`
+    : p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`)).join(' ');
 
 console.log('\nDocument freshness');
 {
@@ -213,6 +214,202 @@ console.log('\nRebuilding the stack from the ledger alone');
 }
 {
   check('an empty ledger rebuilds to nothing', itemsFromLedger([]).length === 0);
+}
+
+console.log('\nTwo levels: piles, and SKU sections inside them');
+{
+  // The stack the prep station actually receives: a SINGLES pile split by SKU, then a MIXED
+  // pile that has no SKU split because there is no single SKU to name.
+  const items = [
+    { group_key: 'p1', banner: 'SINGLES — ONE SKU EACH', caption: '#248 PUMPKIN' },
+    { group_key: 'p2', banner: 'SINGLES — ONE SKU EACH', caption: '#248 PUMPKIN' },
+    { group_key: 'b1', banner: 'SINGLES — ONE SKU EACH', caption: '#352 BANANA' },
+    { group_key: 'm1', banner: 'MIXED — READ EACH LABEL', caption: null },
+    { group_key: 'm2', banner: 'MIXED — READ EACH LABEL', caption: null },
+  ];
+  const rows = items.map((i) => row(i.group_key));
+  const seq = buildAssemblySequence(items, rows, NOW);
+  check('the pile banner counts the WHOLE pile, not one section',
+    shape(seq) === 'BANNER(SINGLES — ONE SKU EACH|3) SLIP(#248 PUMPKIN|2) L(p1) L(p2) '
+      + 'SLIP(#352 BANANA|1) L(b1) BANNER(MIXED — READ EACH LABEL|2) L(m1) L(m2)',
+    shape(seq));
+  check('banners are counted', seq.bannerCount === 2, String(seq.bannerCount));
+  check('slips are counted separately', seq.slipCount === 2, String(seq.slipCount));
+}
+{
+  // A lost box must shrink BOTH levels. A banner saying 3 over a pile of 2 sends the prep
+  // station looking for a label that was never bought.
+  const items = [
+    { group_key: 'p1', banner: 'SINGLES', caption: '#248 PUMPKIN' },
+    { group_key: 'p2', banner: 'SINGLES', caption: '#248 PUMPKIN' },
+    { group_key: 'p3', banner: 'SINGLES', caption: '#248 PUMPKIN' },
+  ];
+  const seq = buildAssemblySequence(
+    items, [row('p1'), row('p2'), row('p3', { status: 'claimed', package_id: null })], NOW);
+  check('the banner count shrinks with the pile',
+    shape(seq) === 'BANNER(SINGLES|2) SLIP(#248 PUMPKIN|2) L(p1) L(p2)', shape(seq));
+}
+{
+  // A pile emptied entirely drops its banner too, or the stack opens with a divider for
+  // nothing and the next pile reads as belonging to it.
+  const items = [
+    { group_key: 'x', banner: 'SINGLES', caption: '#1 A' },
+    { group_key: 'm', banner: 'MIXED', caption: null },
+  ];
+  const seq = buildAssemblySequence(items, [row('m')], NOW);
+  check('an emptied pile drops its banner with it',
+    shape(seq) === 'BANNER(MIXED|1) L(m)', shape(seq));
+}
+{
+  // Rows predating banner_caption still print, as one unheaded run.
+  const rows = [row('legacy', { print_seq: 0, slip_caption: null, banner_caption: null })];
+  const seq = buildAssemblySequence(itemsFromLedger(rows), rows, NOW);
+  check('a row with no banner still prints', shape(seq) === 'L(legacy)', shape(seq));
+  check('…and no empty banner is emitted', seq.bannerCount === 0);
+}
+
+console.log('\nThe column list must cover every field the type declares');
+{
+  // THE BUG THIS EXISTS FOR. banner_caption was added to the migration, the write path, the
+  // LedgerRow type, the grouping, the renderer and these tests — but not to the PDF route's
+  // SELECT. A missing column arrives as `undefined`, which reads as "no banner", so a real day
+  // printed with both pile dividers silently absent and nothing threw.
+  //
+  // No other test could catch it: every one of them builds rows by hand and never issues the
+  // query. This one reads the interface out of the source and checks the string agrees.
+  const src = readFileSync(srcPath, 'utf8');
+  const body = src.slice(
+    src.indexOf('export interface LedgerRow {') + 'export interface LedgerRow {'.length,
+    src.indexOf('}', src.indexOf('export interface LedgerRow {')),
+  );
+  const fields = [...body.matchAll(/^\s*(\w+)\??:/gm)].map((m) => m[1]);
+  check('the interface was parsed', fields.length >= 8, fields.join(','));
+  const missing = fields.filter((f) => !LEDGER_COLUMNS.includes(f));
+  check('every LedgerRow field appears in LEDGER_COLUMNS',
+    missing.length === 0, missing.length ? `MISSING: ${missing.join(', ')}` : 'all present');
+
+  // A name-by-name check is not enough: a botched edit once produced
+  // 'tracking_number, , store_id' + 'print_seq, …' — an empty column and two names fused
+  // together — and every name was still "present". PostgREST would have rejected the query.
+  const parts = LEDGER_COLUMNS.split(',').map((x) => x.trim());
+  check('the column list has no empty entries', parts.every((x) => x.length > 0),
+    JSON.stringify(parts.filter((x) => !x)));
+  check('no two column names are fused together',
+    parts.every((x) => /^[a-z_][a-z0-9_]*$/.test(x)),
+    parts.filter((x) => !/^[a-z_][a-z0-9_]*$/.test(x)).join(' | '));
+  check('no column is listed twice', new Set(parts).size === parts.length);
+  // And specifically the one that got away.
+  check('banner_caption is in the column list', LEDGER_COLUMNS.includes('banner_caption'));
+}
+
+console.log('\nMerging runs from several shops into one pile per SKU');
+{
+  const SINGLES = 'SINGLES — PREP STATION';
+  const MIXED = 'BUNDLED ORDERS — PICK REGULAR';
+  const ORDER = [SINGLES, MIXED];
+  // The real shape: labels are bought per shop, but 108 of 190 SKUs sell in more than one and
+  // the top sellers are in all four. Printed per shop, the same SKU sits in several piles and
+  // the prep station walks it repeatedly.
+  const rows = [
+    row('snore-a', { store_id: 's1', banner_caption: SINGLES, slip_caption: '#106 PINK POPSICLE', print_seq: 0 }),
+    row('snore-b', { store_id: 's1', banner_caption: SINGLES, slip_caption: '#106 PINK POPSICLE', print_seq: 1 }),
+    row('snore-c', { store_id: 's1', banner_caption: SINGLES, slip_caption: '#428 SOAP BAR', print_seq: 2 }),
+    row('lots-a',  { store_id: 's2', banner_caption: SINGLES, slip_caption: '#106 PINK POPSICLE', print_seq: 0 }),
+    row('lots-b',  { store_id: 's2', banner_caption: MIXED,   slip_caption: null, print_seq: 1 }),
+    row('snore-m', { store_id: 's1', banner_caption: MIXED,   slip_caption: null, print_seq: 3 }),
+  ];
+  const seq = buildAssemblySequence(itemsFromLedgerMerged(rows, ORDER), rows, NOW);
+
+  check('the same SKU from two shops becomes ONE pile',
+    shape(seq).includes('SLIP(#106 PINK POPSICLE|3)'), shape(seq));
+  check('…and the bigger SKU section prints first',
+    shape(seq).indexOf('#106 PINK POPSICLE') < shape(seq).indexOf('#428 SOAP BAR'));
+  check('mixed from both shops merges too',
+    shape(seq).includes(`BANNER(${MIXED}|2)`), shape(seq));
+  check('the singles banner counts every shop\'s singles',
+    shape(seq).includes(`BANNER(${SINGLES}|4)`), shape(seq));
+  check('every label still appears exactly once', seq.labelCount === 6);
+  check('no box is lost in the merge', seq.missing.length === 0);
+}
+{
+  const SINGLES = 'SINGLES — PREP STATION';
+  const MIXED = 'BUNDLED ORDERS — PICK REGULAR';
+  // Piles keep the planner's running order — singles first, mixed after — regardless of which
+  // pile happens to be larger. Ordering piles by size would send the packer to the read-each-one
+  // pile first, which is the opposite of the point.
+  const rows = [
+    row('m1', { banner_caption: MIXED, slip_caption: null }),
+    row('m2', { banner_caption: MIXED, slip_caption: null }),
+    row('m3', { banner_caption: MIXED, slip_caption: null }),
+    row('s1', { banner_caption: SINGLES, slip_caption: '#1 A' }),
+  ];
+  const seq = buildAssemblySequence(itemsFromLedgerMerged(rows, [SINGLES, MIXED]), rows, NOW);
+  check('singles come before mixed even when mixed is bigger',
+    shape(seq).indexOf(SINGLES) < shape(seq).indexOf(MIXED), shape(seq));
+}
+{
+  // Determinism: two prints of the same selection must be identical, whatever order the rows
+  // arrive in — a reprint that reorders the stack is a reprint nobody can trust.
+  const SINGLES = 'SINGLES — PREP STATION';
+  const rows = ['d', 'a', 'c', 'b'].map((k) =>
+    row(k, { banner_caption: SINGLES, slip_caption: '#5 E' }));
+  const one = itemsFromLedgerMerged(rows, [SINGLES]).map((i) => i.group_key).join(',');
+  const two = itemsFromLedgerMerged(rows.slice().reverse(), [SINGLES]).map((i) => i.group_key).join(',');
+  check('a merged stack is deterministic', one === two && one === 'a,b,c,d', one);
+}
+{
+  check('merging nothing yields nothing', itemsFromLedgerMerged([], []).length === 0);
+  const seq = buildAssemblySequence(
+    itemsFromLedgerMerged([row('x', { banner_caption: null, slip_caption: null })], []), 
+    [row('x', { banner_caption: null, slip_caption: null })], NOW);
+  check('an unbannered row still prints in a merge', seq.labelCount === 1, shape(seq));
+}
+
+console.log('\nSplitting the stack into two files loses nothing');
+{
+  // The route filters seq.pages on the BANNER. Reproduced here so the invariant that matters —
+  // singles + mixed == the whole stack, with no label dropped or duplicated — is pinned.
+  const SINGLES = 'SINGLES — PREP STATION';
+  const MIXED = 'BUNDLED ORDERS — PICK REGULAR';
+  const NOSKU = 'NO SKU ON FILE — LOOK UP EACH ORDER';
+  const rows = [
+    row('s1', { banner_caption: SINGLES, slip_caption: '#1 A', print_seq: 0 }),
+    row('s2', { banner_caption: SINGLES, slip_caption: '#1 A', print_seq: 1 }),
+    row('s3', { banner_caption: SINGLES, slip_caption: '#2 B', print_seq: 2 }),
+    row('m1', { banner_caption: MIXED, slip_caption: null, print_seq: 3 }),
+    row('m2', { banner_caption: MIXED, slip_caption: null, print_seq: 4 }),
+    row('u1', { banner_caption: NOSKU, slip_caption: null, print_seq: 5 }),
+  ];
+  const seq = buildAssemblySequence(itemsFromLedger(rows), rows, NOW);
+
+  const filterTo = (want) => {
+    const kept = []; let keeping = false;
+    for (const p of seq.pages) {
+      if (p.kind === 'banner') keeping = want(p.caption);
+      if (keeping) kept.push(p);
+    }
+    return kept;
+  };
+  const singles = filterTo((b) => b === SINGLES);
+  const mixed = filterTo((b) => b === MIXED || b === NOSKU);
+
+  const labelsOf = (pp) => pp.filter((p) => p.kind === 'label').map((p) => p.group_key);
+  const all = labelsOf(seq.pages);
+  const both = [...labelsOf(singles), ...labelsOf(mixed)];
+
+  check('the two files together hold every label',
+    both.slice().sort().join(',') === all.slice().sort().join(','), both.join(','));
+  check('…and none twice', new Set(both).size === both.length);
+  check('singles holds only the singles pile',
+    labelsOf(singles).join(',') === 's1,s2,s3', labelsOf(singles).join(','));
+  check('mixed holds bundles AND no-SKU, which are both "read each label" work',
+    labelsOf(mixed).join(',') === 'm1,m2,u1', labelsOf(mixed).join(','));
+  check('each file keeps its own banners so it is self-describing',
+    singles.some((p) => p.kind === 'banner' && p.caption === SINGLES)
+      && mixed.some((p) => p.kind === 'banner' && p.caption === MIXED)
+      && mixed.some((p) => p.kind === 'banner' && p.caption === NOSKU));
+  check('the singles file keeps its per-SKU slips',
+    singles.filter((p) => p.kind === 'slip').length === 2);
 }
 
 console.log('\nEdges');

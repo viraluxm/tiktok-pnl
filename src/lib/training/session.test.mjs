@@ -31,6 +31,9 @@ const {
   trainingControllerPath,
   trainingHostUrl,
   trainingControllerUrl,
+  parseLauncherSessions,
+  addLauncherSession,
+  removeLauncherSession,
 } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -161,6 +164,74 @@ check('launcher never calls window.open', !/window\.open\s*\(/.test(launcherSrc)
 check(
   'launcher performs no router navigation',
   !/useRouter|router\.(push|replace)|location\.href\s*=/.test(launcherSrc),
+);
+
+// ── Launcher session index (P0-2): the list is the ONLY record of a session id,
+// so it must NEVER silently truncate. A dropped id = a running practice live with
+// a published camera that can no longer be re-opened, re-QR'd or removed. ──
+const uuidAt = (n) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
+const buildList = (count) => {
+  let list = [];
+  for (let i = 1; i <= count; i++) list = addLauncherSession(list, uuidAt(i));
+  return list;
+};
+
+for (const n of [20, 25, 32, 40]) {
+  const list = buildList(n);
+  check(`creating ${n} sessions retains all ${n}`, list.length === n, `got ${list.length}`);
+  check(
+    `session #1 survives after ${n} creations`,
+    list.includes(uuidAt(1)),
+    'the audit’s data-loss bug',
+  );
+  check(`session #${n} is present after ${n} creations`, list.includes(uuidAt(n)));
+  check(`newest-first ordering holds at ${n}`, list[0] === uuidAt(n));
+  check(`no id is lost at ${n}`, new Set(list).size === n);
+}
+
+// Explicitly pin the old failure mode: the 9th create must not evict the 1st.
+const nine = buildList(9);
+check('the 9th create does NOT evict the 1st (old MAX_RECENT=8 bug)', nine.length === 9 && nine.includes(uuidAt(1)));
+
+// Reload restoration: persist -> parse round-trip keeps every id and its order.
+const forty = buildList(40);
+const restored = parseLauncherSessions(JSON.stringify(forty));
+check('reload restores all 40 ids', restored.length === 40);
+check('reload preserves exact order', restored.every((id, i) => id === forty[i]));
+check('reload keeps session #1', restored.includes(uuidAt(1)));
+
+// Legacy compatibility: a previously-capped 8-item array still loads.
+const legacy = parseLauncherSessions(JSON.stringify(buildList(8)));
+check('legacy 8-item stored array still loads', legacy.length === 8);
+
+// Robustness of the parser.
+check('null storage -> empty list', parseLauncherSessions(null).length === 0);
+check('malformed JSON -> empty list', parseLauncherSessions('{not json').length === 0);
+check('non-array JSON -> empty list', parseLauncherSessions('{"a":1}').length === 0);
+check(
+  'junk entries are dropped, valid ones kept',
+  parseLauncherSessions(JSON.stringify([A, 'nope', 42, null, B])).length === 2,
+);
+check(
+  'duplicates collapse on load',
+  parseLauncherSessions(JSON.stringify([A, A, B])).length === 2,
+);
+
+// Add is non-destructive and de-duplicating.
+check('re-adding an existing id does not duplicate it', addLauncherSession([A, B], A).length === 2);
+check('re-adding moves it to the front', addLauncherSession([A, B], B)[0] === B);
+check('an invalid id is never added', addLauncherSession([A], 'not-a-uuid').length === 1);
+
+// Remove deletes ONLY the requested id.
+const big = buildList(32);
+const afterRemove = removeLauncherSession(big, uuidAt(16));
+check('remove drops exactly one id', afterRemove.length === 31);
+check('remove drops the requested id', !afterRemove.includes(uuidAt(16)));
+check('remove keeps session #1', afterRemove.includes(uuidAt(1)));
+check('remove keeps session #32', afterRemove.includes(uuidAt(32)));
+check(
+  'removing an absent id changes nothing',
+  removeLauncherSession(big, uuidAt(999)).length === 32,
 );
 
 console.log(`\n${passed} checks passed`);

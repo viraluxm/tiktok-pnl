@@ -21,7 +21,7 @@ export interface EditorHandlers {
   employees: Employee[];
   nameById: (id: string) => string;
   onCreate: (input: { employee_id: string; date: string; start_time: string; end_time: string | null }) => Promise<void>;
-  onUpdate: (id: string, patch: { start_time?: string; end_time?: string | null }) => Promise<void>;
+  onUpdate: (id: string, patch: { start_time?: string; end_time?: string | null; break_minutes?: number }) => Promise<void>;
   onDeleteOneOff: (id: string) => Promise<void>;
   onModifyOccurrence: (ruleId: string, date: string, start: string, end: string) => Promise<void>;
   onSkipOccurrence: (ruleId: string, date: string) => Promise<void>;
@@ -35,6 +35,8 @@ interface FormState {
   date: string;
   start: string;
   end: string;
+  /** Unpaid break in minutes, as typed. Empty string is treated as "leave unchanged". */
+  breakMinutes: string;
   open: boolean;
   // context for save routing
   cardId?: string;
@@ -98,6 +100,7 @@ export default function ShiftEditorModal({
           date: intent.date,
           start: '',
           end: '',
+          breakMinutes: '',
           open: false,
           lockEmployee: false,
           lockDate: false,
@@ -129,6 +132,7 @@ export default function ShiftEditorModal({
       date: card.date,
       start: prefill.start,
       end: prefill.end,
+      breakMinutes: String(card.break_minutes ?? 0),
       open: card.isOpen,
       cardId: card.id,
       lockEmployee: true,
@@ -149,6 +153,7 @@ export default function ShiftEditorModal({
       date: card.date,
       start: prefill.start,
       end: now,
+      breakMinutes: String(card.break_minutes ?? 0),
       open: false,
       cardId: card.id,
       lockEmployee: true,
@@ -171,6 +176,7 @@ export default function ShiftEditorModal({
       date: destDate,
       start: prefill.start,
       end: prefill.end,
+      breakMinutes: '',
       open: false,
       lockEmployee: true,
       lockDate: false,
@@ -189,6 +195,7 @@ export default function ShiftEditorModal({
       date: card.date,
       start: prefill.start,
       end: prefill.end,
+      breakMinutes: '',
       open: false,
       ruleId: card.ruleId,
       lockEmployee: true,
@@ -250,7 +257,15 @@ export default function ShiftEditorModal({
       if (form.kind === 'create' || form.kind === 'duplicate') {
         await handlers.onCreate({ employee_id: form.employeeId, date: form.date, start_time: form.start, end_time: end });
       } else if (form.kind === 'edit' && form.cardId) {
-        await handlers.onUpdate(form.cardId, { start_time: form.start, end_time: end });
+        // Correction only: the break is sent alongside the times through the SAME patch builder,
+        // which decides what actually changed. Blank means "leave it alone", which is why the
+        // field is a string here — '' and '0' are different intents.
+        const brk = form.breakMinutes.trim();
+        await handlers.onUpdate(form.cardId, {
+          start_time: form.start,
+          end_time: end,
+          ...(brk === '' ? {} : { break_minutes: Number(brk) }),
+        });
       } else if (form.kind === 'occurrence' && form.ruleId) {
         await handlers.onModifyOccurrence(form.ruleId, form.date, form.start, form.end);
       }
@@ -355,6 +370,21 @@ export default function ShiftEditorModal({
             )}
           </Field>
         </div>
+
+        {/* Break — EXISTING-SHIFT CORRECTION ONLY. Not offered on create/duplicate/occurrence:
+            those write a new row (or a rule exception) that has no recorded break to correct.
+            The bound is enforced in buildShiftEditPatch, not here — an HTML min/max is a hint,
+            not a guarantee, and a break >= the span would silently pay zero. */}
+        {form.kind === 'edit' && !form.open && (
+          <Field label="Break (minutes)">
+            <input
+              type="number" inputMode="numeric" min={0} step={1}
+              value={form.breakMinutes}
+              onChange={(e) => setForm({ ...form, breakMinutes: e.target.value })}
+              className={inputCls}
+            />
+          </Field>
+        )}
 
         {form.allowOpen && (
           <label className="flex items-center gap-2 cursor-pointer select-none w-fit">

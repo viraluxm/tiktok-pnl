@@ -34,7 +34,10 @@ const punchUrl = transpile('./punchEdit.ts', 'punchEdit.mjs', {
   "'@/lib/weeklySchedule'": `'${weeklyUrl}'`,
 });
 
-const { punchInstantsForWallClock, buildShiftEditPatch, shiftEditPrefill, REOPEN_PUNCH_ERROR } = await import(punchUrl);
+const {
+  punchInstantsForWallClock, buildShiftEditPatch, shiftEditPrefill, REOPEN_PUNCH_ERROR,
+  BREAK_TOO_LONG_ERROR, BREAK_INVALID_ERROR,
+} = await import(punchUrl);
 const { indexWeekCards, instantHours, durationHours } = await import(weeklyUrl);
 const { laWallClockOf, laWallTimeToUtc } = await import(tzUrl);
 const { paidShiftHours, isPayableShift, shiftHours } = await import(employeesUrl);
@@ -627,6 +630,129 @@ console.log('\n17 — display / prefill / write agree');
     disagreements === 0, `${disagreements} disagreement(s)`);
   check('the card carries source + instants so the modal can prefill from them',
     indexWeekCards([rows[0]], [], weekDates).get('e1|2026-08-12')[0].source === 'time_clock');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BREAK CORRECTION. A manager fixing a forgotten break-return must move ONLY the paid
+// break — never the punch that was recorded correctly, and never confirmation.
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('\nbreak correction — a break-only edit touches ONLY break_minutes');
+
+// A real 10h punch: in 5:00pm PDT, out 3:00am PDT next day. 120m break recorded because the
+// employee forgot to clock back in. The manager knows it was 30.
+const BRK_IN = laWallTimeToUtc('2026-08-12', '17:00').toISOString();
+const BRK_OUT = laWallTimeToUtc('2026-08-13', '03:00').toISOString();
+const brkRow = (o = {}) => ({
+  source: 'time_clock', date: '2026-08-12', start_time: '17:00:00', end_time: '03:00:00',
+  clock_in_at: BRK_IN, clock_out_at: BRK_OUT, break_minutes: 120, ...o,
+});
+// The form reopens at the instants, so a break-only save resends the SAME times — which is
+// exactly the case that must not produce a time patch.
+const brkPre = shiftEditPrefill(brkRow());
+
+{
+  const patch = buildShiftEditPatch(brkRow(), { start_time: brkPre.start, end_time: brkPre.end, break_minutes: 30 });
+  check('120 → 30 emits break_minutes', patch.break_minutes === 30, JSON.stringify(patch));
+  check('  ↳ and NOTHING else', Object.keys(patch).length === 1, Object.keys(patch).join(','));
+  for (const f of ['start_time', 'end_time', 'clock_in_at', 'clock_out_at', 'confirmed_at', 'confirmed_by']) {
+    check(`  ↳ patch has no ${f}`, !(f in patch));
+  }
+}
+
+console.log('\nno-op behaviour is preserved');
+{
+  check('same times + same break → null (open-and-save stays inert)',
+    buildShiftEditPatch(brkRow(), { start_time: brkPre.start, end_time: brkPre.end, break_minutes: 120 }) === null);
+  check('same times, break omitted → null',
+    buildShiftEditPatch(brkRow(), { start_time: brkPre.start, end_time: brkPre.end }) === null);
+  check('nothing supplied at all → null', buildShiftEditPatch(brkRow(), {}) === null);
+}
+
+console.log('\nzero is a real value, distinct from "unchanged"');
+{
+  const patch = buildShiftEditPatch(brkRow(), { start_time: brkPre.start, end_time: brkPre.end, break_minutes: 0 });
+  check('120 → 0 emits break_minutes 0', patch != null && patch.break_minutes === 0, JSON.stringify(patch));
+  check('0 → 0 is a no-op', buildShiftEditPatch(brkRow({ break_minutes: 0 }), { start_time: brkPre.start, end_time: brkPre.end, break_minutes: 0 }) === null);
+}
+
+console.log('\ntimes AND break in one save');
+{
+  const patch = buildShiftEditPatch(brkRow(), { start_time: '17:00', end_time: '02:00', break_minutes: 30 });
+  check('break lands', patch.break_minutes === 30);
+  check('  ↳ end time re-derived', patch.end_time === '02:00');
+  check('  ↳ clock_out_at rewritten (end changed)', typeof patch.clock_out_at === 'string');
+  check('  ↳ clock_in_at NOT rewritten (start untouched)', !('clock_in_at' in patch));
+  // The bound follows the RESULTING span (9h), not the stored one.
+  let threw = null;
+  try { buildShiftEditPatch(brkRow(), { start_time: '17:00', end_time: '18:00', break_minutes: 90 }); }
+  catch (e) { threw = e.message; }
+  check('shrinking the shift invalidates a now-too-long break', threw === BREAK_TOO_LONG_ERROR, threw ?? 'no throw');
+}
+
+console.log('\nvalidation — pay must never be silently zeroed');
+{
+  const attempt = (n, row = brkRow()) => {
+    try { return { ok: true, patch: buildShiftEditPatch(row, { start_time: brkPre.start, end_time: brkPre.end, break_minutes: n }) }; }
+    catch (e) { return { ok: false, msg: e.message }; }
+  };
+  // 10h span = 600 minutes.
+  check('599m accepted (just under the span)', attempt(599).ok);
+  check('600m REJECTED (equals the span → would pay 0)', !attempt(600).ok && attempt(600).msg === BREAK_TOO_LONG_ERROR);
+  check('700m REJECTED (over the span)', !attempt(700).ok && attempt(700).msg === BREAK_TOO_LONG_ERROR);
+  check('negative REJECTED', !attempt(-1).ok && attempt(-1).msg === BREAK_INVALID_ERROR);
+  check('fractional REJECTED', !attempt(30.5).ok && attempt(30.5).msg === BREAK_INVALID_ERROR);
+  check('NaN REJECTED', !attempt(Number.NaN).ok && attempt(Number.NaN).msg === BREAK_INVALID_ERROR);
+  // The bound is the PAY span. This row's wall clock reads 2h, but its instants span 26h — the
+  // forgotten-clock-out shape. A 3h break is legitimate against 26h and must not be refused.
+  const longPunch = brkRow({
+    start_time: '17:00:00', end_time: '19:00:00',
+    clock_in_at: '2026-08-12T00:00:00.000Z', clock_out_at: '2026-08-13T02:00:00.000Z',
+  });
+  const lp = shiftEditPrefill(longPunch);
+  let ok = true; try { buildShiftEditPatch(longPunch, { start_time: lp.start, end_time: lp.end, break_minutes: 180 }); } catch { ok = false; }
+  check('bound follows the PAY span (instants), not the wall clock', ok);
+}
+
+console.log('\novernight: a break-only edit leaves the next-day instant alone');
+{
+  const patch = buildShiftEditPatch(brkRow(), { start_time: brkPre.start, end_time: brkPre.end, break_minutes: 45 });
+  check('no clock_out_at in the patch', !('clock_out_at' in patch));
+  check('  ↳ the stored out instant is still the NEXT day',
+    laWallClockOf(BRK_OUT).date === '2026-08-13', laWallClockOf(BRK_OUT).date);
+}
+
+console.log('\nmanual shifts: break edits land on the wall-clock row');
+{
+  const manualRow = { source: 'manual', date: '2026-08-12', start_time: '16:00:00', end_time: '02:00:00', break_minutes: 0 };
+  const mp = shiftEditPrefill(manualRow);
+  const patch = buildShiftEditPatch(manualRow, { start_time: mp.start, end_time: mp.end, break_minutes: 30 });
+  check('emits break_minutes only', patch.break_minutes === 30 && Object.keys(patch).length === 1, Object.keys(patch).join(','));
+  check('  ↳ no punch instants invented for a manual row', !('clock_in_at' in patch) && !('clock_out_at' in patch));
+  let threw = null;
+  try { buildShiftEditPatch(manualRow, { start_time: mp.start, end_time: mp.end, break_minutes: 600 }); } catch (e) { threw = e.message; }
+  check('  ↳ the 10h wall-clock span still bounds it', threw === BREAK_TOO_LONG_ERROR, threw ?? 'no throw');
+}
+
+console.log('\nPAY CONSEQUENCE — the real paidShiftHours, unmodified');
+{
+  const base = { employee_id: 'e1', source: 'time_clock', confirmed_at: '2026-08-13T10:00:00Z',
+                 start_time: '17:00:00', end_time: '03:00:00', clock_in_at: BRK_IN, clock_out_at: BRK_OUT };
+  check('10h span, 120m break → 8h', near(paidShiftHours({ ...base, break_minutes: 120 }), 8));
+  check('10h span, 30m break → 9.5h', near(paidShiftHours({ ...base, break_minutes: 30 }), 9.5));
+  check('10h span, 0m break → 10h', near(paidShiftHours({ ...base, break_minutes: 0 }), 10));
+  // The correction is worth 1.5 paid hours — the whole point of the feature.
+  check('the 120→30 correction is worth +1.5h',
+    near(paidShiftHours({ ...base, break_minutes: 30 }) - paidShiftHours({ ...base, break_minutes: 120 }), 1.5));
+  // Manual rows take the wall-clock branch and respond identically.
+  const man = { employee_id: 'e1', source: 'manual', start_time: '16:00:00', end_time: '02:00:00' };
+  check('manual 10h, 120m break → 8h', near(paidShiftHours({ ...man, break_minutes: 120 }), 8));
+  check('manual 10h, 30m break → 9.5h', near(paidShiftHours({ ...man, break_minutes: 30 }), 9.5));
+  // Instants are the pay basis for a punch row and a break edit never touches them.
+  check('instants unchanged by a break edit → span still 10h',
+    near((Date.parse(BRK_OUT) - Date.parse(BRK_IN)) / 3_600_000, 10));
+  // Payability is orthogonal: a confirmed punch stays payable, an unconfirmed one stays held.
+  check('confirmed punch still payable after a break edit', isPayableShift({ ...base, break_minutes: 30 }) === true);
+  check('unconfirmed punch still held back', isPayableShift({ ...base, confirmed_at: null, break_minutes: 30 }) === false);
 }
 
 console.log(`\n${passed} checks passed\n`);

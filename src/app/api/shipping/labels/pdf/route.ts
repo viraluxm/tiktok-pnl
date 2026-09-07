@@ -5,14 +5,15 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { getPackageDocument } from '@/lib/tiktok/client';
 import {
-  itemsFromLedger, buildAssemblySequence, type LedgerRow,
+  itemsFromLedger, itemsFromLedgerMerged, buildAssemblySequence, LEDGER_COLUMNS, type LedgerRow,
 } from '@/lib/shipping/assemblyPlan';
+import { BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION } from '@/lib/shipping/labelPlan';
 import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
-// GET /api/shipping/labels/pdf?store_id=…&run_id=…[&preview=1]
+// GET /api/shipping/labels/pdf?run_id=…[&store_id=][&section=singles|mixed][&preview=1][&from=&to=]
 //
 // The printable stack for a purchase run: a separator slip, then that SKU's labels, repeating,
 // with bundles last. Returns one PDF sized to the labels themselves.
@@ -28,9 +29,34 @@ export const maxDuration = 300;
 //
 // `preview=1` returns the sequence as JSON instead of a PDF — the same resolution, no
 // downloads, for checking what a stack will contain before sending it to a printer.
+//
+// IT RETURNS A SLICE, NOT ALWAYS THE WHOLE STACK. A serverless response is capped at 4.5MB and
+// a label page is roughly 55KB, so about 60 labels is the ceiling — measured: 1,400 labels
+// assemble in 2.4s but produce a 96MB file, which cannot be returned at all. Buying a day's
+// labels and then being unable to print them is the worst possible failure, so the route slices
+// by `from`/`to` over the LABEL index and reports `parts` so a caller can fetch them all and
+// stitch them together. Slicing on labels rather than pages keeps a label's own pages intact.
+//
+// Every slice carries the banners and slips for the sections it contains, so a part is
+// self-describing even if the parts are printed separately.
+//
+// `section` splits the stack into the two piles that go to two different places: `singles` is
+// the prep-station file where one SKU is packed over and over, `mixed` is everything that has
+// to be read — bundles and boxes with no SKU on file. They are separate PDFs rather than one
+// because they are worked by different people at the same time, and one file has to be split by
+// hand at the banner. Omitting it prints the whole stack, banners and all, as before.
 
 /** Concurrent label downloads. Enough to be quick, few enough not to look like abuse. */
 const FETCH_CONCURRENCY = 6;
+
+/**
+ * Labels per response.
+ *
+ * Vercel returns at most 4.5MB and a label page is around 55KB, so 60 leaves headroom for the
+ * slips and banners that ride along with them. Measured against the real stack: 15 labels came
+ * to ~1MB.
+ */
+const LABELS_PER_PART = 60;
 
 type Row = LedgerRow & { run_id: string };
 
@@ -51,11 +77,18 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const url = new URL(req.url);
+  // store_id is OPTIONAL. Runs may span shops: labels are bought per shop because each has its
+  // own TikTok connection, but the prep station packs by SKU and does not care which shop an
+  // order came from. Omitting it prints the given runs together.
   const storeId = url.searchParams.get('store_id');
   const runParam = url.searchParams.get('run_id');
   const preview = url.searchParams.get('preview') === '1';
-  if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
+  const sectionRaw = url.searchParams.get('section');
   if (!runParam) return NextResponse.json({ error: 'run_id is required' }, { status: 400 });
+  if (sectionRaw != null && sectionRaw !== 'singles' && sectionRaw !== 'mixed') {
+    return NextResponse.json({ error: "section must be 'singles' or 'mixed'" }, { status: 400 });
+  }
+  const section = sectionRaw as 'singles' | 'mixed' | null;
 
   // Several runs may be printed as one stack — a limited purchase run produces several. Each
   // run stays a contiguous block in the order given, so a stack always matches a review.
@@ -69,31 +102,92 @@ export async function GET(req: Request) {
 
   const { data: rowData, error } = await admin
     .from('shipping_label_purchases')
-    .select('group_key, status, package_id, doc_url, doc_url_expires_at, tracking_number, print_seq, slip_caption, run_id')
-    .eq('user_id', user.id).eq('store_id', storeId)
+    .select(`${LEDGER_COLUMNS}, run_id`)
+    .eq('user_id', user.id)
     .in('run_id', runIds);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const rows = (rowData ?? []) as Row[];
+  let rows = (rowData ?? []) as Row[];
+  // A store filter still applies when one is given, so single-shop printing is unchanged.
+  if (storeId) rows = rows.filter((r) => String(r.store_id ?? '') === storeId);
   if (!rows.length) {
     return NextResponse.json({ error: 'No purchases found for that run', run_ids: runIds }, { status: 404 });
   }
 
-  // Resolve run by run, so each purchase run is a contiguous block in the printed order.
-  const items = runIds.flatMap((rid) => itemsFromLedger(rows.filter((r) => r.run_id === rid)));
+  // ── One run keeps its own order; several are MERGED. ──
+  //
+  // A single run already prints in the order it was planned. Several runs are regrouped by SKU
+  // across all of them, which is the whole point of printing shops together: 108 of 190 SKUs
+  // sell in more than one shop, so per-shop stacks leave the same SKU in several piles and the
+  // prep station walks it repeatedly.
+  const merge = runIds.length > 1 && url.searchParams.get('merge') !== '0';
+  const items = merge
+    ? itemsFromLedgerMerged(rows, [BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION])
+    : runIds.flatMap((rid) => itemsFromLedger(rows.filter((r) => r.run_id === rid)));
   const seq = buildAssemblySequence(items, rows);
+
+  // ── Keep only the requested pile. ──
+  //
+  // Filtered on the BANNER, which is the pile's identity, so the two files together are exactly
+  // the whole stack — nothing dropped, nothing duplicated. Done before the label index is built,
+  // so the part count and headers describe the file actually being returned.
+  if (section) {
+    const wanted = (b: string) => (section === 'singles'
+      ? b === BANNER_SINGLES
+      : b === BANNER_MIXED || b === UNBOUND_CAPTION);
+    const kept: typeof seq.pages = [];
+    let keeping = false;
+    for (const p of seq.pages) {
+      if (p.kind === 'banner') keeping = wanted(p.caption);
+      if (keeping) kept.push(p);
+    }
+    seq.pages = kept;
+    seq.labelCount = kept.filter((p) => p.kind === 'label').length;
+  }
+
+  // ── Slice by label index. ──
+  //
+  // The window is over LABELS, not pages, so a label's pages are never split across parts. The
+  // banner and slip that head a section are carried into whichever part holds its labels.
+  const labelIdx: number[] = [];
+  seq.pages.forEach((p, i) => { if (p.kind === 'label') labelIdx.push(i); });
+  const totalLabels = labelIdx.length;
+  const parts = Math.max(1, Math.ceil(totalLabels / LABELS_PER_PART));
+  const fromRaw = Number(url.searchParams.get('from'));
+  const toRaw = Number(url.searchParams.get('to'));
+  const from = Number.isFinite(fromRaw) && fromRaw > 0 ? Math.floor(fromRaw) : 0;
+  const to = Number.isFinite(toRaw) && toRaw > 0
+    ? Math.min(Math.floor(toRaw), totalLabels - 1)
+    : totalLabels - 1;
+
+  if (totalLabels && (from > 0 || to < totalLabels - 1)) {
+    const firstPage = labelIdx[from] ?? 0;
+    const lastPage = labelIdx[to] ?? seq.pages.length - 1;
+    // Reach back for the section headers this slice sits under, so a part opens by saying what
+    // it holds rather than starting mid-pile with an unlabelled label.
+    const heads: typeof seq.pages = [];
+    for (let i = firstPage - 1; i >= 0; i--) {
+      if (seq.pages[i].kind === 'label') break;
+      heads.unshift(seq.pages[i]);
+    }
+    seq.pages = [...heads, ...seq.pages.slice(firstPage, lastPage + 1)];
+  }
 
   if (preview) {
     return NextResponse.json({
       run_ids: runIds,
       pages: seq.pages.length,
       labels: seq.labelCount,
+      total_labels: totalLabels,
+      labels_per_part: LABELS_PER_PART,
+      parts,
       slips: seq.slipCount,
+      banners: seq.bannerCount,
       needs_refetch: seq.refetch.length,
       missing: seq.missing,
-      sequence: seq.pages.map((p) => (p.kind === 'slip'
-        ? { kind: 'slip', caption: p.caption, count: p.count }
-        : { kind: 'label', group_key: p.group_key })),
+      sequence: seq.pages.map((p) => (p.kind === 'label'
+        ? { kind: 'label', group_key: p.group_key }
+        : { kind: p.kind, caption: p.caption, count: p.count })),
     });
   }
 
@@ -111,31 +205,68 @@ export async function GET(req: Request) {
   // silently producing a stack with a hole in it.
   const freshUrls = new Map<string, string>();
   if (seq.refetch.length) {
-    const { data: conn } = await admin
-      .from('tiktok_connections').select('*')
-      .eq('user_id', user.id).eq('store_id', storeId).maybeSingle();
-    if (!conn) return NextResponse.json({ error: 'Store not connected' }, { status: 404 });
-    const fresh = await getFreshToken(admin, conn as ConnRow, { skewMinutes: 30 });
-    const token = fresh.accessToken as string;
-    const cipher = (fresh.shopCipher ?? (conn as { shop_cipher: string }).shop_cipher) as string;
+    // ── Each label is refreshed with ITS OWN shop's token. ──
+    //
+    // A merged stack spans shops, and every shop is a separate TikTok connection: using one
+    // shop's token to ask for another's document fails, and would have failed as a per-package
+    // error that reads like a transient blip rather than a wiring mistake. Packages are grouped
+    // by store and each group uses the credentials for that store.
+    const storeOfPackage = new Map<string, string>();
+    for (const r of rows) {
+      if (r.package_id && r.store_id) storeOfPackage.set(String(r.package_id), String(r.store_id));
+    }
+    const byStore = new Map<string, string[]>();
+    for (const packageId of seq.refetch) {
+      const sid = storeOfPackage.get(packageId);
+      if (!sid) continue;
+      const arr = byStore.get(sid) ?? [];
+      arr.push(packageId);
+      byStore.set(sid, arr);
+    }
 
     const failures: string[] = [];
-    await pooled(seq.refetch, FETCH_CONCURRENCY, async (packageId) => {
-      try {
-        const doc = await getPackageDocument(token, cipher, packageId);
-        if (!doc.doc_url) { failures.push(packageId); return; }
-        freshUrls.set(packageId, doc.doc_url);
-        await admin.from('shipping_label_purchases')
-          .update({
-            doc_url: doc.doc_url,
-            doc_url_expires_at: new Date(Date.now() + 23 * 3_600_000).toISOString(),
-            tracking_number: doc.tracking_number, doc_error: null,
-          })
-          .eq('user_id', user.id).eq('store_id', storeId).eq('package_id', packageId);
-      } catch (e) {
-        failures.push(`${packageId}: ${e instanceof Error ? e.message : String(e)}`);
+    for (const [sid, packageIds] of byStore) {
+      const { data: conn } = await admin
+        .from('tiktok_connections').select('*')
+        .eq('user_id', user.id).eq('store_id', sid).maybeSingle();
+      if (!conn) {
+        failures.push(`store ${sid} is not connected (${packageIds.length} labels)`);
+        continue;
       }
-    });
+      const fresh = await getFreshToken(admin, conn as ConnRow, { skewMinutes: 30 });
+      const token = fresh.accessToken as string;
+      const cipher = (fresh.shopCipher ?? (conn as { shop_cipher: string }).shop_cipher) as string;
+
+      await pooled(packageIds, FETCH_CONCURRENCY, async (packageId) => {
+        try {
+          const doc = await getPackageDocument(token, cipher, packageId);
+          if (!doc.doc_url) { failures.push(packageId); return; }
+          freshUrls.set(packageId, doc.doc_url);
+          await admin.from('shipping_label_purchases')
+            .update({
+              doc_url: doc.doc_url,
+              doc_url_expires_at: new Date(Date.now() + 23 * 3_600_000).toISOString(),
+              tracking_number: doc.tracking_number, doc_error: null,
+            })
+            .eq('user_id', user.id).eq('store_id', sid).eq('package_id', packageId);
+
+          // Write the tracking number where the PACK STATION reads it. Without this the
+          // scanner cannot find a freshly bought label until the 30-minute sync cron catches
+          // up, and someone has to remember to press "Fetch label tracking" first.
+          if (doc.tracking_number) {
+            const row = rows.find((r) => String(r.package_id) === packageId);
+            for (const oid of row?.order_ids ?? []) {
+              await admin.from('synced_order_ids')
+                .update({ tracking_number: doc.tracking_number })
+                .eq('user_id', user.id).eq('store_id', sid).eq('order_id', oid)
+                .is('tracking_number', null);
+            }
+          }
+        } catch (e) {
+          failures.push(`${packageId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      });
+    }
     if (failures.length) {
       return NextResponse.json(
         {
@@ -193,8 +324,12 @@ export async function GET(req: Request) {
   }
 
   for (const page of seq.pages) {
-    if (page.kind === 'slip') {
-      addSlipPage(out, font, pageSize, { caption: page.caption, count: page.count });
+    if (page.kind === 'banner' || page.kind === 'slip') {
+      // A banner is drawn heavier than a slip: it is the divider someone finds while splitting
+      // the stack by hand, often without reading it closely.
+      addSlipPage(out, font, pageSize, {
+        caption: page.caption, count: page.count, banner: page.kind === 'banner',
+      });
       continue;
     }
     const bytes = bytesByPackage.get(page.package_id);
@@ -212,15 +347,45 @@ export async function GET(req: Request) {
   }
 
   const pdf = await out.save();
+
+  // ── Mark what was actually served as printed. ──
+  //
+  // After the bytes are built, so a failure earlier does not claim a stack was printed. Only
+  // the labels IN THIS SLICE are marked: the stack is served in parts, and a download that
+  // stops halfway has genuinely printed some and not others.
+  //
+  // `.is('printed_at', null)` keeps the FIRST print. Reprints are routine — a jam, a stack
+  // split between stations — and must not read as new work.
+  const servedPackages = seq.pages
+    .filter((p): p is Extract<typeof p, { kind: 'label' }> => p.kind === 'label')
+    .map((p) => p.package_id)
+    .filter(Boolean);
+  if (servedPackages.length) {
+    const now = new Date().toISOString();
+    for (let i = 0; i < servedPackages.length; i += 200) {
+      await admin.from('shipping_label_purchases')
+        .update({ printed_at: now })
+        .eq('user_id', user.id)
+        .in('package_id', servedPackages.slice(i, i + 200))
+        .is('printed_at', null);
+    }
+  }
   const stamp = new Date().toISOString().slice(0, 10);
   return new NextResponse(Buffer.from(pdf), {
     headers: {
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `inline; filename="labels-${stamp}-${seq.labelCount}.pdf"`,
+      'Content-Disposition':
+        `inline; filename="labels-${stamp}-${section ?? 'all'}-${seq.labelCount}.pdf"`,
       'Cache-Control': 'no-store',
       // Surfaced in headers so a caller sees an incomplete stack without parsing the PDF.
       'X-Label-Count': String(seq.labelCount),
+      'X-Section': section ?? 'all',
+      // So a caller knows how many more slices to fetch without a second round trip.
+      'X-Total-Labels': String(totalLabels),
+      'X-Parts': String(parts),
+      'X-Labels-Per-Part': String(LABELS_PER_PART),
       'X-Slip-Count': String(seq.slipCount),
+      'X-Banner-Count': String(seq.bannerCount),
       'X-Missing-Count': String(seq.missing.length),
     },
   });
