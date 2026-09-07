@@ -63,6 +63,32 @@ done
 echo "── apply the migration under test: 131 (verbatim, its own begin/commit) ──"
 run "$MIGDIR/131_manual_worked_shift_rpc.sql" >/dev/null || { echo "  ✗ 131 FAILED TO APPLY"; FAILED=1; }
 
+echo "── catalog + grants (must match CONVENTIONS.md and comparable RPCs) ──"
+echo "  server: $(sql "select version()" | cut -d, -f1)"
+chk(){ # chk <label> <actual> <expected>
+  if [ "$2" = "$3" ]; then echo "  ✓ $1 = $2"; else echo "  ✗ $1 = $2 (expected $3)"; FAILED=1; fi
+}
+FN_SIG=$(sql "select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_create_manual_worked_shift'")
+chk "creator signature" "$FN_SIG" "lensed_create_manual_worked_shift(uuid,date,time without time zone,time without time zone,integer)"
+chk "creator returns"   "$(sql "select pg_get_function_result(p.oid) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_create_manual_worked_shift'")" "shifts"
+chk "creator security"  "$(sql "select case when prosecdef then 'definer' else 'invoker' end from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_create_manual_worked_shift'")" "invoker"
+chk "creator search_path" "$(sql "select array_to_string(proconfig,',') from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_create_manual_worked_shift'")" "search_path=public"
+chk "creator volatility" "$(sql "select provolatile from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_create_manual_worked_shift'")" "v"
+chk "creator EXECUTE authenticated" "$(sql "select has_function_privilege('authenticated','public.lensed_create_manual_worked_shift(uuid,date,time,time,integer)','execute')")" "t"
+# anon / PUBLIC: this migration issues no REVOKE, so PostgreSQL's DEFAULT (EXECUTE to PUBLIC) still
+# stands — the same posture as every other authenticated-callable lensed_* RPC (lensed_clock_in
+# etc.). Pinned so a future change is deliberate; the boundary is auth.uid() being NULL for anon,
+# which the function refuses as NOT_AUTHENTICATED (asserted in test 14).
+echo "  note: anon/PUBLIC EXECUTE = $(sql "select has_function_privilege('anon','public.lensed_create_manual_worked_shift(uuid,date,time,time,integer)','execute')")/$(sql "select has_function_privilege('public','public.lensed_create_manual_worked_shift(uuid,date,time,time,integer)','execute')") — default grant, matches sibling user-session RPCs; auth.uid() IS the gate"
+HELPER_SIG=$(sql "select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_shift_wall_range'")
+chk "helper signature" "$HELPER_SIG" "lensed_shift_wall_range(text,date,time without time zone,time without time zone,timestamp with time zone,timestamp with time zone)"
+chk "helper returns"    "$(sql "select pg_get_function_result(p.oid) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_shift_wall_range'")" "tsrange"
+chk "helper IMMUTABLE"  "$(sql "select provolatile from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_shift_wall_range'")" "i"
+chk "helper EXECUTE authenticated" "$(sql "select has_function_privilege('authenticated','public.lensed_shift_wall_range(text,date,time,time,timestamptz,timestamptz)','execute')")" "t"
+chk "no accidental overloads" "$(sql "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname in ('lensed_create_manual_worked_shift','lensed_shift_wall_range')")" "2"
+# The migration must not have touched any TABLE.
+chk "no new/changed table constraints" "$(sql "select count(*) from pg_constraint c join pg_class t on t.oid=c.conrelid where t.relname='shifts' and c.conname ilike '%overlap%'")" "0"
+
 echo "── run manual-worked assertions (overlap · split · overnight · break · tenancy) ──"
 run "$SCRIPT_DIR/test_manual_worked.sql" || FAILED=1
 

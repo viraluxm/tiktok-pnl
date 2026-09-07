@@ -476,3 +476,77 @@ begin
     raise exception 'TEST_FAIL 22g: the function does NOT read employee_time_entries — the race is unguarded'; end if;
   raise notice 'PASS 22g: employee_time_entries is READ only; no punch/break/audit row was written or fabricated';
 end $$;
+
+-- ── 23. LONG-PUNCH REGRESSION: a shift can reach MORE than one day past its own date ─────────
+--
+-- This is the bug a ±1 day scan window would reintroduce, and it is reachable with real data:
+-- production holds four time_clock punches over 24 hours, three of them 46–48h reaching TWO days
+-- past their `date`. A time_clock range is built from INSTANTS and has no 24-hour ceiling — that
+-- is deliberate (072: a 26-hour forgotten clock-out must read as 26 hours, not wrap to 2 and hide
+-- a conflict). So the overlap scan must not bound candidates by date at all.
+--
+-- Clock in 2026-11-02 22:00, out 2026-11-04 21:45 (47.75h — the exact production shape). The row's
+-- `date` is 2026-11-02, but it occupies 2026-11-04.
+\set EL 'cccccccc-cccc-cccc-cccc-000000000003'
+insert into public.employees(id, user_id, name, status) values (:'EL', :'U1', 'Long-punch Lars', 'active')
+  on conflict (id) do nothing;
+
+insert into public.shifts (user_id, employee_id, date, start_time, end_time, source,
+                           clock_in_at, clock_out_at, break_minutes)
+values (:'U1', :'EL', '2026-11-02', '22:00', '21:45', 'time_clock',
+        '2026-11-02 22:00:00-07', '2026-11-04 21:45:00-08', 0);
+
+do $$ declare got text; begin
+  begin
+    -- Two days after the punch's own date, squarely inside its real span.
+    perform public.lensed_create_manual_worked_shift(
+      'cccccccc-cccc-cccc-cccc-000000000003'::uuid, '2026-11-04'::date, '09:00'::time, '17:00'::time, 0);
+    got := 'NO ERROR';
+  exception when others then got := sqlerrm;
+  end;
+  if got <> 'WORKED_TIME_OVERLAP' then
+    raise exception 'TEST_FAIL 23a: a 47.75h punch dated two days earlier did NOT block (got %) — the scan is date-bounded again', got;
+  end if;
+  if exists (select 1 from public.shifts
+              where employee_id='cccccccc-cccc-cccc-cccc-000000000003'::uuid and date='2026-11-04') then
+    raise exception 'TEST_FAIL 23a: a payable row was written anyway';
+  end if;
+  raise notice 'PASS 23a: a 47.75h punch blocks a manual create TWO days past its own date';
+end $$;
+
+-- ...and a create genuinely outside the long span is still allowed, so the fix did not become
+-- "block everything for this employee".
+do $$ declare r public.shifts; begin
+  r := public.lensed_create_manual_worked_shift(
+         'cccccccc-cccc-cccc-cccc-000000000003'::uuid, '2026-11-05'::date, '09:00'::time, '17:00'::time, 30);
+  if r.id is null then raise exception 'TEST_FAIL 23b: a create clear of the long punch was refused'; end if;
+  raise notice 'PASS 23b: a create clear of the long span is still allowed (not a blanket block)';
+end $$;
+
+-- And the boundary: the punch ends 21:45 on the 4th, so 21:45–23:00 on the 4th touches without
+-- overlapping and must be legal (half-open ranges).
+do $$ declare r public.shifts; begin
+  r := public.lensed_create_manual_worked_shift(
+         'cccccccc-cccc-cccc-cccc-000000000003'::uuid, '2026-11-04'::date, '21:45'::time, '23:00'::time, 0);
+  if r.id is null then raise exception 'TEST_FAIL 23c: touching the long punch''s end was refused'; end if;
+  raise notice 'PASS 23c: starting exactly when the long punch ends is allowed (half-open)';
+end $$;
+
+-- The scan must also be unbounded BACKWARD from an OPEN shift, which has no end at all.
+\set EL2 'cccccccc-cccc-cccc-cccc-000000000004'
+insert into public.employees(id, user_id, name, status) values (:'EL2', :'U1', 'Open-ended Oona', 'active')
+  on conflict (id) do nothing;
+insert into public.shifts (user_id, employee_id, date, start_time, end_time, source, break_minutes)
+values (:'U1', :'EL2', '2026-11-01', '08:00', null, 'manual', 0);
+
+do $$ declare got text; begin
+  begin
+    perform public.lensed_create_manual_worked_shift(
+      'cccccccc-cccc-cccc-cccc-000000000004'::uuid, '2026-11-20'::date, '09:00'::time, '17:00'::time, 0);
+    got := 'NO ERROR';
+  exception when others then got := sqlerrm;
+  end;
+  if got not in ('WORKED_TIME_OVERLAP', 'OPEN_SHIFT') then
+    raise exception 'TEST_FAIL 23d: an OPEN shift from weeks earlier did not block (got %)', got; end if;
+  raise notice 'PASS 23d: an OPEN shift is unbounded — it blocks a create 19 days later (%)', got;
+end $$;

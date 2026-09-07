@@ -46,8 +46,12 @@
 --
 -- WHAT THIS DOES NOT DO
 -- ---------------------
--- No fabricated punch: clock_in_at / clock_out_at stay NULL, `source` takes the column default
--- 'manual', and employee_time_entries / employee_time_breaks / clock_audit are never touched.
+-- No fabricated punch: clock_in_at / clock_out_at stay NULL and `source` takes the column default
+-- 'manual'. employee_time_breaks and clock_audit are never referenced at all;
+-- employee_time_entries is READ — and only read — because a punch that has not become a shift yet
+-- is invisible in `shifts` and would otherwise be paved over (see the RAW PUNCH RACE block below).
+-- Nothing here INSERTs, UPDATEs or DELETEs any punch row: raw punches are the auditable trail and
+-- are never rewritten to make a correction fit.
 -- confirmed_at / confirmed_by are never written (070's BEFORE UPDATE guard still owns them, and a
 -- manual row is payable with confirmed_at NULL — the manager entering it IS the approval).
 -- Scheduled shifts are untouched: they live in `shift_instances` and do not come through here.
@@ -188,9 +192,26 @@ begin
   -- becomes payable the moment a manager confirms it; refusing to let a manual row be stacked on
   -- top of one is the entire point.
   --
-  -- The ±1 day window is what makes overnight correct: a shift stored on p_date − 1 that runs past
-  -- midnight occupies part of p_date, and one stored on p_date + 1 cannot, but is scanned anyway
-  -- so the predicate — not the date arithmetic — decides.
+  -- NO DATE WINDOW. The range predicate alone decides which rows are candidates.
+  --
+  -- An earlier draft narrowed the scan to `s.date between p_date - 1 and p_date + 1`, reasoning
+  -- that an overnight shift reaches at most one day past its own date. That is PROVABLE for
+  -- wall-clock rows — `end <= start` adds exactly one day, so a row on D can never extend past
+  -- D+2 00:00 — but it is FALSE for time_clock rows, and the difference is live data, not theory:
+  --
+  --   * a time_clock row's range comes from its INSTANTS, which have no 24-hour ceiling (that is
+  --     deliberate — see 072: a 26-hour forgotten clock-out must read as 26 hours, not wrap to 2
+  --     and hide a real conflict). Production currently holds FOUR punches over 24 hours, three of
+  --     them 46–48 hours reaching TWO days past their own `date`. A shift dated 2026-08-24 with a
+  --     47.75h span occupies 2026-08-26; a manual create for the 26th would never have scanned the
+  --     24th, and the guard would have missed exactly the double-pay it exists to prevent.
+  --   * an OPEN shift (end_time NULL) is unbounded by construction, so no finite window is right
+  --     for it either.
+  --
+  -- Widening to ±2 or ±3 would just move the cliff. There is no product rule capping punch length,
+  -- so the honest bound is "no bound" — filter by the employee and let `&&` answer. The cost is
+  -- nil: this is already a per-employee scan (lensed_shift_wall_range is IMMUTABLE, not indexable),
+  -- idx_shifts_employee serves the filter, and the worst-case employee in production has 46 rows.
   select c.id into v_conflict
   from (
     select s.id,
@@ -201,7 +222,6 @@ begin
     where s.user_id = v_owner
       and s.employee_id = p_employee_id
       and s.source_rule_id is null
-      and s.date between (p_date - 1) and (p_date + 1)
   ) c
   where c.rng && v_new
   limit 1;
