@@ -62,6 +62,12 @@ interface DryRun {
   };
   spend_recent: SpendWindows;
   confirm_boxes: number;
+  /**
+   * The boxes this check is proposing, in print order. POSTed back to /authorize as the
+   * approval itself: only boxes in this list may be bought, so a box that appears between the
+   * check and the click is left for the next run instead of blocking this one.
+   */
+  reviewed_keys: string[];
   batches: Array<{ slip: string; boxes: number }>;
 }
 interface Progress { total: number; bought: number; failed: number; spent: number; done: boolean }
@@ -230,9 +236,14 @@ export default function LabelsPanel() {
     setBuying(true); setErr(null);
     try {
       const ap = scopeParams();
-      ap.set('confirm_boxes', String(plan.confirm_boxes));
       if (plan.counts.unbound_boxes > 0) ap.set('unbound', unbound === 'include' ? 'include' : 'skip');
-      const aRes = await fetch(`/api/shipping/labels/authorize?${ap.toString()}`, { method: 'POST' });
+      // The reviewed set travels in the BODY: ~35KB of group keys for a 1,300-box night, past
+      // what a query string carries.
+      const aRes = await fetch(`/api/shipping/labels/authorize?${ap.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewed_keys: plan.reviewed_keys ?? [] }),
+      });
       const aJson = await aRes.json();
       if (!aJson.authorized || !aJson.run_id) {
         setErr(aJson.reason ?? aJson.error ?? `Could not authorise (${aRes.status})`);
@@ -241,6 +252,17 @@ export default function LabelsPanel() {
       const id = aJson.run_id as string;
       setRunId(id);
       const total = (aJson.claimed as number) || n;
+      // Say so when the plan moved under us. Neither is a problem — the spend is bounded by
+      // what was reviewed — but silently buying a different number than the button promised
+      // would look like a bug.
+      const drifted: string[] = [];
+      if (aJson.dropped_since_review > 0) {
+        drifted.push(`${aJson.dropped_since_review} of the boxes you approved no longer needed buying`);
+      }
+      if (aJson.added_since_review > 0) {
+        drifted.push(`${aJson.added_since_review} new box(es) appeared and were left for the next run`);
+      }
+      if (drifted.length) setErr(`Bought ${total} of ${n}: ${drifted.join('; ')}.`);
       await drain(id, total, 0, 0, 0);
       setPlan(null);
       void loadHistory();

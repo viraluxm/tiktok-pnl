@@ -105,6 +105,17 @@ export async function GET(req: Request) {
 
   const plan = run.plan;
   const toBuy = run.boxes.filter((b) => !alreadyBought.has(b.group_key));
+
+  // The stack in print order, and from it the exact set of boxes this check is proposing.
+  // reviewed_keys is the approval token: /authorize buys the INTERSECTION of these keys with
+  // whatever it resolves, so a box that appears after this response is read can never be bought
+  // and ordinary drift cannot block the purchase. A bare count cannot do both — see authorizeRun.
+  const pageSequence = planPageSequence(plan);
+  const reviewedKeys = pageSequence
+    .filter((pg): pg is typeof pg & { group_key: string } =>
+      pg.kind === 'label' && typeof (pg as { group_key?: string }).group_key === 'string')
+    .map((pg) => pg.group_key)
+    .filter((k) => !alreadyBought.has(k));
   // Estimated from each box's ACTUAL size, because price tracks order count (r = 0.853 over
   // the first 21 purchases: $4.01 for a single, $11.45 for a 20-order combine).
   const spend = await estimateSizedSpend(admin, user.id, storeId, toBuy.map((b) => b.order_ids.length));
@@ -156,12 +167,15 @@ export async function GET(req: Request) {
     // What the last week and month actually cost, so this run is judged against real numbers.
     spend_recent: await readSpendWindows(admin, user.id, storeId),
     max_manifest_boxes: MAX_MANIFEST_BOXES,
-    // Pass this to /authorize as ?confirm_boxes= — it proves the plan has not moved since this
-    // was read. There is no per-call limit any more: SCOPE bounds a run, and the manifest that
-    // authorising writes is what the purchase route drains.
+    // POST these back to /authorize as `reviewed_keys` — they ARE the approval, and only their
+    // intersection with what authorise resolves may be bought. There is no per-call limit any
+    // more: SCOPE bounds a run, and the manifest that authorising writes is what the purchase
+    // route drains.
+    reviewed_keys: reviewedKeys,
+    // Retained for display and for reconciling against reviewed_keys.length. NOT the gate.
     confirm_boxes: toBuy.length,
     batches: plan.batches.map((b) => ({ slip: b.slip, sku_number: b.sku_number, boxes: b.boxes.length })),
-    page_sequence: planPageSequence(plan),
+    page_sequence: pageSequence,
     excluded: run.excluded,
   });
 }
