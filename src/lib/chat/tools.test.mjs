@@ -34,8 +34,10 @@ function transpile(absPath, outName, rewrites = []) {
 }
 
 transpile(join(here, '../employees.ts'), 'employees.mjs');
+transpile(join(here, '../shipping/pickerPerformance.ts'), 'pickerPerformance.mjs');
 const toolsUrl = transpile(join(here, 'tools.ts'), 'tools.mjs', [
   ["'@/lib/employees'", "'./employees.mjs'"],
+  ["'@/lib/shipping/pickerPerformance'", "'./pickerPerformance.mjs'"],
 ]);
 const { runTool, TOOL_DEFS, toolsFor, TOOL_SCOPES } = await import(toolsUrl);
 const { isPayableShift } = await import(pathToFileURL(join(outDir, 'employees.mjs')).href);
@@ -107,7 +109,7 @@ if (!url || !key) {
     `${TOOL_DEFS.length} tools`);
   const teamOnly = toolsFor(['team']).map((t) => t.name).sort();
   check('a team-only member sees only team tools',
-    teamOnly.join(',') === 'get_pay,get_roster,get_schedule', teamOnly.join(','));
+    teamOnly.join(',') === 'get_fulfillment,get_pay,get_roster,get_schedule', teamOnly.join(','));
   check('an unknown scope grants nothing (fail closed)', toolsFor(['nonsense']).length === 0);
   check('no scope at all grants nothing', toolsFor([]).length === 0);
 
@@ -141,6 +143,40 @@ console.log('\nget_shows / get_inventory / get_sku_performance');
   check('get_sku_performance ranks by revenue and honours limit',
     perf.skus.length <= 5 && perf.skus.every((x, i, a) => i === 0 || a[i-1].revenue_dollars >= x.revenue_dollars),
     `top ${perf.skus.length} of ${perf.total_skus}`);
+}
+
+console.log('\nget_fulfillment');
+{
+  // Pick a day that actually has boxes so the shape is exercised on real data.
+  let day = null, r = null;
+  for (const d of ['2026-09-04', '2026-09-03', '2026-09-02', '2026-08-31']) {
+    const attempt = await runTool({ admin, ownerIds, storeIds }, 'get_fulfillment', { date: d });
+    if (attempt.summary.boxes_completed > 0) { day = d; r = attempt; break; }
+  }
+  check('found a fulfillment day with boxes', r != null, day ?? 'none in the sampled days');
+
+  check('fulfillment day is the 04:00 window, not midnight',
+    r.fulfillment_day.window.includes('04:00'), r.fulfillment_day.window);
+
+  // THE load-bearing assertion: no pick_started_at-derived field may reach the model. A field
+  // named orders_per_active_hour would be quoted as a rate regardless of any description.
+  const banned = ['orders_per_active_hour', 'avg_pick_ms', 'active_pick_ms', 'median_gap_ms', 'sessions', 'valid_duration_count'];
+  const blob = JSON.stringify(r);
+  const leaked = banned.filter((k) => blob.includes(k));
+  check('no pick_started_at-derived rate field is exposed', leaked.length === 0,
+    leaked.length ? `LEAKED: ${leaked.join(', ')}` : `${banned.length} invalid fields stripped`);
+
+  check('a wall-clock rate is provided instead',
+    r.pickers.every((p) => 'boxes_per_wall_clock_hour' in p),
+    `${r.pickers.length} pickers, ${r.summary.boxes_completed} boxes`);
+
+  const rated = r.pickers.filter((p) => p.boxes_per_wall_clock_hour != null);
+  check('wall-clock rates are physically plausible (< 200 boxes/h)',
+    rated.every((p) => p.boxes_per_wall_clock_hour < 200),
+    rated.length ? `max ${Math.max(...rated.map((p) => p.boxes_per_wall_clock_hour))}/h over ${rated.length} pickers` : 'none rated');
+
+  check('the set-aside blind spot is declared',
+    r.caveats.some((c) => /set-aside/i.test(c)), `${r.caveats.length} caveats`);
 }
 
 console.log(`\n${passed} checks passed`);
@@ -312,7 +348,7 @@ console.log('\nscope gating');
     `${TOOL_DEFS.length} tools`);
   const teamOnly = toolsFor(['team']).map((t) => t.name).sort();
   check('a team-only member sees only team tools',
-    teamOnly.join(',') === 'get_pay,get_roster,get_schedule', teamOnly.join(','));
+    teamOnly.join(',') === 'get_fulfillment,get_pay,get_roster,get_schedule', teamOnly.join(','));
   check('an unknown scope grants nothing (fail closed)', toolsFor(['nonsense']).length === 0);
   check('no scope at all grants nothing', toolsFor([]).length === 0);
 
@@ -346,6 +382,40 @@ console.log('\nget_shows / get_inventory / get_sku_performance');
   check('get_sku_performance ranks by revenue and honours limit',
     perf.skus.length <= 5 && perf.skus.every((x, i, a) => i === 0 || a[i-1].revenue_dollars >= x.revenue_dollars),
     `top ${perf.skus.length} of ${perf.total_skus}`);
+}
+
+console.log('\nget_fulfillment');
+{
+  // Pick a day that actually has boxes so the shape is exercised on real data.
+  let day = null, r = null;
+  for (const d of ['2026-09-04', '2026-09-03', '2026-09-02', '2026-08-31']) {
+    const attempt = await runTool({ admin, ownerIds, storeIds }, 'get_fulfillment', { date: d });
+    if (attempt.summary.boxes_completed > 0) { day = d; r = attempt; break; }
+  }
+  check('found a fulfillment day with boxes', r != null, day ?? 'none in the sampled days');
+
+  check('fulfillment day is the 04:00 window, not midnight',
+    r.fulfillment_day.window.includes('04:00'), r.fulfillment_day.window);
+
+  // THE load-bearing assertion: no pick_started_at-derived field may reach the model. A field
+  // named orders_per_active_hour would be quoted as a rate regardless of any description.
+  const banned = ['orders_per_active_hour', 'avg_pick_ms', 'active_pick_ms', 'median_gap_ms', 'sessions', 'valid_duration_count'];
+  const blob = JSON.stringify(r);
+  const leaked = banned.filter((k) => blob.includes(k));
+  check('no pick_started_at-derived rate field is exposed', leaked.length === 0,
+    leaked.length ? `LEAKED: ${leaked.join(', ')}` : `${banned.length} invalid fields stripped`);
+
+  check('a wall-clock rate is provided instead',
+    r.pickers.every((p) => 'boxes_per_wall_clock_hour' in p),
+    `${r.pickers.length} pickers, ${r.summary.boxes_completed} boxes`);
+
+  const rated = r.pickers.filter((p) => p.boxes_per_wall_clock_hour != null);
+  check('wall-clock rates are physically plausible (< 200 boxes/h)',
+    rated.every((p) => p.boxes_per_wall_clock_hour < 200),
+    rated.length ? `max ${Math.max(...rated.map((p) => p.boxes_per_wall_clock_hour))}/h over ${rated.length} pickers` : 'none rated');
+
+  check('the set-aside blind spot is declared',
+    r.caveats.some((c) => /set-aside/i.test(c)), `${r.caveats.length} caveats`);
 }
 
 console.log(`\n${passed} checks passed`);

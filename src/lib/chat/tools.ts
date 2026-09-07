@@ -1,6 +1,10 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { isPayableShift, paidShiftHours, computePay, payPeriodFor, nextPayday } from '@/lib/employees';
+import {
+  aggregateFulfillmentDay, zonedDayRangeUtcMs, zonedDayKey, SHOP_TIMEZONE,
+  type PickEvent,
+} from '@/lib/shipping/pickerPerformance';
 
 // Read-only, owner-scoped tools for the admin chat assistant.
 //
@@ -198,6 +202,24 @@ export const TOOL_DEFS: Anthropic.Beta.BetaTool[] = [
     },
     strict: true,
   },
+  {
+    name: 'get_fulfillment',
+    description:
+      'Pick/pack output for ONE fulfillment day: boxes and orders completed per picker, with a ' +
+      'WALL-CLOCK rate derived from their punches. A fulfillment day runs 04:00 to 04:00 Pacific, ' +
+      'not midnight — the night crew works past midnight. Use for "how did the crew do", who ' +
+      'picked what, throughput. Box counts EXCLUDE set-aside scans (~16% of the work writes no ' +
+      'verification row), so a low count is not necessarily low output — say so.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'Fulfillment day as YYYY-MM-DD, or "today" for the day in progress.' },
+      },
+      required: ['date'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
 ];
 
 
@@ -218,6 +240,7 @@ export const TOOL_SCOPES: Record<string, string> = {
   get_sku_performance: 'pnl',
   get_shows: 'shows',
   get_inventory: 'inventory',
+  get_fulfillment: 'team',
 };
 
 /** The tool definitions a caller may see. Unknown scopes contribute nothing (fail closed). */
@@ -648,6 +671,109 @@ async function getSkuPerformance(ctx: ToolCtx, input: { from: string; to: string
   };
 }
 
+
+// ── get_fulfillment ─────────────────────────────────────────────────────────
+// Reuses aggregateFulfillmentDay() from lib/shipping/pickerPerformance — the same unit-tested
+// module the Performance tab uses. A second definition of picker output here is exactly how the
+// assistant would end up contradicting that tab.
+//
+// WHAT IS DELIBERATELY NOT RETURNED — and why stripping matters more than documenting:
+// PickerDayStats carries orders_per_active_hour, avg_pick_ms, active_pick_ms, sessions and
+// median_gap_ms. All of them derive from pick_started_at, which is stamped near CONFIRM time, not
+// when picking begins — so the window captures only the scanning inside the box and misses the
+// walking and gathering. Raw 2026-09-01 rows show 2-7s "durations" with 40-300s gaps BETWEEN
+// boxes; the old view rendered 216, 275 and 314 orders/hour, and once 297 boxes/hour off 0.21
+// "active hours". Those fields were pulled from the UI on 2026-09-02.
+//
+// The source module warns "DO NOT DISPLAY THIS AS A PICK RATE" in a comment. A comment protects a
+// human reading the code; it does nothing for a model reading JSON — a field named
+// orders_per_active_hour WILL be quoted as a rate no matter what the description says. So the
+// fields are REMOVED at this boundary rather than annotated.
+//
+// The rate that IS returned uses a WALL-CLOCK denominator (punch span), which is what the module's
+// own guidance recommends.
+async function getFulfillment(ctx: ToolCtx, input: { date?: string }) {
+  const today = zonedDayKey(Date.now(), SHOP_TIMEZONE);
+  const day = !input.date || input.date === 'today' ? today : input.date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('date must be YYYY-MM-DD or "today"');
+
+  // 04:00 -> 04:00 Pacific, not midnight: the night crew works ~17:00-01:00, so a midnight
+  // boundary would split every night shift across two days.
+  const { startMs, endMs } = zonedDayRangeUtcMs(day, SHOP_TIMEZONE);
+  const startISO = new Date(startMs).toISOString();
+  const endISO = new Date(endMs).toISOString();
+
+  const ver = await pageAll<Record<string, unknown>>((f: number, t: number) =>
+    ctx.admin.from('shipment_verifications')
+      .select('group_key, picker_employee_id, picker_name_snapshot, pick_started_at, order_ids, verified_at')
+      .in('user_id', ctx.ownerIds)
+      .gte('verified_at', startISO).lt('verified_at', endISO)
+      .order('verified_at', { ascending: true }).range(f, t));
+  if (ver.error) throw new Error(`verifications read failed: ${(ver.error as { message?: string }).message ?? String(ver.error)}`);
+
+  const emp = await pageAll<Record<string, unknown>>((f: number, t: number) =>
+    ctx.admin.from('employees').select('id, name')
+      .in('user_id', ctx.ownerIds).order('id', { ascending: true }).range(f, t));
+  if (emp.error) throw new Error(`employees read failed: ${(emp.error as { message?: string }).message ?? String(emp.error)}`);
+  const nameById: Record<string, string> = {};
+  for (const e of emp.rows) nameById[String(e.id)] = String(e.name ?? '');
+
+  const agg = aggregateFulfillmentDay(ver.rows as unknown as PickEvent[], nameById);
+
+  // Wall-clock hours from punches overlapping the fulfillment day — the honest denominator.
+  const sh = await pageAll<Record<string, unknown>>((f: number, t: number) =>
+    ctx.admin.from('shifts').select('employee_id, clock_in_at, clock_out_at')
+      .in('user_id', ctx.ownerIds)
+      .not('clock_in_at', 'is', null)
+      .gte('clock_in_at', new Date(startMs - 12 * 3600_000).toISOString())
+      .lt('clock_in_at', endISO)
+      .order('employee_id', { ascending: true }).range(f, t));
+  if (sh.error) throw new Error(`shifts read failed: ${(sh.error as { message?: string }).message ?? String(sh.error)}`);
+
+  const wallMsById = new Map<string, number>();
+  for (const r of sh.rows) {
+    const inAt = Date.parse(String(r.clock_in_at));
+    const outAt = r.clock_out_at ? Date.parse(String(r.clock_out_at)) : Date.now();
+    if (!Number.isFinite(inAt) || !Number.isFinite(outAt)) continue;
+    // Clip the punch to the fulfillment-day window so a shift straddling 04:00 counts only its
+    // portion of THIS day.
+    const overlap = Math.min(outAt, endMs) - Math.max(inAt, startMs);
+    if (overlap <= 0) continue;
+    const id = String(r.employee_id);
+    wallMsById.set(id, (wallMsById.get(id) ?? 0) + overlap);
+  }
+
+  const pickers = agg.pickers.map((p) => {
+    // Strip every pick_started_at-derived field. See the header.
+    const wallH = p.picker_employee_id ? (wallMsById.get(p.picker_employee_id) ?? 0) / 3_600_000 : 0;
+    return {
+      picker_employee_id: p.picker_employee_id,
+      name: p.name,
+      boxes_completed: p.boxes_completed,
+      orders_picked: p.orders_picked,
+      wall_clock_hours: Math.round(wallH * 100) / 100,
+      boxes_per_wall_clock_hour: wallH > 0.05 ? Math.round((p.boxes_completed / wallH) * 10) / 10 : null,
+      rate_note: wallH > 0.05 ? null : 'no punch overlapping this fulfillment day — rate cannot be computed',
+    };
+  });
+
+  return {
+    fulfillment_day: { date: day, tz: SHOP_TIMEZONE, window: '04:00 -> 04:00 (not midnight)' },
+    summary: {
+      boxes_completed: agg.summary.boxes_completed,
+      orders_picked: agg.summary.orders_picked,
+      active_pickers: agg.summary.active_pickers,
+    },
+    unassigned: agg.unassigned,
+    pickers,
+    caveats: [
+      'Box counts EXCLUDE set-aside scans — roughly 16% of the work writes no verification row and is not attributable. A low box count is NOT necessarily low output; state this whenever comparing people.',
+      'boxes_per_wall_clock_hour uses the PUNCH span, clipped to this fulfillment day. It is a throughput figure over paid time, not a measure of picking speed.',
+      'Per-box pick durations are deliberately not reported: the underlying pick_started_at is stamped near confirm time and produces impossible rates. Do not estimate a pick rate from anything in this result.',
+    ],
+  };
+}
+
 export async function runTool(
   ctx: ToolCtx,
   name: string,
@@ -666,6 +792,7 @@ export async function runTool(
     case 'get_shows': return getShows(ctx, args as never);
     case 'get_inventory': return getInventory(ctx, args as never);
     case 'get_sku_performance': return getSkuPerformance(ctx, args as never);
+    case 'get_fulfillment': return getFulfillment(ctx, args as never);
     default: throw new Error(`unknown tool: ${name}`);
   }
 }
