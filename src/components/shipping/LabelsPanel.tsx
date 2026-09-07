@@ -23,6 +23,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStores } from '@/hooks/useStores';
+import { MAX_SLICE_TRIES, retryWaitMs, shouldRetry } from '@/lib/shipping/printRetry';
 
 /** Boxes per drain request. ~50 calls sits well inside the route's time budget. */
 const DRAIN_CHUNK = 50;
@@ -953,10 +954,22 @@ function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted,
       const parts = Math.max(1, plan.parts || 1);
       if (!total) throw new Error('Nothing printable in that run');
 
-      const fetchSlice = async (from: number, to: number) => {
-        const res = await fetch(`${base}&from=${from}&to=${to}`);
-        if (!res.ok) throw await fail(res);
-        return new Uint8Array(await res.arrayBuffer());
+      // One window, retried. See printRetry.ts for why 4xx is not retried and why a retry is
+      // cheaper than the first attempt. `where` names the slice so a retry is visible on the
+      // button instead of looking like a hang.
+      const lost = () => new Error('Lost the connection while building the stack');
+      const fetchSlice = async (from: number, to: number, where: string) => {
+        for (let attempt = 1; ; attempt++) {
+          let res: Response | null = null;
+          try {
+            res = await fetch(`${base}&from=${from}&to=${to}`);
+          } catch { /* thrown fetch = no status; treated as 0 below */ }
+          if (res?.ok) return new Uint8Array(await res.arrayBuffer());
+          const status = res?.status ?? 0;
+          if (!shouldRetry(attempt, status)) throw res ? await fail(res) : lost();
+          setNote(`${where} — retrying (${attempt + 1}/${MAX_SLICE_TRIES})…`);
+          await new Promise((r) => setTimeout(r, retryWaitMs(attempt)));
+        }
       };
 
       // ── Fetch each 60-label window once, in order. ──
@@ -966,14 +979,14 @@ function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted,
         // One window covers it, so the route's own PDF is the answer — no stitching, and no
         // reason to pull pdf-lib in just to count pages.
         setNote('Building…');
-        merged = await fetchSlice(0, total - 1);
+        merged = await fetchSlice(0, total - 1, 'Building…');
       } else {
         const { PDFDocument } = await import('pdf-lib');
         const out = await PDFDocument.create();
         for (let i = 0; i < parts; i++) {
           setNote(`Building… ${i + 1} of ${parts}`);
           const from = i * per;
-          const bytes = await fetchSlice(from, Math.min(from + per - 1, total - 1));
+          const bytes = await fetchSlice(from, Math.min(from + per - 1, total - 1), `Part ${i + 1} of ${parts}`);
           const src = await PDFDocument.load(bytes);
           for (const pg of await out.copyPages(src, src.getPageIndices())) out.addPage(pg);
         }
