@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { readAllPaged } from '@/lib/db/readAll';
 import { BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION } from '@/lib/shipping/labelPlan';
+import { pileOf, unprintableReason } from '@/lib/shipping/assemblyPlan';
 
 export const dynamic = 'force-dynamic';
 
@@ -112,8 +113,9 @@ export async function GET(req: Request) {
 
     const p = Number(r.price_amount);
     if (Number.isFinite(p) && p > 0) e.spent += p;
-    // Only a purchased box with a package_id of ours can be fetched and printed.
-    if (r.status === 'purchased' && r.package_id) {
+    // Same authority as the piles below and as the PDF itself, rather than a third copy of
+    // "purchased and has a package_id".
+    if (!unprintableReason(r)) {
       e.printable++;
       if (r.printed_at) e.printed++;
     }
@@ -122,11 +124,16 @@ export async function GET(req: Request) {
     // startsWith('MIXED') and silently counted zero once the banner was reworded to "BUNDLED
     // ORDERS — PICK REGULAR" — a classification that breaks when the wording changes is worse
     // than none, because it reports a confident 0 rather than an obvious gap.
-    const b = r.banner_caption ?? '';
-    if (b === BANNER_SINGLES) e.singles++;
-    else if (b === BANNER_MIXED) e.mixed++;
-    else if (b === UNBOUND_CAPTION) e.unbound++;
-    else if (b) e.other++;
+    //
+    // Counted through `pileOf`, which refuses a row the PDF would refuse, so these are counts of
+    // what the file WILL CONTAIN rather than of rows that merely carry the banner. They used to
+    // include failed and claimed boxes: on 2026-09-07 "Singles (261)" labelled a file holding
+    // 260, and "Bundles (357)" one holding 353.
+    const pile = pileOf(r, { singles: BANNER_SINGLES, mixed: BANNER_MIXED, unbound: UNBOUND_CAPTION });
+    if (pile === 'singles') e.singles++;
+    else if (pile === 'mixed') e.mixed++;
+    else if (pile === 'unbound') e.unbound++;
+    else if (pile === 'other') e.other++;
 
     // The run's timestamp is when it was first written, not when its last label landed: a run is
     // one act even though its purchases trickle in over ten minutes.
