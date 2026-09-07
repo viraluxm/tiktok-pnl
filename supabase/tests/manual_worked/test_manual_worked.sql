@@ -259,20 +259,35 @@ end $$;
 -- ── 17. STATIC: the function body touches no punch/audit machinery ──────────────────────────
 -- A behavioural test can only prove the tables it knows to look at. This proves the function
 -- cannot touch them at all — and reports what it examined, so it cannot pass vacuously.
-do $$ declare src text; begin
-  select pg_get_functiondef(p.oid) into src
+do $$ declare src text; raw text; begin
+  select pg_get_functiondef(p.oid) into raw
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
    where n.nspname='public' and p.proname='lensed_create_manual_worked_shift';
-  if src is null then raise exception 'TEST_FAIL 17: function not found (vacuous check)'; end if;
-  if src ~* 'employee_time_entries|employee_time_breaks|clock_audit' then
-    raise exception 'TEST_FAIL 17: the RPC references raw punch machinery'; end if;
+  if raw is null then raise exception 'TEST_FAIL 17: function not found (vacuous check)'; end if;
+  -- STRIP `--` COMMENTS FIRST. pg_get_functiondef returns the body verbatim, comments included,
+  -- and this function EXPLAINS at length which punch tables it must not write. Matching the prose
+  -- instead of the code would fail on the explanation and pass on a real write.
+  src := regexp_replace(raw, '--[^' || chr(10) || ']*', '', 'g');
+  -- READS of employee_time_entries are REQUIRED (see 22 — that is the raw-punch race guard).
+  -- What must never appear is a WRITE. Checking for the table name alone used to be the assertion
+  -- and is now wrong: it would forbid the very protection the feature depends on.
+  if src ~* '(insert into|update|delete from)\s+public\.employee_time_entries' then
+    raise exception 'TEST_FAIL 17: the RPC WRITES employee_time_entries'; end if;
+  if src ~* '(insert into|update|delete from)\s+public\.employee_time_breaks' then
+    raise exception 'TEST_FAIL 17: the RPC WRITES employee_time_breaks'; end if;
+  if src ~* 'employee_time_breaks' then
+    raise exception 'TEST_FAIL 17: the RPC references break rows at all'; end if;
+  if src ~* 'clock_audit' then
+    raise exception 'TEST_FAIL 17: the RPC references clock_audit'; end if;
+  if src !~* 'from public\.employee_time_entries' then
+    raise exception 'TEST_FAIL 17: the RPC does not READ employee_time_entries — the raw-punch race is unguarded'; end if;
   if src ~* 'confirmed_at|confirmed_by' then
     raise exception 'TEST_FAIL 17: the RPC references confirmation columns'; end if;
   if src ~* 'shift_instances' then
     raise exception 'TEST_FAIL 17: the RPC references the schedule'; end if;
   if src !~* 'pg_advisory_xact_lock' then
     raise exception 'TEST_FAIL 17: the RPC lost its serialization lock'; end if;
-  raise notice 'PASS 17: % chars of function source examined; no punch/confirmation/schedule writes, lock present', length(src);
+  raise notice 'PASS 17: % chars of CODE examined (% raw, comments stripped); punches READ not written, no break/audit/confirmation/schedule writes, lock present', length(src), length(raw);
 end $$;
 
 -- ── 18. Confirmation machinery is unchanged ─────────────────────────────────────────────────
@@ -319,3 +334,145 @@ end $$;
 
 -- Clean up the race employee''s rows so run.sh''s two-session race starts from zero.
 delete from public.shifts where employee_id = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+
+-- ── 22. RAW PUNCH RACE: an entry that has not become a shift yet must still block ────────────
+--
+-- A time_clock `shifts` row does not exist while someone is on the clock: every writer (071
+-- clock_out, 072's reconciler, the 091/092/095/099 kiosk paths) builds it FROM an
+-- employee_time_entries row. So scanning `shifts` alone leaves a window where a manual row can be
+-- created into a gap a punch is about to fill:
+--
+--   06:00 clock in                  → entry OPEN, no shifts row
+--   10:00 manager adds manual 06–14 → nothing to overlap, row created
+--   14:00 clock out                 → time_clock 06–14 inserted → DOUBLE PAID
+--
+-- The exact test for "will become a shift" is shift_id IS NULL.
+\set EP 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+insert into public.employees(id, user_id, name, status) values (:'EP', :'U1', 'Punchy Pete', 'active')
+  on conflict (id) do nothing;
+
+-- (a) OPEN entry (no clock-out yet, no shift). Treated as UNBOUNDED — we cannot know where the
+--     punch will end, so anything finishing after it started may collide.
+insert into public.employee_time_entries (user_id, employee_id, clocked_in_at, status)
+values (:'U1', :'EP', '2026-10-20 06:00:00-07', 'open');
+
+do $$ declare got text; begin
+  begin
+    perform public.lensed_create_manual_worked_shift(
+      'cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid, '2026-10-20'::date, '06:00'::time, '14:00'::time, 0);
+    got := 'NO ERROR';
+  exception when others then got := sqlerrm;
+  end;
+  if got <> 'OPEN_PUNCH_CONFLICT' then
+    raise exception 'TEST_FAIL 22a: expected OPEN_PUNCH_CONFLICT, got % (an OPEN punch did not block manual worked time)', got;
+  end if;
+  if exists (select 1 from public.shifts where employee_id='cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid) then
+    raise exception 'TEST_FAIL 22a: a payable row was written anyway';
+  end if;
+  raise notice 'PASS 22a: an OPEN punch blocks manual worked time (OPEN_PUNCH_CONFLICT), zero rows written';
+end $$;
+
+-- ...and it blocks LATER intervals too, because an open punch has no known end.
+do $$ declare got text; begin
+  begin
+    perform public.lensed_create_manual_worked_shift(
+      'cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid, '2026-10-20'::date, '18:00'::time, '22:00'::time, 0);
+    got := 'NO ERROR';
+  exception when others then got := sqlerrm;
+  end;
+  if got <> 'OPEN_PUNCH_CONFLICT' then
+    raise exception 'TEST_FAIL 22b: an interval AFTER an open punch was allowed (got %)', got; end if;
+  raise notice 'PASS 22b: an open punch is unbounded — later intervals are blocked too';
+end $$;
+
+-- ...but an interval entirely BEFORE the punch started is genuinely fine.
+do $$ declare r public.shifts; begin
+  r := public.lensed_create_manual_worked_shift(
+         'cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid, '2026-10-19'::date, '08:00'::time, '12:00'::time, 0);
+  if r.id is null then raise exception 'TEST_FAIL 22c: a shift ending before the punch began was refused'; end if;
+  raise notice 'PASS 22c: an interval finishing before the open punch started is still allowed';
+end $$;
+
+-- (b) CLOSED ORPHAN: clocked out, but shift_id still NULL. 072(b) will back-fill this into a
+--     payable time_clock shift at exactly [clocked_in_at, clocked_out_at).
+--
+--     A SEPARATE employee, deliberately. Pete still carries the open punch from (a), and an open
+--     punch is UNBOUNDED — it would block this interval too and mask which rule actually fired.
+--     That masking is correct behaviour (22b asserts it); it just makes Pete useless as a fixture
+--     for proving the orphan rule on its own.
+\set EO2 'cccccccc-cccc-cccc-cccc-000000000002'
+insert into public.employees(id, user_id, name, status) values (:'EO2', :'U1', 'Orphan Olive', 'active')
+  on conflict (id) do nothing;
+insert into public.employee_time_entries (user_id, employee_id, clocked_in_at, clocked_out_at, status)
+values (:'U1', :'EO2', '2026-10-25 06:00:00-07', '2026-10-25 14:00:00-07', 'closed');
+
+do $$ declare got text; begin
+  begin
+    perform public.lensed_create_manual_worked_shift(
+      'cccccccc-cccc-cccc-cccc-000000000002'::uuid, '2026-10-25'::date, '13:00'::time, '17:00'::time, 0);
+    got := 'NO ERROR';
+  exception when others then got := sqlerrm;
+  end;
+  if got <> 'UNRECONCILED_PUNCH_OVERLAP' then
+    raise exception 'TEST_FAIL 22d: expected UNRECONCILED_PUNCH_OVERLAP, got % (an orphaned punch did not block)', got;
+  end if;
+  if exists (select 1 from public.shifts where employee_id='cccccccc-cccc-cccc-cccc-000000000002'::uuid and date='2026-10-25') then
+    raise exception 'TEST_FAIL 22d: a payable row was written anyway';
+  end if;
+  raise notice 'PASS 22d: a CLOSED-but-unreconciled punch blocks an overlapping manual row';
+end $$;
+
+-- ...and a non-overlapping split around it is still legal (the guard is overlap, never same-day).
+do $$ declare r public.shifts; begin
+  r := public.lensed_create_manual_worked_shift(
+         'cccccccc-cccc-cccc-cccc-000000000002'::uuid, '2026-10-25'::date, '15:00'::time, '19:00'::time, 0);
+  if r.id is null then raise exception 'TEST_FAIL 22e: a legitimate split around the punch was refused'; end if;
+  raise notice 'PASS 22e: a non-overlapping split shift beside an unreconciled punch is allowed';
+end $$;
+
+-- (c) An entry that ALREADY produced its shift must not double-count: shift_id IS NOT NULL means
+--     the shifts scan above owns it, and this scan must ignore it. Proven by the fact that the
+--     refusal comes back as WORKED_TIME_OVERLAP (the shifts rule) rather than a punch rule.
+do $$ declare v_shift uuid; got text; begin
+  select id into v_shift from public.shifts
+   where employee_id='cccccccc-cccc-cccc-cccc-000000000002'::uuid and date='2026-10-25' limit 1;
+  insert into public.employee_time_entries (user_id, employee_id, clocked_in_at, clocked_out_at, status, shift_id)
+  values ('11111111-1111-1111-1111-111111111111'::uuid, 'cccccccc-cccc-cccc-cccc-000000000002'::uuid,
+          '2026-10-25 15:00:00-07', '2026-10-25 19:00:00-07', 'closed', v_shift);
+  begin
+    perform public.lensed_create_manual_worked_shift(
+      'cccccccc-cccc-cccc-cccc-000000000002'::uuid, '2026-10-25'::date, '16:00'::time, '18:00'::time, 0);
+    got := 'NO ERROR';
+  exception when others then got := sqlerrm;
+  end;
+  if got <> 'WORKED_TIME_OVERLAP' then
+    raise exception 'TEST_FAIL 22f: a RECONCILED entry was double-counted as a punch conflict (got %)', got; end if;
+  raise notice 'PASS 22f: an entry with shift_id set is left to the shifts scan (WORKED_TIME_OVERLAP), not re-reported';
+end $$;
+
+-- (d) THE WHOLE POINT: raw punch tables are READ, never written.
+do $$
+declare
+  n_entries int; n_breaks int; src text;
+begin
+  select count(*) into n_entries from public.employee_time_entries
+   where employee_id in ('cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid,
+                         'cccccccc-cccc-cccc-cccc-000000000002'::uuid);
+  if n_entries <> 3 then
+    raise exception 'TEST_FAIL 22g: entry count changed (%), the RPC wrote to employee_time_entries', n_entries; end if;
+  select count(*) into n_breaks from public.employee_time_breaks;
+  if n_breaks <> 0 then raise exception 'TEST_FAIL 22g: a break row was fabricated'; end if;
+
+  select regexp_replace(pg_get_functiondef(p.oid), '--[^' || chr(10) || ']*', '', 'g') into src
+    from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+   where n.nspname='public' and p.proname='lensed_create_manual_worked_shift';
+  if src ~* '(insert into|update|delete from)\s+public\.employee_time_entries' then
+    raise exception 'TEST_FAIL 22g: the function WRITES employee_time_entries'; end if;
+  if src ~* '(insert into|update|delete from)\s+public\.employee_time_breaks' then
+    raise exception 'TEST_FAIL 22g: the function WRITES employee_time_breaks'; end if;
+  if src ~* 'clock_audit' then
+    raise exception 'TEST_FAIL 22g: the function references clock_audit'; end if;
+  if src !~* 'from public\.employee_time_entries' then
+    raise exception 'TEST_FAIL 22g: the function does NOT read employee_time_entries — the race is unguarded'; end if;
+  raise notice 'PASS 22g: employee_time_entries is READ only; no punch/break/audit row was written or fabricated';
+end $$;

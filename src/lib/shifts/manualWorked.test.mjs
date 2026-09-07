@@ -2,9 +2,14 @@
 // the manager is told when the server refuses, and that the break rule is literally the SAME code
 // the merged break editor uses.
 //
-// Exercises the REAL canAddWorkedTime/buildCalendarDays (schedule/calendarModel.ts), the REAL
-// workedTimePrefill/manualWorkedErrorMessage (shifts/manualWorked.ts) and the REAL break helpers
-// (shifts/punchEdit.ts), all transpiled at runtime — nothing is reimplemented here.
+// Exercises the REAL canAddWorkedTimeAt/scheduledEndInstant/workedTimePrefill/
+// manualWorkedErrorMessage (shifts/manualWorked.ts), the REAL buildCalendarDays
+// (schedule/calendarModel.ts) and the REAL break helpers (shifts/punchEdit.ts), all transpiled at
+// runtime — nothing is reimplemented here.
+//
+// ELIGIBILITY IS TIME-BASED, not day-based, so every case below pins an explicit `now`. A
+// day-granular rule cannot express "the shift ended two hours ago" and made a same-day miss wait
+// until midnight; the instant comparison is what the assertions in §1 actually check.
 //
 // NOT COVERED HERE, deliberately: the repo has no React test renderer (no jsdom, no
 // @testing-library), so "the button renders" and "the field is editable" are not assertable in
@@ -41,19 +46,20 @@ const punchUrl = transpile('./punchEdit.ts', 'punchEdit.mjs', {
 });
 const manualUrl = transpile('./manualWorked.ts', 'manualWorked.mjs', {
   "'./punchEdit'": `'${punchUrl}'`,
+  "'@/lib/schedule/timezone'": `'${tzUrl}'`,
 });
 const calUrl = transpile('../schedule/calendarModel.ts', 'calendarModel.mjs');
 
 const {
-  workedTimePrefill, manualWorkedErrorMessage,
+  workedTimePrefill, manualWorkedErrorMessage, canAddWorkedTimeAt, scheduledEndInstant,
   WORKED_TIME_OVERLAP_MESSAGE, OPEN_SHIFT_MESSAGE, EMPLOYEE_NOT_FOUND_MESSAGE,
-  GENERIC_CREATE_FAILED_MESSAGE,
+  GENERIC_CREATE_FAILED_MESSAGE, OPEN_PUNCH_CONFLICT_MESSAGE, UNRECONCILED_PUNCH_MESSAGE,
 } = await import(manualUrl);
 const {
   assertBreakShape, assertBreakFitsSpan, wallClockSpanMinutes,
   buildShiftEditPatch, BREAK_INVALID_ERROR, BREAK_TOO_LONG_ERROR,
 } = await import(punchUrl);
-const { buildCalendarDays, canAddWorkedTime, canRemoveScheduled } = await import(calUrl);
+const { buildCalendarDays, canRemoveScheduled } = await import(calUrl);
 
 let passed = 0;
 const check = (n, c, x = '') => { assert.ok(c, `FAIL: ${n} ${x}`); console.log(`  ✓ ${n}`); passed++; };
@@ -83,37 +89,100 @@ const personOn = (date, { punches = [], scheduled = [] }) =>
     employees: EMPS, punches, scheduled, days: DAYS, view: 'all', todayISO: TODAY,
   }).get(date).people[0];
 
-console.log('\n§1 — which tiles offer Add Worked Time');
+console.log('\n§1 — which tiles offer Add Worked Time (TIME-based eligibility)');
 
-// 1. scheduled + no punch, day has passed → the "Did not clock in" tile → offered.
+// The scheduled span in every fixture is 17:00 → 01:00 LA, i.e. OVERNIGHT: it ends at 01:00 on the
+// FOLLOWING calendar day. That is deliberate — an overnight span is where a day-granular rule and
+// an instant-based one disagree most loudly.
+const at = (iso) => new Date(iso);
+const endOf = (date) => scheduledEndInstant(date, { start_time: '17:00', end_time: '01:00' });
+
+// The end instant itself: 17:00→01:00 on Sep 6 must end 01:00 on Sep 7 LA (08:00Z, PDT = UTC-7).
+check('overnight span ends on the NEXT day', endOf('2026-09-06').toISOString() === '2026-09-07T08:00:00.000Z',
+  endOf('2026-09-06').toISOString());
+check('a same-day span ends on its own day',
+  scheduledEndInstant('2026-09-06', { start_time: '06:00', end_time: '14:00' }).toISOString() === '2026-09-06T21:00:00.000Z');
+
+// 1. PAST scheduled day, no punch → offered.
 const noShow = personOn(PAST, { scheduled: [sched(PAST)] });
 check('past scheduled day with no punch classifies as no_show', noShow.state === 'no_show', noShow.state);
-check('… and offers Add Worked Time', canAddWorkedTime(noShow) === true);
+check('1. PAST no-show offers Add Worked Time', canAddWorkedTimeAt(noShow, PAST, at('2026-09-10T12:00:00Z')) === true);
 
-// 2. a worked shift already exists → NOT offered. This is the duplicate-pay affordance guard.
+// 2. TODAY, scheduled period FULLY ENDED → offered. This is the case a day-granular rule missed.
+const todayPerson = personOn(TODAY, { scheduled: [sched(TODAY)] });
+check('2. TODAY + shift already ended offers it',
+  canAddWorkedTimeAt(todayPerson, TODAY, at('2026-09-11T09:00:00Z')) === true);   // 02:00 LA next day
+
+// 3. TODAY, still in progress → HIDDEN.
+check('3. TODAY + shift still in progress hides it (mid-shift)',
+  canAddWorkedTimeAt(todayPerson, TODAY, at('2026-09-11T05:00:00Z')) === false);  // 22:00 LA, ends 01:00
+check('3b. TODAY + shift not started yet hides it',
+  canAddWorkedTimeAt(todayPerson, TODAY, at('2026-09-10T20:00:00Z')) === false);  // 13:00 LA, starts 17:00
+check('3c. one minute BEFORE the end still hides it',
+  canAddWorkedTimeAt(todayPerson, TODAY, new Date(endOf(TODAY).getTime() - 60_000)) === false);
+check('3d. exactly AT the end instant offers it (eligible the moment it ends)',
+  canAddWorkedTimeAt(todayPerson, TODAY, endOf(TODAY)) === true);
+
+// 4. FUTURE → HIDDEN.
+check('4. FUTURE scheduled day hides it',
+  canAddWorkedTimeAt(personOn(FUTURE, { scheduled: [sched(FUTURE)] }), FUTURE, at('2026-09-10T12:00:00Z')) === false);
+
+// 5. The overnight example from the spec, verbatim: Sep 6 16:00 → Sep 7 02:00.
+{
+  const ov = { punch: null, scheduled: { start_time: '16:00', end_time: '02:00' } };
+  check('5. overnight: Sep 6 22:00 LA → HIDDEN (still running)',
+    canAddWorkedTimeAt(ov, '2026-09-06', at('2026-09-07T05:00:00Z')) === false);
+  check('5b. overnight: Sep 7 01:00 LA → HIDDEN (one hour left)',
+    canAddWorkedTimeAt(ov, '2026-09-06', at('2026-09-07T08:00:00Z')) === false);
+  check('5c. overnight: Sep 7 03:00 LA → SHOWN (period over)',
+    canAddWorkedTimeAt(ov, '2026-09-06', at('2026-09-07T10:00:00Z')) === true);
+}
+
+// A worked record of ANY source suppresses it — the duplicate-pay affordance guard.
+const AFTER = at('2026-09-12T12:00:00Z');
 const worked = personOn(PAST, { scheduled: [sched(PAST)], punches: [punch(PAST)] });
-check('tile with a punch does NOT offer Add Worked Time', canAddWorkedTime(worked) === false);
+check('tile with a punch does NOT offer Add Worked Time', canAddWorkedTimeAt(worked, PAST, AFTER) === false);
 check('… including a MANUAL worked row (equally payable)',
-  canAddWorkedTime(personOn(PAST, { scheduled: [sched(PAST)], punches: [punch(PAST, { source: 'manual' })] })) === false);
+  canAddWorkedTimeAt(personOn(PAST, { scheduled: [sched(PAST)], punches: [punch(PAST, { source: 'manual' })] }), PAST, AFTER) === false);
 check('… including an OPEN punch (still on the clock)',
-  canAddWorkedTime(personOn(PAST, { scheduled: [sched(PAST)], punches: [punch(PAST, { end_time: null })] })) === false);
+  canAddWorkedTimeAt(personOn(PAST, { scheduled: [sched(PAST)], punches: [punch(PAST, { end_time: null })] }), PAST, AFTER) === false);
 check('… including an UNCONFIRMED punch',
-  canAddWorkedTime(personOn(PAST, { scheduled: [sched(PAST)], punches: [punch(PAST, { confirmed_at: null })] })) === false);
-
-// A future or today shift has not happened yet — it must never be one click from being paid.
-check('FUTURE scheduled day does not offer it',
-  canAddWorkedTime(personOn(FUTURE, { scheduled: [sched(FUTURE)] })) === false);
-check('TODAY scheduled day does not offer it',
-  canAddWorkedTime(personOn(TODAY, { scheduled: [sched(TODAY)] })) === false);
+  canAddWorkedTimeAt(personOn(PAST, { scheduled: [sched(PAST)], punches: [punch(PAST, { confirmed_at: null })] }), PAST, AFTER) === false);
 check('no scheduled span at all → not offered',
-  canAddWorkedTime({ punch: null, scheduled: null, state: 'no_show' }) === false);
+  canAddWorkedTimeAt({ punch: null, scheduled: null }, PAST, AFTER) === false);
 
-// The two plan-only actions can never appear together.
-check('Add Worked Time and Remove Shift are mutually exclusive on every state',
-  DAYS.every((d) => {
-    const p = personOn(d, { scheduled: [sched(d)] });
-    return !(canAddWorkedTime(p) && canRemoveScheduled(p));
-  }));
+// THE TWO ACTIONS OVERLAP AT THE RULE LEVEL NOW — and that is why the component has explicit
+// precedence. canRemoveScheduled is DAY-granular ('scheduled' covers anything today or later), so
+// a shift TODAY whose period has already ended satisfies BOTH predicates. Asserting a mutual
+// exclusion here would be asserting something false; what must hold is that the TILE never offers
+// both, which is a PersonCard concern.
+{
+  const endedToday = personOn(TODAY, { scheduled: [sched(TODAY)] });
+  const afterEnd = endOf(TODAY);
+  const bothRulesTrue =
+    canAddWorkedTimeAt(endedToday, TODAY, afterEnd) === true && canRemoveScheduled(endedToday) === true;
+  check('an ended same-day shift satisfies BOTH rules (hence the need for precedence)', bothRulesTrue);
+
+  // SOURCE GUARD: the component must withdraw Remove when Add Worked Time is offered. Comments are
+  // stripped first — this file explains the precedence at length, and matching the explanation
+  // instead of the code would leave the guard permanently green.
+  const cardRaw = readFileSync(fileURLToPath(new URL('../../components/employees/weekly/PersonCard.tsx', import.meta.url)), 'utf8');
+  const card = cardRaw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  check('PersonCard withdraws Remove Shift when Add Worked Time is offered',
+    /canRemoveScheduled\(person\)\s*&&\s*!canAddWorked/.test(card));
+  check('PersonCard uses the TIME-aware rule, not the retired day-granular one',
+    card.includes('canAddWorkedTimeAt(person, dateISO)') && !/\bcanAddWorkedTime\(/.test(card));
+  check('PersonCard refuses the affordance without a dateISO',
+    /!!dateISO\s*&&\s*canAddWorkedTimeAt/.test(card));
+}
+
+// And a FUTURE plan still offers only Remove, never Add — the fence that matters most.
+{
+  const future = personOn(FUTURE, { scheduled: [sched(FUTURE)] });
+  check('a FUTURE plan offers Remove but NEVER Add Worked Time',
+    canRemoveScheduled(future) === true &&
+    canAddWorkedTimeAt(future, FUTURE, at('2026-09-10T12:00:00Z')) === false);
+}
 
 console.log('\n§2 — what the form opens at (prefill)');
 
@@ -183,6 +252,19 @@ check('break-invalid token → the shared break message',
   manualWorkedErrorMessage({ code: '22023', message: 'BREAK_INVALID' }) === BREAK_INVALID_ERROR);
 check('employee token → its own sentence',
   manualWorkedErrorMessage({ code: '42501', message: 'EMPLOYEE_NOT_FOUND' }) === EMPLOYEE_NOT_FOUND_MESSAGE);
+
+// RAW-PUNCH refusals are a different problem from an existing shift overlapping, and the remedy is
+// different too, so each gets its own sentence naming the next action.
+check('open-punch token → its own sentence',
+  manualWorkedErrorMessage({ message: 'OPEN_PUNCH_CONFLICT', code: '23P01' }) === OPEN_PUNCH_CONFLICT_MESSAGE);
+check('… and it tells the manager to clock them out first',
+  /clock(ed)? them out/i.test(OPEN_PUNCH_CONFLICT_MESSAGE));
+check('unreconciled-punch token → its own sentence',
+  manualWorkedErrorMessage({ message: 'UNRECONCILED_PUNCH_OVERLAP', code: '23P01' }) === UNRECONCILED_PUNCH_MESSAGE);
+check('… and it explains it would pay twice',
+  /pay twice/i.test(UNRECONCILED_PUNCH_MESSAGE));
+check('the three 23P01 refusals are DISTINCT sentences',
+  new Set([WORKED_TIME_OVERLAP_MESSAGE, OPEN_PUNCH_CONFLICT_MESSAGE, UNRECONCILED_PUNCH_MESSAGE]).size === 3);
 check('open-shift unique violation keeps its existing wording',
   manualWorkedErrorMessage({ code: '23505', message: 'duplicate key value violates unique constraint' }) === OPEN_SHIFT_MESSAGE);
 

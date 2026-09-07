@@ -237,7 +237,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   // Open it as a MISSED-PUNCH CORRECTION for one person, seeded from their planned span.
   function openWorkedTime(person: DayPerson, date: string) {
     const prefill = workedTimePrefill(person, date);
-    if (!prefill) return; // no scheduled span to copy — canAddWorkedTime already excludes this
+    if (!prefill) return; // no scheduled span to copy — canAddWorkedTimeAt already excludes this
     setWorkedPrefill(prefill);
     setAddOnDate(date);
   }

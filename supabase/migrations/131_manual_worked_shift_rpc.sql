@@ -135,6 +135,7 @@ declare
   v_new        tsrange;
   v_span_min   numeric;
   v_conflict   uuid;
+  v_conflict_open boolean;
   v_row        public.shifts;
 begin
   if v_owner is null then
@@ -207,6 +208,66 @@ begin
 
   if v_conflict is not null then
     raise exception 'WORKED_TIME_OVERLAP' using errcode = '23P01';
+  end if;
+
+  -- ── RAW PUNCH RACE. Scanning `shifts` alone is NOT sufficient. ─────────────────────────────
+  --
+  -- A time_clock `shifts` row does not exist while someone is on the clock — every writer
+  -- (071 lensed_clock_out, 072's reconciler, 091/092/095/099's kiosk paths) creates it FROM an
+  -- employee_time_entries row, derived from clocked_in_at/clocked_out_at. So an entry that has
+  -- not produced its shift yet is invisible to the scan above, and the manual row would be
+  -- created into a gap that a punch is about to fill:
+  --
+  --   06:00 employee clocks in            → entry OPEN, no shifts row exists
+  --   10:00 manager adds manual 06–14     → overlap scan sees nothing, row created
+  --   14:00 employee clocks out           → clock_out inserts time_clock 06–14 → DOUBLE PAID
+  --
+  -- The exact test for "will become a shift" is `shift_id IS NULL`. 071 sets shift_id at
+  -- clock-out and 072(b) back-fills `clocked_out_at is not null and shift_id is null`, so:
+  --   * shift_id NOT NULL → the shift already exists and the scan above already caught it;
+  --   * shift_id NULL, still open      → becomes a shift at clock-out, end time UNKNOWABLE;
+  --   * shift_id NULL, already closed  → an ORPHAN the reconciler will back-fill on its next run,
+  --                                      at exactly [clocked_in_at, clocked_out_at).
+  -- This is not hypothetical: production currently holds 21 such entries (5 open, 16 orphaned).
+  --
+  -- An OPEN entry is treated as UNBOUNDED — the same convention the range helper already uses for
+  -- an open shift. We genuinely cannot know where the punch will end, so anything finishing after
+  -- it started may collide. The refusal names the punch so the manager's next step is obvious:
+  -- close it with the real time (the kiosk/manual-punch path), then record any correction.
+  --
+  -- READ-ONLY, BY CONSTRUCTION. This block only SELECTs. Nothing in this function inserts,
+  -- updates or deletes employee_time_entries, employee_time_breaks or clock_audit — raw punches
+  -- are the auditable trail and are never rewritten to make a correction fit.
+  --
+  -- Cheap: filtered by (user_id, employee_id, shift_id is null), which idx_time_entries_employee
+  -- serves and which is at most a handful of rows per person (worst case 3 in production today).
+  select e.id, (e.clocked_out_at is null)
+    into v_conflict, v_conflict_open
+  from public.employee_time_entries e
+  where e.user_id = v_owner
+    and e.employee_id = p_employee_id
+    and e.shift_id is null
+    and (
+      case
+        when e.clocked_out_at is null
+          then tsrange((e.clocked_in_at at time zone 'America/Los_Angeles'), null, '[)')
+        else tsrange(
+               least(   (e.clocked_in_at  at time zone 'America/Los_Angeles'),
+                        (e.clocked_out_at at time zone 'America/Los_Angeles')),
+               greatest((e.clocked_in_at  at time zone 'America/Los_Angeles'),
+                        (e.clocked_out_at at time zone 'America/Los_Angeles')), '[)')
+      end
+    ) && v_new
+  limit 1;
+
+  if v_conflict is not null then
+    if v_conflict_open then
+      -- Someone is on the clock right now over this interval.
+      raise exception 'OPEN_PUNCH_CONFLICT' using errcode = '23P01';
+    else
+      -- A closed punch with no shift yet: the reconciler will turn it into payable time.
+      raise exception 'UNRECONCILED_PUNCH_OVERLAP' using errcode = '23P01';
+    end if;
   end if;
 
   -- `source` is left to the column default ('manual'), and the instants are left NULL: this row

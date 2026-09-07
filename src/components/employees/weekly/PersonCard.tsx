@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import { formatTime12 } from '@/lib/weeklySchedule';
 import { confirmErrorMessage } from '@/lib/timeclock';
-import { canRemoveScheduled, canAddWorkedTime, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
+import { canRemoveScheduled, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
+import { canAddWorkedTimeAt } from '@/lib/shifts/manualWorked';
 import PersonAvatar from './PersonAvatar';
 
 // One person's day as a TILE: avatar on top, name under it, the facts under that.
@@ -31,6 +32,7 @@ function range(start: string, end: string | null): string {
 export default function PersonCard({
   person,
   dateLabel,
+  dateISO,
   onConfirm,
   onEdit,
   onRemoveScheduled,
@@ -39,6 +41,8 @@ export default function PersonCard({
   person: DayPerson;
   /** Shown only in the pending overlay, where cards span many days. */
   dateLabel?: string;
+  /** 'YYYY-MM-DD' for this cell. Required for the Add Worked Time affordance (see below). */
+  dateISO?: string;
   onConfirm: (shiftId: string, confirmed: boolean) => Promise<void>;
   onEdit?: (shiftId: string) => void;
   /**
@@ -60,13 +64,28 @@ export default function PersonCard({
   const badge = badgeFor(person);
   const { punch, scheduled } = person;
 
-  // Remove Shift is offered on a PLAN-ONLY tile and nowhere else. The rule itself lives in
-  // calendarModel (canRemoveScheduled) so it is pure and unit-tested; a tile with any punch is
-  // excluded there, which is what keeps this action away from worked/payroll rows.
-  const canRemove = !!onRemoveScheduled && canRemoveScheduled(person);
-  // Mutually exclusive with canRemove by construction: canRemoveScheduled needs state
-  // 'scheduled', canAddWorkedTime needs 'no_show'. A tile can never offer both.
-  const canAddWorked = !!onAddWorkedTime && canAddWorkedTime(person);
+  // ADD WORKED TIME. Eligibility is TIME-based: offered once the scheduled period has ENDED, so a
+  // same-day miss is correctable immediately instead of waiting for midnight, and an overnight span
+  // is not eligible until it finishes on the following calendar day. The rule lives in
+  // shifts/manualWorked (canAddWorkedTimeAt) so it is pure and unit-tested. `dateISO` absent → the
+  // affordance is simply not offered rather than guessed at from the display label.
+  const canAddWorked =
+    !!onAddWorkedTime && !!dateISO && canAddWorkedTimeAt(person, dateISO);
+
+  // REMOVE SHIFT is offered on a PLAN-ONLY tile and nowhere else. The rule lives in calendarModel
+  // (canRemoveScheduled); a tile with any punch is excluded there, which keeps this action away
+  // from worked/payroll rows.
+  //
+  // `&& !canAddWorked` is PRECEDENCE, and it became load-bearing when eligibility went time-based.
+  // canRemoveScheduled is still DAY-granular ('scheduled' covers anything today or later), so a
+  // shift TODAY whose period has already ended now satisfies BOTH rules, and the tile would offer
+  // Remove Shift and Add Worked Time at the same time. Once a shift is over the honest question is
+  // "what did they work?", not "cancel the plan" — so Add Worked Time wins.
+  //
+  // Not a safety hole in either direction: planShiftRemoval() on the server independently refuses
+  // to remove an already-started shift. This just stops the tile offering something the server
+  // would reject, and leaves canRemoveScheduled's own rule and tests untouched.
+  const canRemove = !!onRemoveScheduled && canRemoveScheduled(person) && !canAddWorked;
 
   async function run(confirmed: boolean) {
     if (!punch) return;

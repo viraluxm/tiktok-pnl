@@ -87,6 +87,7 @@ export default function DayPeopleModal({
               <PersonCard
                 key={`${p.employee_id}|${p.punch?.id ?? p.scheduled?.id ?? 'x'}`}
                 person={p}
+                dateISO={day.date}
                 onConfirm={onConfirm}
                 onEdit={onEdit}
                 onRemoveScheduled={

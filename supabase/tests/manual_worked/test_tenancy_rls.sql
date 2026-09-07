@@ -24,14 +24,19 @@
 grant usage on schema public to authenticated;
 grant select, insert, update, delete on public.employees to authenticated;
 grant select, insert, update, delete on public.shifts    to authenticated;
+-- The RPC now READS employee_time_entries (the raw-punch race guard), so the caller needs SELECT
+-- on it or the whole function fails with "permission denied" instead of exercising the rule.
+-- Production grants authenticated full DML here and has RLS with auth.uid() = user_id; mirror both.
+grant select, insert, update, delete on public.employee_time_entries to authenticated;
 -- USAGE on `auth` is required or auth.uid() itself raises "permission denied for schema auth",
 -- which would make every assertion below fail for the wrong reason. Real Supabase grants this.
 grant usage on schema auth to authenticated;
 grant select on auth.users to authenticated;
 grant execute on function auth.uid() to authenticated;
 
-alter table public.employees enable row level security;
-alter table public.shifts    enable row level security;
+alter table public.employees             enable row level security;
+alter table public.shifts                enable row level security;
+alter table public.employee_time_entries enable row level security;
 
 do $$ begin
   if not exists (select 1 from pg_policies where tablename='employees' and policyname='rls_emp_sel') then
@@ -42,6 +47,9 @@ do $$ begin
   end if;
   if not exists (select 1 from pg_policies where tablename='shifts' and policyname='rls_sh_ins') then
     create policy rls_sh_ins on public.shifts for insert with check (auth.uid() = user_id);
+  end if;
+  if not exists (select 1 from pg_policies where tablename='employee_time_entries' and policyname='rls_te_sel') then
+    create policy rls_te_sel on public.employee_time_entries for select using (auth.uid() = user_id);
   end if;
 end $$;
 
