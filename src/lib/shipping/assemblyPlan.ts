@@ -32,6 +32,18 @@ export const LEDGER_COLUMNS =
   + 'print_seq, slip_caption, banner_caption, store_id, order_ids';
 
 /** The ledger fields assembly needs. Keep in step with LEDGER_COLUMNS above. */
+/**
+ * The only fields that decide whether a box can be printed.
+ *
+ * Narrower than LedgerRow on purpose: the run summary reads a different, smaller projection of
+ * the same table, and widening it just to satisfy a signature would have meant selecting columns
+ * nobody uses.
+ */
+export interface PrintabilityFields {
+  status: string;
+  package_id: string | null;
+}
+
 export interface LedgerRow {
   group_key: string;
   status: string;
@@ -205,7 +217,7 @@ export function needsRefetch(row: LedgerRow, nowMs: number): boolean {
  * not know whether a label exists. Printing nothing is right; so is NOT quietly dropping it,
  * because a human has to reconcile that box either way.
  */
-function unprintableReason(row: LedgerRow | undefined): string | null {
+export function unprintableReason(row: PrintabilityFields | undefined): string | null {
   if (!row) return 'no purchase recorded for this box';
   if (row.status === 'failed') return 'purchase failed — no label was bought';
   if (row.status === 'claimed') return 'purchase unconfirmed — left claimed, needs reconciling by hand';
@@ -215,6 +227,26 @@ function unprintableReason(row: LedgerRow | undefined): string | null {
   // printed from Seller Center.
   if (!row.package_id) return 'label bought outside Lensed — no package_id; print from Seller Center';
   return null;
+}
+
+/**
+ * Which pile a ledger row will print into, or null if it will not print at all.
+ *
+ * THE POINT IS THAT THIS IS THE SAME QUESTION `buildAssemblySequence` ASKS. The run summary used
+ * to classify by banner alone, so its "Singles (261)" counted a box whose purchase had FAILED and
+ * the file it named then held 260. Two independent answers to "is this box printable" is exactly
+ * the shape of bug that produces a confident wrong number, so there is now one.
+ */
+export function pileOf(
+  row: (PrintabilityFields & { banner_caption?: string | null }) | undefined,
+  banners: { singles: string; mixed: string; unbound: string },
+): 'singles' | 'mixed' | 'unbound' | 'other' | null {
+  if (!row || unprintableReason(row)) return null;
+  const b = row.banner_caption ?? '';
+  if (b === banners.singles) return 'singles';
+  if (b === banners.mixed) return 'mixed';
+  if (b === banners.unbound) return 'unbound';
+  return b ? 'other' : null;
 }
 
 /**

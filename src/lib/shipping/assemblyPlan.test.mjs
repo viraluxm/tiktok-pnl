@@ -15,7 +15,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'ap-')), 'assemblyPlan.mjs');
 writeFileSync(outFile, outputText);
-const { buildAssemblySequence, needsRefetch, itemsFromLedger, itemsFromLedgerMerged, LEDGER_COLUMNS, DOC_REFETCH_MARGIN_MS } =
+const { buildAssemblySequence, needsRefetch, itemsFromLedger, itemsFromLedgerMerged, LEDGER_COLUMNS, DOC_REFETCH_MARGIN_MS, pileOf, unprintableReason } =
   await import(pathToFileURL(outFile).href);
 
 let passed = 0;
@@ -42,6 +42,48 @@ const section = (caption, ...keys) => keys.map((k) => item(k, caption));
 const shape = (seq) => seq.pages
   .map((p) => (p.kind === 'banner' ? `BANNER(${p.caption}|${p.count})`
     : p.kind === 'slip' ? `SLIP(${p.caption}|${p.count})` : `L(${p.group_key})`)).join(' ');
+
+// ── pileOf: the run summary must count what the FILE will contain ───────────────────────────
+//
+// The bug this pins: the summary classified by banner alone, so a run whose purchase had failed
+// on 1 single and 5 bundles advertised "Singles (261) / Bundles (357)" for files that held 260
+// and 353. A count nobody can trust is worse than no count, because the operator reconciles
+// against it.
+{
+  const B = { singles: 'SINGLES — PREP STATION', mixed: 'BUNDLED ORDERS — PICK REGULAR', unbound: 'NO SKU ON FILE — LOOK UP EACH ORDER' };
+  const row = (over = {}) => ({ group_key: 'g', status: 'purchased', package_id: 'pkg', banner_caption: B.singles, ...over });
+
+  check('purchased single counts as singles', pileOf(row(), B) === 'singles');
+  check('purchased bundle counts as mixed', pileOf(row({ banner_caption: B.mixed }), B) === 'mixed');
+  check('purchased unbound counts as unbound', pileOf(row({ banner_caption: B.unbound }), B) === 'unbound');
+
+  // The four ways a row is real in the ledger but absent from the PDF.
+  check('FAILED purchase counts in no pile', pileOf(row({ status: 'failed' }), B) === null);
+  check('CLAIMED (unconfirmed) counts in no pile', pileOf(row({ status: 'claimed' }), B) === null);
+  check('no package_id counts in no pile', pileOf(row({ package_id: null }), B) === null);
+  check('missing row counts in no pile', pileOf(undefined, B) === null);
+
+  // An unrecognised banner is reported, not silently folded into singles.
+  check('unknown banner is "other"', pileOf(row({ banner_caption: 'SOMETHING NEW' }), B) === 'other');
+  check('no banner at all is null', pileOf(row({ banner_caption: null }), B) === null);
+
+  // The real scenario, end to end: Snore's 2026-09-07 run.
+  const snore = [
+    ...Array.from({ length: 260 }, (_, i) => row({ group_key: `s${i}` })),
+    row({ group_key: 'sf', status: 'failed' }),
+    ...Array.from({ length: 331 }, (_, i) => row({ group_key: `m${i}`, banner_caption: B.mixed })),
+    ...Array.from({ length: 5 }, (_, i) => row({ group_key: `mf${i}`, banner_caption: B.mixed, status: 'failed' })),
+  ];
+  const tally = snore.reduce((a, r) => { const k = pileOf(r, B); if (k) a[k] = (a[k] ?? 0) + 1; return a; }, {});
+  check('Snore 2026-09-07 singles = 260, not 261', tally.singles === 260, `got ${tally.singles}`);
+  check('Snore 2026-09-07 bundles = 331, not 336', tally.mixed === 331, `got ${tally.mixed}`);
+
+  // pileOf must agree with the PDF's own gate, not merely resemble it.
+  for (const st of ['failed', 'claimed', 'weird']) {
+    check(`pileOf refuses exactly when unprintableReason does (${st})`,
+      (pileOf(row({ status: st }), B) === null) === Boolean(unprintableReason(row({ status: st }))));
+  }
+}
 
 console.log('\nDocument freshness');
 {
