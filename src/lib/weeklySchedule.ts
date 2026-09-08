@@ -106,6 +106,23 @@ export function schedulableEmployees<T extends Pick<Employee, 'status'>>(employe
   return employees.filter((e) => !isFormer(e));
 }
 
+/**
+ * The roster grid's own view of the team. Removal ARCHIVES a person (status 'former') rather
+ * than deleting them — see src/lib/rosterRemoval.ts — so without this filter the person a
+ * manager just removed stays on screen and Remove looks broken.
+ *
+ * Delegates to schedulableEmployees so "former" has exactly one definition: whoever is hidden
+ * from the roster is the same set that is barred from being scheduled.
+ *
+ * `showFormer` is the roster's opt-in toggle, default OFF.
+ */
+export function visibleRoster<T extends Pick<Employee, 'status'>>(
+  employees: T[],
+  showFormer: boolean,
+): T[] {
+  return showFormer ? employees.slice() : schedulableEmployees(employees);
+}
+
 export function matchesRoleFilter(role: string | null | undefined, filter: RoleFilterValue): boolean {
   if (filter === 'all') return true;
   return roleGroupOf(role) === filter;
