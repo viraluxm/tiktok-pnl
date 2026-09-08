@@ -60,5 +60,25 @@ console.log('\nZIP+4 layout');
   eq('420+ZIP9 strips 12 and resolves', normalizeTracking(`420799281234${t}`), t);
 }
 
+console.log('\nThe parser exists exactly ONCE');
+// This is the guard for the actual 2026-09-08 failure: PR #225 fixed the false-positive parse in
+// scanResolve.ts while an untouched COPY lived in /api/shipping/pick-list — the route the Shipping
+// tab's scanner calls. The fix appeared to do nothing and two labels were photographed failing
+// hours after it deployed. A parser with two copies is a parser with two behaviours.
+{
+  const { execSync } = await import('node:child_process');
+  const root = fileURLToPath(new URL('../../..', import.meta.url));
+  // '--include=*.ts' is quoted so the shell cannot glob it, and it keeps this test file's own
+  // mention of the symbol from being counted (it was, at first: the guard reported 2 when
+  // there was 1).
+  const hits = execSync(
+    `grep -rn "function normalizeTracking" "${root}/src" "--include=*.ts" || true`,
+    { encoding: 'utf8' },
+  ).trim().split('\n').filter(Boolean);
+  eq('exactly one definition of normalizeTracking in src/', hits.length, 1);
+  eq('and it lives in scanResolve.ts',
+    hits[0]?.includes('lib/shipping/scanResolve.ts'), true);
+}
+
 console.log(fails ? `\n${fails} FAILED` : '\nall passed');
 process.exit(fails ? 1 : 0);
