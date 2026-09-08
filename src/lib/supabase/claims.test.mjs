@@ -129,6 +129,19 @@ test('the audit queue rides the binding scope — and ONLY the binding scope', (
   assert.equal(isPathAllowed('/api/member/audit/keep', stocker), false);
 });
 
+test('the out-of-stock lookup rides the binding scope too', () => {
+  const binder = confinementFor('member', ['binding']);
+  assert.equal(isPathAllowed('/team/oos', binder), true);
+  assert.equal(isPathAllowed('/api/member/oos', binder), true);
+  // Read-only, but still scope-gated: it names what a customer bought, box by box.
+  const stocker = confinementFor('member', ['inventory']);
+  assert.equal(isPathAllowed('/team/oos', stocker), false);
+  assert.equal(isPathAllowed('/api/member/oos', stocker), false);
+  // And the station's own allowlist must not have quietly gained a /team page.
+  const station = confinementFor('station', []);
+  assert.equal(isPathAllowed('/team/oos', station), false);
+});
+
 test('member with an UNKNOWN scope contributes nothing (fail closed) and lands on no-access', () => {
   const c = confinementFor('member', ['payroll']);
   assert.deepEqual(c.allow, []);
