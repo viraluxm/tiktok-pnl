@@ -55,6 +55,11 @@ const SERVICE_ROLE_ONLY = new Set([
   // any signed-in user call them directly with someone else's p_owner_user_ids and read that
   // owner's P&L. They were missing from this list, not from the database.
   'pnl_by_show_as', 'pnl_show_hourly_as',
+  // Squish over-bind audit (129). Both take the owner explicitly and trust it, so a grant to
+  // `authenticated` would be a cross-tenant hole, not a fix: any signed-in user could read — or
+  // UNBIND — another owner's orders. Reached only through requireMemberScope('binding') in
+  // /api/member/audit*, which hands back a service-role client after resolving ownerIds.
+  'squish_multibind_audit_as', 'lensed_unbind_as',
 ]);
 
 const PROJECT_REF = process.env.SUPABASE_PROJECT_REF;
