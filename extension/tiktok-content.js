@@ -1235,15 +1235,74 @@
 
   // Auto-bind the staged set to a sale. Returns the bind-time snapshot (so the
   // caller can render the bound items even after the auto-clear below). We clear
-  // the staged pills AFTER snapshotting on EVERY bind that had a staged set —
+  // the staged pills AFTER snapshotting on EVERY FIRST bind that had a staged set —
   // paid and failed-payment alike — so no SKU silently carries into the next
   // auction. `previousSkus` keeps the last set for the manual ↻ re-run.
+  //
+  // A payment-status FLIP is NOT a bind. auction_result/get is cumulative, so an
+  // order first seen unpaid re-arrives paid seconds later — by which time the
+  // operator has normally already scanned the NEXT item. Treating that flip as a
+  // fresh bind stole the next item's staged pill, overwrote the display mapping,
+  // and nulled capture_events.bound_sku_id (the RPC's transition path ignores the
+  // SKUs it is handed, so the DB row itself stayed correct). On a flip we now
+  // dispatch a TRANSITION-only message: no snapshot, no restage, no clearStaged.
   function autoBind(sale) {
     if (!sale || !sale.orderId) return [];
     // New order → binds (get() is undefined ≠ token). Same-status repeat →
-    // skipped. Status flip (failed→paid) → binds again so the RPC can transition.
+    // skipped. Status flip (failed→paid) → dispatches a transition (below).
     var token = saleStatusToken(sale);
-    if (boundOrderStatus.get(sale.orderId) === token) return [];
+    var prevToken = boundOrderStatus.get(sale.orderId);
+    if (prevToken === token) return [];
+
+    // ── Status flip: transition only ────────────────────────────────────────
+    // We have processed this order before at a DIFFERENT status. The background's
+    // flip branch re-calls the RPC against the ORIGINAL session; the RPC decrements
+    // the originally-bound lines and ignores p_skus. Send no staged SKUs and mark
+    // the message isFlip so the background never mistakes an empty set for
+    // "nothing staged" and downgrades a real transition to captured-only.
+    if (prevToken !== undefined) {
+      var flipDispatched = false;
+      dlog('bind.flip_sent', 'info', 'AUTO_BIND transition dispatched (no staging touched)',
+        { order: sale.orderId, from: prevToken, to: token, stagedNow: stagedSkus.length });
+      try {
+        chrome.runtime.sendMessage({
+          type: 'AUTO_BIND',
+          sale: sale,
+          stagedSkus: [],
+          isFlip: true,
+        }, function (resp) {
+          if (chrome.runtime.lastError) {
+            console.error('[LENSED][TT] flip sendMessage error:', chrome.runtime.lastError);
+            dlog('bind.reply', 'error', 'AUTO_BIND flip no reply (runtime error)',
+              { order: sale.orderId, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'lastError' });
+            return;
+          }
+          var okFlip = !!(resp && resp.ok);
+          dlog('bind.reply', okFlip ? 'info' : 'warn', 'AUTO_BIND flip reply', {
+            order: sale.orderId, ok: okFlip, bound: !!(resp && resp.bound), flip: true,
+            reason: (resp && resp.reason) || null, code: (resp && resp.code) || null,
+          });
+          if (resp && resp.ok === false && resp.reason !== 'not_authenticated') {
+            console.warn('[LENSED][TT] flip not fully OK:', sale.orderId, resp.reason, resp.code || '');
+            showBindIssue(resp);
+          }
+        });
+        flipDispatched = true;
+      } catch (err) {
+        console.error('[LENSED][TT] flip dispatch failed:', err);
+        dlog('bind.dispatch_failed', 'error', 'AUTO_BIND flip dispatch threw', { order: sale.orderId });
+      }
+      // Commit the token only on a dispatched message, so a failed dispatch leaves
+      // the flip retry-able on the next cumulative snapshot.
+      if (flipDispatched) {
+        boundOrderStatus.set(sale.orderId, token);
+        capMap(boundOrderStatus);
+        diag.lastBindTs = Date.now();
+      }
+      // Return the ORIGINAL bind's items so the caller re-renders this order with
+      // what it is actually bound to, not with whatever is staged for the next one.
+      return sessionBoundSkus.get(sale.orderId) || [];
+    }
     // The dedup token is committed AFTER the AUTO_BIND message is dispatched (below),
     // so a synchronous throw before dispatch can't permanently suppress a retry.
 
@@ -1813,6 +1872,7 @@
       (boundSkus && boundSkus.length ? boundSkus : null);
 
     var row = el('div', 'lensed-sale' + (wasBound ? ' bound' : ''));
+    if (sale.orderId) row.setAttribute('data-order', sale.orderId);
 
     // \u2500\u2500 Line 1: "#order \u00B7 @buyer" (left, ellipsizes) + "price \u00B7 status" (right).
     // Text-first \u2014 no thumbnail. All values via textContent (never innerHTML).
@@ -1846,10 +1906,29 @@
       }
     }
 
-    salesListEl.insertBefore(row, salesListEl.firstChild);
+    // A payment-status flip re-renders an order that is ALREADY in the list. Replace
+    // that row in place (keeping its position) so the operator sees Unpaid → Paid on
+    // the one row, instead of the same order appearing twice with different items.
+    var existing = null;
+    if (sale.orderId) {
+      try { existing = salesListEl.querySelector('[data-order="' + cssEscapeAttr(sale.orderId) + '"]'); } catch (_) { existing = null; }
+    }
+    if (existing) {
+      salesListEl.replaceChild(row, existing);
+    } else {
+      salesListEl.insertBefore(row, salesListEl.firstChild);
+    }
     while (salesListEl.children.length > MAX_VISIBLE_SALES) {
       salesListEl.removeChild(salesListEl.lastChild);
     }
+  }
+
+  // order_id is digits in practice, but never interpolate an unvalidated value into a
+  // selector — fall back to a scan when it is anything else.
+  function cssEscapeAttr(v) {
+    var str = String(v);
+    if (!/^[A-Za-z0-9_-]+$/.test(str)) throw new Error('unsafe order id for selector');
+    return str;
   }
 
   // ── Live order counter: persistence + session scoping ───────────────
@@ -2687,7 +2766,13 @@
         return;
       }
 
-      var wasBound = boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && hadStaged;
+      // A flip re-renders an order we already processed. It is "bound" if the ORIGINAL
+      // bind attached items — not because something happens to be staged for the NEXT
+      // auction right now (that staging is no longer consumed by a flip).
+      var isFlipRender = boundOrderStatus.get(sale.orderId) !== undefined;
+      var wasBound = isFlipRender
+        ? !!(sale.orderId && sessionBoundSkus.get(sale.orderId))
+        : (boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && hadStaged);
       var boundSkus = autoBind(sale);
 
       // Render in overlay

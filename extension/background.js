@@ -188,6 +188,7 @@ var LIVE_END_DEDUP_MS = 10000;
 var RECENTLY_ENDED_CAP = 200;
 var loggedOrderStatus = new Map(); // order_id -> last logged status ('sold' | 'not_sold')
 var loggedOrderSession = new Map(); // order_id -> session_id of the row we logged (for flip transitions)
+var loggedOrderBoundSku = new Map(); // order_id -> bound_sku_id from the ORIGINAL bind (preserved across a flip)
 var cachedSkus = null;
 // Manually-selected live HOST (a person from the Team/Employees roster) chosen in the
 // overlay. This is NOT the auto-detected TikTok account/shop — it identifies the
@@ -640,6 +641,7 @@ function capOrderMaps() {
     var k = loggedOrderStatus.keys().next().value;
     loggedOrderStatus.delete(k);
     loggedOrderSession.delete(k);
+    loggedOrderBoundSku.delete(k);
   }
 }
 
@@ -1441,8 +1443,14 @@ async function logAuction(sessionId, result, skus, idemKey) {
 // path) and by replayQueuedSale (the unauth-queue flush), so both write the identical shape.
 // Add a field here and it lands on both paths; that was not true before the two literals were
 // collapsed, which is how ext_version had to be added in two places.
-function buildCaptureRow(sale, boundSkuId) {
-  return {
+// omitBoundSku=true leaves bound_sku_id OUT of the payload entirely. PostgREST's
+// merge-duplicates resolution writes only the columns present in the body, so an absent
+// column keeps whatever the existing row holds. That is exactly what a payment-status
+// flip needs: it knows the new status but NOT the sku the original bind attached, and
+// sending an explicit null erased it (measured: 82.6% of flipped orders had a null
+// bound_sku_id vs 42.2% of never-flipped ones).
+function buildCaptureRow(sale, boundSkuId, omitBoundSku) {
+  var row = {
     user_id: userId,
     order_id: sale.orderId,
     room_id: sale.roomId || currentRoomId,
@@ -1460,19 +1468,21 @@ function buildCaptureRow(sale, boundSkuId) {
     raw_payload: sale,
     ext_version: EXT_VERSION,
   };
+  if (omitBoundSku) delete row.bound_sku_id;
+  return row;
 }
 
 // Upsert the raw capture_events row. Returns { ok, ... } so the caller can tell the
 // content script the truth (capture_events feeds P&L). Idempotent: on_conflict targets
 // the real (user_id, order_id) unique index, so a re-sent/replayed order MERGES instead
 // of raising 23505 (the empty-upsert bug that failed 135× during the replay storm).
-async function upsertCaptureEvent(sale, boundSkuId) {
+async function upsertCaptureEvent(sale, boundSkuId, omitBoundSku) {
   if (!isAuthenticated()) { diag('capture.skip_unauth', 'warn', 'not authenticated — capture_events NOT written', { order: sale && sale.orderId }); return { ok: false, reason: 'not_authenticated' }; }
   // ONE definition of the capture row. buildCaptureRow's docstring has always claimed it was
   // shared with this function; it was not — an identical 16-field literal was inlined here, and
   // the two stayed in sync by luck. They were verified byte-identical immediately before this
   // collapse, so it is a pure de-duplication with no behaviour change.
-  var row = buildCaptureRow(sale, boundSkuId);
+  var row = buildCaptureRow(sale, boundSkuId, omitBoundSku);
   try {
     await supabaseUpsert('capture_events', row, 'user_id,order_id');
     console.log('[LENSED][BG] capture_events upserted:', sale.orderId);
@@ -1603,9 +1613,25 @@ async function flushSaleQueue() {
   diagCrit('queue.flush_done', 'info', 'flush complete', { flushed: startCount - saleQueue.length, remaining: saleQueue.length });
 }
 
+// Does an auction row already exist for this (session, order)? Used only to confirm a
+// client-asserted flip before driving the RPC's transition path. Read-only; a failed
+// lookup answers "no" so we never transition on a guess.
+async function auctionRowExists(sessionId, orderId) {
+  if (!sessionId || !orderId) return false;
+  try {
+    var rows = await supabaseGet('live_auction_items',
+      'select=id&session_id=eq.' + encodeURIComponent(sessionId) +
+      '&client_idempotency_key=eq.' + encodeURIComponent(orderId) + '&limit=1');
+    return Array.isArray(rows) && rows.length > 0;
+  } catch (e) {
+    diag('bind.flip_lookup_failed', 'warn', 'auction row lookup failed — not transitioning', { order: orderId, code: diagClassifyErr(e) });
+    return false;
+  }
+}
+
 // ─── Auto-bind: sale + staged SKUs → lensed_log_auction + capture_events
 
-async function handleAutoBind(sale, stagedSkus) {
+async function handleAutoBind(sale, stagedSkus, clientSaysFlip) {
   if (!sale || !sale.orderId) return { ok: false, reason: 'no_order' };
 
   // A sale event can wake a cold worker; wait for the rehydrate so the
@@ -1630,24 +1656,65 @@ async function handleAutoBind(sale, stagedSkus) {
   capOrderMaps();
   diag('bind.received', 'info', 'AUTO_BIND received', { order: sale.orderId, status: result, staged: (stagedSkus ? stagedSkus.length : 0), room: !!sale.roomId });
 
-  // A flip = we've processed this order before, with a different status.
-  var isFlip = prevToken !== undefined;
+  // A flip = this order has been processed before at a DIFFERENT status. The worker's
+  // own prevToken proves it — but the worker can restart mid-live and lose the map,
+  // while the content script (which lives as long as the page) still knows. Trust
+  // either. Without this, a post-restart flip arrives with an empty stagedSkus and
+  // falls through to the no_staged branch: captured-only, transition never fired.
+  var isFlip = prevToken !== undefined || !!clientSaysFlip;
   var boundSkuId = null;
   var bound = false;         // did lensed_log_auction actually write/replay an auction row?
   var bindReason = null;     // why not bound (no_staged / no_session / rpc_failed / not_authenticated)
 
-  if (isFlip && isAuthenticated() && loggedOrderSession.has(sale.orderId)) {
-    // ── Status-flip transition (e.g. failed→paid) ───────────────────────────
-    // We previously LOGGED a row for this order (we recorded its session). The
-    // RPC's transition path decrements the ORIGINALLY-bound live_auction_item_skus
-    // and ignores p_skus — so the current staged set is irrelevant. Fire the RPC
-    // even when nothing is staged now. Use the ORIGINAL session so the RPC finds
-    // the existing row (it matches on session_id + idem_key); pass the non-empty
-    // placeholder only to satisfy the RPC's NO_SKUS guard.
-    var flipSession = loggedOrderSession.get(sale.orderId);
-    console.log('[LENSED][BG] status flip — re-calling RPC for transition:', sale.orderId, prevToken, '->', result);
+  // ── Status-flip transition (e.g. failed→paid) ─────────────────────────────
+  // The RPC's transition path decrements the ORIGINALLY-bound live_auction_item_skus
+  // and IGNORES p_skus, so whatever is staged right now is irrelevant — and the content
+  // script no longer sends it, because that staging belongs to the NEXT auction. We pass
+  // the non-empty placeholder purely to satisfy the RPC's NO_SKUS guard.
+  //
+  // A transition is only safe against a session that ALREADY HAS a row for this order.
+  // Against any other session the RPC takes its INSERT path, where the placeholder sku
+  // raises SKU_NOT_FOUND — rolling back, rolling back our dedup, and re-firing on every
+  // cumulative snapshot for the rest of the live. So resolve the session in this order:
+  //   1. the one recorded at the original bind (in-worker proof a row exists), else
+  //   2. the room-scoped session, but ONLY after confirming the row is really there.
+  // If neither yields a row, this order was never bound — it is not a transition at all,
+  // so fall through and treat it as a normal capture.
+  var flipSession = null;
+  var flipRecovered = false;
+  if (isFlip && isAuthenticated()) {
+    flipSession = loggedOrderSession.get(sale.orderId) || null;
+    if (!flipSession) {
+      var candidate = await getOrCreateSessionGuarded(sale.roomId);
+      if (candidate && await auctionRowExists(candidate, sale.orderId)) {
+        flipSession = candidate;
+        flipRecovered = true;
+      } else if (candidate) {
+        // Session resolved, but no row for this order → captured-only, never bound.
+        isFlip = false;
+        diag('bind.flip_unbound', 'info', 'flip for an order with no auction row — treated as a normal capture', { order: sale.orderId });
+      }
+      // candidate === null → keep isFlip true and fall into the no_session branch below,
+      // which rolls the dedup back so the next snapshot retries.
+    }
+  }
+
+  if (isFlip && isAuthenticated() && !flipSession) {
+    // A real transition we cannot place: no session resolved. Roll the dedup back so the
+    // next cumulative snapshot retries instead of the flip being silently lost.
+    loggedOrderStatus.delete(sale.orderId);
+    bindReason = 'no_session';
+    console.warn('[LENSED][BG] flip with no resolvable session — captured only (will retry):', sale.orderId);
+    diag('bind.flip_no_session', 'warn', 'flip with no resolvable session', { order: sale.orderId, room: sale.roomId || null });
+  } else if (isFlip && isAuthenticated()) {
+    console.log('[LENSED][BG] status flip — re-calling RPC for transition:', sale.orderId, prevToken, '->', result, flipRecovered ? '(session recovered)' : '');
+    diag('bind.flip', 'info', 'status flip transition', { order: sale.orderId, from: prevToken || null, to: result, recovered: flipRecovered, clientFlag: !!clientSaysFlip });
     var flipRow = await logAuction(flipSession, result, TRANSITION_PLACEHOLDER_SKUS, sale.orderId);
-    if (flipRow) { bound = true; } else { bindReason = 'rpc_failed'; loggedOrderStatus.delete(sale.orderId); }
+    if (flipRow) {
+      bound = true;
+      loggedOrderSession.set(sale.orderId, flipSession);
+      capOrderMaps();
+    } else { bindReason = 'rpc_failed'; loggedOrderStatus.delete(sale.orderId); }
   } else if (stagedSkus && stagedSkus.length > 0 && isAuthenticated()) {
     // ── Fresh bind: requires staged SKUs + a room-scoped session ───────────────
     // Pass the sale's own room so a stale in-memory/persisted session (different
@@ -1673,8 +1740,10 @@ async function handleAutoBind(sale, stagedSkus) {
       if (logRow) {
         // Only record success on an actual bind so a later flip can target it.
         loggedOrderSession.set(sale.orderId, sessionId);
-        capOrderMaps();
         boundSkuId = stagedSkus.length === 1 ? stagedSkus[0].id : null;
+        // Remember it so a later flip can re-send the SAME value instead of nulling it.
+        if (boundSkuId) loggedOrderBoundSku.set(sale.orderId, boundSkuId);
+        capOrderMaps();
         bound = true;
         diag('bind.ok', 'info', 'order bound to auction item', { order: sale.orderId, boundSkuId: boundSkuId || null });
       } else {
@@ -1717,11 +1786,22 @@ async function handleAutoBind(sale, stagedSkus) {
   }
 
   // Always upsert to capture_events (raw revenue/audit row that P&L joins on).
-  var cap = await upsertCaptureEvent(sale, boundSkuId);
+  //
+  // On a flip we did NOT compute a boundSkuId (the transition path never looks at
+  // staged SKUs). Re-send the value remembered from the original bind; if the worker
+  // restarted and lost it, omit the column so the row keeps what it already has.
+  // Writing an explicit null here is what erased bound_sku_id on flipped orders.
+  var capBoundSkuId = boundSkuId;
+  var capOmitBoundSku = false;
+  if (isFlip && !capBoundSkuId) {
+    capBoundSkuId = loggedOrderBoundSku.get(sale.orderId) || null;
+    capOmitBoundSku = !capBoundSkuId;
+  }
+  var cap = await upsertCaptureEvent(sale, capBoundSkuId, capOmitBoundSku);
   if (!cap.ok && cap.reason === 'capture_write_failed') {
     // One immediate idempotent retry (on_conflict=user_id,order_id makes re-upsert a
     // MERGE, never a second row) — clears transient blips. Does NOT touch inventory.
-    cap = await upsertCaptureEvent(sale, boundSkuId);
+    cap = await upsertCaptureEvent(sale, capBoundSkuId, capOmitBoundSku);
   }
   if (!cap.ok) {
     // The capture row is missing — roll back the status dedup so a later cumulative
@@ -2352,6 +2432,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
       // clear both maps in lockstep (also bounds them across a multi-live worker).
       loggedOrderStatus.clear();
       loggedOrderSession.clear();
+      loggedOrderBoundSku.clear();
       persistSession();   // clears SK_SESSION_ID / SK_ROOM_ID
       broadcastSession('room_changed'); // sessionId=null → overlays clear staged SKUs + counter
       console.log('[LENSED][BG] SESSION RESET', { reason: 'room_changed', source: 'TIKTOK_ROOM', hadSession: true, hadHost: null, hadStagedSku: null });
@@ -2416,7 +2497,7 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
   }
 
   if (message.type === 'AUTO_BIND') {
-    handleAutoBind(message.sale, message.stagedSkus).then(function (res) {
+    handleAutoBind(message.sale, message.stagedSkus, message.isFlip).then(function (res) {
       // Reply the TRUTHFUL result — ok:false when the capture_events write failed even
       // if lensed_log_auction succeeded (partial:true), so the content script never
       // reports success on a P&L-breaking failure.
