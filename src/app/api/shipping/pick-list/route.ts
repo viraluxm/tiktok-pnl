@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { normalizeTracking, attachLocations } from '@/lib/shipping/scanResolve';
+import { normalizeTracking, attachLocations, DO_NOT_PACK, refundBlockedOrders } from '@/lib/shipping/scanResolve';
+import { REASON_CANCELED } from '@/lib/shipping/refundGuard';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
@@ -16,7 +17,8 @@ function logScan(fields: { user_id: string; store_id: string | null; raw_scan: s
 
 // Statuses that must NOT be packed into the box: cancelled/held (never ship) and already-gone
 // (re-picking = over-pick). Everything else — AWAITING_COLLECTION / AWAITING_SHIPMENT — is packable.
-const DO_NOT_PACK = new Set(['CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
+// DO_NOT_PACK lives in scanResolve.ts — see the note there. This route kept its own copy, the
+// same shape of duplication that made PR #225's parser fix invisible (PR #227).
 
 const BUCKET = 'inventory-thumbnails';
 
@@ -197,8 +199,14 @@ export async function POST(req: Request) {
 
   // Effective status: live when we have it, else stored. Partition the box into pick vs do-not-pack.
   const effStatus = (id: string) => liveStatus.get(id) ?? boxRows.get(id)?.status ?? '';
-  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(effStatus(id)));
-  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(effStatus(id)));
+  // A refund or cancellation outranks the order status: TikTok has already paid the buyer back,
+  // so the parcel must not go out whatever the order still says.
+  // Own admin client: the one above is scoped inside the live-status try block, and
+  // order_refund_state is service-role-only (RLS, no public policies).
+  const refundBlocked = await refundBlockedOrders(createAdminClient(), [user.id], orderIds);
+  const packStatus = (id: string) => (refundBlocked.has(id) ? REASON_CANCELED : effStatus(id));
+  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(packStatus(id)));
+  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(packStatus(id)));
 
   // 3) Bound auction items for ALL box orders; map item→order so SKUs attribute to their order
   //    (needed to split pickable SKUs from the excluded "would-have-packed" list).
