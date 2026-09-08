@@ -310,7 +310,11 @@ export async function POST(req: Request) {
   }
   const excluded = excludedOrderIds.map((id) => ({
     order_id: id,
-    reason: effStatus(id) || 'UNKNOWN',   // CANCELLED / ON_HOLD / IN_TRANSIT / DELIVERED / COMPLETED
+    // packStatus, NOT effStatus: the same function that decided to exclude the order must name
+    // the reason, or the two disagree. They did — this route reported a refunded order as
+    // COMPLETED, so the station showed the generic do-not-pack wording instead of
+    // "ORDER CANCELED, NO NEED TO PACK" while the box was in fact refunded.
+    reason: packStatus(id) || 'UNKNOWN',   // CANCELED / CANCELLED / ON_HOLD / IN_TRANSIT / DELIVERED / COMPLETED
     skus: linesByOrder.get(id) ?? [],      // what would have been packed — for the picker's awareness
   }));
 

@@ -61,5 +61,30 @@ console.log('\nThe banner the picker reads');
 eq('no exclusions -> generic, never the cancelled claim',
   packBlockHeadline([]).title, 'Nothing to pack');
 
+console.log('\nStructural: the reason must come from the same decision that excluded the order');
+{
+  const { execSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, resolve } = await import('node:path');
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+
+  // A route that filters on packStatus but labels with effStatus reports a refunded order as
+  // COMPLETED, and the picker is told the wrong thing about a box that must not ship.
+  const mislabel = execSync(
+    `grep -rn "reason: effStatus" "${root}/src" "--include=*.ts" || true`,
+    { encoding: 'utf8' },
+  ).trim().split('\n').filter(Boolean);
+  eq('no route labels an exclusion with effStatus (it ignores refunds)', mislabel.length, 0);
+
+  // Every route that partitions the box must consult the refund guard, not just one of them.
+  const routes = execSync(
+    `grep -rln "excludedOrderIds" "${root}/src/app/api" "--include=*.ts" || true`,
+    { encoding: 'utf8' },
+  ).trim().split('\n').filter(Boolean);
+  const withGuard = routes.filter((f) => /refundBlockedOrders/.test(
+    execSync(`cat "${f}"`, { encoding: 'utf8' })));
+  eq(`all ${routes.length} pick routes consult the refund guard`, withGuard.length, routes.length);
+}
+
 console.log(fails ? `\n${fails} FAILED` : '\nall passed');
 process.exit(fails ? 1 : 0);
