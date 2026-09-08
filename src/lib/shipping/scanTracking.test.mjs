@@ -6,10 +6,19 @@ import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
-// scanResolve.ts imports from @/lib/mapping/route, which this test does not exercise. Strip the
-// imports so the pure parser can be loaded on its own.
+// scanResolve.ts imports from @/lib/mapping/route and @/lib/shipping/refundGuard, neither of which
+// this test exercises. Strip the imports so the pure parser loads on its own — but REASON_CANCELED
+// is used at module scope (inside DO_NOT_PACK), so its REAL value is read from refundGuard and
+// re-declared rather than stubbed with a guess that could drift.
+const guardSrc = readFileSync(new URL('./refundGuard.ts', import.meta.url), 'utf8');
+const guardJs = ts.transpileModule(guardSrc, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const { REASON_CANCELED } = await import(`data:text/javascript,${encodeURIComponent(guardJs)}`);
+
 const srcPath = fileURLToPath(new URL('./scanResolve.ts', import.meta.url));
-const src = readFileSync(srcPath, 'utf8').replace(/^import .*$/gm, '');
+const src = `const REASON_CANCELED = ${JSON.stringify(REASON_CANCELED)};\n`
+  + readFileSync(srcPath, 'utf8').replace(/^import .*$/gm, '');
 const { outputText } = ts.transpileModule(src, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
@@ -78,6 +87,16 @@ console.log('\nThe parser exists exactly ONCE');
   eq('exactly one definition of normalizeTracking in src/', hits.length, 1);
   eq('and it lives in scanResolve.ts',
     hits[0]?.includes('lib/shipping/scanResolve.ts'), true);
+
+  // DO_NOT_PACK was duplicated the same way, found while adding the refund guard: had the guard
+  // gone into one copy only, refunded orders would still have packed via the other route.
+  const dnp = execSync(
+    `grep -rn "DO_NOT_PACK = new Set" "${root}/src" "--include=*.ts" || true`,
+    { encoding: 'utf8' },
+  ).trim().split('\n').filter(Boolean);
+  eq('exactly one definition of DO_NOT_PACK in src/', dnp.length, 1);
+  eq('and it too lives in scanResolve.ts',
+    dnp[0]?.includes('lib/shipping/scanResolve.ts'), true);
 }
 
 console.log(fails ? `\n${fails} FAILED` : '\nall passed');

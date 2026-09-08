@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { routePositionMap, sectionRoutePosition, slotAddress } from '@/lib/mapping/route';
+import { REASON_CANCELED } from '@/lib/shipping/refundGuard';
 
 // Shared scan → box resolution used by both /api/shipping/pick-list (the
 // operator-facing picker, scoped to the caller's own user_id) and
@@ -16,7 +17,45 @@ export const BUCKET = 'inventory-thumbnails';
 // Statuses that must NOT be packed into the box: cancelled/held (never ship)
 // and already-gone (re-picking = over-pick). Everything else —
 // AWAITING_COLLECTION / AWAITING_SHIPMENT — is packable.
-export const DO_NOT_PACK = new Set(['CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
+// REASON_CANCELED is stamped by the refund guard (order_refund_state, migration 133) for orders
+// TikTok has refunded or cancelled. Before it existed, a refunded order in AWAITING_COLLECTION was
+// indistinguishable from a live one and would have been packed and shipped.
+export const DO_NOT_PACK = new Set([
+  'CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED', REASON_CANCELED,
+]);
+
+/**
+ * Which of these orders TikTok has refunded or cancelled.
+ *
+ * Shared by BOTH pick paths on purpose. /api/shipping/pick-list and /api/station/scan each kept
+ * their own copy of DO_NOT_PACK, and a duplicated parser in exactly that shape cost a night of
+ * packing on 2026-09-08 (PR #227): fixing one copy was indistinguishable from fixing the rule.
+ *
+ * A read failure returns EMPTY rather than throwing, so a refund-table problem degrades to the
+ * old behaviour instead of stopping the station. That is the wrong direction for safety, so it is
+ * the one case where the guard can miss — worth it against the alternative of a warehouse that
+ * cannot pack anything because one table is unavailable.
+ */
+export async function refundBlockedOrders(
+  db: SupabaseClient,
+  userIds: string[],
+  orderIds: string[],
+): Promise<Set<string>> {
+  const blocked = new Set<string>();
+  if (!orderIds.length) return blocked;
+  // Chunked at 200: the undici 16KB request-header ceiling on `.in()` lists, same reason as
+  // IN_CHUNK in src/lib/db/readAll.ts. A box is small, but a caller could pass more.
+  for (let i = 0; i < orderIds.length; i += 200) {
+    const { data, error } = await db.from('order_refund_state')
+      .select('order_id')
+      .in('user_id', userIds)
+      .in('order_id', orderIds.slice(i, i + 200))
+      .eq('blocks_packing', true);
+    if (error) return blocked;
+    for (const r of (data ?? []) as Array<{ order_id: string }>) blocked.add(String(r.order_id));
+  }
+  return blocked;
+}
 
 // USPS IMpb mod-10 check digit, computed over the first 21 of a 22-digit
 // tracking. (Rightmost of the 21 weighted ×3, then alternating ×1/×3.) Used to
