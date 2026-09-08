@@ -82,6 +82,35 @@ export default function BadgeAdmin() {
     await loadBadges();
   };
 
+  // Rolling the kiosk out means issuing ~40 badges. One click per person made that a chore
+  // nobody would finish, which is part of why the kiosk sat unused. Sequential rather than
+  // parallel so a mid-run failure names the person it stopped on and the successes before it
+  // still stand — the route is idempotent per employee, so a re-run only fills the gaps.
+  const issueAllMissing = async () => {
+    const missing = activeEmployees.filter((e) => !activeByEmployee.get(e.id));
+    if (missing.length === 0) return;
+    if (!confirm(`Issue a badge to ${missing.length} employee${missing.length === 1 ? '' : 's'} who have none?`)) return;
+
+    setBusy(true);
+    setError(null);
+    let issued = 0;
+    for (const e of missing) {
+      const res = await fetch('/api/admin/badges', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employee_id: e.id }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(`Stopped at ${e.name}: ${j.error ?? 'could not issue badge'}. ${issued} issued before this — run again to finish the rest.`);
+        break;
+      }
+      issued += 1;
+    }
+    setBusy(false);
+    await loadBadges();
+  };
+
   const revoke = async (badgeId: string) => {
     setBusy(true);
     setError(null);
@@ -187,25 +216,36 @@ export default function BadgeAdmin() {
   };
 
   const hasAnyActiveBadge = activeByEmployee.size > 0;
+  const missingBadgeCount = activeEmployees.filter((e) => !activeByEmployee.get(e.id)).length;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-gray-900">Employee badges</h1>
+        <h1 className="text-xl font-semibold text-tt-text">Employee badges</h1>
         <button
           onClick={printSheet}
           disabled={!hasAnyActiveBadge}
-          className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"
+          className="rounded-lg border border-tt-border px-4 py-2 text-sm font-medium text-tt-text disabled:opacity-50"
         >
           Print badge sheet
         </button>
+        <button
+          onClick={issueAllMissing}
+          disabled={busy || missingBadgeCount === 0}
+          title={missingBadgeCount === 0 ? 'Everyone active already has a badge' : undefined}
+          className="rounded-lg bg-tt-cyan px-4 py-2 text-sm font-medium text-black disabled:opacity-50"
+        >
+          {missingBadgeCount === 0
+            ? 'All staff have badges'
+            : `Issue badges to ${missingBadgeCount} without one`}
+        </button>
       </div>
 
-      <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm">
+      <div className="space-y-3 rounded-lg border border-tt-border bg-tt-card/[0.03] p-4 text-sm">
         <div className="flex items-center gap-3">
-          <span className="font-medium text-gray-700">Kiosk:</span>
+          <span className="font-medium text-tt-text">Kiosk:</span>
           {kioskActive === null ? (
-            <span className="text-gray-500">checking…</span>
+            <span className="text-tt-muted">checking…</span>
           ) : kioskActive ? (
             <>
               <span className="font-medium text-emerald-700">enabled</span>
@@ -215,8 +255,8 @@ export default function BadgeAdmin() {
             </>
           ) : (
             <>
-              <span className="font-medium text-gray-600">disabled</span>
-              <button onClick={enableKiosk} disabled={busy} className="ml-auto rounded-md bg-gray-900 px-3 py-1 font-medium text-white disabled:opacity-50">
+              <span className="font-medium text-tt-muted">disabled</span>
+              <button onClick={enableKiosk} disabled={busy} className="ml-auto rounded-md bg-tt-cyan px-3 py-1 font-medium text-white disabled:opacity-50">
                 Enable kiosk
               </button>
             </>
@@ -236,28 +276,28 @@ export default function BadgeAdmin() {
           </div>
         )}
 
-        <div className="border-t border-gray-200 pt-3">
-          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">Kiosk tablets — each killed independently</p>
+        <div className="border-t border-tt-border pt-3">
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-tt-muted">Kiosk tablets — each killed independently</p>
           {kioskAccounts.length === 0 ? (
-            <p className="text-xs text-gray-500">No kiosk accounts yet. Create one in Team → “Time clock kiosk”.</p>
+            <p className="text-xs text-tt-muted">No kiosk accounts yet. Create one in Team → “Time clock kiosk”.</p>
           ) : (
             <ul className="space-y-2">
               {kioskAccounts.map((a) => (
-                <li key={a.id} className="rounded-md border border-gray-200 bg-white p-2">
+                <li key={a.id} className="rounded-md border border-tt-border bg-tt-card p-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium text-gray-800">{a.email ?? a.id}</span>
+                    <span className="text-sm font-medium text-tt-text">{a.email ?? a.id}</span>
                     {a.banned && <span className="rounded bg-red-100 px-1.5 py-0.5 text-[11px] font-medium text-red-700">killed</span>}
                     <div className="ml-auto flex gap-2">
                       <button onClick={() => kioskSession('kill', a.id)} disabled={busy} className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50">Kill (ban + rotate)</button>
-                      <button onClick={() => kioskSession('rotate', a.id)} disabled={busy} className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 disabled:opacity-50">Rotate</button>
-                      <button onClick={() => kioskSession('unban', a.id)} disabled={busy || !a.banned} className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium text-gray-700 disabled:opacity-50">Unban</button>
+                      <button onClick={() => kioskSession('rotate', a.id)} disabled={busy} className="rounded-md border border-tt-border px-2.5 py-1 text-xs font-medium text-tt-text disabled:opacity-50">Rotate</button>
+                      <button onClick={() => kioskSession('unban', a.id)} disabled={busy || !a.banned} className="rounded-md border border-tt-border px-2.5 py-1 text-xs font-medium text-tt-text disabled:opacity-50">Unban</button>
                     </div>
                   </div>
                   {reveal?.id === a.id && (
-                    <div className="mt-2 rounded-md border border-gray-300 bg-gray-50 px-2 py-1.5">
-                      <p className="text-[11px] text-gray-500">New password — shown once. Sign the tablet back in; Rotate again if you miss it.</p>
-                      <code className="mt-0.5 block break-all font-mono text-xs text-gray-900">{reveal.password}</code>
-                      <button onClick={() => setReveal(null)} className="mt-0.5 text-[11px] text-gray-500 underline">Dismiss</button>
+                    <div className="mt-2 rounded-md border border-tt-border bg-tt-card/[0.03] px-2 py-1.5">
+                      <p className="text-[11px] text-tt-muted">New password — shown once. Sign the tablet back in; Rotate again if you miss it.</p>
+                      <code className="mt-0.5 block break-all font-mono text-xs text-tt-text">{reveal.password}</code>
+                      <button onClick={() => setReveal(null)} className="mt-0.5 text-[11px] text-tt-muted underline">Dismiss</button>
                     </div>
                   )}
                 </li>
@@ -269,17 +309,17 @@ export default function BadgeAdmin() {
 
       {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
 
-      <ul className="divide-y divide-gray-200 rounded-lg border border-gray-200">
+      <ul className="divide-y divide-[rgba(255,255,255,0.06)] rounded-lg border border-tt-border">
         {activeEmployees.map((emp) => {
           const b = activeByEmployee.get(emp.id);
           return (
             <li key={emp.id} className="flex items-center justify-between gap-4 px-4 py-3">
               <div>
-                <p className="font-medium text-gray-900">{emp.name}</p>
-                <p className="text-sm text-gray-500">{emp.role}</p>
+                <p className="font-medium text-tt-text">{emp.name}</p>
+                <p className="text-sm text-tt-muted">{emp.role}</p>
               </div>
               <div className="flex items-center gap-3">
-                <label className="cursor-pointer text-sm font-medium text-gray-600 hover:text-gray-900">
+                <label className="cursor-pointer text-sm font-medium text-tt-muted hover:text-tt-text">
                   {(emp as { photo_path?: string | null }).photo_path ? 'Photo ✓' : 'Add photo'}
                   <input
                     type="file"
@@ -294,20 +334,20 @@ export default function BadgeAdmin() {
                 </label>
                 {b ? (
                   <>
-                    <code className="rounded bg-gray-100 px-2 py-1 font-mono text-sm text-gray-800">{b.code}</code>
+                    <code className="rounded bg-white/10 px-2 py-1 font-mono text-sm text-tt-text">{b.code}</code>
                     <button onClick={() => revoke(b.id)} disabled={busy} className="text-sm font-medium text-red-600 disabled:opacity-50">
                       Revoke
                     </button>
                     <button
                       onClick={async () => { await revoke(b.id); await issue(emp.id); }}
                       disabled={busy}
-                      className="text-sm font-medium text-gray-700 disabled:opacity-50"
+                      className="text-sm font-medium text-tt-text disabled:opacity-50"
                     >
                       Reissue
                     </button>
                   </>
                 ) : (
-                  <button onClick={() => issue(emp.id)} disabled={busy} className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">
+                  <button onClick={() => issue(emp.id)} disabled={busy} className="rounded-md bg-tt-cyan px-3 py-1.5 text-sm font-medium text-black disabled:opacity-50">
                     Issue badge
                   </button>
                 )}
@@ -315,7 +355,7 @@ export default function BadgeAdmin() {
             </li>
           );
         })}
-        {activeEmployees.length === 0 && <li className="px-4 py-6 text-center text-gray-500">No active employees.</li>}
+        {activeEmployees.length === 0 && <li className="px-4 py-6 text-center text-tt-muted">No active employees.</li>}
       </ul>
     </div>
   );

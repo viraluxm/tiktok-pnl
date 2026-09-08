@@ -108,6 +108,15 @@ export default function UserMenu() {
                 onClick={() => { setOpen(false); router.push('/admin/team'); }}
               />
             )}
+            {/* /admin/badges had no link anywhere in the app — the only way in was typing the
+                URL, which is part of why the badge kiosk was never rolled out. */}
+            {user?.app_metadata?.role === 'admin' && (
+              <MenuItem
+                icon={<TeamIcon />}
+                label="Badges & Kiosk"
+                onClick={() => { setOpen(false); router.push('/admin/badges'); }}
+              />
+            )}
             <MenuItem
               icon={<HelpIcon />}
               label="Help"
