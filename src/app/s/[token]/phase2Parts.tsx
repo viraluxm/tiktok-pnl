@@ -13,6 +13,12 @@ import { fmtDateLA, fmtTimeRangeLA, isOvernight } from '@/lib/schedule/format';
 // VOCABULARY. Employee-facing copy never says "release", "claim", "instance" or "materialize".
 // A dropped shift is OFFERED and the worker is told, in as many words, that it is still theirs.
 
+// PREVIEW SEAM. Each control below takes an optional `onPreview`. When supplied, submitting calls
+// it INSTEAD of post() and returns — so /preview/schedule-phase2 drives the real components and
+// the real dialogs against local React state, with no network path at all. Production never passes
+// it, so the live behaviour is byte-identical.
+export type PreviewHandler = (() => void) | undefined;
+
 async function post(url: string, body: unknown): Promise<{ ok: boolean; data: Record<string, unknown> }> {
   const res = await fetch(url, {
     method: 'POST',
@@ -41,8 +47,8 @@ function ShiftFacts({ startsAt, endsAt }: { startsAt: string; endsAt: string }) 
 
 /** DROP SHIFT — offers the shift while it stays yours. */
 export function DropShiftButton({
-  token, instanceId, startsAt, endsAt,
-}: { token: string; instanceId: string; startsAt: string; endsAt: string }) {
+  token, instanceId, startsAt, endsAt, onPreview,
+}: { token: string; instanceId: string; startsAt: string; endsAt: string; onPreview?: PreviewHandler }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -50,6 +56,7 @@ export function DropShiftButton({
 
   async function submit() {
     setBusy(true); setErr(null);
+    if (onPreview) { onPreview(); setBusy(false); setOpen(false); return; }   // preview: local state only
     const { ok, data } = await post(`/s/${token}/offer`, { instanceId });
     setBusy(false);
     if (ok) { setOpen(false); router.refresh(); }
@@ -101,8 +108,8 @@ export function DropShiftButton({
  * mismatch as STALE_OFFER rather than closing the current offer.
  */
 export function CancelOfferButton({
-  token, instanceId, offerId, startsAt, endsAt,
-}: { token: string; instanceId: string; offerId: string; startsAt: string; endsAt: string }) {
+  token, instanceId, offerId, startsAt, endsAt, onPreview,
+}: { token: string; instanceId: string; offerId: string; startsAt: string; endsAt: string; onPreview?: PreviewHandler }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -110,6 +117,7 @@ export function CancelOfferButton({
 
   async function submit() {
     setBusy(true); setErr(null);
+    if (onPreview) { onPreview(); setBusy(false); setOpen(false); return; }   // preview: local state only
     const { ok, data } = await post(`/s/${token}/cancel-offer`, { instanceId, offerId });
     setBusy(false);
     if (ok) { setOpen(false); router.refresh(); }
@@ -148,10 +156,11 @@ export function CancelOfferButton({
 
 /** PICK UP SHIFT — files a pending request. Never assigns the shift. */
 export function PickUpShiftButton({
-  token, instanceId, offerId, startsAt, endsAt, disabledReason,
+  token, instanceId, offerId, startsAt, endsAt, disabledReason, onPreview,
 }: {
   token: string; instanceId: string; offerId: string;
   startsAt: string; endsAt: string;
+  onPreview?: PreviewHandler;
   /** Employee-facing reason this viewer cannot take it; renders a static label instead. */
   disabledReason?: string | null;
 }) {
@@ -166,6 +175,7 @@ export function PickUpShiftButton({
 
   async function submit() {
     setBusy(true); setErr(null);
+    if (onPreview) { onPreview(); setBusy(false); setOpen(false); return; }   // preview: local state only
     const { ok, data } = await post(`/s/${token}/pickup`, { instanceId, offerId });
     setBusy(false);
     if (ok) { setOpen(false); router.refresh(); }

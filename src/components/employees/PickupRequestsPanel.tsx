@@ -23,7 +23,15 @@ interface PickupRequest {
   requester_name: string;
 }
 
-export default function PickupRequestsPanel() {
+// PREVIEW SEAM. `previewRequests` supplies fixture rows instead of fetching, and `onPreviewAct`
+// replaces the approve/decline POST. Supplied only by /preview/schedule-phase2; production renders
+// this component with no props, exactly as before.
+export default function PickupRequestsPanel({
+  previewRequests, onPreviewAct,
+}: {
+  previewRequests?: PickupRequest[];
+  onPreviewAct?: (claimId: string, action: 'approve' | 'decline') => void;
+} = {}) {
   const qc = useQueryClient();
   const [requests, setRequests] = useState<PickupRequest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,6 +39,12 @@ export default function PickupRequestsPanel() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (previewRequests) {                 // preview: fixture rows, no fetch
+      setRequests(previewRequests);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     try {
       const res = await fetch('/api/admin/schedule/pickups', { cache: 'no-store' });
       const body = await res.json().catch(() => ({}));
@@ -42,11 +56,12 @@ export default function PickupRequestsPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [previewRequests]);
 
   useEffect(() => { load(); }, [load]);
 
   async function act(r: PickupRequest, action: 'approve' | 'decline') {
+    if (onPreviewAct) { onPreviewAct(r.claim_id, action); return; }   // preview: local state only
     setBusyId(r.claim_id);
     setError(null);
     try {

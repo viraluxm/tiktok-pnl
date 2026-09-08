@@ -1,3 +1,5 @@
+'use client';
+
 import Link from 'next/link';
 import type { TeamScheduleWeek } from '@/lib/schedule/teamSchedule';
 import type { AvailableShift } from '@/lib/schedule/offerPlan';
@@ -27,12 +29,14 @@ function dayHeading(dateISO: string): string {
 }
 
 export default function TeamSchedule({
-  token, week, available, todayISO,
+  token, week, available, todayISO, onPreviewPickup,
 }: {
   token: string;
   week: TeamScheduleWeek;
   available: AvailableShift[];
   todayISO: string;
+  /** PREVIEW SEAM — see phase2Parts. Supplied only by /preview/schedule-phase2. */
+  onPreviewPickup?: (instanceId: string) => void;
 }) {
   const prev = addDaysISO(week.start, -7);
   const next = addDaysISO(week.start, 7);
@@ -80,6 +84,7 @@ export default function TeamSchedule({
                       startsAt={a.starts_at}
                       endsAt={a.ends_at}
                       disabledReason={a.refusal ? PICKUP_REFUSAL_MESSAGES[a.refusal] : null}
+                      onPreview={onPreviewPickup ? () => onPreviewPickup(a.id) : undefined}
                     />
                   </div>
                 </div>
