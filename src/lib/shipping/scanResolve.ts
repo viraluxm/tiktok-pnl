@@ -141,6 +141,43 @@ export async function resolveBox(
     const { data } = await db.from('synced_order_ids').select(SEL)
       .in('user_id', userIds).eq('tracking_number', tracking);
     seed = (data ?? []) as SeedRow[];
+
+    // ── A SUPERSEDED LABEL still names its box. ──
+    //
+    // TikTok re-labels combine shipments (one consolidated label -> N per-package labels), so a
+    // label already printed and stuck to a parcel can carry a tracking the order no longer
+    // stores. The parcel is physically right there; only our current-value lookup has moved on.
+    // Two records remember what was printed, and both are consulted before giving up:
+    //
+    //   1. tracking_correction_log.old_tracking — every supersede, now captured by a database
+    //      trigger (migration 132) so no write path can skip it;
+    //   2. shipping_label_purchases.tracking_number — what Lensed itself bought and printed,
+    //      which is authoritative for our own labels regardless of what sync later reported.
+    //
+    // Order matters only for cost: both are indexed point lookups and only run on a miss, so a
+    // normal scan pays nothing for this.
+    if (!seed.length) {
+      const ids = new Set<string>();
+
+      const { data: superseded } = await db.from('tracking_correction_log')
+        .select('order_id').in('user_id', userIds).eq('old_tracking', tracking);
+      for (const r of (superseded ?? []) as Array<{ order_id: string }>) ids.add(r.order_id);
+
+      if (!ids.size) {
+        const { data: printed } = await db.from('shipping_label_purchases')
+          .select('order_ids').in('user_id', userIds)
+          .eq('tracking_number', tracking).eq('status', 'purchased');
+        for (const r of (printed ?? []) as Array<{ order_ids: string[] | null }>) {
+          for (const id of r.order_ids ?? []) ids.add(id);
+        }
+      }
+
+      if (ids.size) {
+        const { data } = await db.from('synced_order_ids').select(SEL)
+          .in('user_id', userIds).in('order_id', [...ids]);
+        seed = (data ?? []) as SeedRow[];
+      }
+    }
   }
   // Order-id fallback (also belt-and-suspenders when a parsed tracking matched nothing —
   // today ~93% of synced_order_ids rows have a NULL tracking_number).
