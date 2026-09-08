@@ -25,6 +25,16 @@ export const maxDuration = 300;
 // because that is roughly where TikTok's own auto-refund lands for a late dispatch, which is the
 // case that caused the incident.
 
+// SCHEDULE (vercel.json) — two entries, deliberately:
+//
+//   ?days=2   every 2 hours — the one that protects packing. A refund that lands today is a
+//             refund against a box someone may pick this afternoon, so exposure is capped at
+//             two hours rather than a day. Cheap: a 2-day window is a few hundred records.
+//   ?days=30  daily — catches records whose STATUS changed later (a pending refund completing,
+//             or a rejection reviving an order) which a 2-day window on update time would miss.
+//
+// One daily wide sweep alone would have left up to 24h where a fresh refund was invisible to the
+// scanner, which is precisely the window in which a picker packs.
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 180;
 
