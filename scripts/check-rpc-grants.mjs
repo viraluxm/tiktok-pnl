@@ -27,6 +27,10 @@ const SRC = path.join(ROOT, 'src');
 // ungranted. Keep this list tiny and reviewed; add here when you add a service-role-only RPC.
 const SERVICE_ROLE_ONLY = new Set([
   'lensed_add_batch_admin', 'lensed_void_batch',
+  // Shift-trade approval (136) — bypasses auth.uid() and takes the owner explicitly, so a grant to
+  // `authenticated` would let any signed-in user swap another owner's shifts. Called ONLY via
+  // createAdminClient from /api/admin/schedule/trades.
+  'lensed_approve_shift_trade',
   // Service-role-only `_as` variants, invoked ONLY via createAdminClient in member routes (owner
   // passed explicitly; revoked from authenticated by 084/087). Were unregistered → the check was
   // already red on main before the kiosk PR.

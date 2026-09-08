@@ -10,6 +10,7 @@ import type { Employee, ShiftRule } from '@/types';
 import ScheduleMonthCalendar from './weekly/ScheduleMonthCalendar';
 import PendingClaimsPanel from './PendingClaimsPanel';
 import PickupRequestsPanel from './PickupRequestsPanel';
+import TradeRequestsPanel from './TradeRequestsPanel';
 import TeamScheduleLinkButton from './TeamScheduleLinkButton';
 import { Field, daysLabel, inputCls } from './shared';
 import MobileDataCard from '@/components/ui/MobileDataCard';
@@ -153,6 +154,9 @@ export default function ShiftsView({
 
       {/* Phase 2 shift swaps. Its own queue: same table, different lifecycle and write path. */}
       <PickupRequestsPanel />
+
+      {/* One-for-one trades both employees already agreed to (136). Approve swaps atomically. */}
+      <TradeRequestsPanel />
 
       <ScheduleMonthCalendar employees={employees} />
 

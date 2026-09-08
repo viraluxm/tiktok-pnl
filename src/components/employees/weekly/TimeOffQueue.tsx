@@ -21,6 +21,8 @@ export interface TimeOffRow {
   status: 'pending' | 'approved' | 'denied';
   decision_note: string | null;
   created_at: string;
+  /** planned (scheduled/claimed) shifts inside the requested range — approving does NOT remove them */
+  conflicts?: number;
 }
 
 function fmt(iso: string): string {
@@ -145,6 +147,11 @@ export default function TimeOffQueue({
                     {fmt(r.start_date)}{r.end_date !== r.start_date && ` – ${fmt(r.end_date)}`}
                   </div>
                   {r.reason && <div className="truncate text-[11px] text-tt-muted">{r.reason}</div>}
+                  {(r.conflicts ?? 0) > 0 && (
+                    <div className="mt-0.5 text-[11px] font-semibold text-tt-yellow">
+                      Conflicts with {r.conflicts} scheduled shift{r.conflicts === 1 ? '' : 's'} — approving keeps {r.conflicts === 1 ? 'it' : 'them'} on the schedule
+                    </div>
+                  )}
                 </div>
                 <div className="flex shrink-0 gap-1.5">
                   <button

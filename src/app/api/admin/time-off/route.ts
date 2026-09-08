@@ -26,7 +26,30 @@ export async function GET(req: Request) {
     console.error('[admin/time-off] read failed:', error.message);
     return NextResponse.json({ error: 'Failed to load time-off requests' }, { status: 500 });
   }
-  return NextResponse.json({ requests: data ?? [] });
+  const requests = data ?? [];
+
+  // CONFLICTS. Approving time off never deletes or reassigns a shift (see PATCH). So a manager
+  // approving a request that overlaps an already-planned shift must be TOLD, and then handle the
+  // schedule with the normal tools. Count active planned shifts (scheduled/claimed shift_instances)
+  // per request over the request's own days. Same session client, same RLS scope.
+  const pending = requests.filter((r) => r.status === 'pending');
+  const conflicts = new Map<string, number>();
+  if (pending.length > 0) {
+    const from = pending.reduce((m, r) => (r.start_date < m ? r.start_date : m), pending[0].start_date);
+    const to = pending.reduce((m, r) => (r.end_date > m ? r.end_date : m), pending[0].end_date);
+    const { data: inst } = await supabase
+      .from('shift_instances')
+      .select('employee_id, shift_date')
+      .in('employee_id', [...new Set(pending.map((r) => r.employee_id))])
+      .in('status', ['scheduled', 'claimed'])
+      .gte('shift_date', from)
+      .lte('shift_date', to);
+    for (const r of pending) {
+      const n = (inst ?? []).filter((i) => i.employee_id === r.employee_id && i.shift_date >= r.start_date && i.shift_date <= r.end_date).length;
+      conflicts.set(r.id, n);
+    }
+  }
+  return NextResponse.json({ requests: requests.map((r) => ({ ...r, conflicts: conflicts.get(r.id) ?? 0 })) });
 }
 
 // PATCH { id, status: 'approved'|'denied', note? } — decide one request.

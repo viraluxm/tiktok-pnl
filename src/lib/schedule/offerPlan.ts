@@ -39,7 +39,8 @@ export type DropRefusal =
   | 'NOT_ACTIVE'
   | 'ALREADY_OFFERED'
   | 'OFFER_CLOSED'
-  | 'RELEASED_LEGACY';
+  | 'RELEASED_LEGACY'
+  | 'IN_ACTIVE_TRADE';
 
 export const DROP_REFUSAL_MESSAGES: Record<DropRefusal, string> = {
   NOT_YOUR_SHIFT: 'That shift is not yours to drop.',
@@ -49,6 +50,9 @@ export const DROP_REFUSAL_MESSAGES: Record<DropRefusal, string> = {
   ALREADY_OFFERED: 'You have already offered this shift to your coworkers.',
   OFFER_CLOSED: 'This shift has already been picked up.',
   RELEASED_LEGACY: 'This shift is already on the old open-shift board — contact a manager.',
+  // Not decided by planDrop (which is pure); offer.ts reads shift_trades and refuses with this code so
+  // a shift can never be on the pickup board and in a pending trade at the same time.
+  IN_ACTIVE_TRADE: 'This shift is part of a pending trade. Cancel the trade before offering it.',
 };
 
 export type DropPlan = { ok: true } | { ok: false; code: DropRefusal };
