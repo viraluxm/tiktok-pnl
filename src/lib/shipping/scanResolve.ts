@@ -43,9 +43,36 @@ function uspsTrackingValid(t: string): boolean {
 //     e.g. "4208914992362903942203000007067" → "9236290394220300007067".
 export function normalizeTracking(digits: string): string | null {
   if (/^9[2-5]\d{20}$/.test(digits)) return digits;               // bare canonical tracking
-  // Candidate regions: the whole string, and after stripping "420" + ZIP5 / ZIP+4 routing.
-  const regions = [digits];
-  if (digits.startsWith('420')) { regions.push(digits.slice(8)); regions.push(digits.slice(12)); }
+
+  // (0) STRUCTURE BEFORE SEARCH. A "420" routing label is a DOCUMENTED layout — "420" + ZIP5 or
+  //     ZIP+4, then the 22-digit IMpb — so when stripping the prefix leaves exactly a valid
+  //     tracking, that is the answer and no search is needed.
+  //
+  //     This must come first, because searching finds the WRONG tracking on real labels. The
+  //     check digit is one digit: about 1 in 10 arbitrary 22-digit windows passes it by chance,
+  //     and a window starting inside the ZIP can be one of them. Measured on a live failure
+  //     (lots of steals, 2026-09-07): "420" + "79928" + "9200190394220319214706" has TWO
+  //     check-valid windows — a false one at offset 5 spanning the ZIP into the tracking, and the
+  //     real one at offset 8. Left-to-right search returned the false one, the scanner looked up
+  //     a tracking no order has ever had, and the picker was told "No matching order" while the
+  //     box sat AWAITING_COLLECTION in the database.
+  if (digits.startsWith('420')) {
+    for (const zipLen of [5, 9]) {
+      const rest = digits.slice(3 + zipLen);
+      if (/^9[2-5]\d{20}$/.test(rest) && uspsTrackingValid(rest)) return rest;
+    }
+  }
+
+  // Candidate regions for the fallback search.
+  //
+  // On a "420" label the routing prefix is DEFINITIONALLY NOT PART OF THE TRACKING, so the whole
+  // string is not a candidate at all: any window starting inside "420"+ZIP is spurious by
+  // construction, and excluding it removes that whole class of false positive rather than
+  // out-ranking it. Only the ZIP-stripped regions are searched, which is also what lets the
+  // HAZMAT zero-collapse below work on the tracking region instead of the routing digits.
+  const regions: string[] = digits.startsWith('420')
+    ? [digits.slice(8), digits.slice(12)]
+    : [digits];
   for (const region of regions) {
     // (1) a clean 22-digit window starting 9[2-5] that passes the USPS check digit.
     for (let i = 0; i + 22 <= region.length; i++) {
