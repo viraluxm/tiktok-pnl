@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { fmt } from '@/lib/calculations';
 import {
   computePay,
@@ -11,11 +11,16 @@ import {
   fmtPayDate,
   fmtMonthDay,
 } from '@/lib/employees';
+import { buildPayStatement, OVERLAP_SCAN_LOOKBACK_DAYS, type PayStatement } from '@/lib/pay/statement';
+import { addDaysISO, indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
 import PayGrid, { type PayTile } from './PayGrid';
+import PayDetailModal from './PayDetailModal';
+import ShiftEditorModal, { type EditorIntent } from './weekly/ShiftEditorModal';
+import { makeEditorHandlers } from './weekly/editorHandlers';
 
 // Pay sub-tab role filter (ported from PR #69). 'all' = everyone (default); others match
 // employees.role. Purely display — narrows which payroll rows show; no new calc/query.
@@ -26,6 +31,13 @@ const PAY_ROLE_OPTIONS: { value: PayRole; label: string }[] = [
   { value: 'host', label: 'Host' },
 ];
 
+/** Which person's detail is open, and the timestamp the statement/PDF is stamped with. Captured
+ *  at OPEN time rather than during render, so nothing here reads a clock while rendering. */
+interface DetailTarget {
+  employee: Employee;
+  generatedAtISO: string;
+}
+
 // Pay owed for the current biweekly pay period — unchanged behaviour, extracted from the
 // original EmployeesTab. Scoped to its OWN pay period (not the dashboard FiltersBar), with
 // prev/next navigation. Reuses computePay's exact hours×rate math (open + skipped excluded).
@@ -35,8 +47,30 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   const payday = useMemo(() => paydayAtOffset(periodOffset), [periodOffset]);
   const period = useMemo(() => payPeriodFor(payday), [payday]);
 
-  const { shifts: periodShifts } = useShifts(period.start, period.end);
-  const { rules, exceptions } = useShiftRules();
+  // FETCH WIDER THAN THE PERIOD, PAY ONLY THE PERIOD.
+  //
+  // A time_clock row's real interval comes from its punch instants and has no 24-hour ceiling, so
+  // a row DATED just before the period can still occupy time inside it — production holds a
+  // 47.75h punch that reaches two days past its own date. The overlap warning has to be able to
+  // see those rows or it would reproduce, in the UI, the exact date-bounded blind spot that commit
+  // 717fe22 removed from the database's own guard.
+  //
+  // The widened set feeds warnings ONLY. `periodShifts` below is filtered back to the same
+  // `date >= start && date <= end` predicate the query used before, so computePay's input — and
+  // therefore every number on this screen — is byte-for-byte what it was.
+  const scanStart = useMemo(() => addDaysISO(period.start, -OVERLAP_SCAN_LOOKBACK_DAYS), [period.start]);
+  const {
+    shifts: scanShifts,
+    addShift,
+    updateShift,
+    deleteShift,
+  } = useShifts(scanStart, period.end);
+  const { rules, exceptions, upsertException } = useShiftRules();
+
+  const periodShifts = useMemo(
+    () => scanShifts.filter((s) => s.date >= period.start && s.date <= period.end),
+    [scanShifts, period.start, period.end],
+  );
 
   const periodMaterialized = useMemo(
     () => new Set(periodShifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
@@ -63,6 +97,76 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     }
     return m;
   }, [periodGenerated]);
+
+  // ── Detail + editing ───────────────────────────────────────────────────────────────────────
+  const [detail, setDetail] = useState<DetailTarget | null>(null);
+  const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
+
+  // THE STATEMENT IS BUILT ONCE, HERE, and handed to both the detail panel and (through it) the
+  // PDF. Neither renders arithmetic of its own.
+  const statement: PayStatement | null = useMemo(
+    () =>
+      detail
+        ? buildPayStatement({
+            employee: detail.employee,
+            period: { start: period.start, end: period.end, payday },
+            shifts: scanShifts,
+            generatedAtISO: detail.generatedAtISO,
+          })
+        : null,
+    [detail, period.start, period.end, payday, scanShifts],
+  );
+
+  // Review counts for the tiles, so a manager can see WHERE the problems are before opening
+  // anyone. Derived from the same builder as the panel — one definition of "needs review".
+  const reviewCountByEmployee = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of employees) {
+      const s = buildPayStatement({
+        employee: e,
+        period: { start: period.start, end: period.end, payday },
+        shifts: scanShifts,
+        // Not rendered anywhere on this path; the tile only reads totals.reviewCount.
+        generatedAtISO: '1970-01-01T00:00:00.000Z',
+      });
+      if (s.totals.reviewCount > 0) m.set(e.id, s.totals.reviewCount);
+    }
+    return m;
+  }, [employees, period.start, period.end, payday, scanShifts]);
+
+  // The editor's own card model, built by the SAME indexer the calendars use — never by hand, so
+  // a Pay Details edit opens at the identical prefill (shiftEditPrefill) the calendar would.
+  const cardById = useMemo(() => {
+    const dates = new Set(scanShifts.map((s) => s.date));
+    const m = new Map<string, WeekShiftCard>();
+    for (const arr of indexWeekCards(scanShifts, [], dates).values()) {
+      for (const c of arr) m.set(c.id, c);
+    }
+    return m;
+  }, [scanShifts]);
+
+  const nameById = useCallback(
+    (id: string) => employees.find((e) => e.id === id)?.name ?? 'Unknown',
+    [employees],
+  );
+
+  // The app's ONE shift-editor wiring. Saving goes through useShifts.updateShift →
+  // buildShiftEditPatch, which is what decides whether a correction lands on the punch instants
+  // or the wall clock — i.e. the Pay Details edit writes the exact interval payroll reads.
+  const editorHandlers = useMemo(
+    () => makeEditorHandlers({ employees, nameById, addShift, updateShift, deleteShift, upsertException }),
+    [employees, nameById, addShift, updateShift, deleteShift, upsertException],
+  );
+
+  const canEdit = useCallback((shiftId: string) => cardById.has(shiftId), [cardById]);
+  const openEditor = useCallback(
+    (shiftId: string) => {
+      const card = cardById.get(shiftId);
+      if (card) setEditorIntent({ mode: 'card', card });
+    },
+    [cardById],
+  );
+
   // Role filter applied on the already-computed pay rows (no recompute — just narrows which
   // rows show). The period selector still drives the numbers.
   const filteredPay = useMemo(
@@ -75,8 +179,9 @@ export default function PayView({ employees }: { employees: Employee[] }) {
       hours: p.hours,
       pay: p.pay,
       scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
+      reviewCount: reviewCountByEmployee.get(p.employee.id) ?? 0,
     })),
-    [filteredPay, plannedHoursByEmployee],
+    [filteredPay, plannedHoursByEmployee, reviewCountByEmployee],
   );
   const totals = useMemo(
     () =>
@@ -92,6 +197,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   );
 
   return (
+    <>
     <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
       <div className="px-6 py-5 border-b border-tt-border">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -175,6 +281,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
         rows={tiles}
         fmt={fmt}
         fmtHours={fmtHours}
+        onOpen={(t) => setDetail({ employee: t.employee, generatedAtISO: new Date().toISOString() })}
         emptyMessage={
           pay.length === 0
             ? 'No employees yet'
@@ -184,5 +291,27 @@ export default function PayView({ employees }: { employees: Employee[] }) {
         }
       />
     </div>
+
+    {/* Rendered as SIBLINGS of the panel above, not inside it: the panel is `backdrop-blur-xl
+        overflow-hidden`, which would become the containing block for a fixed child and clip it.
+        (PayDetailModal also portals to body; the editor keeps the placement every other caller
+        gives it.) */}
+    {statement && (
+      <PayDetailModal
+        statement={statement}
+        onClose={() => setDetail(null)}
+        onEditRow={openEditor}
+        canEdit={canEdit}
+      />
+    )}
+    {editorIntent && (
+      <ShiftEditorModal
+        intent={editorIntent}
+        handlers={editorHandlers}
+        initialScreen="edit"
+        onClose={() => setEditorIntent(null)}
+      />
+    )}
+    </>
   );
 }
