@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { createClient } from '@/lib/supabase/client';
 import type { Shift } from '@/types';
 import { buildShiftEditPatch, type EditableShiftRow } from '@/lib/shifts/punchEdit';
+import { manualWorkedErrorMessage } from '@/lib/shifts/manualWorked';
 import { useUser } from './useUser';
 
 export interface ShiftInput {
@@ -11,6 +12,8 @@ export interface ShiftInput {
   date: string;
   start_time: string;
   end_time: string | null; // null = save as an OPEN shift (in progress)
+  /** Unpaid break. Omitted reads as 0 — the column is NOT NULL DEFAULT 0. */
+  break_minutes?: number;
 }
 
 // Shifts for the selected pay period (dateFrom/dateTo). Nulls fetch all shifts.
@@ -53,21 +56,37 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
     },
   });
 
+  // Create a MANUAL, PAYABLE worked shift — the Worked / Missed Punch correction.
+  //
+  // SERVER-AUTHORITATIVE, and deliberately no longer a plain insert. A direct
+  // `.from('shifts').insert()` had no protection against creating a second payable row over time
+  // the employee is already paid for: production carries 12 such overlapping pairs, every one a
+  // manual row stacked on a real punch. A client-side "check then insert" cannot fix that —
+  // PostgREST cannot express `INSERT … WHERE NOT EXISTS`, so two managers saving at once both read
+  // "no conflict" and both write.
+  //
+  // lensed_create_manual_worked_shift (migration 131) takes a per-employee advisory lock, re-reads
+  // the employee's worked intervals, refuses an OVERLAP (not a same-day collision — split shifts
+  // stay legal) and inserts, all in one transaction. This is the ONLY client-side write that
+  // creates a `shifts` row, so routing it here protects BOTH the day-card "Add Worked Time"
+  // shortcut and the older Advanced "Worked / Missed Punch" lane at a single point.
+  //
+  // Scheduled shifts do NOT come through here — they are `shift_instances`, written by
+  // useScheduleBulk, and are never payable.
   const addShift = useMutation({
     mutationFn: async (input: ShiftInput) => {
-      const { data, error } = await supabase
-        .from('shifts')
-        .insert({ ...input, user_id: user!.id })
-        .select('*')
-        .single();
-      if (error) {
-        // Partial unique index idx_shifts_one_open_per_employee (migration 052) — the
-        // server-side backstop for "one open shift per employee".
-        if (error.code === '23505') {
-          throw new Error('This person already has an open shift — end it first.');
-        }
-        throw error;
-      }
+      // No `rpc-grants:` annotation here on purpose — that annotation is for DYNAMIC .rpc(expr)
+      // calls only (see supabase/migrations/CONVENTIONS.md). This name is a literal, so
+      // check-rpc-grants.mjs collects it directly.
+      const { data, error } = await supabase.rpc('lensed_create_manual_worked_shift', {
+        p_employee_id: input.employee_id,
+        p_date: input.date,
+        p_start_time: input.start_time,
+        p_end_time: input.end_time,
+        p_break_minutes: input.break_minutes ?? 0,
+      });
+      // Tokens in, sentences out — a raw Postgres error never reaches the manager.
+      if (error) throw new Error(manualWorkedErrorMessage(error));
       return data;
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shifts'] }),

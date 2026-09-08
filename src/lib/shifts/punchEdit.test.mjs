@@ -391,8 +391,17 @@ console.log('\n10 — raw punch log untouched');
     [...new Set(tables)].join(','));
 
   const rpcs = [...hookCode.matchAll(/\.rpc\(([^)]*)\)/g)].map((m) => m[1].trim());
-  check('LOOKUP GUARD: the confirm RPC call is still present', rpcs.length === 1, rpcs.join(' | '));
-  check('updateShift added no new RPC', rpcs.every((r) => r.startsWith('fn')), rpcs.join(' | '));
+  // TWO call sites, and only these two: the dynamic confirm/unconfirm pair (`fn`), and the
+  // guarded manual-worked creator that REPLACED addShift's raw insert (migration 131). This guard
+  // exists to catch an unreviewed third write path appearing in the hook, so it is widened by
+  // exactly the one call that was added — not relaxed to "any rpc".
+  check('LOOKUP GUARD: both RPC call sites are present', rpcs.length === 2, rpcs.join(' | '));
+  check('the hook calls only the confirm pair and the guarded worked-shift creator',
+    rpcs.every((r) => r.startsWith('fn') || r.startsWith("'lensed_create_manual_worked_shift'")),
+    rpcs.join(' | '));
+  // The point of routing creation through the RPC: there is no longer ANY raw insert into shifts
+  // from the client, so the overlap guard cannot be bypassed by the app itself.
+  check('the hook never inserts into shifts directly any more', !/\.from\('shifts'\)\s*\.insert/.test(hookCode));
 
   check('no DDL shipped in this module', !/alter\s+table|create\s+(table|trigger|constraint)/i.test(src));
 }
