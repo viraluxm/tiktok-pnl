@@ -24,7 +24,7 @@ interface PickupRequest {
 }
 
 // PREVIEW SEAM. `previewRequests` supplies fixture rows instead of fetching, and `onPreviewAct`
-// replaces the approve/decline POST. Supplied only by /preview/schedule-phase2; production renders
+// replaces the approve/decline POST. Supplied only by /preview/employee-portal; production renders
 // this component with no props, exactly as before.
 export default function PickupRequestsPanel({
   previewRequests, onPreviewAct,

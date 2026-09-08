@@ -76,3 +76,17 @@ body {
 .animate-fade-in-5 { animation: fadeIn 0.4s ease both; animation-delay: 0.25s; }
 .animate-fade-in-6 { animation: fadeIn 0.4s ease both; animation-delay: 0.3s; }
 .animate-fade-in-7 { animation: fadeIn 0.4s ease both; animation-delay: 0.35s; }
+
+/* Employee portal: every enabled control is a pointer target (Tailwind v4 resets buttons to default). */
+.portal-root button:not(:disabled) { cursor: pointer; }
+
+/* Employee portal sheet: a short ease-out slide on phones; none under reduced motion. */
+@keyframes portalSheetUp {
+  from { transform: translateY(24px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.portal-sheet { animation: portalSheetUp 0.22s cubic-bezier(0.22, 1, 0.36, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .portal-sheet { animation: none; }
+  .animate-fade-in, .animate-fade-in-1, .animate-fade-in-2, .animate-fade-in-3 { animation: none; }
+}

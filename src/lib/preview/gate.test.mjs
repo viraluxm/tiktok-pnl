@@ -40,7 +40,7 @@ check('completely empty env denies under production', isPreviewRouteAllowed({ NO
 check('no keys at all is allowed (undefined NODE_ENV = not production)', isPreviewRouteAllowed({}) === true);
 
 // The route file must actually USE the gate and notFound() — a gate nobody calls is decoration.
-const routeSrc = readFileSync(fileURLToPath(new URL('../../app/preview/schedule-phase2/page.tsx', import.meta.url)), 'utf8');
+const routeSrc = readFileSync(fileURLToPath(new URL('../../app/preview/employee-portal/page.tsx', import.meta.url)), 'utf8');
 const code = routeSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 check('the route imports the gate', /isPreviewRouteAllowed/.test(code));
 check('the route calls notFound() when denied', /if\s*\(!isPreviewRouteAllowed\(\)\)\s*notFound\(\)/.test(code));
