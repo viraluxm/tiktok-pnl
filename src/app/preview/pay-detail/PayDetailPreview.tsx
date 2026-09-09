@@ -3,12 +3,14 @@
 import { useCallback, useMemo, useState } from 'react';
 import { computePay } from '@/lib/employees';
 import { buildPayStatement } from '@/lib/pay/statement';
+import { canDeleteRecord, deleteBlockedReasonFor } from '@/lib/pay/deleteEligibility';
 import { buildShiftEditPatch, type EditableShiftRow } from '@/lib/shifts/punchEdit';
 import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { fmt } from '@/lib/calculations';
 import { fmtHours } from '@/components/employees/shared';
 import PayGrid, { type PayTile } from '@/components/employees/PayGrid';
 import PayDetailModal from '@/components/employees/PayDetailModal';
+import OverlayLayer from '@/components/employees/OverlayLayer';
 import ShiftEditorModal, { type EditorIntent, type EditorHandlers } from '@/components/employees/weekly/ShiftEditorModal';
 import type { Employee, Shift } from '@/types';
 import { PREVIEW_EMPLOYEES, PREVIEW_GENERATED_AT, PREVIEW_PERIOD, PREVIEW_SHIFTS } from './fixtures';
@@ -95,6 +97,12 @@ export default function PayDetailPreview() {
     [employees],
   );
 
+  // The same shared eligibility rule production uses — manual rows only.
+  const handleDeleteRow = useCallback(async (shiftId: string) => {
+    setShifts((rows) => rows.filter((r) => r.id !== shiftId));
+    setSaved('Record deleted — totals rebuilt.');
+  }, []);
+
   const openEditor = useCallback(
     (shiftId: string) => {
       const card = cardById.get(shiftId);
@@ -155,15 +163,21 @@ export default function PayDetailPreview() {
           onClose={() => setDetail(null)}
           onEditRow={openEditor}
           canEdit={(id) => cardById.has(id)}
+          onDeleteRow={handleDeleteRow}
+          canDelete={canDeleteRecord}
+          deleteBlockedReason={deleteBlockedReasonFor}
         />
       )}
+      {/* Same body-level layering as production — this is the fix under review. */}
       {editorIntent && (
-        <ShiftEditorModal
-          intent={editorIntent}
-          handlers={handlers}
-          initialScreen="edit"
-          onClose={() => setEditorIntent(null)}
-        />
+        <OverlayLayer>
+          <ShiftEditorModal
+            intent={editorIntent}
+            handlers={handlers}
+            initialScreen="edit"
+            onClose={() => setEditorIntent(null)}
+          />
+        </OverlayLayer>
       )}
     </div>
   );

@@ -517,8 +517,9 @@ console.log('\n§12 There is only one payroll calculation');
     check(`${label} carries no anomaly presentation`, !JUDGY.test(strip(code)));
   }
   check('the tile grid has no review badge', !/badge|reviewCount/i.test(strip(grid)));
-  check('the detail panel groups by day rather than listing a flat table',
-    /workedDayGroups\(statement\)/.test(modal));
+  check('the detail panel lays the period out week by week, not as a flat table',
+    /payPeriodWeeks\(statement\)/.test(modal),
+    'payPeriodWeeks carries every calendar day, including the ones nobody worked');
 
   // The not-paid records stay reachable but folded shut, last on the page — context when someone
   // goes looking for it, never something competing with the payable rows.
@@ -527,7 +528,7 @@ console.log('\n§12 There is only one payroll calculation');
   check('...labelled by count, in plain words',
     /not included in pay/.test(modal) && /<summary/.test(modal));
   check('...and it sits after the payable rows, not before them',
-    modal.indexOf('workedDayGroups') < modal.indexOf('not included in pay'));
+    modal.indexOf('payPeriodWeeks') < modal.indexOf('not included in pay'));
   check('the disclosure carries no count badge or colour alarm',
     !/bg-tt-yellow|text-tt-yellow|bg-tt-red|text-tt-red/.test(
       modal.slice(modal.indexOf('function NotPaid'))),

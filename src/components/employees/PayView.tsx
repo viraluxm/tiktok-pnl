@@ -12,6 +12,7 @@ import {
   fmtMonthDay,
 } from '@/lib/employees';
 import { buildPayStatement, type PayStatement } from '@/lib/pay/statement';
+import { canDeleteRecord, deleteBlockedReasonFor } from '@/lib/pay/deleteEligibility';
 import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
@@ -19,6 +20,7 @@ import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
 import PayGrid, { type PayTile } from './PayGrid';
 import PayDetailModal from './PayDetailModal';
+import OverlayLayer from './OverlayLayer';
 import ShiftEditorModal, { type EditorIntent } from './weekly/ShiftEditorModal';
 import { makeEditorHandlers } from './weekly/editorHandlers';
 
@@ -127,6 +129,17 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   );
 
   const canEdit = useCallback((shiftId: string) => cardById.has(shiftId), [cardById]);
+
+  // Delete eligibility is one shared rule (lib/pay/deleteEligibility) with the schema evidence
+  // behind it — manual rows only, because a deleted time-clock row is recreated by the reconciler.
+  // The canonical delete, then a refetch: the statement is rebuilt from what the database says,
+  // never from an optimistic guess about what the totals should now be.
+  const handleDeleteRow = useCallback(
+    async (shiftId: string) => {
+      await deleteShift.mutateAsync(shiftId);
+    },
+    [deleteShift],
+  );
   const openEditor = useCallback(
     (shiftId: string) => {
       const card = cardById.get(shiftId);
@@ -259,25 +272,32 @@ export default function PayView({ employees }: { employees: Employee[] }) {
       />
     </div>
 
-    {/* Rendered as SIBLINGS of the panel above, not inside it: the panel is `backdrop-blur-xl
-        overflow-hidden`, which would become the containing block for a fixed child and clip it.
-        (PayDetailModal also portals to body; the editor keeps the placement every other caller
-        gives it.) */}
     {statement && (
       <PayDetailModal
         statement={statement}
         onClose={() => setDetail(null)}
         onEditRow={openEditor}
         canEdit={canEdit}
+        onDeleteRow={handleDeleteRow}
+        canDelete={canDeleteRecord}
+        deleteBlockedReason={deleteBlockedReasonFor}
       />
     )}
+    {/* THE EDITOR MUST BE A BODY-LEVEL LAYER ABOVE THE PANEL THAT OPENED IT.
+        Rendered inline here it mounted and prefilled correctly but was painted underneath Pay
+        Details — same z-50, and the panel is portalled to the end of <body> while this sits deep
+        inside body's first child, so DOM order decided it. Clicking Edit looked like a dead
+        button. OverlayLayer portals it out of the dashboard's filtered ancestors and puts it at
+        z-60. Every other caller of ShiftEditorModal is untouched. */}
     {editorIntent && (
-      <ShiftEditorModal
-        intent={editorIntent}
-        handlers={editorHandlers}
-        initialScreen="edit"
-        onClose={() => setEditorIntent(null)}
-      />
+      <OverlayLayer>
+        <ShiftEditorModal
+          intent={editorIntent}
+          handlers={editorHandlers}
+          initialScreen="edit"
+          onClose={() => setEditorIntent(null)}
+        />
+      </OverlayLayer>
     )}
     </>
   );
