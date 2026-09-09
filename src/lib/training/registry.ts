@@ -26,6 +26,10 @@ export interface PracticeSessionRow {
   started_at: string | null;
   ended_at: string | null;
   last_seen_at: string | null;
+  // How many timeline events this session recorded (migration 139). Present on the
+  // list read so History can say what there is to replay; 0 for a session that
+  // never ran.
+  event_count: number;
 }
 
 // Where a session is in its life:

@@ -384,6 +384,13 @@ function SessionHistory({ sessions }: { sessions: PracticeSessionRow[] }) {
               </span>
               <span className="flex shrink-0 items-baseline gap-3 text-[12px] tabular-nums text-tt-muted">
                 <span>{formatPracticeRunLength(s)}</span>
+                {/* What was actually captured. Until the replay player exists this is
+                    the honest answer to "is there anything to watch?" — and a
+                    session with 0 recorded moments would otherwise look identical
+                    to one with a full timeline. */}
+                <span title="Timeline moments recorded for replay">
+                  {s.event_count} {s.event_count === 1 ? 'moment' : 'moments'}
+                </span>
                 <span>
                   {new Date(s.ended_at ?? s.created_at).toLocaleDateString(undefined, {
                     month: 'short',

@@ -21,6 +21,12 @@ export const dynamic = 'force-dynamic';
 // internal column later cannot silently start shipping it to the browser.
 const ROW_COLUMNS = 'id, trainee_name, purpose, created_at, started_at, ended_at, last_seen_at';
 
+// The list additionally carries how many timeline events each session recorded, so
+// History can say what is actually there to replay. PostgREST computes this as an
+// embedded aggregate over the foreign key, so it costs no extra round trip and no
+// event rows cross the wire.
+const LIST_COLUMNS = `${ROW_COLUMNS}, practice_events(count)`;
+
 // GET /api/admin/training/sessions — every session for this owner, newest first.
 // Status is NOT returned: it is derived from these timestamps by
 // derivePracticeStatus so the server and the launcher can never disagree.
@@ -31,7 +37,7 @@ export async function GET() {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from('practice_sessions')
-    .select(ROW_COLUMNS)
+    .select(LIST_COLUMNS)
     .eq('owner_id', gate.ownerId)
     .order('created_at', { ascending: false })
     // Practice sessions are transient and hand-created, so this ceiling is far
@@ -41,10 +47,18 @@ export async function GET() {
     .limit(500);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(
-    { sessions: (data ?? []) as PracticeSessionRow[] },
-    { headers: { 'Cache-Control': 'no-store' } },
-  );
+
+  // Flatten the embedded aggregate — PostgREST returns it as practice_events:
+  // [{count}] — into a plain number, so the client never has to know it came from
+  // a join.
+  const sessions: PracticeSessionRow[] = (data ?? []).map((row) => {
+    const { practice_events: agg, ...rest } = row as typeof row & {
+      practice_events?: { count: number }[] | null;
+    };
+    return { ...(rest as Omit<PracticeSessionRow, 'event_count'>), event_count: agg?.[0]?.count ?? 0 };
+  });
+
+  return NextResponse.json({ sessions }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 // POST /api/admin/training/sessions { trainee_name?, purpose?, id? }

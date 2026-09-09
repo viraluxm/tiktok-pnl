@@ -25,6 +25,9 @@ const trainerEventsSrc = read('../../components/training/trainerEvents.ts');
 const deleteRoute = read('../../app/api/admin/training/sessions/[id]/route.ts');
 const logHook = read('./usePracticeLog.ts');
 const eventsRoute = read('../../app/api/admin/training/events/route.ts');
+const listRoute = read('../../app/api/admin/training/sessions/route.ts');
+const practicePage = read('../../app/(app)/admin/training/practice-mode/page.tsx');
+const sessionLib = read('./session.ts');
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -343,5 +346,49 @@ check(
   eventsRoute.indexOf(".eq('owner_id', gate.ownerId)") < eventsRoute.indexOf(".from('practice_events')"),
 );
 check('the events route caps the batch size', /PRACTICE_LOG_MAX_BATCH/.test(eventsRoute));
+
+// ── P0-6: however a session ends, the timeline must say so ──
+// finish() covers the 30-minute expiry, but a host far more often just closes the
+// tab. Without session_complete on pagehide a replay renders the session as still
+// running at the end — the gap the first real test run exposed.
+check(
+  'pagehide records session_complete before the final flush',
+  logHook.indexOf("add('session_complete'") < logHook.indexOf('sendBeacon'),
+);
+check(
+  'it is guarded by startedRef, so a never-started session logs nothing',
+  /if \(startedRef\.current\) \{\s*\n\s*bufferRef\.current\.add\('session_complete'/.test(logHook),
+);
+check(
+  'session_complete is also recorded on a clean 30-minute finish',
+  /finish = useCallback[\s\S]{0,400}add\('session_complete'/.test(logHook),
+);
+
+// ── neither admin screen can strand the manager on a URL-only exit ──
+check(
+  'the back target is defined once and shared',
+  /PRACTICE_BACK_HREF = '\/dashboard\?tab=shows'/.test(sessionLib),
+);
+check(
+  'it returns to the Shows TAB, not a bare /dashboard',
+  /tab=shows/.test(sessionLib),
+);
+check('the launcher page has the back link', /PRACTICE_BACK_HREF/.test(practicePage));
+check('the controller has the back link', /PRACTICE_BACK_HREF/.test(controlClient));
+check(
+  'the HOST screen does NOT (it is the trainee\'s full-bleed phone view)',
+  !/PRACTICE_BACK_HREF/.test(liveSimulator),
+);
+
+// ── History must say what there is to replay ──
+check(
+  'the list read carries an event count as an embedded aggregate (no extra round trip)',
+  /practice_events\(count\)/.test(listRoute),
+);
+check(
+  'the aggregate is flattened to a plain number for the client',
+  /event_count: agg\?\.\[0\]\?\.count \?\? 0/.test(listRoute),
+);
+check('History surfaces the recorded moment count', /event_count/.test(launcher));
 
 console.log(`\n${passed} checks passed`);

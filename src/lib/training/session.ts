@@ -83,6 +83,14 @@ export function trainingControllerUrl(origin: string, sessionId: string): string
 // to ~39 bytes, so even several hundred sessions stay far under the ~5 MiB
 // origin quota (40 ids ≈ 1.5 KB ≈ 0.03%). Kept pure so they're unit-testable.
 
+// Where the admin training screens return to. Practice Mode is entered from the
+// dashboard's Shows tab, whose selection is URL-backed (?tab=shows) — so this goes
+// back to that exact tab rather than dumping the manager on the default dashboard
+// view. Kept here beside the other training URL helpers so both screens use one
+// definition.
+export const PRACTICE_BACK_HREF = '/dashboard?tab=shows';
+export const PRACTICE_BACK_LABEL = '\u2190 Back to Shows';
+
 // LEGACY (migration 136): the launcher's session index now lives in the
 // practice_sessions table. parseLauncherSessions is still used, once, to IMPORT
 // whatever a browser's old localStorage array still holds; addLauncherSession and

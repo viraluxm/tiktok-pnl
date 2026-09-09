@@ -84,6 +84,16 @@ export function usePracticeLog(sessionId: string) {
   // that actually fires on iOS Safari — the platform the host screen runs on.
   useEffect(() => {
     const onPageHide = () => {
+      // Close the timeline here too, not only in finish(). finish() runs when the
+      // 30-minute clock expires, but a host far more often just closes the tab —
+      // and without this the log would have no session_complete, so a replay would
+      // render the session as still going at the end. Matches what the heartbeat
+      // hook already does on pagehide (it beacons /end), so the row and the
+      // timeline agree on how the session finished.
+      if (startedRef.current) {
+        bufferRef.current.add('session_complete', {}, performance.now());
+        startedRef.current = false;
+      }
       const batch = bufferRef.current.take(PRACTICE_LOG_MAX_BATCH);
       if (batch.length === 0) return;
       try {

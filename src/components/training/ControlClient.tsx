@@ -10,7 +10,12 @@ import {
   type TrainerEvent,
 } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
-import { shortTrainingSessionLabel } from '@/lib/training/session';
+import Link from 'next/link';
+import {
+  shortTrainingSessionLabel,
+  PRACTICE_BACK_HREF,
+  PRACTICE_BACK_LABEL,
+} from '@/lib/training/session';
 import TrainerVideoView from './TrainerVideoView';
 
 // ---- Auto-bid tuning (module-level: stable identity, no per-render churn) ----
@@ -246,6 +251,14 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
         </div>
       )}
       <div className="mx-auto w-full max-w-md lg:max-w-4xl">
+        {/* Same stranding problem as the launcher: the controller opens in its own
+            tab and had no way back except the URL bar. */}
+        <Link
+          href={PRACTICE_BACK_HREF}
+          className="mb-3 inline-block text-[13px] text-tt-cyan hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
+        >
+          {PRACTICE_BACK_LABEL}
+        </Link>
         <header className="flex items-center justify-between">
           <div className="flex items-baseline gap-2">
             <h1 className="text-lg font-bold">Practice Controller</h1>
