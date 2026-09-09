@@ -5,9 +5,9 @@ import { useEffect, useMemo, useState } from 'react';
 // The shared catalog, read-only, for an external seller.
 //
 // Cost is shown on purpose: a seller who cannot see cost cannot tell whether a price loses money.
-// Everything here comes from /api/partner/inventory, which is org-scoped and has no write verbs —
+// Everything here comes from /api/seller/inventory, which is org-scoped and has no write verbs —
 // the seller reads the shelf, they never edit it.
-interface PartnerSku {
+interface SellerSku {
   id: string;
   sku_number: number | null;
   barcode: string | null;
@@ -21,15 +21,15 @@ interface PartnerSku {
 const money = (cents: number | null) =>
   cents == null ? '—' : `$${(cents / 100).toFixed(2)}`;
 
-export default function PartnerInventory() {
-  const [skus, setSkus] = useState<PartnerSku[] | null>(null);
+export default function SellerInventory() {
+  const [skus, setSkus] = useState<SellerSku[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
   const [inStockOnly, setInStockOnly] = useState(true);
 
   useEffect(() => {
     let alive = true;
-    fetch('/api/partner/inventory')
+    fetch('/api/seller/inventory')
       .then(async (res) => {
         const body = await res.json().catch(() => ({}));
         if (!alive) return;

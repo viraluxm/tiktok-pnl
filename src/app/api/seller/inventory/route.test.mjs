@@ -1,6 +1,6 @@
-// GET /api/partner/inventory — the only route that shows an external seller our data.
+// GET /api/seller/inventory — the only route that shows an external seller our data.
 //
-// Exercises the REAL route and the REAL requirePartnerScope, transpiled at runtime. Stubbed:
+// Exercises the REAL route and the REAL requireSellerScope, transpiled at runtime. Stubbed:
 // next/server, the Supabase server client (session + a recording query builder), and @/lib/org.
 //
 // The fake client RECORDS every filter, so these assert the PREDICATE. Two things must hold no
@@ -8,7 +8,7 @@
 // to RLS. Mutation-checked by hand — delete `.eq('org_id', orgId)` and "scopes the read to the
 // caller's own org" goes red.
 //
-// Run:  TZ=UTC node src/app/api/partner/inventory/route.test.mjs
+// Run:  TZ=UTC node src/app/api/seller/inventory/route.test.mjs
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +16,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import ts from 'typescript';
 
-const dir = mkdtempSync(join(tmpdir(), 'partnerinv-'));
+const dir = mkdtempSync(join(tmpdir(), 'sellerinv-'));
 const write = (name, src) => { const p = join(dir, name); writeFileSync(p, src); return pathToFileURL(p).href; };
 function transpile(srcRel, outName, rewrites = {}) {
   const srcPath = fileURLToPath(new URL(srcRel, import.meta.url));
@@ -34,7 +34,7 @@ const clientStub = write('clientStub.mjs',
   'export async function createClient(){ return globalThis.__DB; }\n');
 const orgStub = write('orgStub.mjs', 'export async function getOrgId(){ return globalThis.__MEMBER_ORG; }\n');
 
-const guardUrl = transpile('../../../../lib/partner/guard.ts', 'guard.mjs', {
+const guardUrl = transpile('../../../../lib/seller/guard.ts', 'guard.mjs', {
   "'server-only'": `'${serverOnly}'`,
   "'next/server'": `'${nextStub}'`,
   "'@/lib/supabase/server'": `'${clientStub}'`,
@@ -42,7 +42,7 @@ const guardUrl = transpile('../../../../lib/partner/guard.ts', 'guard.mjs', {
 });
 const { GET } = await import(transpile('./route.ts', 'route.mjs', {
   "'next/server'": `'${nextStub}'`,
-  "'@/lib/partner/guard'": `'${guardUrl}'`,
+  "'@/lib/seller/guard'": `'${guardUrl}'`,
 }));
 
 const ORG_A = 'org-a';
@@ -78,7 +78,7 @@ function fakeDb(user) {
     },
   };
 }
-const partner = (extra = {}) => ({ id: 'u-partner', app_metadata: { role: 'partner', ...extra } });
+const seller = (extra = {}) => ({ id: 'u-seller', app_metadata: { role: 'seller', ...extra } });
 
 let passed = 0;
 const results = [];
@@ -88,7 +88,7 @@ async function t(name, fn) {
 }
 
 await t('scopes the read to the CALLER\'S OWN org, written into the query', async () => {
-  globalThis.__DB = fakeDb(partner({ org_id: ORG_A }));
+  globalThis.__DB = fakeDb(seller({ org_id: ORG_A }));
   globalThis.__MEMBER_ORG = null;
   const res = await GET();
   assert.equal(res.status, 200, JSON.stringify(res.body));
@@ -98,13 +98,13 @@ await t('scopes the read to the CALLER\'S OWN org, written into the query', asyn
 });
 
 await t('inactive SKUs are not offered for sale', async () => {
-  globalThis.__DB = fakeDb(partner({ org_id: ORG_A }));
+  globalThis.__DB = fakeDb(seller({ org_id: ORG_A }));
   const res = await GET();
   assert.equal(res.body.skus.some((s) => s.id === 's2'), false);
 });
 
 await t('falls back to the org membership when app_metadata.org_id is unstamped', async () => {
-  globalThis.__DB = fakeDb(partner());
+  globalThis.__DB = fakeDb(seller());
   globalThis.__MEMBER_ORG = ORG_A;
   const res = await GET();
   assert.equal(res.status, 200);
@@ -112,14 +112,14 @@ await t('falls back to the org membership when app_metadata.org_id is unstamped'
 });
 
 await t('a stamped org_id WINS over the membership', async () => {
-  globalThis.__DB = fakeDb(partner({ org_id: ORG_B }));
+  globalThis.__DB = fakeDb(seller({ org_id: ORG_B }));
   globalThis.__MEMBER_ORG = ORG_A;
   await GET();
   assert.equal(globalThis.__DB.queries.find((x) => x.table === 'inventory_skus').eq.org_id, ORG_B);
 });
 
-await t('a partner with NO org is a 500, never an empty shelf', async () => {
-  globalThis.__DB = fakeDb(partner());
+await t('a seller with NO org is a 500, never an empty shelf', async () => {
+  globalThis.__DB = fakeDb(seller());
   globalThis.__MEMBER_ORG = null;
   const res = await GET();
   assert.equal(res.status, 500);
@@ -134,7 +134,7 @@ for (const [label, user] of [
   ['a member', { id: 'u-mem', app_metadata: { role: 'member', scopes: ['inventory'] } }],
   ['a timeclock kiosk', { id: 'u-tc', app_metadata: { role: 'timeclock' } }],
 ]) {
-  await t(`${label} is 403 on the partner route`, async () => {
+  await t(`${label} is 403 on the seller route`, async () => {
     globalThis.__DB = fakeDb(user);
     globalThis.__MEMBER_ORG = ORG_A;
     const res = await GET();
@@ -152,10 +152,10 @@ await t('unauthenticated is 401', async () => {
 await t('the route exposes no write verb', async () => {
   const mod = await import(transpile('./route.ts', 'route2.mjs', {
     "'next/server'": `'${nextStub}'`,
-    "'@/lib/partner/guard'": `'${guardUrl}'`,
+    "'@/lib/seller/guard'": `'${guardUrl}'`,
   }));
   for (const verb of ['POST', 'PATCH', 'PUT', 'DELETE']) {
-    assert.equal(mod[verb], undefined, `${verb} must not exist — a partner never edits our catalog`);
+    assert.equal(mod[verb], undefined, `${verb} must not exist — a seller never edits our catalog`);
   }
 });
 

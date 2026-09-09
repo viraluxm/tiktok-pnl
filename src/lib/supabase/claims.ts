@@ -9,7 +9,7 @@
 // A Supabase access token carries TWO different things called "role":
 //   • `claims.role`            → the POSTGRES role. Always the literal 'authenticated' for a
 //                                signed-in user. NOT an app role.
-//   • `claims.app_metadata.role` → OUR role ('station' | 'member' | 'timeclock' | 'partner' |
+//   • `claims.app_metadata.role` → OUR role ('station' | 'member' | 'timeclock' | 'seller' |
 //                                'admin' | unset).
 // Reading the former would give every user role='authenticated', which is not undefined and not
 // 'admin', so it falls into the fail-closed catch-all below and locks EVERY user out of the app.
@@ -38,7 +38,7 @@ export const STATION_CONFINEMENT: Confinement = { home: '/fulfillment', allow: [
 // owner-from-app_metadata (never client input).
 export const TIMECLOCK_CONFINEMENT: Confinement = { home: '/kiosk', allow: ['/kiosk', '/api/kiosk'] };
 
-// ── partner ──────────────────────────────────────────────────────────────────────────────────
+// ── seller ──────────────────────────────────────────────────────────────────────────────────
 // An EXTERNAL seller who runs their own TikTok shop and sells from our shared inventory. Unlike
 // station/member/timeclock they own real data — their own shop, shows, orders and labels, under
 // their own user_id — so they are not a sub-user reading as us. They are a separate tenant with a
@@ -47,10 +47,10 @@ export const TIMECLOCK_CONFINEMENT: Confinement = { home: '/kiosk', allow: ['/ki
 // WHY A CONFINED ROLE AND NOT AN UNCONFINED ONE. Two reasons, both structural:
 //
 //  1. THE CAPTURE RELAY. (app)/layout.tsx mounts useExtensionAuth, which hands the signed-in
-//     session to the capture extension. A partner legitimately owns a store, so the eligibility
+//     session to the capture extension. A seller legitimately owns a store, so the eligibility
 //     guard passes them — and if they ever signed into lensed.io on a warehouse capture machine,
 //     captures would write under THEIR user_id. Confining them out of (app) is what makes that
-//     impossible rather than merely unlikely; the (partner) layout does not mount the relay, for
+//     impossible rather than merely unlikely; the (seller) layout does not mount the relay, for
 //     exactly the reason (station) does not.
 //
 //  2. synced_order_ids HAS NO RLS. Orders are scoped by hand-written .eq('user_id', …) filters in
@@ -61,21 +61,21 @@ export const TIMECLOCK_CONFINEMENT: Confinement = { home: '/kiosk', allow: ['/ki
 // So the allowlist is short, and every entry is a route already scoped to the CALLER (user_id, and
 // for labels user_id + store_id) — never one that resolves the store owners. '/auth/tiktok/callback'
 // is in it because the confinement check runs BEFORE the OAuth-callback allowance below, and
-// without it a partner could never finish connecting their own shop.
+// without it a seller could never finish connecting their own shop.
 //
 // DELIBERATELY EXCLUDED, and why:
 //   /dashboard + the (app) group  — our numbers, and the capture relay.
 //   /api/tiktok/disconnect        — it DELETES that store's synced orders, which are the record of
 //                                   what they sold from our stock. Removal is an owner action.
-//   /api/inventory/*              — org-scoped AND writable: it would let a partner edit our
-//                                   catalog. They read inventory through /api/partner/inventory.
+//   /api/inventory/*              — org-scoped AND writable: it would let a seller edit our
+//                                   catalog. They read inventory through /api/seller/inventory.
 //   /api/team, /api/labor, /api/admin/*, /api/chat — payroll, staff, admin, assistant.
 //   /api/member/*, /api/station/*, /api/kiosk/*    — these read as the store OWNERS.
-export const PARTNER_CONFINEMENT: Confinement = {
-  home: '/partner',
+export const SELLER_CONFINEMENT: Confinement = {
+  home: '/seller',
   allow: [
-    '/partner',
-    '/api/partner',
+    '/seller',
+    '/api/seller',
     // Connecting their own shop: the OAuth handshake, plus the store switcher and sync/status
     // endpoints, all of which filter on the caller's own user_id.
     '/auth/tiktok/callback',
@@ -136,7 +136,7 @@ export function roleHomeFor(role: string | undefined, scopes: unknown): string {
   return role === 'station' ? '/fulfillment'
     : role === 'member' ? memberConfinement(scopes).home
       : role === 'timeclock' ? '/kiosk'
-        : role === 'partner' ? '/partner'
+        : role === 'seller' ? '/seller'
           : '/dashboard';
 }
 
@@ -151,7 +151,7 @@ export function confinementFor(role: string | undefined, scopes: unknown): Confi
   if (role === 'station') return STATION_CONFINEMENT;
   if (role === 'member') return memberConfinement(scopes);
   if (role === 'timeclock') return TIMECLOCK_CONFINEMENT;
-  if (role === 'partner') return PARTNER_CONFINEMENT;
+  if (role === 'seller') return SELLER_CONFINEMENT;
   return { home: '/login', allow: [] };
 }
 

@@ -3,11 +3,11 @@
 import { useStores, useSetActiveStore } from '@/hooks/useStores';
 import { useTikTok } from '@/hooks/useTikTok';
 
-// The partner's own shop: connect it, pick which one is active, sync it.
+// The seller's own shop: connect it, pick which one is active, sync it.
 //
 // NOT a reuse of TikTokConnect. That component offers Disconnect, which DELETES the store's synced
-// orders — the record of what the partner sold from our stock, and the thing we reconcile against.
-// /api/tiktok/disconnect is therefore not in the partner allowlist, and rendering a button that
+// orders — the record of what the seller sold from our stock, and the thing we reconcile against.
+// /api/tiktok/disconnect is therefore not in the seller allowlist, and rendering a button that
 // 403s would be worse than not rendering it. Removal is an owner action.
 //
 // Every endpoint touched here (/api/stores, /api/stores/active, /api/tiktok/auth, status, sync)
@@ -16,7 +16,7 @@ import { useTikTok } from '@/hooks/useTikTok';
 const connectHref = (storeId: string) => `/api/tiktok/auth?store_id=${encodeURIComponent(storeId)}`;
 const NEW_STORE_HREF = '/api/tiktok/auth?new=1';
 
-export default function PartnerShop() {
+export default function SellerShop() {
   const { data: storesData, isLoading } = useStores();
   const setActive = useSetActiveStore();
   const { syncProgress, sync } = useTikTok();

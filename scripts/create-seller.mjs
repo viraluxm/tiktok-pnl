@@ -1,11 +1,11 @@
-// Provision ONE external seller (role='partner').
+// Provision ONE external seller (role='seller').
 //
 // DRY RUN BY DEFAULT. It prints exactly what it would do and writes nothing unless --apply.
 //
-//   dry run:  node scripts/create-partner.mjs --email seller@example.com
-//   apply:    node scripts/create-partner.mjs --email seller@example.com --apply
+//   dry run:  node scripts/create-seller.mjs --email seller@example.com
+//   apply:    node scripts/create-seller.mjs --email seller@example.com --apply
 //
-// WHY A SCRIPT AND NOT THE TEAM UI. Provisioning a partner is not the same shape as adding a
+// WHY A SCRIPT AND NOT THE TEAM UI. Provisioning a seller is not the same shape as adding a
 // sub-user: it needs an auth account AND an organization_members row, because org membership is
 // what grants shared-inventory access through the is_org_member RLS on inventory_skus /
 // sku_batches / products / product_costs. It is also rare — a couple of people, ever — so it does
@@ -13,13 +13,13 @@
 // account by accident.
 //
 // WHAT IT DOES (two writes, in this order):
-//   1. auth user, app_metadata = { role: 'partner', org_id }  → middleware confines them to
-//      /partner/* (PARTNER_CONFINEMENT); the password is printed ONCE and never stored by us.
+//   1. auth user, app_metadata = { role: 'seller', org_id }  → middleware confines them to
+//      /seller/* (SELLER_CONFINEMENT); the password is printed ONCE and never stored by us.
 //   2. organization_members(org_id, user_id, role='member')    → shared inventory becomes readable.
 // If step 2 fails, step 1 is rolled back, so a half-provisioned account is never left behind.
 //
 // WHAT IT DELIBERATELY DOES NOT DO:
-//   • No store, and no store_members row. The partner connects their OWN shop through the normal
+//   • No store, and no store_members row. The seller connects their OWN shop through the normal
 //     OAuth flow (/api/tiktok/auth?new=1), which creates the store and makes them its owner. A
 //     store we created for them would sit in OUR org and be the wrong shape entirely.
 //   • Nothing to our own account, our stores, or any existing user.
@@ -35,7 +35,7 @@ const email = args.includes('--email') && emailArg && !emailArg.startsWith('--')
 const orgArg = args.includes('--org') ? args[args.indexOf('--org') + 1] : null;
 
 if (!email || !email.includes('@')) {
-  console.error('✗ Usage: node scripts/create-partner.mjs --email seller@example.com [--org <org_id>] [--apply]');
+  console.error('✗ Usage: node scripts/create-seller.mjs --email seller@example.com [--org <org_id>] [--apply]');
   process.exit(2);
 }
 
@@ -65,7 +65,7 @@ if (!orgId) {
   if (orgs.length !== 1) {
     console.error(
       `✗ ${orgs.length} organizations exist — pass --org <org_id> to say which inventory this ` +
-      `partner sells from. Refusing to guess.\n  ${orgs.map((o) => `${o.id}  ${o.name}`).join('\n  ')}`,
+      `seller sells from. Refusing to guess.\n  ${orgs.map((o) => `${o.id}  ${o.name}`).join('\n  ')}`,
     );
     process.exit(1);
   }
@@ -77,7 +77,7 @@ if (!orgId) {
 const orgName = orgs.find((o) => String(o.id) === orgId)?.name ?? '(unknown)';
 
 // ── refuse to touch an existing account ──
-// A partner is a NEW tenant. Re-pointing an existing account at role='partner' would silently
+// A seller is a NEW tenant. Re-pointing an existing account at role='seller' would silently
 // change what an already-signed-in person can reach, so that is a decision to make by hand.
 let existing = null;
 for (let page = 1; page <= 50; page++) {
@@ -90,14 +90,14 @@ for (let page = 1; page <= 50; page++) {
 if (existing) {
   console.error(
     `✗ ${email} already exists (id ${existing.id}, role ${existing.app_metadata?.role ?? '(none)'}).\n` +
-    '  Refusing to change an existing account into a partner — do that deliberately, by hand.',
+    '  Refusing to change an existing account into a seller — do that deliberately, by hand.',
   );
   process.exit(1);
 }
 
-const appMetadata = { role: 'partner', org_id: orgId };
+const appMetadata = { role: 'seller', org_id: orgId };
 
-console.log(`=== CREATE PARTNER — ${APPLY ? 'APPLY' : 'DRY RUN'} ===`);
+console.log(`=== CREATE SELLER — ${APPLY ? 'APPLY' : 'DRY RUN'} ===`);
 console.log(`project:  ${SUPABASE_URL.replace(/^https:\/\//, '').split('.')[0]}`);
 console.log(`email:    ${email}`);
 console.log(`org:      ${orgId}  (${orgName})`);
@@ -107,9 +107,9 @@ console.log('WOULD DO:');
 console.log(`  1. create auth user ${email} with app_metadata ${JSON.stringify(appMetadata)}`);
 console.log(`  2. insert organization_members(org_id=${orgId}, user_id=<new>, role='member')`);
 console.log('');
-console.log('THEY WILL REACH:  /partner, /partner/inventory, /partner/labels');
+console.log('THEY WILL REACH:  /seller, /seller/inventory, /seller/labels');
 console.log('THEY WILL NOT:    /dashboard, Team/payroll, /admin/*, the assistant, or any');
-console.log('                  owner-scoped route (see PARTNER_CONFINEMENT in src/lib/supabase/claims.ts)');
+console.log('                  owner-scoped route (see SELLER_CONFINEMENT in src/lib/supabase/claims.ts)');
 console.log('NEXT, BY THEM:    connect their own shop at /api/tiktok/auth?new=1 — we create no store');
 
 if (!APPLY) {
@@ -133,7 +133,7 @@ const userId = created.user.id;
 console.log(`\n✓ created auth user ${userId}`);
 
 // ── 2. org membership = shared inventory access. Roll back the account if this fails, so we never
-//      leave a partner who can sign in and see an empty shelf with no idea why.
+//      leave a seller who can sign in and see an empty shelf with no idea why.
 const { error: memErr } = await admin
   .from('organization_members')
   .insert({ org_id: orgId, user_id: userId, role: 'member' });

@@ -1,21 +1,21 @@
-// THE PARTNER GROUP MUST NEVER MOUNT THE CAPTURE RELAY.
+// THE SELLER GROUP MUST NEVER MOUNT THE CAPTURE RELAY.
 //
-// This is the whole reason the (partner) route group exists, and it is a property of a React tree
+// This is the whole reason the (seller) route group exists, and it is a property of a React tree
 // that this repo has no renderer for — so it is asserted on the real source, the same way
 // practiceModeWiring.test.mjs pins its component invariants.
 //
 // THE FAILURE IT CATCHES: useExtensionAuth hands the signed-in session to the capture extension,
-// which writes capture_events under that token's user_id. A partner legitimately owns a store, so
-// the relay's eligibility guard PASSES them. If a partner page ever ended up under a layout that
+// which writes capture_events under that token's user_id. A seller legitimately owns a store, so
+// the relay's eligibility guard PASSES them. If a seller page ever ended up under a layout that
 // mounts the relay — moved into (app), or someone adding the hook here "for consistency" — a
-// partner signing into lensed.io on a warehouse capture machine would silently take over capture:
+// seller signing into lensed.io on a warehouse capture machine would silently take over capture:
 // accepted by own-row RLS, invisible to the owner, no error anywhere. That is the 2026-07-22 shape
 // (383 orders orphaned).
 //
 // It cannot be caught by using the app: everything looks fine until the wrong rows appear under
 // the wrong account days later. So it is pinned here.
 //
-// Run:  node src/app/(partner)/layout.wiring.test.mjs
+// Run:  node src/app/(seller)/layout.wiring.test.mjs
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
@@ -42,7 +42,7 @@ function walk(dir) {
   return out;
 }
 const groupFiles = walk(here).filter((f) => !f.endsWith('.test.mjs'));
-check('the (partner) group has files to check', groupFiles.length >= 2, `${groupFiles.length} files`);
+check('the (seller) group has files to check', groupFiles.length >= 2, `${groupFiles.length} files`);
 
 for (const f of groupFiles) {
   const src = readFileSync(f, 'utf8');

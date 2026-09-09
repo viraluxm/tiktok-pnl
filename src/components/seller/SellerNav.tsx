@@ -2,20 +2,20 @@
 
 import Link from 'next/link';
 
-// Nav for the confined /partner pages. A fixed three-item set: unlike MemberNav there are no
-// per-account scopes to filter on — every partner reaches exactly these pages, and middleware
-// (PARTNER_CONFINEMENT) is the real gate. Nothing here links out of /partner, because nothing
+// Nav for the confined /seller pages. A fixed three-item set: unlike MemberNav there are no
+// per-account scopes to filter on — every seller reaches exactly these pages, and middleware
+// (SELLER_CONFINEMENT) is the real gate. Nothing here links out of /seller, because nothing
 // outside it is reachable: our dashboard, Team, payroll, admin and assistant are all 403/redirect
 // for this role. Rendering a link to any of them would only produce a bounce.
 const NAV_ITEMS = [
-  { id: 'shop', href: '/partner', label: 'My shop' },
-  { id: 'inventory', href: '/partner/inventory', label: 'Inventory' },
-  { id: 'labels', href: '/partner/labels', label: 'Labels' },
+  { id: 'shop', href: '/seller', label: 'My shop' },
+  { id: 'inventory', href: '/seller/inventory', label: 'Inventory' },
+  { id: 'labels', href: '/seller/labels', label: 'Labels' },
 ] as const;
 
-export type PartnerTab = (typeof NAV_ITEMS)[number]['id'];
+export type SellerTab = (typeof NAV_ITEMS)[number]['id'];
 
-export default function PartnerNav({ active }: { active: PartnerTab }) {
+export default function SellerNav({ active }: { active: SellerTab }) {
   return (
     <nav className="mb-6 flex flex-wrap gap-1">
       {NAV_ITEMS.map((i) => (
