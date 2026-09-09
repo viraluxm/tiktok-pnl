@@ -14,6 +14,14 @@ import { PRACTICE_ROOM_OPTIONS } from '@/lib/training/media';
 // Best-effort: any failure is swallowed so the practice simulator keeps working.
 // Does not acquire its own camera (no second getUserMedia) and does not own the
 // device track (userProvidedTrack) — the simulator keeps full control of streamRef.
+// Why a publish did not happen. The old code returned void and swallowed every
+// failure in a bare catch, which is why "Waiting for host video…" was the only
+// symptom available for a fault anywhere between the token route and the SFU.
+// Recording made that unacceptable: a host must be told WHY nothing is recording.
+export type PublishResult =
+  | { ok: true; tracks: PublishedTracks }
+  | { ok: false; reason: string };
+
 export interface PublishedTracks {
   videoTrackId: string;
   // null when the host has no microphone — the recording start route omits the
@@ -37,9 +45,9 @@ export function useVideoPublish(sessionId: string) {
   }, []);
 
   const publish = useCallback(
-    async (stream: MediaStream): Promise<PublishedTracks | null> => {
+    async (stream: MediaStream): Promise<PublishResult> => {
       const videoTrack = stream.getVideoTracks()[0];
-      if (!videoTrack) return null;
+      if (!videoTrack) return { ok: false, reason: 'no camera track' };
       // Avoid duplicate rooms/connections if called again while connected.
       if (roomRef.current) await stop();
       try {
@@ -50,9 +58,22 @@ export function useVideoPublish(sessionId: string) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ role: 'host', session: sessionId }),
         });
-        if (!res.ok) return null; // 401/403/500 (or middleware redirect) -> skip video silently
+        // An expired session is 307'd to /login by middleware and, because fetch
+        // follows redirects, arrives as a 200 with HTML — res.ok would be TRUE.
+        if (res.redirected) return { ok: false, reason: 'sign-in expired' };
+        if (!res.ok) {
+          return {
+            ok: false,
+            reason:
+              res.status === 403
+                ? 'this account is not an admin'
+                : res.status === 500
+                  ? 'LiveKit is not configured on the server'
+                  : `video token failed (${res.status})`,
+          };
+        }
         const { token, url } = (await res.json()) as { token?: string; url?: string };
-        if (!token || !url) return null;
+        if (!token || !url) return { ok: false, reason: 'video token was empty' };
 
         // dynacast lets the SFU pause simulcast layers nobody is watching, which
         // is the publisher half of the bandwidth fix (adaptiveStream on the
@@ -61,7 +82,15 @@ export function useVideoPublish(sessionId: string) {
         // demand, which is the dominant Wi-Fi cost when ~20 hosts publish at once.
         const room = new Room(PRACTICE_ROOM_OPTIONS);
         roomRef.current = room;
-        await room.connect(url, token);
+        // Separated from the publish below so the two failure modes are
+        // distinguishable: reaching the SFU at all, versus being allowed to send.
+        try {
+          await room.connect(url, token);
+        } catch (err) {
+          await stop();
+          const detail = err instanceof Error ? err.message : String(err);
+          return { ok: false, reason: `could not reach LiveKit — ${detail}` };
+        }
 
         // Reuse the existing tracks; userProvidedTrack=true keeps device ownership
         // with the simulator (LiveKit won't stop/reacquire them).
@@ -89,11 +118,16 @@ export function useVideoPublish(sessionId: string) {
 
         // The SIDs the egress request needs. Video is required; without it there
         // is nothing to record, so resolve null rather than a half-usable pair.
-        return videoPub.trackSid ? { videoTrackId: videoPub.trackSid, audioTrackId } : null;
-      } catch {
-        // Video is non-fatal — ensure we don't leak a half-open room.
+        if (!videoPub.trackSid) {
+          return { ok: false, reason: 'camera published without a track id' };
+        }
+        return { ok: true, tracks: { videoTrackId: videoPub.trackSid, audioTrackId } };
+      } catch (err) {
+        // Still non-fatal to the practice session — but the reason is reported
+        // now instead of vanishing.
         await stop();
-        return null;
+        const detail = err instanceof Error ? err.message : String(err);
+        return { ok: false, reason: `publish failed — ${detail}` };
       }
     },
     [sessionId, stop],

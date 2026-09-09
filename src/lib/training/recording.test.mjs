@@ -158,8 +158,28 @@ check(
   /PublishedTracks/.test(publish) && /videoPub\.trackSid/.test(publish),
 );
 check(
-  'a publish failure resolves null rather than throwing into the session',
-  /return null/.test(publish),
+  'a publish failure returns a REASON rather than a bare null',
+  /PublishResult/.test(publish) && /ok: false, reason:/.test(publish),
+);
+check(
+  'connect and publish failures are distinguishable',
+  /could not reach LiveKit/.test(publish) && /publish failed/.test(publish),
+);
+check(
+  'a 403 is named as a non-admin account, not a generic failure',
+  /not an admin/.test(publish),
+);
+check(
+  'a 500 is named as missing server config',
+  /LiveKit is not configured on the server/.test(publish),
+);
+check(
+  'the login-redirect trap is handled in the publish path too',
+  /res\.redirected/.test(publish),
+);
+check(
+  'the host surfaces the publisher\'s own reason, not a generic symptom',
+  /setState\(\{ kind: 'failed', reason: published\.reason \}\)/.test(hook),
 );
 check(
   'recording starts only AFTER publish resolves (the SIDs must exist in the room first)',

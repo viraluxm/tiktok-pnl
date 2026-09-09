@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useRef, useState } from 'react';
-import type { PublishedTracks } from '@/lib/training/useVideoPublish';
+import type { PublishResult } from '@/lib/training/useVideoPublish';
 
 // Starts and stops the server-side recording for one practice session.
 //
@@ -21,15 +21,16 @@ export function usePracticeRecording(sessionId: string) {
   const startedRef = useRef(false);
 
   const start = useCallback(
-    async (tracks: PublishedTracks | null) => {
+    async (published: PublishResult) => {
       if (startedRef.current) return;
-      // No published video track means LiveKit never came up. Say so plainly
-      // rather than leaving the indicator at idle, which reads as "not recording
-      // yet" instead of "will not record".
-      if (!tracks) {
-        setState({ kind: 'failed', reason: 'Video did not connect — nothing to record.' });
+      // Carry the publisher's OWN reason through. "Video did not connect" was true
+      // but useless — it named the symptom, not the cause, and the cause is the
+      // only thing that lets anyone fix it mid-session.
+      if (!published.ok) {
+        setState({ kind: 'failed', reason: published.reason });
         return;
       }
+      const tracks = published.tracks;
       startedRef.current = true;
       try {
         const res = await fetch('/api/admin/training/recording/start', {

@@ -482,9 +482,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     // Publish, then start recording with the SIDs it returns. Sequenced (not
     // parallel) because a track-composite egress is defined BY those SIDs, so it
     // cannot be requested until the tracks actually exist in the room.
-    void publishVideo(stream).then((tracks) => {
+    void publishVideo(stream).then((published) => {
       if (!mountedRef.current) return;
-      void recording.start(tracks);
+      void recording.start(published);
     });
   }
 
