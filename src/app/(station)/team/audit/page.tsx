@@ -364,14 +364,33 @@ export default function MemberAuditPage() {
                   <div className="rounded-lg border-2 border-tt-red/50 bg-tt-red/10 px-3 py-2 text-sm text-tt-red">{rerr}</div>
                 )}
 
+                {/* The dismiss affordance differs by row because the two dismissals MEAN different
+                    things, and the server records them as different verdicts (migration 141).
+
+                    On a NOT-FIXABLE row it is the only action available, so it is a real button —
+                    and it must not claim "not a mistake". That row's buyer paid for one item and
+                    was sent two; the error is real, just past fixing. It files `too_late`.
+
+                    On a fixable row Keep is the expected action, so dismissing stays a quiet link,
+                    and there the claim is actually true. It files `keep_multi`. */}
                 <div className="flex justify-end pt-1">
-                  <button
-                    onClick={() => doDismiss(r)}
-                    disabled={busy}
-                    className="text-xs text-tt-muted underline hover:text-tt-text disabled:opacity-40"
-                  >
-                    {r.line_count === 1 ? `Not a mistake — they really bought ${r.units}` : 'Not a mistake — they really won both'}
-                  </button>
+                  {!r.unpacked ? (
+                    <button
+                      onClick={() => doDismiss(r)}
+                      disabled={busy}
+                      className="rounded-lg border-2 border-tt-border px-4 py-2 text-xs font-semibold text-tt-text hover:bg-tt-card-hover disabled:opacity-40"
+                    >
+                      {busy ? 'Dismissing…' : 'Dismiss — can’t be fixed now'}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => doDismiss(r)}
+                      disabled={busy}
+                      className="text-xs text-tt-muted underline hover:text-tt-text disabled:opacity-40"
+                    >
+                      {r.line_count === 1 ? `Not a mistake — they really bought ${r.units}` : 'Not a mistake — they really won both'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
