@@ -150,12 +150,13 @@ begin
   delete from public.employee_time_entries; delete from public.shifts;
   s := mk_punch(carlos);
 
+  -- The NEW two-argument RPC carries the host rule. A stated NULL is a refusal: that is the exact
+  -- shape the app sends when the manager left the hours box blank. (The legacy one-argument overload
+  -- kept by 137 is deliberately NOT bound by this rule — see its own section below.)
   perform t_reject('a live host CANNOT be confirmed without approved minutes',
-    format('select public.lensed_confirm_time_clock_shift(%L)', s), 'HOST_APPROVED_MINUTES_REQUIRED');
+    format('select public.lensed_confirm_time_clock_shift(%L, null)', s), 'HOST_APPROVED_MINUTES_REQUIRED');
   perform t_eq('…and the refusal wrote nothing', (select confirmed_at from public.shifts where id = s), null::timestamptz);
   perform t_eq('…including no approval', (select approved_minutes from public.shifts where id = s), null::integer);
-  perform t_reject('explicit NULL is refused just the same',
-    format('select public.lensed_confirm_time_clock_shift(%L, null)', s), 'HOST_APPROVED_MINUTES_REQUIRED');
 
   -- The whole point: the host is NOT silently paid their clocked span (8h32m = 512 minutes).
   perform t_eq('a refused host confirm leaves NO figure that could pay 512 minutes',
@@ -169,7 +170,7 @@ begin
   -- 'Live Host' (free-text spelling) is recognised by the same predicate.
   s2 := mk_punch(lee, '2026-09-10');
   perform t_reject('the "Live Host" spelling is also required to state hours',
-    format('select public.lensed_confirm_time_clock_shift(%L)', s2), 'HOST_APPROVED_MINUTES_REQUIRED');
+    format('select public.lensed_confirm_time_clock_shift(%L, null)', s2), 'HOST_APPROVED_MINUTES_REQUIRED');
 
   -- ═══ UNCONFIRM withdraws the approval with the confirmation ═══
   res := public.lensed_unconfirm_time_clock_shift(s);
@@ -189,6 +190,90 @@ begin
     (select approved_minutes is null and confirmed_at is not null from public.shifts where id = s), true);
 
   perform t_report('live host requirement, unconfirm, correction');
+end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════════════════════════
+-- THE LEGACY ONE-ARGUMENT OVERLOAD — transition compatibility during the deployment window
+--
+-- 137 is ADDITIVE: it keeps lensed_confirm_time_clock_shift(uuid) so the app version deployed
+-- BEFORE Approved Hours keeps confirming while the migration is live and the new code is not out
+-- yet. That old client has no hours box to type into, so the legacy path must behave exactly as it
+-- did before 137 — confirm the punch, write no approval, and above all GUESS NOTHING. A shift
+-- confirmed this way reads approved_minutes IS NULL, which paidShiftHours() resolves to the legacy
+-- clocked calculation: identical pay to what that same confirmation produced yesterday.
+-- ═══════════════════════════════════════════════════════════════════════════════════════════════
+do $$
+declare
+  carlos uuid := 'e1111111-0000-4000-8000-000000000001';
+  madison uuid := 'e2222222-0000-4000-8000-000000000002';
+  s uuid; s2 uuid; s3 uuid; res jsonb; before_in timestamptz; before_out timestamptz;
+begin
+  delete from public.employee_time_entries; delete from public.shifts;
+
+  -- A LIVE HOST through the legacy call CONFIRMS. Refusing here is what would break every
+  -- confirmation in the currently deployed app the moment 137 is applied.
+  s := mk_punch(carlos);
+  select clock_in_at, clock_out_at into before_in, before_out from public.shifts where id = s;
+  res := public.lensed_confirm_time_clock_shift(s);
+  perform t_eq('the legacy 1-arg call confirms a live host (pre-137 behaviour, unchanged)',
+    (res->>'confirmed_at') is not null, true);
+  perform t_eq('…and leaves approved_minutes NULL — it guesses NO live duration',
+    (select approved_minutes from public.shifts where id = s), null::integer);
+  perform t_eq('…so that shift keeps the legacy clocked calculation for payroll',
+    (select approved_minutes is null and confirmed_at is not null from public.shifts where id = s), true);
+  perform t_eq('…and it never reports an approval it did not make',
+    (res ? 'approved_minutes'), false);
+  perform t_eq('…and the raw punch is untouched by the legacy path too',
+    (select clock_in_at = before_in and clock_out_at = before_out from public.shifts where id = s), true);
+  perform t_eq('…and 137''s widened guard did not break it (confirmed_by is stamped)',
+    (select confirmed_by from public.shifts where id = s), 'a0000000-0000-4000-8000-000000000001'::uuid);
+
+  -- After the code deploy the manager fixes such a shift WITHOUT unconfirming it: the correction
+  -- RPC is the migration path for anything confirmed during the window.
+  perform public.lensed_set_approved_minutes(s, 478);
+  perform t_eq('a legacy-confirmed host shift can be approved afterwards, no unconfirm needed',
+    (select approved_minutes from public.shifts where id = s), 478);
+  perform t_eq('…and that correction still did not touch the punch',
+    (select clock_in_at = before_in and clock_out_at = before_out from public.shifts where id = s), true);
+
+  -- Fulfillment through the legacy call: same as before 137 in every respect.
+  s2 := mk_punch(madison, '2026-09-11');
+  res := public.lensed_confirm_time_clock_shift(s2);
+  perform t_eq('the legacy call still confirms fulfillment',
+    (res->>'confirmed_at') is not null, true);
+  perform t_eq('…with no approval written', (select approved_minutes from public.shifts where id = s2), null::integer);
+  -- 071 promised idempotence (double-tap safety); the widened guard must not have cost it.
+  res := public.lensed_confirm_time_clock_shift(s2);
+  perform t_eq('the legacy call is still idempotent', (res->>'confirmed_at') is not null, true);
+  perform t_eq('…and the repeat did not invent an approval',
+    (select approved_minutes from public.shifts where id = s2), null::integer);
+
+  -- The guard is unchanged for everyone: keeping the legacy RPC did not open a direct-write door.
+  --
+  -- ONE THING TO KNOW ABOUT ASSERTING THE GUARD HERE: every confirm/correction RPC unlocks the
+  -- guarded columns with set_config('lensed.confirm_ctx','on', TRUE) — transaction-local, which is
+  -- 070/071 behaviour that 137 does not change. PostgREST runs each RPC in its own transaction, so
+  -- in production that unlock dies with the request and a later direct UPDATE from the same client
+  -- arrives in a fresh, locked transaction. This DO block is a SINGLE transaction that has already
+  -- called those RPCs above, so it is still legitimately unlocked and must clear the flag by hand
+  -- to model a fresh request. Without this line the next two assertions would pass trivially.
+  perform set_config('lensed.confirm_ctx', '', true);
+  s3 := mk_punch(madison, '2026-09-12');
+  perform t_reject('a direct UPDATE still cannot confirm, legacy overload or not',
+    format('update public.shifts set confirmed_at = now() where id = %L', s3), 'CONFIRMATION_IS_SERVER_ONLY');
+  perform t_reject('…nor set an approval',
+    format('update public.shifts set approved_minutes = 60 where id = %L', s3), 'CONFIRMATION_IS_SERVER_ONLY');
+
+  -- Both call shapes are reachable in the SAME transaction: proof there is no overload ambiguity.
+  -- If the new argument had a default, one of these two lines would raise "function is not unique".
+  -- (These RPCs unlock the guard again, so they come AFTER the two guard assertions above.)
+  perform public.lensed_confirm_time_clock_shift(s3);
+  perform t_eq('1-arg then 2-arg on the same shift both resolve (no ambiguity)',
+    (public.lensed_confirm_time_clock_shift(s3, 300)->>'approved_minutes'), '300');
+  perform t_eq('…and the two-argument call is what wrote the figure',
+    (select approved_minutes from public.shifts where id = s3), 300);
+
+  perform t_report('legacy one-argument overload (transition compatibility)');
 end $$;
 
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════

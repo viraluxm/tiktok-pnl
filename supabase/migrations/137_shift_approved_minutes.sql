@@ -9,14 +9,47 @@
 --      column (verified absent 2026-09-08, read-only) and that the two confirm functions still
 --      match the bodies rebuilt below.
 --
--- ⚠️ DEPLOY ORDER — APPLY THIS **WITH OR AFTER** THE CODE DEPLOY, NEVER BEFORE.
---    The confirm RPC below REFUSES to confirm a LIVE HOST shift without an explicit approved
---    duration (HOST_APPROVED_MINUTES_REQUIRED). The manager UI that collects that value ships in
---    the same change. Between an early apply and the code deploy, host confirmations would be
---    refused — loudly, and with nothing written. That is the safe failure and the whole point of
---    this migration: a host's clocked span must never become payroll by default. Fulfillment
---    confirmations keep working throughout (the new argument is DEFAULTed, so the old one-argument
---    call still resolves).
+-- ✅ DEPLOY ORDER — FULLY ADDITIVE. THIS MAY BE APPLIED **BEFORE** THE CODE DEPLOY.
+--    Nothing existing is dropped or narrowed, so there is no window in which shift confirmation
+--    can fail:
+--      • the LEGACY one-argument confirm RPC (migration 071) is left in place, untouched, and
+--        keeps behaving exactly as it does in production today — it confirms and leaves
+--        approved_minutes NULL, which payroll reads as the legacy calculation;
+--      • the NEW two-argument confirm RPC is added alongside it and carries the approved duration.
+--    The currently-deployed app sends only p_shift_id and keeps resolving to the legacy function;
+--    the new app sends both arguments and resolves to the new one. Both work throughout the deploy.
+--
+--    ⚠️ WHY THE NEW ARGUMENT HAS NO DEFAULT — this is the load-bearing detail of the additive
+--    rollout. An earlier draft of this migration DROPPED the one-argument function and gave the new
+--    one `p_approved_minutes integer default null`, because two overloads where the second is
+--    fully defaulted make `lensed_confirm_time_clock_shift(p_shift_id => …)` AMBIGUOUS — Postgres
+--    raises "function is not unique" and EVERY existing confirm call breaks. Keeping both overloads
+--    is therefore only safe with NO default on the new argument: a one-argument call can then match
+--    only the legacy function, and a two-argument call only the new one. Do not add a default back
+--    while the legacy overload exists.
+--
+-- 🧹 CLEANUP, LATER AND SEPARATELY (do NOT fold it into this file). Once production is confirmed to
+--    be running the new client everywhere — i.e. no caller sends a bare p_shift_id to confirm any
+--    more — the legacy overload should be removed by its own migration:
+--
+--        -- 138 (or the next free prefix), AFTER the new client is fully deployed:
+--        drop function if exists public.lensed_confirm_time_clock_shift(uuid);
+--
+--    Preconditions to verify before that cleanup, not after:
+--      1. the deployed web bundle sends p_approved_minutes on every confirm (src/hooks/useShifts.ts
+--         is the ONLY caller in the repo — the iOS app makes no .rpc() calls at all and the Chrome
+--         extension calls only open_session_host_segment / close_session_host_segment /
+--         lensed_log_auction);
+--      2. no rollback to a pre-Approved-Hours build is still on the table;
+--      3. evidence that the legacy function is no longer being called. NOTE, verified read-only on
+--         2026-09-08: this database runs `track_functions = none`, so pg_stat_user_functions is
+--         EMPTY and cannot answer this today. Either turn the counter on first as its own approved
+--         change (`alter system set track_functions = 'pl'` + reload; no restart) and watch the
+--         `calls` column for lensed_confirm_time_clock_shift(uuid) stop advancing, or fall back to
+--         the deploy record: the only thing that can still send a bare p_shift_id is a browser tab
+--         holding the old bundle, so wait out any plausible stale session (a full pay period is
+--         comfortable) after the new bundle is confirmed live everywhere.
+--    Removing it earlier re-creates exactly the deployment gap this additive shape exists to avoid.
 --
 -- LOCK FOOTPRINT (CLAUDE.md "classify by LOCK FOOTPRINT"): CLASS A.
 --   • `add column ... integer` NULLABLE WITH NO DEFAULT → catalog-only in PG11+, no table rewrite.
@@ -27,7 +60,8 @@
 --     is NOT a capture/order-sync table and is not read during a live show, but it IS written by
 --     the kiosk clock-out path, so run each group in its own transaction with
 --     `set local lock_timeout = '3s'` per the Class A recipe and confirm capture kept landing.
---   • DROP + CREATE on lensed_confirm_time_clock_shift: see the signature note below.
+--   • a NEW overload of lensed_confirm_time_clock_shift and a NEW lensed_set_approved_minutes.
+--     Creating a function takes no lock on any table. NOTHING is dropped by this migration.
 --
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- WHY THIS MIGRATION EXISTS
@@ -60,22 +94,52 @@
 -- re-stamps them, so "who approved this number, and when" is always answerable from the row.
 --
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
--- WHY THE CONFIRM SIGNATURE CHANGES (and why DROP first)
+-- WHY THE CONFIRM RPC GAINS AN OVERLOAD INSTEAD OF CHANGING SIGNATURE
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- Confirming a host shift and recording its approved duration MUST be one transaction. If they
 -- were two calls and the second failed, the shift would be confirmed with approved_minutes NULL —
 -- i.e. payroll would silently fall back to the clocked span, the exact bug this migration removes.
 -- So the approved value is an argument to the confirm RPC.
 --
--- `create or replace` with a different argument list creates a SECOND overload rather than
--- replacing, and `lensed_confirm_time_clock_shift(p_shift_id => …)` would then be ambiguous
--- ("function is not unique"). The one-argument version is therefore DROPPED explicitly first, the
--- same hazard and the same fix as migration 130's approval RPC.
+-- `create or replace` with a different argument list ADDS an overload rather than replacing, and
+-- that is exactly what is wanted here: the legacy one-argument function stays for the currently-
+-- deployed app while the new two-argument one serves the new app. The two coexist unambiguously
+-- ONLY because the new argument has no default (see the deploy-order note above). This is
+-- deliberately NOT what migration 130 did to lensed_approve_shift_pickup — that function had zero
+-- deployed callers at the time, so dropping the old overload cost nothing. This one has a live
+-- caller in production, so it is kept.
 --
--- Both function bodies below were rebuilt from the LIVE `pg_get_functiondef` output (per
--- CONVENTIONS.md: never hand-copy a create-or-replace from an older migration file). The diff
--- against live is exactly: the new parameter, the host requirement, the approved_minutes write in
--- confirm, and clearing approved_minutes in unconfirm. Nothing else — comments included.
+-- The two bodies REPLACED below (unconfirm, and the guard trigger) were rebuilt from the LIVE
+-- `pg_get_functiondef` output (per CONVENTIONS.md: never hand-copy a create-or-replace from an
+-- older migration file). The diff against live is exactly: approved_minutes added to the guarded
+-- set, and approved_minutes cleared on unconfirm. Nothing else — comments included. The legacy
+-- confirm function is not reissued here AT ALL, which is the strongest possible guarantee that
+-- this migration cannot drift it: migration 071 remains its only definition.
+
+-- ═══════════════════════════════════════════════════════════════════════════════════════════════
+-- ROLLBACK
+-- ═══════════════════════════════════════════════════════════════════════════════════════════════
+-- The APP can be rolled back to a pre-Approved-Hours build with this migration left in place, and
+-- that is the intended rollback path: the legacy one-argument confirm RPC still exists and the old
+-- bundle calls it, so confirmation keeps working with no schema change at all.
+--
+-- What the app rollback DOES change is payroll for shifts approved during the window. The old
+-- bundle's paidShiftHours() knows nothing about approved_minutes, so those shifts go back to being
+-- paid at their clocked span until the new bundle returns. The stored figures are NOT lost — they
+-- sit in the column and take effect again on redeploy — so this is a reversible pay difference on
+-- a known, listable set of rows:
+--     select id, employee_id, date, approved_minutes from public.shifts where approved_minutes is not null;
+-- Check that list against any pay run issued while the old bundle was live.
+--
+-- Reverting the SCHEMA is only needed if the feature is abandoned:
+--     drop function if exists public.lensed_set_approved_minutes(uuid, integer);
+--     drop function if exists public.lensed_confirm_time_clock_shift(uuid, integer);
+--     -- restore the pre-137 bodies of shifts_guard_confirmation() and
+--     -- lensed_unconfirm_time_clock_shift(uuid) from migration 071/070 (or live prosrc backup)
+--     alter table public.shifts drop constraint if exists shifts_approved_minutes_range;
+--     alter table public.shifts drop column if exists approved_minutes;   -- DESTROYS approvals
+-- Dropping the column destroys every approved duration, so capture them first if pay has run:
+--     select id, employee_id, date, approved_minutes from public.shifts where approved_minutes is not null;
 
 begin;
 
@@ -132,13 +196,17 @@ end;
 $function$;
 
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
--- 3. CONFIRM — now records the approved duration, and requires it for a live host
+-- 3. CONFIRM — a NEW overload that records the approved duration and requires it for a live host
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
-drop function if exists public.lensed_confirm_time_clock_shift(uuid);
-
+-- The legacy one-argument lensed_confirm_time_clock_shift(uuid) from migration 071 is deliberately
+-- NOT dropped and NOT reissued: it stays exactly as production has it so the currently-deployed
+-- app keeps working across the deploy. It is marked transition-only below.
+--
+-- NO DEFAULT on p_approved_minutes. With the legacy overload present, a default would make a
+-- one-argument call ambiguous and break every existing confirm. See the header.
 create or replace function public.lensed_confirm_time_clock_shift(
   p_shift_id uuid,
-  p_approved_minutes integer default null
+  p_approved_minutes integer
 )
 returns jsonb
 language plpgsql
@@ -189,6 +257,8 @@ begin
     into v_is_host
     from public.employees e
    where e.id = v_shift.employee_id and e.user_id = v_user;
+  -- The new client always SENDS this argument, so a NULL here is an explicit "no figure given",
+  -- not an omitted parameter. Either way a live host cannot be confirmed without one.
   if v_is_host is true and p_approved_minutes is null and v_shift.approved_minutes is null then
     raise exception 'HOST_APPROVED_MINUTES_REQUIRED';
   end if;
@@ -317,9 +387,25 @@ begin
 end;
 $function$;
 
--- Grants: these three run as the MANAGER's own session and derive the owner from auth.uid(), so
--- they are granted to `authenticated` exactly like the confirm pair always has been. They are not
+-- TRANSITION MARKER on the legacy overload. A comment is the only change this migration makes to
+-- it — the body stays byte-identical to what migration 071 created and production runs today.
+comment on function public.lensed_confirm_time_clock_shift(uuid) is
+  'TRANSITION ONLY (migration 137). Legacy one-argument confirm, kept so the app deployed before '
+  'Approved Hours keeps working during the rollout. It confirms and leaves approved_minutes NULL, '
+  'which payroll reads as the legacy clocked calculation — it never guesses a live host''s verified '
+  'live duration. New callers must use lensed_confirm_time_clock_shift(uuid, integer). Remove this '
+  'overload in a separate migration ONLY after production is confirmed to be running the new client '
+  'everywhere; see 137''s header for the preconditions.';
+
+comment on function public.lensed_confirm_time_clock_shift(uuid, integer) is
+  'Confirm a time-clock shift AND record its final payable duration (approved_minutes) in one '
+  'transaction. Refuses a live host shift with no approved duration (HOST_APPROVED_MINUTES_REQUIRED) '
+  'rather than letting the clocked span become payroll. Never modifies the punch.';
+
+-- Grants: these run as the MANAGER's own session and derive the owner from auth.uid(), so they are
+-- granted to `authenticated` exactly like the confirm pair always has been. They are not
 -- service-role-only and must NOT be added to SERVICE_ROLE_ONLY in scripts/check-rpc-grants.mjs.
+-- The LEGACY overload's own grant was made by migration 071 and is deliberately not reissued.
 grant execute on function public.lensed_confirm_time_clock_shift(uuid, integer) to authenticated;
 grant execute on function public.lensed_unconfirm_time_clock_shift(uuid)        to authenticated;
 grant execute on function public.lensed_set_approved_minutes(uuid, integer)     to authenticated;

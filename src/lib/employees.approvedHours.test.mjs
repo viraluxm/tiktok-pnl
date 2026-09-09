@@ -91,6 +91,11 @@ console.log('\n1. THE PUNCH IS NOT THE PAYROLL FIGURE — and is never rewritten
   check('the confirm mutation sends only the shift id and the approved minutes',
     /p_shift_id: id/.test(confirmBody) && /p_approved_minutes/.test(confirmBody)
     && !/clock_in_at|clock_out_at|start_time|end_time/.test(confirmBody));
+  // OVERLOAD RESOLUTION. The confirm branch must send BOTH argument names: sending only
+  // p_shift_id would resolve to the LEGACY overload, which silently records no approval.
+  check('the confirm branch always sends p_approved_minutes (never the bare legacy shape)',
+    /confirmed[\s\S]{0,80}\?\s*\{\s*p_shift_id: id,\s*p_approved_minutes:/.test(confirmBody),
+    confirmBody.replace(/\s+/g, ' ').slice(confirmBody.replace(/\s+/g, ' ').indexOf('const args'), 160));
 }
 
 console.log('\n2. LEGACY SHIFTS ARE UNTOUCHED — approved_minutes NULL keeps the old figure exactly');
@@ -347,8 +352,35 @@ console.log('\n11. THE DATABASE IS THE BOUNDARY — approved_minutes is server-o
     /new\.approved_minutes is distinct from old\.approved_minutes/.test(mig));
   check('…and still refuses outside the confirm context',
     /coalesce\(current_setting\('lensed\.confirm_ctx', true\), ''\) <> 'on'/.test(mig));
-  check('the one-arg confirm overload is dropped before the two-arg is created (no ambiguity)',
-    mig.indexOf('drop function if exists public.lensed_confirm_time_clock_shift(uuid)') < mig.indexOf('p_approved_minutes integer default null'));
+  // ADDITIVE ROLLOUT. The legacy one-argument confirm must survive 137 so the app deployed before
+  // Approved Hours keeps working during the rollout — and the new overload must have NO DEFAULT,
+  // or `confirm(p_shift_id => …)` becomes ambiguous and EVERY existing confirm call breaks.
+  // SQL comments are `--` lines, which the JS-oriented strip() above does not touch. 137's header
+  // QUOTES the future cleanup DROP and the rollback DROPs as documentation, so the executable
+  // statements have to be isolated before asserting that nothing is dropped.
+  const migCode = mig.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n');
+  check('no DROP of a function, table or column survives in executable SQL',
+    !/\bdrop\s+(function|table|column)\b/i.test(migCode),
+    (migCode.match(/\bdrop\s+\w+[^\n;]*/gi) ?? []).join(' | '));
+  check('the only DROP at all is 137 re-creating its OWN check constraint idempotently',
+    (migCode.match(/\bdrop\s+\w+/gi) ?? []).every((d) => /drop constraint/i.test(d))
+    && /drop constraint if exists shifts_approved_minutes_range/.test(migCode));
+  check('…specifically, the legacy one-argument confirm is never dropped',
+    !/drop function if exists public\.lensed_confirm_time_clock_shift\(uuid\)\s*;/.test(migCode));
+  check('…and is not reissued either, so 137 cannot drift it (071 stays its only definition)',
+    !/create or replace function public\.lensed_confirm_time_clock_shift\(\s*p_shift_id uuid\s*\)/.test(migCode));
+  check('the NEW overload takes two arguments with NO default (the anti-ambiguity rule)',
+    /create or replace function public\.lensed_confirm_time_clock_shift\(\s*p_shift_id uuid,\s*p_approved_minutes integer\s*\)/.test(migCode)
+    && !/p_approved_minutes integer default/.test(migCode));
+  check('the legacy overload is marked TRANSITION ONLY for the future cleanup',
+    /comment on function public\.lensed_confirm_time_clock_shift\(uuid\) is/.test(migCode)
+    && /TRANSITION ONLY/.test(mig));
+  check('the header documents the cleanup migration and its preconditions',
+    /CLEANUP, LATER AND SEPARATELY/.test(mig) && /pg_stat_user_functions/.test(mig));
+  check('the header states the migration may be applied BEFORE the code deploy',
+    /MAY BE APPLIED \*\*BEFORE\*\* THE CODE DEPLOY/.test(mig));
+  check('137 documents its rollback, including that dropping the column destroys approvals',
+    /^-- ROLLBACK$/m.test(mig) && /DESTROYS approvals/.test(mig));
   check('unconfirming clears the approval (no payable-looking number on an unconfirmed shift)',
     /set confirmed_at = null, confirmed_by = null, approved_minutes = null/.test(mig));
   check('the correction RPC refuses an unconfirmed time-clock shift', /SHIFT_NOT_CONFIRMED/.test(mig));
@@ -357,7 +389,7 @@ console.log('\n11. THE DATABASE IS THE BOUNDARY — approved_minutes is server-o
     (mig.match(/grant execute on function[^\n]*to authenticated;/g) ?? []).length === 3
     && !/to service_role/.test(mig));
   check('the migration declares itself unapplied and names the deploy order',
-    /NOT APPLIED/.test(mig) && mig.includes('WITH OR AFTER') && mig.includes('THE CODE DEPLOY'));
+    /NOT APPLIED/.test(mig) && mig.includes('FULLY ADDITIVE') && mig.includes('THE CODE DEPLOY'));
   check('the new RPC is NOT registered as service-role-only',
     !/lensed_set_approved_minutes/.test(read('../../scripts/check-rpc-grants.mjs')));
 }

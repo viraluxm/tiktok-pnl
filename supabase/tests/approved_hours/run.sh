@@ -60,6 +60,8 @@ done
 PRE=$(psqlq -c "select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift'")
 [ "$PRE" = "lensed_confirm_time_clock_shift(uuid)" ] && echo "  ✓ pre-137 confirm signature: $PRE" \
   || { echo "  ✗ unexpected pre-137 signature: $PRE"; FAILED=1; }
+# Fingerprint the legacy body now, so the additive check below can prove 137 left it alone.
+LEGACY_PRE=$(psqlq -c "select md5(pg_get_functiondef('public.lensed_confirm_time_clock_shift(uuid)'::regprocedure))")
 
 echo "── apply migration 137 VERBATIM (it carries its own begin/commit) ──"
 APPLY_LOG=/tmp/ah_apply.$$
@@ -80,25 +82,52 @@ case "$CK" in *"approved_minutes >= 0"*|*"approved_minutes IS NULL"*) echo "  �
 VALID=$(psqlq -c "select convalidated from pg_constraint where conname='shifts_approved_minutes_range'")
 [ "$VALID" = "t" ] && echo "  ✓ CHECK is VALIDATED (not left NOT VALID)" || { echo "  ✗ CHECK not validated"; FAILED=1; }
 
-# Exactly one confirm overload, now two-argument: a stale one-arg version would confirm host
-# shifts with no approved duration — silently paying the clocked span.
+# ── THE ADDITIVE-ROLLOUT PROPERTY ─────────────────────────────────────────────────────────────
+# BOTH overloads must exist after 137: the legacy one-argument function so the app deployed before
+# Approved Hours keeps confirming during the rollout, and the new two-argument one for the new app.
 OVERLOADS=$(psqlq -c "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift'")
-SIG=$(psqlq -c "select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift'")
-[ "$OVERLOADS" = "1" ] && echo "  ✓ exactly one confirm overload (the one-arg version was dropped)" \
-  || { echo "  ✗ $OVERLOADS confirm overloads present (expected 1)"; FAILED=1; }
-[ "$SIG" = "lensed_confirm_time_clock_shift(uuid,integer)" ] && echo "  ✓ signature: $SIG" \
-  || { echo "  ✗ unexpected signature: $SIG"; FAILED=1; }
-# And the legacy CALL SHAPE still resolves through the DEFAULT (PostgREST sends p_shift_id only).
-# A bogus id under a real identity must reach the function body and raise SHIFT_NOT_FOUND — the
-# failure this guards against is "function is not unique", which would mean the drop+create left
-# two overloads and every existing confirm call in the app broke.
-ONEARG=$(docker exec -i "$CONTAINER" psql -U postgres -d db -tA -c \
-  "set \"test.user_id\" = 'a0000000-0000-4000-8000-0000000000ff'; select public.lensed_confirm_time_clock_shift('00000000-0000-4000-8000-000000000000'::uuid);" 2>&1 || true)
+SIGS=$(psqlq -c "select string_agg(p.oid::regprocedure::text, ' + ' order by p.oid::regprocedure::text) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift'")
+[ "$OVERLOADS" = "2" ] && echo "  ✓ BOTH confirm overloads present (additive: legacy kept)" \
+  || { echo "  ✗ $OVERLOADS confirm overloads present (expected 2: legacy + new)"; FAILED=1; }
+[ "$SIGS" = "lensed_confirm_time_clock_shift(uuid) + lensed_confirm_time_clock_shift(uuid,integer)" ] \
+  && echo "  ✓ signatures: $SIGS" || { echo "  ✗ unexpected signatures: $SIGS"; FAILED=1; }
+
+# The new argument must have NO DEFAULT. With a default, a one-argument call matches BOTH functions
+# and Postgres raises "function is not unique" — breaking every confirm call in the deployed app.
+# This is the single most important assertion in this file.
+DEFAULTS=$(psqlq -c "select pronargdefaults from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift' and pronargs=2")
+[ "$DEFAULTS" = "0" ] && echo "  ✓ the two-argument overload has NO defaulted parameters (no ambiguity)" \
+  || { echo "  ✗ the two-argument overload has $DEFAULTS default(s) — a 1-arg call is now AMBIGUOUS"; FAILED=1; }
+
+# And prove resolution empirically, from both call shapes, against a bogus id under a real identity.
+# The two bodies are distinguishable by their return: only the NEW one reports approved_minutes.
+probe(){ docker exec -i "$CONTAINER" psql -U postgres -d db -tA -c \
+  "set \"test.user_id\" = 'a0000000-0000-4000-8000-0000000000ff'; $1" 2>&1 || true; }
+ONEARG=$(probe "select public.lensed_confirm_time_clock_shift('00000000-0000-4000-8000-000000000000'::uuid);")
 case "$ONEARG" in
-  *SHIFT_NOT_FOUND*) echo "  ✓ one-argument call still resolves (reached the body: SHIFT_NOT_FOUND)";;
-  *"is not unique"*) echo "  ✗ AMBIGUOUS overload — the one-arg version was not dropped"; FAILED=1;;
+  *"is not unique"*) echo "  ✗ AMBIGUOUS: a one-argument call matches both overloads"; FAILED=1;;
+  *SHIFT_NOT_FOUND*) echo "  ✓ one-argument call resolves (legacy body reached: SHIFT_NOT_FOUND)";;
   *) echo "  ✗ the one-argument call shape broke: $ONEARG"; FAILED=1;;
 esac
+TWOARG=$(probe "select public.lensed_confirm_time_clock_shift('00000000-0000-4000-8000-000000000000'::uuid, 478);")
+case "$TWOARG" in
+  *"is not unique"*) echo "  ✗ AMBIGUOUS: a two-argument call matches both overloads"; FAILED=1;;
+  *SHIFT_NOT_FOUND*) echo "  ✓ two-argument call resolves (new body reached: SHIFT_NOT_FOUND)";;
+  *) echo "  ✗ the two-argument call shape broke: $TWOARG"; FAILED=1;;
+esac
+# The legacy body must be UNCHANGED by 137 — byte-identical to what migration 071 created.
+LEGACY_071=$(docker exec -i "$CONTAINER" psql -U postgres -d db -tA -c "select md5(pg_get_functiondef('public.lensed_confirm_time_clock_shift(uuid)'::regprocedure))")
+[ "$LEGACY_071" = "$LEGACY_PRE" ] && echo "  ✓ the legacy body is byte-identical before and after 137" \
+  || { echo "  ✗ 137 CHANGED the legacy confirm body ($LEGACY_PRE -> $LEGACY_071)"; FAILED=1; }
+# Transition markers, so the future cleanup has something to find.
+COMMENTED=$(psqlq -c "select coalesce(obj_description('public.lensed_confirm_time_clock_shift(uuid)'::regprocedure, 'pg_proc'), '') like '%TRANSITION ONLY%'")
+[ "$COMMENTED" = "t" ] && echo "  ✓ the legacy overload is marked TRANSITION ONLY" \
+  || { echo "  ✗ the legacy overload carries no transition marker"; FAILED=1; }
+# Grants: BOTH overloads must be callable by the manager session during the window.
+for FN in 'public.lensed_confirm_time_clock_shift(uuid)' 'public.lensed_confirm_time_clock_shift(uuid,integer)'; do
+  g=$(psqlq -c "select has_function_privilege('authenticated','$FN','execute')")
+  [ "$g" = "t" ] && echo "  ✓ authenticated may call $FN" || { echo "  ✗ authenticated cannot call $FN"; FAILED=1; }
+done
 
 echo "── assertions ──"
 psqlf < "$SCRIPT_DIR/test_approved.sql" 2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
