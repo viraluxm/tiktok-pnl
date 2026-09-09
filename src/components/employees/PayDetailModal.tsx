@@ -7,6 +7,7 @@ import {
   formatClock12,
   formatDayLabel,
   payStatementFilename,
+  workedDayGroups,
   type ExcludedRow,
   type PayStatement,
   type StatementRow,
@@ -16,18 +17,23 @@ import { fmt } from '@/lib/calculations';
 import { fmtHours, titleCase } from './shared';
 import PersonAvatar from './weekly/PersonAvatar';
 
-// EVERY WORKED-TIME ROW BEHIND ONE PERSON'S PAY, and the two buttons that put the same thing on
-// paper. This component RENDERS a PayStatement; it does not compute one. Hours, rates, amounts,
-// totals and warnings are all read off the object, which is the same object the PDF is handed —
-// so "the screen and the PDF agree" is not a thing to keep true, it is a thing that cannot be
-// false.
+// EVERY WORKED-TIME RECORD BEHIND ONE PERSON'S PAY, grouped by the day it happened on, and the two
+// buttons that put the same thing on paper. This component RENDERS a PayStatement; it does not
+// compute one. Hours, rates, amounts and totals are read off the object, which is the same object
+// the PDF is handed — so "the screen and the PDF agree" is not a thing to keep true, it is a thing
+// that cannot be false.
+//
+// IT DOES NOT JUDGE THE RECORDS. There is no anomaly badge, no warning colour and no "needs review"
+// anywhere: the job here is to lay the payroll out clearly enough that a manager can see a bad
+// record for themselves. Rows read left to right as day → in → out → break → hours → pay, and each
+// record keeps its own Edit, because a duplicate is fixed one record at a time.
 //
 // PORTALLED TO document.body ON PURPOSE. `position: fixed` resolves against the nearest ancestor
-// carrying a filter/backdrop-filter, and PayView's own card is `backdrop-blur-xl overflow-hidden`
-// — rendered as its descendant this overlay would be laid out inside the panel and clipped by it.
+// carrying a filter/backdrop-filter, and PayView's own card is `backdrop-blur-xl overflow-hidden` —
+// rendered as its descendant this overlay would be laid out inside the panel and clipped by it.
 // Same reasoning, same fix as HoverCard.
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'money' | 'plain' }) {
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'money' }) {
   return (
     <div>
       <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">{label}</div>
@@ -42,47 +48,61 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'mo
   );
 }
 
-const CHIP = 'rounded-md px-1.5 py-0.5 text-[9.5px] font-semibold whitespace-nowrap';
-
-function WarningChips({ row }: { row: StatementRow }) {
-  // The 'manual_entry' note is dropped here and only here: this row already prints its source
-  // label immediately to the left, so a chip repeating "Manual Entry" is the same word twice. The
-  // note stays in the statement model — it is a real property of the row, and the model is what
-  // the PDF and any future surface read.
-  const chips = row.warnings.filter((w) => w.kind !== 'manual_entry');
-  if (chips.length === 0) return null;
-  return (
-    <span className="ml-1.5 inline-flex flex-wrap gap-1 align-middle">
-      {chips.map((w) => (
-        <span
-          key={w.kind}
-          title={w.detail}
-          className={`${CHIP} ${
-            w.tone === 'review'
-              ? 'bg-tt-yellow/15 text-tt-yellow'
-              : 'bg-white/5 text-tt-muted'
-          }`}
-        >
-          {w.label}
-        </span>
-      ))}
-    </span>
-  );
-}
-
-// One worked-time row. Desktop lays out as columns under a shared header; on a phone each cell
-// labels itself and the row reads as a card — one markup tree, both shapes, matching how
-// FulfillmentPerformance already does its tables.
+// One worked-time record. Desktop lays out as columns under a shared header; on a phone each cell
+// labels itself and the record reads as a card — one markup tree, both shapes.
 function Cell({ label, children, right }: { label: string; children: React.ReactNode; right?: boolean }) {
   return (
     <div className={right ? 'sm:text-right' : ''}>
       <div className="text-[9px] uppercase tracking-wide text-tt-muted sm:hidden">{label}</div>
-      <div className="text-[12.5px] text-tt-text tabular-nums">{children}</div>
+      <div className="text-[12.5px] tabular-nums text-tt-text">{children}</div>
     </div>
   );
 }
 
-const GRID = 'grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-[1.6fr_1fr_1fr_0.6fr_0.8fr_0.7fr_1fr_auto] sm:items-center sm:gap-y-0';
+const GRID =
+  'grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-[1.15fr_0.95fr_1.15fr_0.6fr_0.75fr_0.7fr_0.95fr_auto] sm:items-center sm:gap-y-0';
+
+function RecordRow({
+  row,
+  onEdit,
+}: {
+  row: StatementRow;
+  onEdit?: () => void;
+}) {
+  return (
+    <div className={`${GRID} rounded-lg border border-tt-border px-3 py-2.5`}>
+      <Cell label="Source">
+        <span className="text-[11.5px] text-tt-muted">{row.sourceLabel}</span>
+      </Cell>
+      <Cell label="Start">{formatClock12(row.startLabel)}</Cell>
+      <Cell label="End">
+        {formatClock12(row.endLabel)}
+        {row.endDateISO && (
+          <span className="ml-1 text-[10px] text-tt-muted">
+            ({formatDayLabel(row.endDateISO).replace(/^\w+ /, '')})
+          </span>
+        )}
+      </Cell>
+      <Cell label="Break" right>{formatBreak(row.breakMinutes)}</Cell>
+      <Cell label="Paid hours" right>{row.paidHours.toFixed(2)}</Cell>
+      <Cell label="Rate" right>{fmt(row.rate)}</Cell>
+      <Cell label="Amount" right>
+        <span className="font-semibold text-tt-green">{fmt(row.amount)}</span>
+      </Cell>
+      <div className="col-span-2 sm:col-span-1 sm:justify-self-end">
+        {onEdit ? (
+          <button
+            type="button"
+            onClick={onEdit}
+            className="min-h-[32px] w-full rounded-lg border border-tt-border px-2.5 text-[11px] font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/10 sm:w-auto"
+          >
+            Edit
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 export default function PayDetailModal({
   statement,
@@ -92,7 +112,7 @@ export default function PayDetailModal({
 }: {
   statement: PayStatement;
   onClose: () => void;
-  /** Opens the app's existing shift editor for this row. Undefined = editing unavailable. */
+  /** Opens the app's existing shift editor for this record. Undefined = editing unavailable. */
   onEditRow?: (shiftId: string) => void;
   canEdit: (shiftId: string) => boolean;
 }) {
@@ -162,10 +182,7 @@ export default function PayDetailModal({
     }
   }
 
-  const reviewRows = useMemo(
-    () => statement.rows.filter((r) => r.warnings.some((w) => w.tone === 'review')),
-    [statement.rows],
-  );
+  const days = useMemo(() => workedDayGroups(statement), [statement]);
 
   if (typeof document === 'undefined') return null;
 
@@ -233,53 +250,26 @@ export default function PayDetailModal({
         </div>
         {docError && <p className="-mt-3 mb-4 text-xs text-tt-red">{docError}</p>}
 
-        {/* ── Needs review ───────────────────────────────────────────────────── */}
-        {statement.totals.reviewCount > 0 && (
-          <div className="mb-5 rounded-xl border border-tt-yellow/25 bg-tt-yellow/[0.06] px-4 py-3">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-tt-yellow">
-              {statement.totals.reviewCount === 1 ? '1 thing to review' : `${statement.totals.reviewCount} things to review`}
-            </div>
-            <ul className="mt-2 space-y-1.5">
-              {reviewRows.flatMap((r) =>
-                r.warnings
-                  .filter((w) => w.tone === 'review')
-                  .map((w) => (
-                    <li key={`${r.shiftId}-${w.kind}`} className="text-[12px] leading-snug text-tt-text">
-                      <span className="font-semibold">{formatDayLabel(r.dateISO)} · {w.label}</span>{' '}
-                      <span className="text-tt-muted">{w.detail}</span>
-                    </li>
-                  )),
-              )}
-              {statement.excluded
-                .filter((e) => e.reason !== 'schedule_plan')
-                .map((e) => (
-                  <li key={e.shiftId} className="text-[12px] leading-snug text-tt-text">
-                    <span className="font-semibold">
-                      {formatDayLabel(e.dateISO)} · {e.label} · not paid
-                    </span>{' '}
-                    <span className="text-tt-muted">{e.detail}</span>
-                  </li>
-                ))}
-            </ul>
-          </div>
-        )}
-
-        {/* ── Worked time ────────────────────────────────────────────────────── */}
+        {/* ── Worked time, by day ────────────────────────────────────────────── */}
         <div className="mb-2 flex items-baseline justify-between">
           <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">Worked time</div>
           <div className="text-[10px] text-tt-muted">
             {statement.totals.rowCount === 1 ? '1 record' : `${statement.totals.rowCount} records`}
+            {' · '}
+            {statement.totals.workedDays === 1 ? '1 day' : `${statement.totals.workedDays} days`}
           </div>
         </div>
 
-        {statement.rows.length === 0 ? (
+        {days.length === 0 ? (
           <div className="rounded-xl border border-tt-border px-4 py-10 text-center text-sm text-tt-muted">
             No payable worked time in this pay period.
           </div>
         ) : (
-          <div className="space-y-1.5">
-            <div className={`${GRID} hidden px-3 pb-1 text-[9px] font-bold uppercase tracking-wider text-tt-muted sm:grid`}>
-              <div>Date</div>
+          <div className="space-y-3">
+            <div
+              className={`${GRID} hidden px-3 text-[9px] font-bold uppercase tracking-wider text-tt-muted sm:grid`}
+            >
+              <div>Source</div>
               <div>Start</div>
               <div>End</div>
               <div className="text-right">Break</div>
@@ -289,65 +279,47 @@ export default function PayDetailModal({
               <div />
             </div>
 
-            {statement.rows.map((row) => (
-              <div
-                key={row.shiftId}
-                className={`${GRID} rounded-xl border px-3 py-2.5 ${
-                  row.warnings.some((w) => w.tone === 'review')
-                    ? 'border-tt-yellow/25 bg-tt-yellow/[0.03]'
-                    : 'border-tt-border'
-                }`}
-              >
-                <div className="col-span-2 sm:col-span-1">
-                  <div className="text-[12.5px] font-semibold text-tt-text">{formatDayLabel(row.dateISO)}</div>
-                  <div className="mt-0.5 text-[9.5px] text-tt-muted">
-                    {row.sourceLabel}
-                    <WarningChips row={row} />
-                  </div>
+            {/* One block per calendar day. A day with several records keeps them side by side under
+                the same heading — never merged, so each stays separately editable. */}
+            {days.map((day) => (
+              <div key={day.dateISO}>
+                <div className="mb-1.5 flex items-baseline justify-between gap-3 border-b border-tt-border pb-1">
+                  <span className="text-[12.5px] font-semibold text-tt-text">
+                    {formatDayLabel(day.dateISO)}
+                    {day.rows.length > 1 && (
+                      <span className="ml-2 text-[10px] font-normal text-tt-muted">
+                        {day.rows.length} records
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-[11px] tabular-nums text-tt-muted">
+                    {day.hours.toFixed(2)} hr · {fmt(day.amount)}
+                  </span>
                 </div>
-                <Cell label="Start">{formatClock12(row.startLabel)}</Cell>
-                <Cell label="End">
-                  {formatClock12(row.endLabel)}
-                  {row.endDateISO && (
-                    <span className="ml-1 text-[10px] text-tt-muted">
-                      ({formatDayLabel(row.endDateISO).replace(/^\w+ /, '')})
-                    </span>
-                  )}
-                </Cell>
-                <Cell label="Break" right>{formatBreak(row.breakMinutes)}</Cell>
-                <Cell label="Paid hours" right>{row.paidHours.toFixed(2)}</Cell>
-                <Cell label="Rate" right>{fmt(row.rate)}</Cell>
-                <Cell label="Amount" right>
-                  <span className="font-semibold text-tt-green">{fmt(row.amount)}</span>
-                </Cell>
-                <div className="col-span-2 sm:col-span-1 sm:justify-self-end">
-                  {onEditRow && canEdit(row.shiftId) ? (
-                    <button
-                      type="button"
-                      onClick={() => onEditRow(row.shiftId)}
-                      className="min-h-[32px] w-full rounded-lg border border-tt-border px-2.5 text-[11px] font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/10 sm:w-auto"
-                    >
-                      Edit
-                    </button>
-                  ) : null}
+                <div className="space-y-1.5">
+                  {day.rows.map((row) => (
+                    <RecordRow
+                      key={row.shiftId}
+                      row={row}
+                      onEdit={onEditRow && canEdit(row.shiftId) ? () => onEditRow(row.shiftId) : undefined}
+                    />
+                  ))}
                 </div>
               </div>
             ))}
 
-            {/* Total. Read off statement.totals — never re-added from the rows above, so this can
-                never quietly disagree with the tile that opened this panel. */}
-            <div className={`${GRID} rounded-xl border border-tt-border bg-white/[0.03] px-3 py-3`}>
-              <div className="col-span-2 text-[12.5px] font-bold text-tt-text sm:col-span-4">
-                Total owed
-              </div>
-              <div className="text-right text-[13px] font-bold tabular-nums text-tt-text">
-                {statement.totals.paidHours.toFixed(2)}
-              </div>
-              <div />
-              <div className="text-right text-[14px] font-bold tabular-nums text-tt-green">
-                {fmt(statement.totals.gross)}
-              </div>
-              <div />
+            {/* Read off statement.totals — never re-added from the rows above, so this can never
+                quietly disagree with the tile that opened the panel. */}
+            <div className="flex items-center justify-between rounded-xl border border-tt-border bg-white/[0.03] px-4 py-3">
+              <span className="text-[13px] font-bold text-tt-text">Total owed</span>
+              <span className="flex items-baseline gap-5">
+                <span className="text-[13px] font-bold tabular-nums text-tt-text">
+                  {statement.totals.paidHours.toFixed(2)} hr
+                </span>
+                <span className="text-[15px] font-bold tabular-nums text-tt-green">
+                  {fmt(statement.totals.gross)}
+                </span>
+              </span>
             </div>
           </div>
         )}
@@ -365,8 +337,8 @@ export default function PayDetailModal({
   );
 }
 
-// Records that sit inside the period but are NOT part of the money. Shown so a manager can see
-// why a number looks light, and visually separated so nothing here can be mistaken for pay.
+// Records inside the period that carry no money. Stated plainly and without alarm, because a light
+// total is easier to understand when you can see what is not in it.
 function NotPaid({ rows }: { rows: ExcludedRow[] }) {
   return (
     <div className="mt-5">
@@ -377,16 +349,16 @@ function NotPaid({ rows }: { rows: ExcludedRow[] }) {
         {rows.map((r) => (
           <div
             key={r.shiftId}
-            className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-xl border border-dashed border-tt-border px-3 py-2.5 opacity-70"
+            className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border border-dashed border-tt-border px-3 py-2 text-tt-muted"
           >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[12.5px] font-semibold text-tt-text">{formatDayLabel(r.dateISO)}</span>
-              <span className="text-[12px] tabular-nums text-tt-muted">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="text-[12px] font-semibold text-tt-text/70">{formatDayLabel(r.dateISO)}</span>
+              <span className="text-[11.5px] tabular-nums">
                 {formatClock12(r.startLabel)} – {r.endLabel ? formatClock12(r.endLabel) : '—'}
               </span>
-              <span className={`${CHIP} bg-white/5 text-tt-muted`}>{r.label}</span>
-            </div>
-            <span className="text-[11px] text-tt-muted">{r.detail}</span>
+              <span className="rounded-md bg-white/5 px-1.5 py-0.5 text-[9.5px] font-semibold">{r.label}</span>
+            </span>
+            <span className="text-[11px]">{r.detail}</span>
           </div>
         ))}
       </div>

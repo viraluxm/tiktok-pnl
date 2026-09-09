@@ -6,7 +6,7 @@ import { buildPayStatement } from '@/lib/pay/statement';
 import { buildShiftEditPatch, type EditableShiftRow } from '@/lib/shifts/punchEdit';
 import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { fmt } from '@/lib/calculations';
-import { fmtHours, titleCase } from '@/components/employees/shared';
+import { fmtHours } from '@/components/employees/shared';
 import PayGrid, { type PayTile } from '@/components/employees/PayGrid';
 import PayDetailModal from '@/components/employees/PayDetailModal';
 import ShiftEditorModal, { type EditorIntent, type EditorHandlers } from '@/components/employees/weekly/ShiftEditorModal';
@@ -52,9 +52,8 @@ export default function PayDetailPreview() {
         hours: p.hours,
         pay: p.pay,
         scheduled: 0, // the recurring projection needs a rules query; not part of this review
-        reviewCount: statementFor(p.employee).totals.reviewCount,
       })),
-    [pay, statementFor],
+    [pay],
   );
 
   const totals = useMemo(
@@ -112,10 +111,10 @@ export default function PayDetailPreview() {
         <header className="mb-6">
           <h1 className="text-xl font-semibold text-tt-text">Pay Period Detail — review</h1>
           <p className="mt-1 max-w-2xl text-sm text-tt-muted">
-            The real Pay tiles, Pay Details panel, statement PDF and shift editor, running on
-            fixture data shaped after the {period.start} – {period.end} period. Nothing here can
-            reach the database. Click a person, then Edit a row and watch the totals and the PDF
-            move together.
+            The real Pay tiles, Pay Details panel, payroll hours statement and record editor,
+            running on fixture data shaped after the {period.start} – {period.end} period. Nothing
+            here can reach the database. Click a person, then Edit a record and watch the day
+            total, the period total and the PDF move together.
           </p>
         </header>
 
@@ -148,17 +147,6 @@ export default function PayDetailPreview() {
           />
         </div>
 
-        <div className="mt-6 rounded-xl border border-tt-border px-4 py-3 text-[12px] leading-relaxed text-tt-muted">
-          <div className="mb-1 font-semibold text-tt-text">What to look at</div>
-          <ul className="list-disc space-y-0.5 pl-5">
-            <li><span className="text-tt-text">{titleCase('Juan Reyes')}</span> — overlapping worked time, an unusually long span, an unconfirmed punch and a scheduled-only day.</li>
-            <li><span className="text-tt-text">Adriana Salas</span> — an overnight shift whose end lands on the next day, plus one overlap.</li>
-            <li><span className="text-tt-text">Chris Okafor</span> — an open clock-in that is deliberately not paid.</li>
-            <li><span className="text-tt-text">Haley Nguyen</span> — the ordinary, clean case.</li>
-            <li><span className="text-tt-text">Marcus Bell</span> — nothing but an unconfirmed punch, so zero owed.</li>
-            <li><span className="text-tt-text">Devon Clarke</span> — real hours at a $0 rate.</li>
-          </ul>
-        </div>
       </div>
 
       {statement && (

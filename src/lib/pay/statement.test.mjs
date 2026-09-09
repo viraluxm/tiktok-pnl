@@ -1,5 +1,6 @@
 // THE PAY STATEMENT: that its money is payroll's money, that an edit moves the interval payroll
-// actually reads, and that the plan never becomes pay.
+// actually reads, that the plan never becomes pay, and that the day/week grouping the screen and
+// the printed statement both read adds back up to the total.
 //
 // Everything under test is the REAL module, transpiled at runtime — the real buildPayStatement,
 // the real isPayableShift/paidShiftHours/computePay from employees.ts, the real
@@ -31,11 +32,6 @@ const src = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 
 const tzUrl = transpile('../schedule/timezone.ts', 'timezone.mjs');
 const employeesUrl = transpile('../employees.ts', 'employees.mjs');
 const weeklyUrl = transpile('../weeklySchedule.ts', 'weeklySchedule.mjs');
-const pickerUrl = transpile('../shipping/pickerPerformance.ts', 'pickerPerformance.mjs');
-const econUrl = transpile('../shipping/pickCostEconomics.ts', 'pickCostEconomics.mjs', {
-  "'@/lib/employees'": `'${employeesUrl}'`,
-  "'@/lib/shipping/pickerPerformance'": `'${pickerUrl}'`,
-});
 const punchUrl = transpile('../shifts/punchEdit.ts', 'punchEdit.mjs', {
   "'@/lib/schedule/timezone'": `'${tzUrl}'`,
   "'@/lib/weeklySchedule'": `'${weeklyUrl}'`,
@@ -43,17 +39,15 @@ const punchUrl = transpile('../shifts/punchEdit.ts', 'punchEdit.mjs', {
 const stmtUrl = transpile('./statement.ts', 'statement.mjs', {
   "'@/lib/employees'": `'${employeesUrl}'`,
   "'@/lib/schedule/timezone'": `'${tzUrl}'`,
-  "'@/lib/shipping/pickCostEconomics'": `'${econUrl}'`,
 });
 
 const {
-  buildPayStatement, wallIntervalOf, exclusionReasonOf, payStatementFilename,
-  LONG_SPAN_HOURS, OVERLAP_SCAN_LOOKBACK_DAYS, formatClock12, formatDayLabel,
+  buildPayStatement, exclusionReasonOf, payStatementFilename,
+  workedDayGroups, payPeriodWeeks, formatClock12, formatDayLabel, formatBreak,
 } = await import(stmtUrl);
 const { computePay, isPayableShift, paidShiftHours } = await import(employeesUrl);
 const { buildShiftEditPatch, shiftEditPrefill } = await import(punchUrl);
 const { laWallTimeToUtc, laWallClockOf } = await import(tzUrl);
-const { MAX_PLAUSIBLE_PUNCH_HOURS } = await import(econUrl);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -110,44 +104,37 @@ const build = (shifts, employee = EMP()) =>
   buildPayStatement({ employee, period: PERIOD, shifts, generatedAtISO: '2026-09-08T17:00:00.000Z' });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§1 Interval derivation mirrors the database range helper');
-// lensed_shift_wall_range: instants for a time_clock row with both, else wall clock with a day
-// added when end <= start, and an unbounded upper for an open row.
+console.log('\n§1 A record reads as the span it is actually paid for');
 {
   const day = manual('2026-08-25', '06:00', '14:00');
-  const iv = wallIntervalOf(day);
-  check('a plain day is exactly its wall-clock span', near((iv.hi - iv.lo) / 60, 8));
+  check('a plain day shows its own wall clock',
+    build([day]).rows[0].startLabel === '06:00' && build([day]).rows[0].endLabel === '14:00');
+  check('...and is paid for it', near(build([day]).totals.paidHours, 8));
 
   const overnight = manual('2026-08-25', '17:00', '01:00');
-  const ivo = wallIntervalOf(overnight);
-  check('end < start rolls into the next day', near((ivo.hi - ivo.lo) / 60, 8));
+  const or_ = build([overnight]).rows[0];
+  check('an overnight record names the day its end lands on', or_.endDateISO === '2026-08-26', String(or_.endDateISO));
+  check('...and is paid the wrapped span', near(or_.paidHours, 8));
 
-  const degenerate = manual('2026-08-25', '06:00', '06:00');
-  check(
-    'end == start is a full day, as `end_time <= start_time` in the DB helper',
-    near((wallIntervalOf(degenerate).hi - wallIntervalOf(degenerate).lo) / 60, 24),
-  );
+  // A time_clock row whose wall clock has DIVERGED from its instants must display the INSTANTS —
+  // showing the stale copy next to hours derived from the punch is the bug this feature exists to
+  // make impossible.
+  const diverged = punch('2026-08-25', '06:00', '14:00', { start_time: '05:00:00', end_time: '13:00:00' });
+  const dr = build([diverged]).rows[0];
+  check('a diverged punch displays its instants, not its stale wall clock',
+    dr.startLabel === '06:00' && dr.endLabel === '14:00', `${dr.startLabel}-${dr.endLabel}`);
+  check('...and its hours come from the same basis', near(dr.paidHours, paidShiftHours(diverged)));
 
-  const open = manual('2026-08-25', '06:00', null);
-  check('an open row has an unbounded upper bound', wallIntervalOf(open).hi === null);
-
-  // A 47.75h punch: the instants branch has no 24h ceiling, so the interval must NOT wrap.
+  // A 47.75h punch: the instants branch has no 24h ceiling, so hours must not wrap.
   const long = punch('2026-08-24', '05:59', '05:44', {
     clock_out_at: laWallTimeToUtc('2026-08-26', '05:44').toISOString(),
+    break_minutes: 2417,
   });
-  const ivl = wallIntervalOf(long);
-  check('a 47.75h punch reads as 47.75h, not wrapped to 23.75h', near((ivl.hi - ivl.lo) / 60, 47.75, 1e-6),
-    `${((ivl.hi - ivl.lo) / 60).toFixed(2)}h`);
-
-  // A time_clock row whose wall clock has DIVERGED from its instants must follow the instants.
-  const diverged = punch('2026-08-25', '06:00', '14:00', {
-    start_time: '05:00:00', end_time: '13:00:00', // the stale display copy
-  });
-  const ivd = wallIntervalOf(diverged);
-  check(
-    'a diverged punch is read from its instants, not its wall clock',
-    laWallClockOf(diverged.clock_in_at).time === '06:00' && near(ivd.lo % 1440, 6 * 60),
-  );
+  const lr = build([long]).rows[0];
+  check('a 47.75h punch is paid its real span minus the break, never wrapped',
+    near(lr.paidHours, 47.75 - 2417 / 60, 1e-6), `${lr.paidHours.toFixed(2)}h`);
+  check('...and says the end landed two days later', lr.endDateISO === '2026-08-26');
+  check('a long break reads in hours, not raw minutes', formatBreak(2417) === '40h 17m', formatBreak(2417));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -216,8 +203,8 @@ console.log('\n§4 The plan never becomes pay');
   check('...zero pay', s.totals.gross === 0 && row.pay === 0);
   check('...and is shown as scheduled-only, not as pay',
     s.excluded.length === 1 && s.excluded[0].reason === 'schedule_plan');
-  check('a scheduled-only row is not counted as something to review',
-    s.totals.reviewCount === 0, 'the plan is not an anomaly');
+  check('...and it still appears in the week grid as a day with no payable hours',
+    payPeriodWeeks(s).flatMap((w) => w.days).find((d) => d.dateISO === '2026-08-25').hours === 0);
 
   // The statement builder only ever receives stored `shifts` rows. A projected recurring instance
   // has no id/source/break_minutes and is structurally not one; assert the module never mentions
@@ -238,9 +225,8 @@ console.log('\n§5 Both worked-time sources flow through the one model');
 
   check('the punch row is labelled Time Clock', rp.sourceLabel === 'Time Clock');
   check('the manual row is labelled Manual Entry', rm.sourceLabel === 'Manual Entry');
-  check('a manual row carries a neutral note, never a review flag',
-    rm.warnings.length === 1 && rm.warnings[0].kind === 'manual_entry' && rm.warnings[0].tone === 'note');
-  check('a punch row carries no manual note', !rp.warnings.some((w) => w.kind === 'manual_entry'));
+  check('a record carries source context and nothing that judges it',
+    !('warnings' in rm) && !('spanHours' in rm), Object.keys(rm).join(','));
   check('both are paid', near(rp.paidHours, paidShiftHours(p)) && near(rm.paidHours, paidShiftHours(m)));
   check('the manual row displays its own wall clock', rm.startLabel === '15:00' && rm.endLabel === '19:00');
   check('the punch row displays the instants as Pacific wall clock',
@@ -319,100 +305,93 @@ console.log('\n§6 An edit moves the interval PAYROLL reads — the historical b
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§7 Overlapping worked time is surfaced, and nothing is touched');
+console.log('\n§7 Grouping by day and by week — the arrangement screen and paper share');
 {
-  const p = punch('2026-08-26', '06:06', '14:01', { break_minutes: 27 });
-  const m = manual('2026-08-26', '06:00', '14:00'); // the classic stacked correction
-  const clean = manual('2026-08-27', '06:00', '14:00');
-  const s = build([p, m, clean]);
+  const shifts = [
+    punch('2026-08-26', '06:06', '14:01', { break_minutes: 27 }),
+    manual('2026-08-26', '15:00', '19:00'),   // a second record on the SAME day
+    punch('2026-08-27', '06:04', '14:02', { break_minutes: 62 }),
+    manual('2026-09-05', '09:00', '17:00'),   // in week 2
+  ];
+  const s = build(shifts);
 
-  const flagged = s.rows.filter((r) => r.warnings.some((w) => w.kind === 'overlap'));
-  check('both sides of an overlap are flagged', flagged.length === 2, `${flagged.map((r) => r.shiftId).join(',')}`);
-  check('the non-overlapping row is not flagged',
-    !s.rows.find((r) => r.shiftId === clean.id).warnings.some((w) => w.kind === 'overlap'));
-  const detail = flagged[0].warnings.find((w) => w.kind === 'overlap').detail;
-  check('the warning names the conflicting record so a manager can compare',
-    detail.includes('Wed Aug 26') && /\d{1,2}:\d{2} (AM|PM)/.test(detail) && /Time Clock|Manual Entry/.test(detail),
-    detail);
-  check('...in manager language, not an ISO date or a row id',
-    !detail.includes('2026-08-26') && !detail.includes(p.id) && !detail.includes(m.id), detail);
-  check('the warning does not quantify the conflict in money',
-    !flagged.some((r) => r.warnings.some((w) => w.kind === 'overlap' && /\$/.test(w.detail))),
-    'the occupancy interval is gross of breaks, so a dollar figure would be wrong');
+  // ── by day (what the Pay Details panel lists) ──
+  const days = workedDayGroups(s);
+  check('one group per worked date, in date order', days.length === 3 &&
+    days.map((d) => d.dateISO).join(',') === '2026-08-26,2026-08-27,2026-09-05');
+  check('a day with two records keeps BOTH, separately',
+    days[0].rows.length === 2 && days[0].rows[0].shiftId !== days[0].rows[1].shiftId,
+    'they must stay individually editable');
+  check('...and they are not merged into one interval',
+    days[0].rows[0].startLabel !== days[0].rows[1].startLabel);
+  check('a day total is the sum of its own records',
+    near(days[0].hours, days[0].rows[0].paidHours + days[0].rows[1].paidHours));
+  check('day names are right', days[0].dayName === 'Wednesday' && days[2].dayName === 'Saturday',
+    `${days[0].dayName}/${days[2].dayName}`);
+  check('the day groups add back up to the statement total',
+    near(days.reduce((n, d) => n + d.hours, 0), s.totals.paidHours), `${s.totals.paidHours.toFixed(2)}h`);
+  check('and so do their amounts',
+    cents(days.reduce((n, d) => n + d.amount, 0)) === cents(s.totals.gross));
 
-  // DETECTION MUST NOT MOVE MONEY.
-  const noOverlap = build([p, clean]);
-  const withOverlap = build([p, m, clean]);
-  check('flagging an overlap does not change the flagged rows\' paid hours',
-    withOverlap.rows.find((r) => r.shiftId === p.id).paidHours ===
-      noOverlap.rows.find((r) => r.shiftId === p.id).paidHours);
-  check('and the period total is still the plain sum of every payable row',
-    withOverlap.totals.paidHours === computePay([EMP()], [p, m, clean])[0].hours,
-    'an overlap is reported, never deducted');
+  // ── by week (what the printed statement is read in) ──
+  const weeks = payPeriodWeeks(s);
+  check('a biweekly period is exactly two weeks', weeks.length === 2);
+  check('...of seven days each', weeks.every((w) => w.days.length === 7));
+  check('EVERY calendar day in the period is present, worked or not',
+    weeks.flatMap((w) => w.days).length === 14);
+  check('...and they are the period\'s own dates, in order', (() => {
+    const all = weeks.flatMap((w) => w.days.map((d) => d.dateISO));
+    return all[0] === PERIOD.start && all[13] === PERIOD.end &&
+      all.every((d, i) => i === 0 || d > all[i - 1]);
+  })());
+  check('week 1 runs Mon-Sun', weeks[0].start === '2026-08-24' && weeks[0].end === '2026-08-30');
+  check('week 2 runs Mon-Sun', weeks[1].start === '2026-08-31' && weeks[1].end === '2026-09-06');
+  check('a day nobody worked carries no rows and no hours', (() => {
+    const off = weeks[0].days.find((d) => d.dateISO === '2026-08-25');
+    return off.rows.length === 0 && off.hours === 0 && off.amount === 0;
+  })());
+  check('WEEK 1 + WEEK 2 subtotals equal the total payable hours',
+    near(weeks[0].hours + weeks[1].hours, s.totals.paidHours),
+    `${weeks[0].hours.toFixed(2)} + ${weeks[1].hours.toFixed(2)} = ${s.totals.paidHours.toFixed(2)}`);
+  check('...and neither week is empty in this fixture (not a vacuous pass)',
+    weeks[0].hours > 0 && weeks[1].hours > 0);
+  check('the week amounts also reconcile',
+    cents(weeks[0].amount + weeks[1].amount) === cents(s.totals.gross));
+  check('grouping invented no records',
+    weeks.flatMap((w) => w.days).flatMap((d) => d.rows).length === s.rows.length, `${s.rows.length}`);
 
-  // Touching endpoints are not an overlap (half-open, as the DB range is).
-  const a = manual('2026-08-28', '06:00', '14:00');
-  const b = manual('2026-08-28', '14:00', '18:00');
-  check('back-to-back shifts are NOT an overlap',
-    build([a, b]).rows.every((r) => !r.warnings.some((w) => w.kind === 'overlap')));
-
-  // THE LOOKBACK. A punch DATED before the period whose instants reach into it must still be seen.
-  const reachesIn = punch('2026-08-22', '05:59', '05:44', {
-    clock_out_at: laWallTimeToUtc('2026-08-24', '05:44').toISOString(),
-  });
-  const inPeriod = manual('2026-08-24', '05:00', '05:30');
-  const look = build([reachesIn, inPeriod]);
-  check('a pre-period punch reaching into the period raises the flag',
-    look.rows.find((r) => r.shiftId === inPeriod.id).warnings.some((w) => w.kind === 'overlap'));
-  check('...while the pre-period row itself is neither paid nor listed',
-    look.rows.length === 1 && look.excluded.every((e) => e.shiftId !== reachesIn.id),
-    'only its shadow is used');
-  check('the lookback covers the worst span on record (47.75h reaches 2 days)',
-    OVERLAP_SCAN_LOOKBACK_DAYS >= 3, `${OVERLAP_SCAN_LOOKBACK_DAYS} days`);
-
-  // An OPEN row is unbounded in the DB guard, but must not declare a conflict against every
-  // later shift here — it pays nothing and is already reported as an Open Clock-In.
-  const openRow = manual('2026-08-30', '09:00', null);
-  const later = manual('2026-09-02', '09:00', '17:00');
-  const withOpen = build([openRow, later]);
-  check('an open clock-in does not manufacture a conflict with every later shift',
-    withOpen.rows.every((r) => !r.warnings.some((w) => w.kind === 'overlap')),
-    'one forgotten clock-out would otherwise flag the whole rest of the period');
-  check('...and the open row is still reported on its own',
-    withOpen.excluded.length === 1 && withOpen.excluded[0].reason === 'open');
-
-  // An unconfirmed punch is not payable, but IS a conflict once someone confirms it.
-  const pending = punch('2026-08-29', '06:00', '14:00', { confirmed_at: null });
-  const stacked = manual('2026-08-29', '06:30', '10:00');
-  const q = build([pending, stacked]);
-  check('a manual row stacked on an UNCONFIRMED punch is still flagged',
-    q.rows.find((r) => r.shiftId === stacked.id).warnings.some((w) => w.kind === 'overlap'),
-    'it double-pays the moment the punch is confirmed');
+  // An overnight record belongs to the day it STARTED on — the same date predicate pay uses.
+  const over = build([manual('2026-08-30', '17:00', '01:00')]);
+  const w = payPeriodWeeks(over);
+  check('an overnight record sits on its own date, not the day it ended',
+    w[0].days[6].dateISO === '2026-08-30' && w[0].days[6].rows.length === 1 && w[1].days[0].rows.length === 0);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§8 An implausibly long span is impossible to miss');
+console.log('\n§8 Long and unusual records are reported exactly as they are');
 {
-  check('the threshold is the one the product already shows managers',
-    LONG_SPAN_HOURS === MAX_PLAUSIBLE_PUNCH_HOURS && LONG_SPAN_HOURS === 18);
-
-  // The real production shape: 47.75h end to end, 2417 minutes of break, 7.47h paid.
+  // No cap, no exclusion, no flag — the record is laid out and the manager judges it.
   const forgotten = punch('2026-08-24', '05:59', '05:44', {
     clock_out_at: laWallTimeToUtc('2026-08-26', '05:44').toISOString(),
     break_minutes: 2417,
   });
   const s = build([forgotten]);
-  const r = s.rows[0];
-  check('the long span is flagged for review', r.warnings.some((w) => w.kind === 'long_span' && w.tone === 'review'));
-  check('...even though its PAID hours look ordinary', r.paidHours < 8 && r.spanHours > 40,
-    `paid ${r.paidHours.toFixed(2)}h, span ${r.spanHours.toFixed(2)}h`);
   check('the hours are reported, never silently capped',
     s.totals.paidHours === computePay([EMP()], [forgotten])[0].hours);
-  check('the row says the end lands on a different day', r.endDateISO === '2026-08-26');
+  check('nothing on the record judges it',
+    JSON.stringify(s).toLowerCase().indexOf('review') === -1 &&
+    JSON.stringify(s).toLowerCase().indexOf('unusual') === -1 &&
+    JSON.stringify(s).toLowerCase().indexOf('overlap') === -1);
 
-  const normal = punch('2026-08-25', '06:00', '20:00'); // 14h — long, but under the threshold
-  check('a genuine 14h double shift is NOT flagged',
-    !build([normal]).rows[0].warnings.some((w) => w.kind === 'long_span'));
+  // Two records covering the same hours are BOTH kept and BOTH paid, untouched.
+  const a = punch('2026-08-26', '06:06', '14:01');
+  const b = manual('2026-08-26', '06:00', '14:00');
+  const dup = build([a, b]);
+  check('two records over the same time are both listed', dup.rows.length === 2);
+  check('...both paid, with nothing deducted or merged',
+    dup.totals.paidHours === computePay([EMP()], [a, b])[0].hours);
+  check('...and they sit under one day so the duplication is visible',
+    workedDayGroups(dup).length === 1 && workedDayGroups(dup)[0].rows.length === 2);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -430,8 +409,12 @@ console.log('\n§9 Rows that are in the period but not in the money');
     s.totals.gross === computePay([EMP()], shifts)[0].pay);
   const reasons = Object.fromEntries(s.excluded.map((e) => [e.reason, e.shiftId]));
   check('the open shift is named as an open clock-in', reasons.open === open.id);
-  check('the unconfirmed punch is named as needing review', reasons.awaiting_confirmation === pending.id);
+  check('the unconfirmed punch is named as one', reasons.awaiting_confirmation === pending.id);
   check('the schedule row is named as scheduled only', reasons.schedule_plan === plan.id);
+  check('the copy states facts and never passes judgement', (() => {
+    const words = s.excluded.map((e) => `${e.label} ${e.detail}`).join(' ').toLowerCase();
+    return !/review|warning|problem|error|unusual|overlap|suspicious|wrong/.test(words);
+  })(), JSON.stringify(s.excluded.map((e) => e.label)));
   check('no manager-facing copy leaks a column or table name',
     !s.excluded.some((e) => /confirmed_at|source_rule_id|shift_instances|time_clock'|_id\b/.test(e.detail + e.label)),
     JSON.stringify(s.excluded.map((e) => e.label)));
@@ -445,7 +428,11 @@ console.log('\n§9 Rows that are in the period but not in the money');
   const confirmed = { ...pending, confirmed_at: '2026-09-03T00:00:00.000Z' };
   const after = build([open, confirmed, plan, paid]);
   check('confirming a punch adds exactly its hours', near(after.totals.paidHours, s.totals.paidHours + 8, 1e-9));
-  check('an open clock-in counts as something to review', s.totals.reviewCount >= 1);
+  check('an excluded day still appears in the week grid, with zero hours', (() => {
+    const grid = payPeriodWeeks(s).flatMap((w) => w.days);
+    const d = grid.find((x) => x.dateISO === '2026-08-30');
+    return d.rows.length === 0 && d.hours === 0;
+  })(), 'it prints as Off — honest about pay, and the panel says why');
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -466,7 +453,7 @@ console.log('\n§10 Rates are reported as the product actually stores them');
       build(shifts, EMP({ hourly_rate: 0 })).totals.paidHours === 12);
   check('no invented payroll concepts', (() => {
     const s = JSON.stringify(a).toLowerCase();
-    return !/(\bnet pay\b|withhold|deduction|\btax\b|benefit)/.test(s);
+    return !/(\bnet pay\b|withhold|deduction|\btax\b|benefit|cash paid|payment method)/.test(s);
   })(), 'gross hours and money only');
 }
 
@@ -475,16 +462,16 @@ console.log('\n§11 One person, one period, one filename');
 {
   const s = build([manual('2026-08-26', '09:00', '17:00')], EMP({ name: 'Carlos' }));
   check('the filename is the documented shape',
-    payStatementFilename(s) === 'Lensed-Pay-Statement-Carlos-2026-08-24-to-2026-09-06.pdf',
+    payStatementFilename(s) === 'Viralux-Payroll-Hours-Statement-Carlos-2026-08-24-to-2026-09-06.pdf',
     payStatementFilename(s));
   check('it is stable across rebuilds', payStatementFilename(s) === payStatementFilename(build([], EMP({ name: 'Carlos' }))));
   const messy = build([], EMP({ name: '  José  Núñez-Ортега / #2  ' }));
   check('accents, punctuation and spaces are sanitised out',
-    /^Lensed-Pay-Statement-[A-Za-z0-9-]+-2026-08-24-to-2026-09-06\.pdf$/.test(payStatementFilename(messy)),
+    /^Viralux-Payroll-Hours-Statement-[A-Za-z0-9-]+-2026-08-24-to-2026-09-06\.pdf$/.test(payStatementFilename(messy)),
     payStatementFilename(messy));
   check('a name that sanitises to nothing still yields a filename',
     payStatementFilename(build([], EMP({ name: '***' }))) ===
-      'Lensed-Pay-Statement-Employee-2026-08-24-to-2026-09-06.pdf');
+      'Viralux-Payroll-Hours-Statement-Employee-2026-08-24-to-2026-09-06.pdf');
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -505,11 +492,33 @@ console.log('\n§12 There is only one payroll calculation');
   check('the PDF renderer cannot see payroll at all',
     !pdfSrc.includes('@/lib/employees') && !pdfSrc.includes('paidShiftHours') &&
       !pdfSrc.includes('isPayableShift') && !pdfSrc.includes('computePay'));
-  check('the PDF renderer imports only the statement model',
-    (pdfSrc.match(/^import .* from '(.+)';$/gm) || []).every((l) => l.includes("'./statement'")),
-    'pdf-lib is a dynamic import inside the function');
+  check('the PDF renderer imports only the statement model and the brand asset', (() => {
+    const specs = [...pdfSrc.matchAll(/from '([^']+)';/g)].map((m) => m[1]);
+    return specs.length > 0 && specs.every((x) => x === './statement' || x === '@/lib/brand/viraluxLockup');
+  })(), 'pdf-lib is a dynamic import inside the function');
   check('the PDF renderer never does rate arithmetic',
     !/\*\s*(statement\.)?rate|rate\s*\*/.test(pdfSrc), 'it prints statement.totals, it does not derive them');
+  check('the PDF renderer sums nothing of its own — weeks come from the model',
+    /payPeriodWeeks\(statement\)/.test(pdfSrc) && !/reduce\(\(n, r\) => n \+ r\.paidHours/.test(pdfSrc));
+
+  // The presentation cleanup, pinned: nothing in the model or on any surface tells a manager that
+  // a record looks wrong. If anomaly copy comes back, it comes back deliberately, not by drift.
+  const modal = src('../../components/employees/PayDetailModal.tsx');
+  const grid = src('../../components/employees/PayGrid.tsx');
+  const preview = src('../../app/preview/pay-detail/PayDetailPreview.tsx');
+  // Comments are stripped first: these files explain at length WHY the anomaly presentation was
+  // removed, and matching the explanation instead of the code is how a guard silently rots.
+  const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const JUDGY = /needs review|things to review|overlapping worked time|unusually long|reviewCount|warnings/i;
+  for (const [label, code] of [
+    ['the statement model', stmtSrc], ['the PDF', pdfSrc], ['the detail panel', modal],
+    ['the tile grid', grid], ['the preview page', preview],
+  ]) {
+    check(`${label} carries no anomaly presentation`, !JUDGY.test(strip(code)));
+  }
+  check('the tile grid has no review badge', !/badge|reviewCount/i.test(strip(grid)));
+  check('the detail panel groups by day rather than listing a flat table',
+    /workedDayGroups\(statement\)/.test(modal));
 
   // The Pay tab must keep feeding computePay the period rows and nothing else.
   const viewSrc = src('../../components/employees/PayView.tsx').replace(/\/\/[^\n]*/g, '');
@@ -517,9 +526,8 @@ console.log('\n§12 There is only one payroll calculation');
   check('PayView calls computePay exactly once', calls.length === 1, calls.join(' | '));
   check('...with periodShifts, never the recurring projection',
     calls[0] === 'computePay(employees, periodShifts)', calls[0]);
-  check('periodShifts is filtered back to the pay period before it is paid',
-    /periodShifts\s*=\s*useMemo\(\s*\(\)\s*=>\s*scanShifts\.filter\(\(s\) => s\.date >= period\.start && s\.date <= period\.end\)/.test(viewSrc),
-    'the widened fetch feeds warnings only');
+  check('the Pay tab still fetches exactly the pay period — no widened scan left behind',
+    /useShifts\(period\.start, period\.end\)/.test(viewSrc) && !/scanShifts|LOOKBACK/.test(viewSrc));
   check('the detail panel does not compute pay either', (() => {
     const modal = src('../../components/employees/PayDetailModal.tsx');
     return !modal.includes('paidShiftHours') && !modal.includes('computePay') && !modal.includes('isPayableShift');

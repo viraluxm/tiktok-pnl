@@ -1,5 +1,6 @@
-// THE PAY STATEMENT DOCUMENT: a real US-Letter PDF, byte-deterministic, carrying the statement's
-// own numbers and nothing it worked out for itself.
+// THE PAYROLL HOURS STATEMENT: a real US-Letter PDF, byte-deterministic, carrying the statement's
+// own numbers and nothing it worked out for itself — every calendar day of the period present,
+// each week subtotalled, and those subtotals adding back up to the payable total.
 //
 // This renders through the REAL pdf-lib (already a production dependency) and inspects the bytes
 // it produces — page geometry from the MediaBox, text from the content streams. Nothing is
@@ -43,18 +44,14 @@ writeFileSync(
 
 const tzUrl = transpile('../schedule/timezone.ts', 'timezone.mjs');
 const employeesUrl = transpile('../employees.ts', 'employees.mjs');
-const pickerUrl = transpile('../shipping/pickerPerformance.ts', 'pickerPerformance.mjs');
-const econUrl = transpile('../shipping/pickCostEconomics.ts', 'pickCostEconomics.mjs', {
-  "'@/lib/employees'": `'${employeesUrl}'`,
-  "'@/lib/shipping/pickerPerformance'": `'${pickerUrl}'`,
-});
 const stmtUrl = transpile('./statement.ts', 'statement.mjs', {
   "'@/lib/employees'": `'${employeesUrl}'`,
   "'@/lib/schedule/timezone'": `'${tzUrl}'`,
-  "'@/lib/shipping/pickCostEconomics'": `'${econUrl}'`,
 });
+const brandUrl = transpile('../brand/viraluxLockup.ts', 'viraluxLockup.mjs');
 const pdfUrl = transpile('./statementPdf.ts', 'statementPdf.mjs', {
   "'./statement'": `'${stmtUrl}'`,
+  "'@/lib/brand/viraluxLockup'": `'${brandUrl}'`,
   "'pdf-lib'": `'${pathToFileURL(shim).href}'`,
 });
 
@@ -62,9 +59,9 @@ const punchUrl = transpile('../shifts/punchEdit.ts', 'punchEdit.mjs', {
   "'@/lib/schedule/timezone'": `'${tzUrl}'`,
   "'@/lib/weeklySchedule'": `'${transpile('../weeklySchedule.ts', 'weeklySchedule.mjs')}'`,
 });
-const { buildPayStatement, formatMoney } = await import(stmtUrl);
+const { buildPayStatement, formatMoney, payPeriodWeeks } = await import(stmtUrl);
 const { buildShiftEditPatch } = await import(punchUrl);
-const { renderPayStatementPdf, wrapText, fitText, rowCells, formatPeriodRange } = await import(pdfUrl);
+const { renderPayStatementPdf, fitText, dayLines, formatLongDate, formatPeriodRange } = await import(pdfUrl);
 const { laWallTimeToUtc } = await import(tzUrl);
 
 let passed = 0;
@@ -156,11 +153,11 @@ async function pageSizes(bytes) {
 
 const SHIFTS = [
   punch('2026-08-26', '06:06', '14:01', { break_minutes: 27 }),
-  manual('2026-08-26', '06:00', '14:00'), // overlaps the punch → a review note
+  manual('2026-08-26', '15:00', '19:00'), // a SECOND record on the same day
   punch('2026-08-27', '06:04', '14:02', { break_minutes: 62 }),
-  manual('2026-08-31', '17:00', '01:00'), // overnight
+  manual('2026-08-31', '17:00', '01:00'), // overnight, into September
   punch('2026-09-01', '06:15', '13:58'),
-  manual('2026-09-02', '09:00', null), // open → excluded, listed as not paid
+  manual('2026-09-02', '09:00', null), // open → not payable, so its day prints as Off
 ];
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -189,119 +186,193 @@ console.log('\n§2 The same statement always produces the same bytes');
   check('a different generated-at DOES change the document', !Buffer.from(a).equals(Buffer.from(later)),
     'the timestamp is real, not decorative');
   check('the document carries the caller\'s date, not today\'s',
-    textOf(a).includes('Generated 2026-09-08') && textOf(later).includes('Generated 2026-09-09'));
+    textOf(a).includes('2026-09-08') && textOf(later).includes('2026-09-09'));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§3 What is on the page is what is on the screen');
+console.log('\n§3 The document says who, when and on what terms');
 {
   const statement = build(SHIFTS);
   const text = textOf(await renderPayStatementPdf(statement));
 
-  check('the Lensed masthead is there', text.includes('LENSED'));
-  check('it names itself', text.includes('Employee Pay Statement'));
-  check('the employee is named', text.includes('Carlos Medina'));
-  check('the role is shown', text.includes('Fulfillment'));
-  check('the pay period is shown',
-    text.includes(formatPeriodRange(PERIOD.start, PERIOD.end)), formatPeriodRange(PERIOD.start, PERIOD.end));
+  check('it is titled as a payroll hours statement', text.includes('EMPLOYEE PAYROLL HOURS STATEMENT'));
+  check('the employee is named', text.includes('Employee Name:') && text.includes('Carlos Medina'));
+  check('the department is the person\'s team', text.includes('Department:') && text.includes('Fulfillment'));
+  check('the pay schedule is stated', text.includes('Pay Schedule:') && text.includes('Biweekly'));
+  check('the pay period is stated',
+    text.includes('Pay Period:') && text.includes(formatPeriodRange(PERIOD.start, PERIOD.end)),
+    formatPeriodRange(PERIOD.start, PERIOD.end));
 
-  // The totals must be the STATEMENT's totals, character for character.
-  check('the total owed on paper is the statement total',
-    text.includes(formatMoney(statement.totals.gross)), formatMoney(statement.totals.gross));
-  check('the payable hours on paper are the statement hours',
-    text.includes(statement.totals.paidHours.toFixed(2)), statement.totals.paidHours.toFixed(2));
-  check('worked days are shown', text.includes(String(statement.totals.workedDays)));
+  // The reference statement carries these; this product stores none of them, so the document
+  // must not pretend to.
+  check('nothing is invented that the product does not store', (() => {
+    const t = text.toLowerCase();
+    return !/(cash paid|payment method|net pay|withhold|deduction|\btax\b)/.test(t);
+  })(), 'gross hours and money only');
+  check('no Lensed branding on the employee document', !/lensed/i.test(text));
 
-  // Every payable row must appear, with its own cells.
-  const missing = statement.rows.filter((r) => {
-    const c = rowCells(r);
-    return !text.includes(c.date) || !text.includes(c.hours) || !text.includes(c.amount);
-  });
-  check('every payable row is printed with its date, hours and amount',
-    missing.length === 0 && statement.rows.length === 5,
-    `${statement.rows.length} rows checked`);
-
-  check('both source labels appear', text.includes('Time Clock') && text.includes('Manual Entry'));
-  check('a break under an hour prints in minutes', text.includes('27m'));
-  check('a break over an hour prints in hours and minutes', text.includes('1h 2m'),
-    'the 62-minute break — 2417m would be unreadable');
-  check('an overnight end names the day it lands on', text.includes('(Sep 1)'), 'the 17:00–01:00 row');
+  check('the totals block is present and reads off the statement',
+    text.includes('Total Hours This Pay Period:') &&
+      text.includes(statement.totals.paidHours.toFixed(2)) &&
+      text.includes('Hourly Rate:') && text.includes(formatMoney(statement.rate)) &&
+      text.includes('Gross Pay:') && text.includes(formatMoney(statement.totals.gross)),
+    `${statement.totals.paidHours.toFixed(2)}h / ${formatMoney(statement.totals.gross)}`);
+  check('the signature block survived', text.includes('Employee Signature:') && text.includes('Employer/Manager Signature:'));
+  check('and the notes line', text.includes('Notes:'));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§4 Review notes travel with the document');
+console.log('\n§4 Two weeks, every calendar day, subtotals that reconcile');
 {
   const statement = build(SHIFTS);
+  const weeks = payPeriodWeeks(statement);
   const text = textOf(await renderPayStatementPdf(statement));
-  check('the fixture really does have something to review', statement.totals.reviewCount >= 2,
-    `${statement.totals.reviewCount}`);
-  check('the review section is printed', text.includes('NEEDS REVIEW'));
-  check('the overlap is named', text.includes('Overlapping Worked Time'));
-  check('the open clock-in is named as not paid',
-    text.includes('Open Clock-In') && text.includes('not paid'));
-  check('the review copy is manager language, not schema',
-    !/confirmed_at|source_rule_id|shift_instances|clock_in_at/.test(text));
 
-  const clean = build([punch('2026-08-26', '09:00', '17:00')]);
-  const cleanText = textOf(await renderPayStatementPdf(clean));
-  check('a clean period prints no review section', !cleanText.includes('NEEDS REVIEW'));
-  check('...and still prints its total', cleanText.includes(formatMoney(clean.totals.gross)));
+  check('both week headings are printed with their own ranges',
+    text.includes(`Week 1: ${formatPeriodRange(weeks[0].start, weeks[0].end)}`) &&
+      text.includes(`Week 2: ${formatPeriodRange(weeks[1].start, weeks[1].end)}`));
+  check('the table header is the agreed set of columns',
+    ['Date', 'Day', 'Time In', 'Time Out', 'Break', 'Hours'].every((h) => text.includes(h)));
+
+  // EVERY calendar day in the period must appear — that is the point of the layout.
+  const allDays = weeks.flatMap((w) => w.days);
+  check('the period really is 14 days (not a vacuous check)', allDays.length === 14);
+  const missing = allDays.filter((d) => !text.includes(formatLongDate(d.dateISO)));
+  check('all 14 dates are printed', missing.length === 0, missing.map((d) => d.dateISO).join(','));
+  const missingNames = [...new Set(allDays.map((d) => d.dayName))].filter((n) => !text.includes(n));
+  check('every weekday name is printed', missingNames.length === 0, missingNames.join(','));
+
+  // Days with no payable record read "Off", per the reference statement.
+  const offDays = allDays.filter((d) => d.rows.length === 0);
+  check('the fixture really has days off', offDays.length >= 5, `${offDays.length}`);
+  check('a day with no payable record prints as Off', text.includes('Off'));
+  check('...and as 0.00 hours', text.includes('0.00'));
+
+  // Subtotals.
+  check('each week prints its own subtotal',
+    text.includes('Week 1 Total Hours:') && text.includes('Week 2 Total Hours:'));
+  check('the printed subtotals are the model\'s subtotals',
+    text.includes(weeks[0].hours.toFixed(2)) && text.includes(weeks[1].hours.toFixed(2)),
+    `${weeks[0].hours.toFixed(2)} / ${weeks[1].hours.toFixed(2)}`);
+  check('WEEK 1 + WEEK 2 == total payable hours',
+    Math.abs(weeks[0].hours + weeks[1].hours - statement.totals.paidHours) < 1e-9,
+    `${weeks[0].hours.toFixed(2)} + ${weeks[1].hours.toFixed(2)} = ${statement.totals.paidHours.toFixed(2)}`);
+  check('...and neither week is empty here', weeks[0].hours > 0 && weeks[1].hours > 0);
+
+  // Multiple records on one date stay as separate lines.
+  const twoRecordDay = allDays.find((d) => d.rows.length > 1);
+  check('the fixture has a day with two records', !!twoRecordDay, twoRecordDay?.dateISO);
+  const lines = dayLines(twoRecordDay);
+  check('that day emits one line per record, not a merged one', lines.length === twoRecordDay.rows.length);
+  check('the date and day name are printed once, on the first line',
+    lines[0].date !== '' && lines[0].day !== '' && lines[1].date === '' && lines[1].day === '');
+  check('both records\' own hours reach the page',
+    twoRecordDay.rows.every((r) => text.includes(r.paidHours.toFixed(2))),
+    twoRecordDay.rows.map((r) => r.paidHours.toFixed(2)).join(' + '));
+
+  // An overnight record names the day it ended on.
+  check('an end on a later calendar day is labelled', text.includes('(Sep 1)'), 'the Aug 31 17:00-01:00 record');
+
+  // A scheduled-only day contributes nothing.
+  const withPlan = build([...SHIFTS, manual('2026-09-04', '09:00', '17:00', { source_rule_id: 'r1' })]);
+  const planWeeks = payPeriodWeeks(withPlan);
+  const planDay = planWeeks.flatMap((w) => w.days).find((d) => d.dateISO === '2026-09-04');
+  check('a scheduled-only day carries no payable record', planDay.rows.length === 0 && planDay.hours === 0);
+  check('...and does not change the total',
+    withPlan.totals.paidHours === build(SHIFTS).totals.paidHours,
+    'the plan is never pay');
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§5 It holds up at the edges');
+console.log('\n§5 It says nothing about whether a record looks wrong');
 {
+  // Two records covering the same hours, and a 47.75h punch: both are printed plainly and neither
+  // is flagged, capped or excluded. Reading them is the manager's job.
+  const dup = [
+    punch('2026-08-26', '06:06', '14:01'),
+    manual('2026-08-26', '06:00', '14:00'),
+    punch('2026-08-24', '05:59', '05:44', {
+      clock_out_at: laWallTimeToUtc('2026-08-26', '05:44').toISOString(),
+      break_minutes: 2417,
+    }),
+  ];
+  const statement = build(dup);
+  const text = textOf(await renderPayStatementPdf(statement));
+
+  check('no review or anomaly section anywhere', (() => {
+    const t = text.toLowerCase();
+    return !/needs review|review|overlapping|unusually long|warning|anomaly/.test(t);
+  })());
+  check('both same-day records are still printed', dayLines(
+    payPeriodWeeks(statement).flatMap((w) => w.days).find((d) => d.dateISO === '2026-08-26'),
+  ).length === 2);
+  check('the long record is printed at its real hours, uncapped',
+    text.includes(statement.rows.find((r) => r.dateISO === '2026-08-24').paidHours.toFixed(2)));
+  check('and its break reads in hours', text.includes('40h 17m'));
+  check('the total still equals the model\'s total', text.includes(formatMoney(statement.totals.gross)));
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+console.log('\n§6 One page when it reasonably can be, and it holds up at the edges');
+{
+  // The ordinary case: a two-week period, one record most days. Must be a single sheet.
+  const ordinary = [];
+  for (const d of ['24', '25', '26', '27', '28']) ordinary.push(punch(`2026-08-${d}`, '09:00', '17:00'));
+  for (const d of ['31']) ordinary.push(punch(`2026-08-${d}`, '09:00', '17:00'));
+  for (const d of ['01', '02', '03', '04']) ordinary.push(punch(`2026-09-${d}`, '09:00', '17:00'));
+  const ordinaryPages = await pageSizes(await renderPayStatementPdf(build(ordinary)));
+  check('a normal two-week statement is ONE Letter page', ordinaryPages.length === 1,
+    `${ordinaryPages.length} pages, 10 worked days`);
+
+  // The fixture with a second record on a day still fits.
+  const fixturePages = await pageSizes(await renderPayStatementPdf(build(SHIFTS)));
+  check('...and so does one with a doubled-up day', fixturePages.length === 1, `${fixturePages.length}`);
+
   const empty = build([]);
   const emptyText = textOf(await renderPayStatementPdf(empty));
-  check('a period with no worked time still renders a statement',
-    emptyText.includes('No payable worked time in this pay period.'));
-  check('...and reads as zero owed', emptyText.includes('$0.00'));
+  check('a period with no worked time still renders every day as Off',
+    emptyText.includes('Off') && emptyText.includes('August 24') && emptyText.includes('September 6'));
+  check('...and reads as zero owed', emptyText.includes('$0.00') && emptyText.includes('0.00'));
 
-  // Enough rows to force pagination.
+  // Genuinely many records: pagination is allowed, but every row must survive it.
   const many = [];
-  for (let d = 24; d <= 31; d++) {
-    many.push(punch(`2026-08-${d}`, '06:00', '14:00'));
-    many.push(manual(`2026-08-${d}`, '15:00', '19:00'));
+  for (let d = 24; d <= 30; d++) {
+    many.push(punch(`2026-08-${d}`, '06:00', '10:00'));
+    many.push(manual(`2026-08-${d}`, '11:00', '15:00'));
+    many.push(manual(`2026-08-${d}`, '16:00', '20:00'));
   }
+  for (let d = 31; d <= 31; d++) many.push(punch(`2026-08-${d}`, '06:00', '14:00'));
   for (let d = 1; d <= 6; d++) {
     const dd = String(d).padStart(2, '0');
-    many.push(punch(`2026-09-${dd}`, '06:00', '14:00'));
-    many.push(manual(`2026-09-${dd}`, '15:00', '19:00'));
+    many.push(punch(`2026-09-${dd}`, '06:00', '10:00'));
+    many.push(manual(`2026-09-${dd}`, '11:00', '15:00'));
   }
   const big = build(many);
   const bytes = await renderPayStatementPdf(big);
   const boxes = await pageSizes(bytes);
   const text = textOf(bytes);
-  check('a long period spills onto more than one page', boxes.length >= 2, `${big.rows.length} rows → ${boxes.length} pages`);
+  check('a genuinely crowded period paginates rather than overflowing', boxes.length >= 2,
+    `${big.rows.length} records -> ${boxes.length} pages`);
   check('every spilled page is still Letter', boxes.every(([w, h]) => w === 612 && h === 792));
   check('pages are numbered with the real total', text.includes(`Page ${boxes.length} of ${boxes.length}`));
-  check('the total survives pagination', text.includes(formatMoney(big.totals.gross)),
-    formatMoney(big.totals.gross));
-  check('every row still made it onto paper',
-    big.rows.every((r) => text.includes(rowCells(r).amount)), `${big.rows.length} rows`);
+  check('the total survives pagination', text.includes(formatMoney(big.totals.gross)), formatMoney(big.totals.gross));
+  const bigWeeks = payPeriodWeeks(big);
+  check('the week subtotals still reconcile across pages',
+    Math.abs(bigWeeks[0].hours + bigWeeks[1].hours - big.totals.paidHours) < 1e-9);
+  check('every one of the 14 dates still appears',
+    bigWeeks.flatMap((w) => w.days).every((d) => text.includes(formatLongDate(d.dateISO))));
 
   // A name long enough to collide with the period block must be trimmed, not overlapped.
   const longName = build(SHIFTS, EMP({ name: 'Bartholomew Fitzgerald-Montgomery III of the Warehouse' }));
   const longText = textOf(await renderPayStatementPdf(longName));
   check('an over-long name is truncated with an ellipsis rather than overrunning',
     longText.includes('Bartholomew') && /…/.test(longText));
-}
 
-// ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§6 The layout helpers');
-{
-  const font = { widthOfTextAtSize: (t, s) => t.length * s * 0.5 };
+  const font = { widthOfTextAtSize: (t, sz) => t.length * sz * 0.5 };
   check('fitText leaves short text alone', fitText('abc', font, 10, 100) === 'abc');
-  check('fitText truncates with an ellipsis', fitText('a'.repeat(80), font, 10, 50).endsWith('…'));
   check('fitText result actually fits', font.widthOfTextAtSize(fitText('a'.repeat(80), font, 10, 50), 10) <= 50);
-  const lines = wrapText('the quick brown fox jumps over the lazy dog', font, 10, 60);
-  check('wrapText breaks into lines that fit', lines.length > 1 && lines.every((l) => font.widthOfTextAtSize(l, 10) <= 60));
-  check('wrapText loses no words',
-    lines.join(' ').split(/\s+/).join(' ') === 'the quick brown fox jumps over the lazy dog');
-  check('wrapText hard-splits an unbreakable token',
-    wrapText('x'.repeat(200), font, 10, 60).every((l) => font.widthOfTextAtSize(l, 10) <= 60));
   check('a period spanning a year boundary names both years',
-    formatPeriodRange('2026-12-28', '2027-01-10') === 'Dec 28, 2026 – Jan 10, 2027',
+    formatPeriodRange('2026-12-28', '2027-01-10') === 'December 28, 2026 - January 10, 2027',
     formatPeriodRange('2026-12-28', '2027-01-10'));
 }
 

@@ -13,8 +13,6 @@ export interface PayTile {
   hours: number;
   pay: number;
   scheduled: number;
-  /** Records in this period that need a manager's eye. 0 = nothing to look at. */
-  reviewCount: number;
 }
 
 export default function PayGrid({
@@ -34,7 +32,7 @@ export default function PayGrid({
   return (
     <div className="grid grid-cols-2 gap-2.5 p-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
       {rows.map((tile) => {
-        const { employee, hours, pay, scheduled, reviewCount } = tile;
+        const { employee, hours, pay, scheduled } = tile;
         const unpaid = pay === 0;
         return (
           <button
@@ -42,18 +40,8 @@ export default function PayGrid({
             type="button"
             onClick={() => onOpen(tile)}
             aria-label={`Pay details for ${employee.name}`}
-            className={`relative flex flex-col items-center rounded-xl border border-tt-border bg-white/[0.02] p-3 text-center transition-colors hover:border-tt-cyan/40 hover:bg-tt-card-hover ${unpaid ? 'opacity-55' : ''}`}
+            className={`flex flex-col items-center rounded-xl border border-tt-border bg-white/[0.02] p-3 text-center transition-colors hover:border-tt-cyan/40 hover:bg-tt-card-hover ${unpaid ? 'opacity-55' : ''}`}
           >
-            {/* The count is the point of the badge, but colour alone is not the signal — the tile
-                also reads out in its aria-label above. */}
-            {reviewCount > 0 && (
-              <span
-                title={`${reviewCount} ${reviewCount === 1 ? 'record needs' : 'records need'} review`}
-                className="absolute right-2 top-2 rounded-md bg-tt-yellow/15 px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums text-tt-yellow"
-              >
-                {reviewCount}
-              </span>
-            )}
             <PersonAvatar name={employee.name} state="confirmed" size="lg" />
             <span className="mt-2 w-full truncate text-[13px] font-semibold text-tt-text" title={employee.name}>
               {employee.name}

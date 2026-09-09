@@ -4,11 +4,10 @@ import {
   type ShiftLike,
 } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
-import { MAX_PLAUSIBLE_PUNCH_HOURS } from '@/lib/shipping/pickCostEconomics';
 import type { Employee, Shift } from '@/types';
 
 // ONE NORMALIZED PAY STATEMENT. This module is the single place a pay period is turned into
-// per-employee rows, hours, money and review warnings. The Pay Detail screen and the PDF both
+// per-employee rows, hours and money. The Pay Detail screen and the PDF both
 // render the object this builds and neither does arithmetic of its own — that is the whole
 // point. Two renderers over one model cannot disagree; two calculators always eventually do.
 //
@@ -20,45 +19,22 @@ import type { Employee, Shift } from '@/types';
 // Pure: no React, no Supabase, no clock. `generatedAtISO` is passed in so a statement is a
 // deterministic function of its inputs and can be tested without freezing time.
 
-// ── Interval derivation ─────────────────────────────────────────────────────────────────────
+// ── Calendar arithmetic ─────────────────────────────────────────────────────────────────────
 //
-// The occupancy interval of a worked row, used ONLY for overlap and span warnings — never for
-// money. It is a branch-for-branch port of the database's canonical range helper
-// `public.lensed_shift_wall_range(source, date, start_time, end_time, clock_in_at, clock_out_at)`
-// (migration 131), which is what lensed_create_manual_worked_shift refuses overlapping writes
-// against. The UI warning and the DB guard must name the same conflicts, so there is exactly one
-// rule and this is a transcription of it:
+// Pure integer civil-calendar maths. Date is avoided on purpose: a statement must come out
+// identical on a UTC server and an LA laptop.
 //
-//   * time_clock WITH both instants → the punch instants, read as America/Los_Angeles wall time.
-//     Instants have no 24-hour ceiling, which is deliberate (a 26h forgotten clock-out must read
-//     as 26h, not wrap to 2h and hide a conflict).
-//   * anything else                 → date + start_time … date + end_time, plus a day when
-//     end_time <= start_time (ran past midnight).
-//   * end_time NULL                 → unbounded upper, matching the DB's `tsrange(lo, null)`.
-//
-// TESTED FOR THE INSTANTS, NEVER INFERRED FROM `source`. Three shipped kiosk RPCs are written as
-// though they could insert a time_clock row with NULL instants; the hosted CHECK constraint
-// `shifts_time_clock_has_instants` currently forbids it (verified against the live schema), but
-// this code does not depend on that — it takes the wall-clock branch whenever an instant is
-// missing, exactly as paidShiftHours does.
-//
-// Working in WALL space (plain minutes on a civil calendar) rather than absolute instants is not
-// a shortcut: it is what the DB does, because tsrange is `timestamp without time zone`. Two rows
-// conflict when they occupy the same wall time, which is the question a manager is asking.
-//
-// KNOWN GRANULARITY: laWallClockOf truncates to the minute (real punches carry seconds), so an
-// interval here can differ from the DB's by up to 59s. Minutes are the granularity the editor and
-// every other surface work at; a sub-minute touch is not a conflict a manager can act on.
+// (An earlier pass also carried a port of the database's `lensed_shift_wall_range` helper here, to
+// drive overlap and long-span warnings on the Pay screen. Those warnings were removed — a manager
+// reads the records and judges them — so the port went with them rather than sitting unused and
+// costing an O(n^2) scan on every statement build. The database keeps its own guard on writes;
+// nothing here needed to duplicate it.)
 
-const MINUTES_PER_DAY = 1440;
-
-// Days from 1970-01-01 for a 'YYYY-MM-DD', by pure integer civil-calendar arithmetic. Date is
-// avoided on purpose: this must be identical on a UTC server and an LA laptop.
+// Days from 1970-01-01 for a 'YYYY-MM-DD' — Howard Hinnant's days_from_civil.
 function daysFromEpoch(dateISO: string): number {
   const y = Number(dateISO.slice(0, 4));
   const m = Number(dateISO.slice(5, 7));
   const d = Number(dateISO.slice(8, 10));
-  // Howard Hinnant's days_from_civil.
   const yAdj = m <= 2 ? y - 1 : y;
   const era = Math.floor(yAdj / 400);
   const yoe = yAdj - era * 400;
@@ -67,112 +43,47 @@ function daysFromEpoch(dateISO: string): number {
   return era * 146097 + doe - 719468;
 }
 
+// The inverse — civil_from_days — so a date can be stepped without touching Date.
+function isoPlusDays(dateISO: string, n: number): string {
+  const z = daysFromEpoch(dateISO) + n + 719468;
+  const era = Math.floor(z / 146097);
+  const doe = z - era * 146097;
+  const yoe = Math.floor(
+    (doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365,
+  );
+  const y = yoe + era * 400;
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+  const mp = Math.floor((5 * doy + 2) / 153);
+  const d = doy - Math.floor((153 * mp + 2) / 5) + 1;
+  const m = mp + (mp < 10 ? 3 : -9);
+  const year = m <= 2 ? y + 1 : y;
+  return `${String(year).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
 function minutesOfDay(timeHHMM: string): number {
   return Number(timeHHMM.slice(0, 2)) * 60 + Number(timeHHMM.slice(3, 5));
 }
 
-// Absolute minutes on the civil calendar — the comparable coordinate every interval uses.
-function wallMinutes(dateISO: string, timeHHMM: string): number {
-  return daysFromEpoch(dateISO) * MINUTES_PER_DAY + minutesOfDay(timeHHMM);
-}
-
-/** A half-open [lo, hi) occupancy interval in wall minutes. `hi` null = open/unbounded. */
-export interface WallInterval {
-  lo: number;
-  hi: number | null;
-}
-
-/** The fields interval derivation needs. Satisfied by a stored `Shift`. */
-export type IntervalShift = Pick<Shift, 'date' | 'start_time' | 'end_time'> &
-  Partial<Pick<Shift, 'source' | 'clock_in_at' | 'clock_out_at'>>;
-
-export function wallIntervalOf(s: IntervalShift): WallInterval {
-  const usesInstants = s.source === 'time_clock' && !!s.clock_in_at && !!s.clock_out_at;
-  if (usesInstants) {
-    const inAt = laWallClockOf(s.clock_in_at as string);
-    const outAt = laWallClockOf(s.clock_out_at as string);
-    const a = wallMinutes(inAt.date, inAt.time);
-    const b = wallMinutes(outAt.date, outAt.time);
-    // LEAST/GREATEST, as the DB helper does — an inverted pair is normalised, not negative.
-    return { lo: Math.min(a, b), hi: Math.max(a, b) };
-  }
-  const lo = wallMinutes(s.date, s.start_time);
-  if (s.end_time == null) return { lo, hi: null }; // open shift — unbounded, like tsrange(lo, null)
-  const endM = minutesOfDay(s.end_time);
-  const startM = minutesOfDay(s.start_time);
-  const wrap = endM <= startM ? MINUTES_PER_DAY : 0; // `<=`, matching lensed_shift_wall_range
-  return { lo, hi: lo + (endM - startM) + wrap };
-}
-
-function intervalsOverlap(a: WallInterval, b: WallInterval): boolean {
-  const aHi = a.hi ?? Infinity;
-  const bHi = b.hi ?? Infinity;
-  return a.lo < bHi && b.lo < aHi; // half-open: touching endpoints do not overlap
-}
-
-// ── Warnings ────────────────────────────────────────────────────────────────────────────────
-
-/**
- * How many days BEFORE the pay period the overlap scan must also read.
- *
- * The Pay tab fetches by the `shifts.date` COLUMN, but a time_clock row's real interval comes
- * from its instants and has no 24-hour ceiling — production holds a punch dated 2026-08-24 whose
- * span is 47.75h and therefore occupies 2026-08-26. A row dated just before the period can reach
- * into it, and scanning only the period would miss exactly the conflict the database's own guard
- * exists to catch (commit 717fe22 removed the same date-bounded mistake from that guard).
- *
- * 3 days clears the worst shape on record with a day of slack: measured against live data, the
- * furthest any stored row reaches past its own `date` is 2 days (max span 47.75h). This is a
- * BOUNDED APPROXIMATION of the RPC's deliberately unbounded per-employee scan — a hypothetical
- * 100-hour punch dated 4 days before the period would not be flagged here, though the RPC would
- * still refuse a write against it. Only a per-employee unbounded read is exact.
- */
-export const OVERLAP_SCAN_LOOKBACK_DAYS = 3;
-
-/**
- * Gross span, in hours, past which a worked interval is called out for review.
- *
- * Imported rather than redefined: 18 is the number this product already shows managers ("A single
- * punch over 18h is a missed clock-out, not a shift"), and it was tuned against real stored spans
- * — high enough to clear a genuine 16.08h double shift, low enough to catch every observed
- * anomaly. A fourth threshold competing with LONG_SHIFT_HOURS (16, an at-entry editor warning on
- * wall-clock duration) and IMPLAUSIBLE_SPAN_HOURS (14, orphaned) is the last thing payroll needs.
- *
- * Measured on the GROSS span, not on paid hours. The 47.75h row in production carries a 2417-minute
- * break and pays 7.47h; judged on paid hours it looks ordinary, and it is precisely the row a
- * manager must see.
- *
- * (The constant lives in a shipping module, which is poor layering. Left where it is: relocating a
- * shared constant is not this feature's business, and duplicating it would defeat the point.)
- */
-export const LONG_SPAN_HOURS = MAX_PLAUSIBLE_PUNCH_HOURS;
-
-export type WarningKind = 'overlap' | 'long_span' | 'manual_entry';
-
-export interface RowWarning {
-  kind: WarningKind;
-  /** Manager-facing, plain language. No table names, no column names, no RPC names. */
-  label: string;
-  detail: string;
-  /** 'review' needs a decision; 'note' is context, not a problem. */
-  tone: 'review' | 'note';
-}
+// ── Rows that sit in the period without being paid ──────────────────────────────────────────
 
 /** Why a row inside the period contributed nothing — the reasons isPayableShift encodes. */
 export type ExclusionReason = 'open' | 'schedule_plan' | 'awaiting_confirmation';
 
+// Plain statements of fact about why a record carries no money — not verdicts on it. These sit in
+// a quiet list under the worked time so a light total is explainable, and nothing here tells the
+// manager that something is wrong.
 const EXCLUSION_COPY: Record<ExclusionReason, { label: string; detail: string }> = {
   open: {
-    label: 'Open Clock-In',
-    detail: 'Still on the clock — no end time recorded, so these hours are not being paid yet.',
+    label: 'Open clock-in',
+    detail: 'No end time recorded yet.',
   },
   schedule_plan: {
-    label: 'Scheduled Only',
-    detail: 'This came from the schedule, not from worked time. Scheduled hours are never paid.',
+    label: 'Scheduled only',
+    detail: 'From the schedule, not worked time.',
   },
   awaiting_confirmation: {
-    label: 'Needs Review',
-    detail: 'A time-clock punch waiting on a manager. It stays out of pay until it is confirmed.',
+    label: 'Unconfirmed punch',
+    detail: 'Stays out of pay until it is confirmed.',
   },
 };
 
@@ -200,13 +111,11 @@ export interface StatementRow {
   breakMinutes: number;
   /** === paidShiftHours(shift). Never recomputed downstream. */
   paidHours: number;
-  /** Gross occupancy before the break — what the long-span warning judges. */
-  spanHours: number;
   rate: number;
   amount: number;
   source: 'time_clock' | 'manual';
+  /** Neutral context only: 'Time Clock' or 'Manual Entry'. */
   sourceLabel: string;
-  warnings: RowWarning[];
 }
 
 export interface ExcludedRow {
@@ -241,7 +150,6 @@ export interface StatementTotals {
   /** Distinct calendar dates with at least one payable row. */
   workedDays: number;
   rowCount: number;
-  reviewCount: number;
 }
 
 export interface PayStatement {
@@ -281,29 +189,14 @@ function displaySpan(s: Shift): { start: string; end: string; endDateISO: string
   };
 }
 
-function isoPlusDays(dateISO: string, n: number): string {
-  const days = daysFromEpoch(dateISO) + n;
-  // civil_from_days, the inverse of daysFromEpoch above.
-  const z = days + 719468;
-  const era = Math.floor(z / 146097);
-  const doe = z - era * 146097;
-  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
-  const y = yoe + era * 400;
-  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
-  const mp = Math.floor((5 * doy + 2) / 153);
-  const d = doy - Math.floor((153 * mp + 2) / 5) + 1;
-  const m = mp + (mp < 10 ? 3 : -9);
-  const year = m <= 2 ? y + 1 : y;
-  return `${String(year).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-}
 
 export interface BuildStatementInput {
   employee: Employee;
   period: { start: string; end: string; payday: string };
   /**
-   * Every `shifts` row for THIS employee in [period.start − OVERLAP_SCAN_LOOKBACK_DAYS, period.end].
-   * The wider window feeds the overlap scan only; rows dated before period.start are never paid
-   * and never listed. Filtering happens here, on `date`, exactly as the Pay tab's query does.
+   * `shifts` rows for THIS employee. Anything outside [period.start, period.end] is ignored —
+   * filtering happens here, on `date`, exactly as the Pay tab's own query does, so a caller may
+   * safely pass a wider fetch.
    */
   shifts: Shift[];
   generatedAtISO: string;
@@ -318,90 +211,11 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
   // period its own `date` falls in, which is the existing rule and is deliberately not changed.
   const inPeriod = mine.filter((s) => s.date >= period.start && s.date <= period.end);
 
-  // Overlap candidates: the database guard's set, with ONE deliberate narrowing.
-  //
-  // Kept, as the guard keeps them: unconfirmed punches. An unconfirmed punch is real worked time
-  // that becomes payable the moment a manager confirms it, which is exactly when a manual row
-  // stacked on top of it starts paying twice — so it must raise the flag before that happens.
-  //
-  // Dropped, where the guard keeps them: OPEN rows. The guard treats an open shift as unbounded
-  // because it has to refuse a write that MIGHT collide with wherever that punch eventually ends.
-  // A review warning is answering a different question, and inheriting the unbounded reach here
-  // makes one forgotten clock-out declare a conflict against every shift that follows it — noise
-  // that buries the real overlaps. An open row is not payable (isPayableShift drops it) so it is
-  // double-paying nothing, and it is already called out on its own as an Open Clock-In.
-  const candidates = mine
-    .filter((s) => s.source_rule_id == null)
-    .map((s) => ({ shift: s, interval: wallIntervalOf(s) }))
-    .filter((c) => c.interval.hi !== null);
-
-  const overlapPartners = new Map<string, Shift[]>();
-  for (let i = 0; i < candidates.length; i++) {
-    for (let j = i + 1; j < candidates.length; j++) {
-      const a = candidates[i];
-      const b = candidates[j];
-      if (!intervalsOverlap(a.interval, b.interval)) continue;
-      const forA = overlapPartners.get(a.shift.id) ?? [];
-      forA.push(b.shift);
-      overlapPartners.set(a.shift.id, forA);
-      const forB = overlapPartners.get(b.shift.id) ?? [];
-      forB.push(a.shift);
-      overlapPartners.set(b.shift.id, forB);
-    }
-  }
-
   const payable = inPeriod.filter((s) => isPayableShift(s));
   const rows: StatementRow[] = payable
     .map((s) => {
       const span = displaySpan(s);
-      const interval = wallIntervalOf(s);
-      const spanHours = interval.hi == null ? 0 : (interval.hi - interval.lo) / 60;
       const paidHours = paidShiftHours(s);
-      const warnings: RowWarning[] = [];
-
-      const partners = overlapPartners.get(s.id);
-      if (partners && partners.length > 0) {
-        warnings.push({
-          kind: 'overlap',
-          label: 'Overlapping Worked Time',
-          // Deliberately NOT quantified in hours or dollars. The occupancy interval is gross and
-          // does not subtract breaks, so any figure stated here would not be the money at stake.
-          // The manager is shown WHICH records conflict and decides; nothing decides for them.
-          detail: `Covers the same time as ${partners.length === 1 ? 'another record' : `${partners.length} other records`} for ${employee.name}: ${partners
-            .map((p) => {
-              const ps = displaySpan(p);
-              const end = ps.end ? formatClock12(ps.end) : 'still open';
-              return `${formatDayLabel(p.date)} ${formatClock12(ps.start)}–${end} (${
-                p.source === 'time_clock' ? 'Time Clock' : 'Manual Entry'
-              })`;
-            })
-            .join('; ')}. Both are being paid. Review which one is right.`,
-          tone: 'review',
-        });
-      }
-
-      if (spanHours > LONG_SPAN_HOURS) {
-        warnings.push({
-          kind: 'long_span',
-          label: 'Unusually Long',
-          detail: `Runs ${spanHours.toFixed(1)} hours end to end — longer than a shift usually is, and often a missed clock-out.${
-            s.break_minutes > 0
-              ? ` A ${formatBreak(s.break_minutes)} break brings the paid time down to ${paidHours.toFixed(2)}.`
-              : ''
-          } The hours shown are being paid as-is.`,
-          tone: 'review',
-        });
-      }
-
-      if (s.source !== 'time_clock') {
-        warnings.push({
-          kind: 'manual_entry',
-          label: 'Manual Entry',
-          detail: 'Entered by hand rather than punched at the clock. Not a problem on its own.',
-          tone: 'note',
-        });
-      }
-
       return {
         shiftId: s.id,
         dateISO: s.date,
@@ -410,12 +224,10 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
         endDateISO: span.endDateISO,
         breakMinutes: s.break_minutes ?? 0,
         paidHours,
-        spanHours,
         rate,
         amount: paidHours * rate,
         source: s.source === 'time_clock' ? 'time_clock' : 'manual',
         sourceLabel: s.source === 'time_clock' ? 'Time Clock' : 'Manual Entry',
-        warnings,
       } satisfies StatementRow;
     })
     .sort((a, b) => a.dateISO.localeCompare(b.dateISO) || a.startLabel.localeCompare(b.startLabel));
@@ -446,9 +258,6 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
   const gross = paidHours * rate;
 
   const workedDays = new Set(rows.map((r) => r.dateISO)).size;
-  const reviewCount =
-    rows.reduce((n, r) => n + r.warnings.filter((w) => w.tone === 'review').length, 0) +
-    excluded.filter((e) => e.reason !== 'schedule_plan').length;
 
   return {
     employee: { id: employee.id, name: employee.name, role: employee.role },
@@ -459,9 +268,111 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
     // One line, because one rate is all the product stores. Kept as a list so a real rate history
     // would extend this rather than force a second total somewhere else.
     rateLines: rows.length > 0 ? [{ rate, hours: paidHours, amount: gross }] : [],
-    totals: { paidHours, gross, workedDays, rowCount: rows.length, reviewCount },
+    totals: { paidHours, gross, workedDays, rowCount: rows.length },
     generatedAtISO,
   };
+}
+
+// ── Grouping: the same arrangement on screen and on paper ───────────────────────────────────
+//
+// These only ARRANGE `statement.rows` — every hour they report is a sum of numbers buildPayStatement
+// already computed, so there is still exactly one payroll calculation. Both the Pay Details panel
+// and the PDF read these, which is what keeps a day's total on screen equal to the same day's total
+// on paper.
+//
+// MULTIPLE RECORDS ON ONE DAY STAY SEPARATE. A split shift, or a hand-entered correction sitting
+// beside a punch, are different records that a manager may need to edit one at a time; merging them
+// into a day total would take that away and hide what actually happened.
+
+export interface DayGroup {
+  dateISO: string;
+  /** 'Monday'. */
+  dayName: string;
+  /** Every payable record on this date, earliest first. Empty on a day nobody worked. */
+  rows: StatementRow[];
+  /** Sum of this day's rows. 0 on a day with no payable record. */
+  hours: number;
+  amount: number;
+}
+
+export interface PeriodWeek {
+  /** 1 or 2 for a normal biweekly period. */
+  index: number;
+  start: string;
+  end: string;
+  /** Every calendar day in the week, worked or not. */
+  days: DayGroup[];
+  hours: number;
+  amount: number;
+}
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function weekdayIndex(dateISO: string): number {
+  return ((daysFromEpoch(dateISO) % 7) + 11) % 7; // 1970-01-01 was a Thursday
+}
+
+function dayGroupFor(dateISO: string, rows: StatementRow[]): DayGroup {
+  let hours = 0;
+  let amount = 0;
+  for (const r of rows) {
+    hours += r.paidHours;
+    amount += r.amount;
+  }
+  return { dateISO, dayName: DAY_NAMES[weekdayIndex(dateISO)], rows, hours, amount };
+}
+
+/** The days that actually have payable records, in date order. What the Pay Details panel lists. */
+export function workedDayGroups(statement: PayStatement): DayGroup[] {
+  const byDate = new Map<string, StatementRow[]>();
+  for (const r of statement.rows) {
+    const arr = byDate.get(r.dateISO);
+    if (arr) arr.push(r);
+    else byDate.set(r.dateISO, [r]);
+  }
+  return [...byDate.keys()].sort().map((d) => dayGroupFor(d, byDate.get(d) as StatementRow[]));
+}
+
+/**
+ * The WHOLE pay period as consecutive 7-day weeks, every calendar day present whether or not it
+ * was worked — the shape the printed statement is read in, where an empty Tuesday is information.
+ *
+ * Weeks are chunked from the period's own span rather than assuming 14 days, so a period of any
+ * length still comes out whole (the last chunk is simply short). For the biweekly period this
+ * product actually issues, that is exactly Week 1 and Week 2.
+ */
+export function payPeriodWeeks(statement: PayStatement): PeriodWeek[] {
+  const byDate = new Map<string, StatementRow[]>();
+  for (const r of statement.rows) {
+    const arr = byDate.get(r.dateISO);
+    if (arr) arr.push(r);
+    else byDate.set(r.dateISO, [r]);
+  }
+
+  const first = daysFromEpoch(statement.period.start);
+  const last = daysFromEpoch(statement.period.end);
+  const weeks: PeriodWeek[] = [];
+  for (let offset = 0; first + offset <= last; offset += 7) {
+    const days: DayGroup[] = [];
+    let hours = 0;
+    let amount = 0;
+    for (let d = 0; d < 7 && first + offset + d <= last; d++) {
+      const iso = isoPlusDays(statement.period.start, offset + d);
+      const group = dayGroupFor(iso, byDate.get(iso) ?? []);
+      hours += group.hours;
+      amount += group.amount;
+      days.push(group);
+    }
+    weeks.push({
+      index: weeks.length + 1,
+      start: days[0].dateISO,
+      end: days[days.length - 1].dateISO,
+      days,
+      hours,
+      amount,
+    });
+  }
+  return weeks;
 }
 
 // ── Presentation helpers shared by the screen and the PDF ───────────────────────────────────
@@ -502,9 +413,10 @@ export function formatMoney(n: number): string {
 
 /**
  * A stable, filesystem-safe document name:
- *   Lensed-Pay-Statement-Carlos-2026-08-24-to-2026-09-06.pdf
- * Deterministic for a given (employee, period): the same statement downloaded twice overwrites
- * rather than accumulating "(1)" copies.
+ *   Viralux-Payroll-Hours-Statement-Carlos-2026-08-24-to-2026-09-06.pdf
+ * Named for what the document IS and who issues it — the employee-facing statement is Viralux
+ * Media paperwork, not Lensed's. Deterministic for a given (employee, period): the same statement
+ * downloaded twice overwrites rather than accumulating "(1)" copies.
  */
 export function payStatementFilename(s: Pick<PayStatement, 'employee' | 'period'>): string {
   const name = s.employee.name
@@ -513,5 +425,5 @@ export function payStatementFilename(s: Pick<PayStatement, 'employee' | 'period'
     .replace(/[^A-Za-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
   const who = name || 'Employee';
-  return `Lensed-Pay-Statement-${who}-${s.period.start}-to-${s.period.end}.pdf`;
+  return `Viralux-Payroll-Hours-Statement-${who}-${s.period.start}-to-${s.period.end}.pdf`;
 }

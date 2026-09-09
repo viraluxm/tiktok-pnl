@@ -11,8 +11,8 @@ import {
   fmtPayDate,
   fmtMonthDay,
 } from '@/lib/employees';
-import { buildPayStatement, OVERLAP_SCAN_LOOKBACK_DAYS, type PayStatement } from '@/lib/pay/statement';
-import { addDaysISO, indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
+import { buildPayStatement, type PayStatement } from '@/lib/pay/statement';
+import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee } from '@/types';
@@ -47,30 +47,15 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   const payday = useMemo(() => paydayAtOffset(periodOffset), [periodOffset]);
   const period = useMemo(() => payPeriodFor(payday), [payday]);
 
-  // FETCH WIDER THAN THE PERIOD, PAY ONLY THE PERIOD.
-  //
-  // A time_clock row's real interval comes from its punch instants and has no 24-hour ceiling, so
-  // a row DATED just before the period can still occupy time inside it — production holds a
-  // 47.75h punch that reaches two days past its own date. The overlap warning has to be able to
-  // see those rows or it would reproduce, in the UI, the exact date-bounded blind spot that commit
-  // 717fe22 removed from the database's own guard.
-  //
-  // The widened set feeds warnings ONLY. `periodShifts` below is filtered back to the same
-  // `date >= start && date <= end` predicate the query used before, so computePay's input — and
-  // therefore every number on this screen — is byte-for-byte what it was.
-  const scanStart = useMemo(() => addDaysISO(period.start, -OVERLAP_SCAN_LOOKBACK_DAYS), [period.start]);
+  // The period's rows, and the mutations the record editor saves through. Scoped to exactly the
+  // pay period — the same query, and therefore the same computePay input, this tab has always used.
   const {
-    shifts: scanShifts,
+    shifts: periodShifts,
     addShift,
     updateShift,
     deleteShift,
-  } = useShifts(scanStart, period.end);
+  } = useShifts(period.start, period.end);
   const { rules, exceptions, upsertException } = useShiftRules();
-
-  const periodShifts = useMemo(
-    () => scanShifts.filter((s) => s.date >= period.start && s.date <= period.end),
-    [scanShifts, period.start, period.end],
-  );
 
   const periodMaterialized = useMemo(
     () => new Set(periodShifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
@@ -110,40 +95,23 @@ export default function PayView({ employees }: { employees: Employee[] }) {
         ? buildPayStatement({
             employee: detail.employee,
             period: { start: period.start, end: period.end, payday },
-            shifts: scanShifts,
+            shifts: periodShifts,
             generatedAtISO: detail.generatedAtISO,
           })
         : null,
-    [detail, period.start, period.end, payday, scanShifts],
+    [detail, period.start, period.end, payday, periodShifts],
   );
-
-  // Review counts for the tiles, so a manager can see WHERE the problems are before opening
-  // anyone. Derived from the same builder as the panel — one definition of "needs review".
-  const reviewCountByEmployee = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const e of employees) {
-      const s = buildPayStatement({
-        employee: e,
-        period: { start: period.start, end: period.end, payday },
-        shifts: scanShifts,
-        // Not rendered anywhere on this path; the tile only reads totals.reviewCount.
-        generatedAtISO: '1970-01-01T00:00:00.000Z',
-      });
-      if (s.totals.reviewCount > 0) m.set(e.id, s.totals.reviewCount);
-    }
-    return m;
-  }, [employees, period.start, period.end, payday, scanShifts]);
 
   // The editor's own card model, built by the SAME indexer the calendars use — never by hand, so
   // a Pay Details edit opens at the identical prefill (shiftEditPrefill) the calendar would.
   const cardById = useMemo(() => {
-    const dates = new Set(scanShifts.map((s) => s.date));
+    const dates = new Set(periodShifts.map((s) => s.date));
     const m = new Map<string, WeekShiftCard>();
-    for (const arr of indexWeekCards(scanShifts, [], dates).values()) {
+    for (const arr of indexWeekCards(periodShifts, [], dates).values()) {
       for (const c of arr) m.set(c.id, c);
     }
     return m;
-  }, [scanShifts]);
+  }, [periodShifts]);
 
   const nameById = useCallback(
     (id: string) => employees.find((e) => e.id === id)?.name ?? 'Unknown',
@@ -179,9 +147,8 @@ export default function PayView({ employees }: { employees: Employee[] }) {
       hours: p.hours,
       pay: p.pay,
       scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
-      reviewCount: reviewCountByEmployee.get(p.employee.id) ?? 0,
     })),
-    [filteredPay, plannedHoursByEmployee, reviewCountByEmployee],
+    [filteredPay, plannedHoursByEmployee],
   );
   const totals = useMemo(
     () =>
