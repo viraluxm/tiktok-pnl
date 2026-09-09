@@ -7,15 +7,19 @@ import { createClient } from '@/lib/supabase/client';
 // member actually holds — read from their own app_metadata.scopes via the browser session (the same
 // getUser pattern as useUser; it reads the existing session, never establishes one). Middleware is
 // still the real gate; this just avoids showing a member a tab they'd be 403'd from.
-const NAV_ITEMS: Array<{ scope: string; href: string; label: string }> = [
-  { scope: 'binding', href: '/team/binding', label: 'Binding' },
-  { scope: 'inventory', href: '/team/inventory', label: 'Inventory' },
-  { scope: 'pnl', href: '/team/pnl', label: 'P&L' },
-  { scope: 'shows', href: '/team/shows', label: 'Shows' },
-  { scope: 'team', href: '/team/staff', label: 'Team' },
+// `id` is the TAB identity, `scope` is the permission it needs — no longer the same thing. Binding
+// and Audit are two pages of the ONE 'binding' scope, so the id identifies the tab and the scope
+// only gates it.
+const NAV_ITEMS: Array<{ id: string; scope: string; href: string; label: string }> = [
+  { id: 'binding', scope: 'binding', href: '/team/binding', label: 'Binding' },
+  { id: 'audit', scope: 'binding', href: '/team/audit', label: 'Audit' },
+  { id: 'inventory', scope: 'inventory', href: '/team/inventory', label: 'Inventory' },
+  { id: 'pnl', scope: 'pnl', href: '/team/pnl', label: 'P&L' },
+  { id: 'shows', scope: 'shows', href: '/team/shows', label: 'Shows' },
+  { id: 'team', scope: 'team', href: '/team/staff', label: 'Team' },
 ];
 
-export default function MemberNav({ active }: { active: 'binding' | 'inventory' | 'pnl' | 'shows' | 'team' }) {
+export default function MemberNav({ active }: { active: 'binding' | 'audit' | 'inventory' | 'pnl' | 'shows' | 'team' }) {
   const [scopes, setScopes] = useState<string[] | null>(null);
 
   useEffect(() => {
@@ -30,16 +34,20 @@ export default function MemberNav({ active }: { active: 'binding' | 'inventory' 
   }, []);
 
   // Until scopes load, show only the current tab so links the member may not hold never flash in.
-  const items = NAV_ITEMS.filter((i) => (scopes == null ? i.scope === active : scopes.includes(i.scope)));
+  //
+  // Scopes ONLY — deliberately no admin branch. /team/* is the confined team UI; an admin's account
+  // is the website (/dashboard and the (app) group) and has no business rendering the team's nav.
+  // An admin-side view of a team queue belongs in the website, under its own owner-scoped route.
+  const items = NAV_ITEMS.filter((i) => (scopes == null ? i.id === active : scopes.includes(i.scope)));
 
   return (
     <nav className="mb-6 flex flex-wrap gap-1">
       {items.map((i) => (
         <a
-          key={i.scope}
+          key={i.id}
           href={i.href}
           className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
-            i.scope === active ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'
+            i.id === active ? 'bg-tt-cyan text-black' : 'bg-tt-card-hover text-tt-muted hover:text-tt-text'
           }`}
         >
           {i.label}

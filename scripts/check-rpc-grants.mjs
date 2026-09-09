@@ -65,6 +65,12 @@ const SERVICE_ROLE_ONLY = new Set([
   // any signed-in user call them directly with someone else's p_owner_user_ids and read that
   // owner's P&L. They were missing from this list, not from the database.
   'pnl_by_show_as', 'pnl_show_hourly_as',
+  // Squish over-bind audit (134/136/137 — renumbered off 129, which main's schedule Phase 2 took).
+  // Both take the owner explicitly and trust it, so a grant to `authenticated` would be a
+  // cross-tenant hole, not a fix: any signed-in user could read — or UNBIND — another owner's
+  // orders. Reached only through requireMemberScope('binding') in /api/member/audit*, which hands
+  // back a service-role client after resolving ownerIds.
+  'squish_multibind_audit_as', 'lensed_unbind_as',
   // Phase 2 pickup approval (129) — same posture again: SECURITY DEFINER, takes p_owner as a
   // PARAMETER, and has no auth.uid() to trust because service_role has none. Called ONLY via
   // createAdminClient in /api/admin/schedule/pickups, which resolves the owner from the session

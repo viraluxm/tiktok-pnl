@@ -111,6 +111,24 @@ test('member reach is the UNION over recognized scopes', () => {
   assert.equal(isPathAllowed('/dashboard', c), false);
 });
 
+test('the audit queue rides the binding scope — and ONLY the binding scope', () => {
+  const binder = confinementFor('member', ['binding']);
+  assert.equal(isPathAllowed('/team/audit', binder), true);
+  assert.equal(isPathAllowed('/api/member/audit', binder), true);
+  // /keep and /dismiss are children, reached through the startsWith match — not listed separately.
+  assert.equal(isPathAllowed('/api/member/audit/keep', binder), true);
+  assert.equal(isPathAllowed('/api/member/audit/dismiss', binder), true);
+  // Home must still be the BINDING page: memberConfinement takes element [0], so inserting
+  // '/team/audit' anywhere but second would silently move where a binder lands after sign-in.
+  assert.equal(binder.home, '/team/binding');
+
+  // An inventory-only member gains nothing: the audit routes UNBIND orders and move stock.
+  const stocker = confinementFor('member', ['inventory']);
+  assert.equal(isPathAllowed('/team/audit', stocker), false);
+  assert.equal(isPathAllowed('/api/member/audit', stocker), false);
+  assert.equal(isPathAllowed('/api/member/audit/keep', stocker), false);
+});
+
 test('member with an UNKNOWN scope contributes nothing (fail closed) and lands on no-access', () => {
   const c = confinementFor('member', ['payroll']);
   assert.deepEqual(c.allow, []);

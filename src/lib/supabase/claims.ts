@@ -44,7 +44,12 @@ export const TIMECLOCK_CONFINEMENT: Confinement = { home: '/kiosk', allow: ['/ki
 // performance) is deliberately NOT reachable — member data comes only from owner-scoped
 // /api/member/*.
 export const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
-  binding: ['/team/binding', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores'],
+  // '/team/binding' MUST stay first: memberConfinement uses element [0] as this scope's home.
+  // '/team/audit' + '/api/member/audit' are the squish over-bind queue — a SECOND page of this
+  // SAME scope (the team that binds is the team that audits), so no new scope is provisioned and
+  // no existing member's app_metadata has to change. '/api/member/audit' covers its /keep and
+  // /dismiss children through the startsWith match in isPathAllowed.
+  binding: ['/team/binding', '/team/audit', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores', '/api/member/audit'],
   inventory: ['/team/inventory', '/api/member/inventory'],
 };
 
