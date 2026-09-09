@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { PRACTICE_LIVE_WINDOW_MS, type PracticeSessionRow } from '@/lib/training/registry';
+import { useEffect, useRef } from 'react';
 
 const KEY = 'practice-sessions';
 
@@ -100,4 +101,58 @@ export function useRemovePracticeSession() {
     },
     onSuccess: () => void qc.invalidateQueries({ queryKey: [KEY] }),
   });
+}
+
+// Completes recordings whose webhook never arrived, by asking LiveKit directly.
+//
+// WHY IT RUNS FROM THE LAUNCHER. The `egress_ended` webhook is configured in the
+// LiveKit Cloud dashboard — outside this repo and outside this deploy. If it is
+// missing or points at a stale preview URL, every row sits at 'recording' forever
+// even though the MP4 landed fine. Reconciling here makes the webhook an
+// optimisation rather than a dependency, which matters on a day with ~100
+// recordings where nobody can be counting files by hand.
+//
+// GATED ON THERE BEING WORK TO DO. It only fires while at least one recording is
+// still in flight, so an idle launcher makes no calls at all — this must not become
+// a background poll against LiveKit.
+export function useReconcileRecordings(sessions: PracticeSessionRow[]) {
+  const qc = useQueryClient();
+  const inFlight = sessions.some((s) => s.recordings.some((r) => r.status === 'recording'));
+  // Serialises calls: reconcile reads and writes several rows, and two overlapping
+  // passes would race each other for no benefit.
+  const runningRef = useRef(false);
+
+  useEffect(() => {
+    if (!inFlight) return;
+    let cancelled = false;
+
+    const run = async () => {
+      if (runningRef.current || cancelled) return;
+      runningRef.current = true;
+      try {
+        const res = await fetch('/api/admin/training/recording/reconcile', { method: 'POST' });
+        // Only refresh the list when something actually changed, so a steady state
+        // does not invalidate the query every tick.
+        if (res.ok && !res.redirected) {
+          const body = (await res.json().catch(() => null)) as
+            | { completed?: number; failed?: number; abandoned?: number }
+            | null;
+          const changed =
+            (body?.completed ?? 0) + (body?.failed ?? 0) + (body?.abandoned ?? 0) > 0;
+          if (changed && !cancelled) void qc.invalidateQueries({ queryKey: [KEY] });
+        }
+      } catch {
+        /* non-fatal: the next tick retries, and the file is unaffected either way */
+      } finally {
+        runningRef.current = false;
+      }
+    };
+
+    void run(); // immediately, so a just-finished recording resolves without a wait
+    const t = setInterval(() => void run(), REFETCH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [inFlight, qc]);
 }

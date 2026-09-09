@@ -21,6 +21,8 @@ const startRoute = readFileSync(
   'utf8',
 );
 const publish = readFileSync(fileURLToPath(new URL('./useVideoPublish.ts', import.meta.url)), 'utf8');
+const reconcile = readFileSync(fileURLToPath(new URL('./reconcileRecordings.ts', import.meta.url)), 'utf8');
+const sessionsHook = readFileSync(fileURLToPath(new URL('../../hooks/usePracticeSessions.ts', import.meta.url)), 'utf8');
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -271,6 +273,60 @@ check(
 check(
   'the bandwidth cap moved to the publish encoding instead',
   /videoEncoding: PRACTICE_VIDEO_ENCODING/.test(publish),
+);
+
+// ── Reconcile: the webhook must be an optimisation, not a dependency ──
+// It is configured in the LiveKit Cloud dashboard, outside this repo and outside
+// this deploy. If it is missing or points at a stale preview URL, rows sit at
+// 'recording' forever while the MP4 is perfectly fine in storage.
+check(
+  'reconcile asks LiveKit directly rather than waiting for the webhook',
+  /listEgress\(/.test(reconcile),
+);
+check(
+  'it only touches rows still marked recording',
+  /\.eq\('status', 'recording'\)/.test(reconcile),
+);
+check(
+  'it is owner-scoped through the parent (practice_recordings has no RLS policies)',
+  /\.eq\('owner_id', ownerId\)/.test(reconcile),
+);
+check(
+  'young rows are left alone (an egress takes seconds to report)',
+  /MIN_AGE_MS/.test(reconcile) && /\.lt\('started_at', cutoff\)/.test(reconcile),
+);
+check(
+  'a row with no matching job is only abandoned once far too old to be real',
+  /ABANDON_AFTER_MS/.test(reconcile) && /age > ABANDON_AFTER_MS/.test(reconcile),
+);
+check(
+  'abandoning says the file may still exist rather than implying it was lost',
+  /may exist in storage/.test(reconcile),
+);
+check(
+  'EGRESS_LIMIT_REACHED is still named explicitly here too',
+  /concurrent-egress limit reached/.test(reconcile),
+);
+check(
+  'a missing config is REPORTED, not returned as silent zeros',
+  /skipped: `not configured/.test(reconcile),
+);
+check(
+  'a listEgress failure is reported too',
+  /skipped: `listEgress failed/.test(reconcile),
+);
+// The client half: it must not become a background poll against LiveKit.
+check(
+  'the launcher only reconciles while a recording is actually in flight',
+  /const inFlight = sessions\.some\(/.test(sessionsHook) && /if \(!inFlight\) return;/.test(sessionsHook),
+);
+check(
+  'overlapping passes are prevented',
+  /runningRef\.current/.test(sessionsHook),
+);
+check(
+  'the list is refreshed only when something actually changed',
+  /const changed =/.test(sessionsHook),
 );
 
 console.log(`\n${passed} checks passed`);

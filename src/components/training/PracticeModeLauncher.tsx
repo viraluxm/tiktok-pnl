@@ -12,6 +12,7 @@ import {
 } from '@/lib/training/session';
 import {
   derivePracticeStatus,
+  describeRecordings,
   formatPracticeRunLength,
   PRACTICE_STATUS_LABEL,
   PRACTICE_TRAINEE_NAME_MAX,
@@ -21,6 +22,7 @@ import {
 import {
   useCreatePracticeSession,
   usePracticeSessions,
+  useReconcileRecordings,
   useRemovePracticeSession,
   useRenamePracticeSession,
 } from '@/hooks/usePracticeSessions';
@@ -41,6 +43,9 @@ const STATUS_STYLE: Record<PracticeStatus, string> = {
 export default function PracticeModeLauncher() {
   const { data: sessions = [], isLoading, error } = usePracticeSessions();
   const create = useCreatePracticeSession();
+  // Completes any recording whose webhook never landed. No-ops when nothing is in
+  // flight, so an idle launcher makes no calls.
+  useReconcileRecordings(sessions);
   const remove = useRemovePracticeSession();
 
   const [name, setName] = useState('');
@@ -384,10 +389,26 @@ function SessionHistory({ sessions }: { sessions: PracticeSessionRow[] }) {
               </span>
               <span className="flex shrink-0 items-baseline gap-3 text-[12px] tabular-nums text-tt-muted">
                 <span>{formatPracticeRunLength(s)}</span>
-                {/* What was actually captured. Until the replay player exists this is
-                    the honest answer to "is there anything to watch?" — and a
-                    session with 0 recorded moments would otherwise look identical
-                    to one with a full timeline. */}
+                {/* Footage. A FAILED recording is the thing someone has to act on,
+                    so it is coloured and carries its reason as a tooltip — never
+                    left to look like an absence. */}
+                {(() => {
+                  const r = describeRecordings(s.recordings);
+                  const tone =
+                    r.tone === 'error'
+                      ? 'text-tt-red font-semibold'
+                      : r.tone === 'ok'
+                        ? 'text-tt-text'
+                        : r.tone === 'pending'
+                          ? 'text-tt-yellow'
+                          : 'text-tt-muted';
+                  return (
+                    <span className={tone} title={r.detail ?? undefined}>
+                      {r.label}
+                    </span>
+                  );
+                })()}
+                {/* What the timeline captured, for replay. */}
                 <span title="Timeline moments recorded for replay">
                   {s.event_count} {s.event_count === 1 ? 'moment' : 'moments'}
                 </span>

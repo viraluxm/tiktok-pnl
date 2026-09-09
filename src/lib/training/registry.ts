@@ -16,6 +16,15 @@ export const PRACTICE_HEARTBEAT_MS = 15_000;
 // that died is not still advertised as live a minute later.
 export const PRACTICE_LIVE_WINDOW_MS = 45_000;
 
+// One recording attached to a session (migration 143), as the list read returns it.
+export interface PracticeRecordingRow {
+  id: string;
+  status: 'recording' | 'complete' | 'failed';
+  duration_ms: number | null;
+  size_bytes: number | null;
+  error: string | null;
+}
+
 // A registry row as the API returns it. Timestamps are ISO strings (what
 // PostgREST emits) rather than Date objects, so this type survives JSON.
 export interface PracticeSessionRow {
@@ -26,10 +35,53 @@ export interface PracticeSessionRow {
   started_at: string | null;
   ended_at: string | null;
   last_seen_at: string | null;
-  // How many timeline events this session recorded (migration 139). Present on the
+  // How many timeline events this session recorded (migration 142). Present on the
   // list read so History can say what there is to replay; 0 for a session that
   // never ran.
   event_count: number;
+  // This session's recordings, newest first. Empty when nothing was recorded.
+  recordings: PracticeRecordingRow[];
+}
+
+// Human summary of a session's footage, for the History row.
+//
+// A session can have several recordings (restartPractice reuses the id), so this
+// reports the whole set rather than assuming one. A FAILED recording is called out
+// explicitly and in preference to a byte count: "there is footage" and "one of
+// these did not record" are different facts, and the second is the one someone
+// needs to act on.
+export function describeRecordings(recordings: PracticeRecordingRow[]): {
+  label: string;
+  tone: 'none' | 'pending' | 'ok' | 'error';
+  detail: string | null;
+} {
+  if (recordings.length === 0) return { label: 'No recording', tone: 'none', detail: null };
+
+  const failed = recordings.filter((r) => r.status === 'failed');
+  const running = recordings.filter((r) => r.status === 'recording');
+  const done = recordings.filter((r) => r.status === 'complete');
+
+  if (failed.length > 0) {
+    return {
+      label: done.length > 0 ? `${done.length} recorded · ${failed.length} failed` : 'Recording failed',
+      tone: 'error',
+      detail: failed[0].error,
+    };
+  }
+  if (running.length > 0 && done.length === 0) {
+    return { label: 'Recording…', tone: 'pending', detail: null };
+  }
+
+  const totalMs = done.reduce((n, r) => n + (r.duration_ms ?? 0), 0);
+  const totalBytes = done.reduce((n, r) => n + (r.size_bytes ?? 0), 0);
+  const mins = Math.round(totalMs / 60000);
+  const mb = totalBytes > 0 ? `${(totalBytes / 1048576).toFixed(0)} MB` : null;
+  const parts = [
+    done.length > 1 ? `${done.length} recordings` : 'Recorded',
+    totalMs > 0 ? (mins >= 1 ? `${mins}m` : `${Math.round(totalMs / 1000)}s`) : null,
+    mb,
+  ].filter(Boolean);
+  return { label: parts.join(' · '), tone: 'ok', detail: null };
 }
 
 // Where a session is in its life:

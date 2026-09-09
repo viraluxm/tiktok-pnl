@@ -5,6 +5,7 @@ import { isValidTrainingSessionId } from '@/lib/training/session';
 import {
   isPracticePurpose,
   normalizeTraineeName,
+  type PracticeRecordingRow,
   type PracticeSessionRow,
 } from '@/lib/training/registry';
 
@@ -25,7 +26,11 @@ const ROW_COLUMNS = 'id, trainee_name, purpose, created_at, started_at, ended_at
 // History can say what is actually there to replay. PostgREST computes this as an
 // embedded aggregate over the foreign key, so it costs no extra round trip and no
 // event rows cross the wire.
-const LIST_COLUMNS = `${ROW_COLUMNS}, practice_events(count)`;
+const LIST_COLUMNS =
+  `${ROW_COLUMNS}, practice_events(count), ` +
+  // Each session's recordings, so History can say whether there is footage and
+  // whether it failed. Embedded, so no extra round trip.
+  `practice_recordings(id, status, duration_ms, size_bytes, error)`;
 
 // GET /api/admin/training/sessions — every session for this owner, newest first.
 // Status is NOT returned: it is derived from these timestamps by
@@ -51,11 +56,18 @@ export async function GET() {
   // Flatten the embedded aggregate — PostgREST returns it as practice_events:
   // [{count}] — into a plain number, so the client never has to know it came from
   // a join.
-  const sessions: PracticeSessionRow[] = (data ?? []).map((row) => {
-    const { practice_events: agg, ...rest } = row as typeof row & {
-      practice_events?: { count: number }[] | null;
-    };
-    return { ...(rest as Omit<PracticeSessionRow, 'event_count'>), event_count: agg?.[0]?.count ?? 0 };
+  // PostgREST returns the embedded aggregate as practice_events: [{count}] and the
+  // embedded rows as practice_recordings: [...]. Flatten both so the client never
+  // has to know they came from a join. Typed via an explicit shape rather than a
+  // rest-spread, because supabase-js's inferred row type is a union that a rest
+  // element cannot destructure.
+  type RawRow = Omit<PracticeSessionRow, 'event_count' | 'recordings'> & {
+    practice_events?: { count: number }[] | null;
+    practice_recordings?: PracticeRecordingRow[] | null;
+  };
+  const sessions: PracticeSessionRow[] = ((data ?? []) as unknown as RawRow[]).map((row) => {
+    const { practice_events: agg, practice_recordings: recs, ...rest } = row;
+    return { ...rest, event_count: agg?.[0]?.count ?? 0, recordings: recs ?? [] };
   });
 
   return NextResponse.json({ sessions }, { headers: { 'Cache-Control': 'no-store' } });
