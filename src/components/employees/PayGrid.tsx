@@ -16,12 +16,14 @@ export interface PayTile {
 }
 
 export default function PayGrid({
-  rows, fmt, fmtHours, emptyMessage,
+  rows, fmt, fmtHours, emptyMessage, onOpen,
 }: {
   rows: PayTile[];
   fmt: (n: number) => string;
   fmtHours: (n: number) => string;
   emptyMessage: string;
+  /** Opens this person's Pay Details. */
+  onOpen: (tile: PayTile) => void;
 }) {
   if (rows.length === 0) {
     return <div className="px-5 py-12 text-center text-sm text-tt-muted">{emptyMessage}</div>;
@@ -29,12 +31,16 @@ export default function PayGrid({
 
   return (
     <div className="grid grid-cols-2 gap-2.5 p-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-      {rows.map(({ employee, hours, pay, scheduled }) => {
+      {rows.map((tile) => {
+        const { employee, hours, pay, scheduled } = tile;
         const unpaid = pay === 0;
         return (
-          <div
+          <button
             key={employee.id}
-            className={`flex flex-col items-center rounded-xl border border-tt-border bg-white/[0.02] p-3 text-center ${unpaid ? 'opacity-55' : ''}`}
+            type="button"
+            onClick={() => onOpen(tile)}
+            aria-label={`Pay details for ${employee.name}`}
+            className={`flex flex-col items-center rounded-xl border border-tt-border bg-white/[0.02] p-3 text-center transition-colors hover:border-tt-cyan/40 hover:bg-tt-card-hover ${unpaid ? 'opacity-55' : ''}`}
           >
             <PersonAvatar name={employee.name} state="confirmed" size="lg" />
             <span className="mt-2 w-full truncate text-[13px] font-semibold text-tt-text" title={employee.name}>
@@ -52,7 +58,8 @@ export default function PayGrid({
               {scheduled > 0 ? `${fmtHours(scheduled)} scheduled` : 'no schedule'}
             </span>
             <span className="mt-1 text-[9.5px] tabular-nums text-tt-muted/60">{fmt(employee.hourly_rate)}/hr</span>
-          </div>
+            <span className="mt-1.5 text-[10px] font-semibold text-tt-cyan">View pay details</span>
+          </button>
         );
       })}
     </div>

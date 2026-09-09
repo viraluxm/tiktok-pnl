@@ -78,22 +78,62 @@ function Shell({ title, onClose, children }: { title: string; onClose: () => voi
   );
 }
 
+// The edit form's initial state for an existing card. Defined once, at module scope, because it
+// is needed BEFORE the component's first render when initialScreen='edit' as well as from the
+// actions screen's Edit button — and two copies of it is exactly how a prefill starts to diverge.
+// Times come from shiftEditPrefill (the punch instants on a time_clock row, the wall clock
+// otherwise), which is the same basis the save path compares against.
+function editFormFor(card: WeekShiftCard): FormState {
+  const prefill = shiftEditPrefill(card);
+  return {
+    kind: 'edit',
+    employeeId: card.employee_id,
+    date: card.date,
+    start: prefill.start,
+    end: prefill.end,
+    breakMinutes: String(card.break_minutes ?? 0),
+    open: card.isOpen,
+    cardId: card.id,
+    lockEmployee: true,
+    lockDate: true,
+    allowOpen: true,
+    title: 'Edit shift',
+  };
+}
+
 export default function ShiftEditorModal({
   intent,
   handlers,
   onClose,
+  initialScreen = 'actions',
 }: {
   intent: EditorIntent;
   handlers: EditorHandlers;
   onClose: () => void;
+  /**
+   * Which screen a CARD opens on. 'actions' (the default, and what both calendars pass by
+   * omitting it) shows the Edit / Duplicate / Delete menu first. 'edit' skips straight to the
+   * form — for callers that already mean "correct this record", like the Pay Details panel,
+   * where the menu is a tap between a manager and the number they came to fix.
+   *
+   * Purely a starting screen: the form, its prefill (shiftEditPrefill) and its save path are
+   * identical either way, so this cannot make one caller write different columns than another.
+   * Ignored for 'create', which has no actions screen.
+   */
+  initialScreen?: 'actions' | 'edit';
 }) {
   const { employees, nameById } = handlers;
   const card = intent.mode === 'card' ? intent.card : null;
 
-  // The actions screen is only for an existing card; create goes straight to the form.
-  const [showActions, setShowActions] = useState(intent.mode === 'card');
+  // The actions screen is only for an existing card; create goes straight to the form, and so
+  // does a card opened with initialScreen='edit'.
+  const [showActions, setShowActions] = useState(intent.mode === 'card' && initialScreen !== 'edit');
   const [form, setForm] = useState<FormState | null>(() =>
-    intent.mode === 'create'
+    intent.mode === 'card'
+      ? initialScreen === 'edit'
+        ? editFormFor(intent.card)
+        : null
+      : intent.mode === 'create'
       ? {
           kind: 'create',
           employeeId: intent.employeeId,
@@ -125,21 +165,8 @@ export default function ShiftEditorModal({
   const prefill = useMemo(() => (card ? shiftEditPrefill(card) : null), [card]);
 
   function startEdit() {
-    if (!card || !prefill) return;
-    setForm({
-      kind: 'edit',
-      employeeId: card.employee_id,
-      date: card.date,
-      start: prefill.start,
-      end: prefill.end,
-      breakMinutes: String(card.break_minutes ?? 0),
-      open: card.isOpen,
-      cardId: card.id,
-      lockEmployee: true,
-      lockDate: true,
-      allowOpen: true,
-      title: 'Edit shift',
-    });
+    if (!card) return;
+    setForm(editFormFor(card));
     setError(null);
     setShowActions(false);
   }

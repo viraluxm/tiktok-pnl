@@ -136,9 +136,25 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
 
       // break_minutes is read back for the same reason source/date are: the patch builder compares
       // the edit against what is STORED, so a break-only save can tell "unchanged" from "set to 0".
+      //
+      // THE INSTANTS ARE IN THIS PROJECTION FOR THE SAME REASON, and leaving them out was a real
+      // bug. buildShiftEditPatch decides "did this endpoint move?" by comparing the form's value
+      // against shiftEditPrefill(row) — and shiftEditPrefill reads the PUNCH INSTANTS for a
+      // time_clock row, falling back to the wall clock only when they are absent. Selecting
+      // without them made them absent on every row, so the builder compared against the wall
+      // clock while the MODAL had prefilled from the instants. On the 43 production rows whose
+      // two copies have diverged (42 of them confirmed and being paid) that is the historical
+      // failure in both directions: an edit that lands exactly on the stale wall-clock value
+      // reads as "unchanged" and never reaches clock_in_at — payroll silently ignores the
+      // correction — while an endpoint the manager never touched reads as changed and gets its
+      // real punch rewritten from 'HH:MM', truncating up to 59 seconds of it.
+      //
+      // EditableShiftRow declares both fields optional, so nothing typechecked its way to the
+      // problem. Manual rows are unaffected either way: they carry NULL instants, so the prefill
+      // still takes the wall-clock branch exactly as before.
       const { data: row, error: readErr } = await supabase
         .from('shifts')
-        .select('source, date, start_time, end_time, break_minutes')
+        .select('source, date, start_time, end_time, break_minutes, clock_in_at, clock_out_at')
         .eq('id', id)
         .single();
       if (readErr) throw readErr;
