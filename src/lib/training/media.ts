@@ -6,36 +6,53 @@
 // options are a structural literal rather than a typed RoomOptions so this file
 // never pulls in the browser-only SDK.
 
-// Portrait-safe 720p-equivalent capture ceiling.
+// Capture constraints: facingMode ONLY.
 //
-// We cap BOTH axes at 1280 instead of requesting a landscape 1280x720, because
-// practice hosts hold PHONES IN PORTRAIT: a portrait sensor delivers 720x1280,
-// which satisfies max<=1280 on both axes and keeps its natural orientation and
-// aspect ratio. Asking for an exact or ideal 1280x720 would push the browser to
-// crop, letterbox or rotate a portrait stream, so we pin NEITHER axis and set no
-// aspectRatio. `max` is a hard upper bound, so a 1080p/4K-capable sensor is
-// downscaled to <=1280 on its long edge — the single biggest upload saving
-// available when ~20 cameras share one Wi-Fi — while 720p-equivalent detail is
-// still plenty to evaluate a host.
+// REVERTED to the pre-#208 form on 2026-09-09 because the `{ max: 1280 }` ranges
+// #208 introduced BROKE VIDEO PUBLISHING OUTRIGHT, in every browser, for five
+// days. livekit-client's publishTrack does
+//     opts.degradationPreference ??= getDefaultDegradationPreference(track)
+// and that default reads
+//     track.constraints.height && unwrapConstraint(track.constraints.height) >= 1080
+// where unwrapConstraint() understands only a bare number, an array, `{exact}` or
+// `{ideal}`. A `{max}`-only range reaches `throw Error('could not unwrap
+// constraint')`, publishTrack aborts, and the host is disconnected. With no
+// width/height here at all, `track.constraints.height` is undefined and that
+// expression short-circuits before ever calling unwrapConstraint — which is
+// precisely why this worked before #208 and not after.
+//
+// THE BANDWIDTH GOAL IS NOT LOST — IT MOVED TO WHERE IT BELONGS. Capping the
+// CAPTURE was always the wrong lever: what costs Wi-Fi is what gets UPLOADED, and
+// that is set by the publish encoding. PRACTICE_VIDEO_ENCODING below caps the
+// upload directly, independent of what the sensor produces, and involves no
+// constraint parsing at all. #208's other two measures (dynacast + adaptiveStream)
+// are untouched and still doing the heavier lifting.
+//
+// Do NOT reintroduce width/height/frameRate here without checking
+// unwrapConstraint's accepted shapes first. recording.test.mjs guards this.
 export const PRACTICE_VIDEO_CAPTURE: MediaTrackConstraints = {
   facingMode: 'user',
-  width: { max: 1280 },
-  height: { max: 1280 },
-  frameRate: { max: 30 },
 };
 
-// LiveKit Room options shared by BOTH the host publisher and the trainer
-// subscriber. livekit-client defaults both of these to false, which meant every
-// host uploaded its whole simulcast ladder regardless of demand and every
-// trainer pulled the full-resolution top layer into a ~260px preview.
-//   - adaptiveStream (subscriber): request a layer sized to the actual element.
-//   - dynacast (publisher): let the SFU pause layers nobody is watching.
-// They only pay off as a pair, which is why they live in one constant.
+// Upload ceiling for a published practice camera, applied at publish time.
+//
+// ~1.2 Mbps is comfortably enough to judge a host's delivery and is roughly half
+// what LiveKit would choose by default for a 720p+ camera — which is the saving
+// #208 was after when ~10-20 hosts publish over one warehouse connection. Capping
+// here rather than at capture also means it holds regardless of the sensor: a 4K
+// phone still uploads ~1.2 Mbps.
+export const PRACTICE_VIDEO_ENCODING = {
+  maxBitrate: 1_200_000,
+  maxFramerate: 30,
+} as const;
+
 export const PRACTICE_ROOM_OPTIONS: { adaptiveStream: boolean; dynacast: boolean } = {
   adaptiveStream: true,
   dynacast: true,
 };
 
-// The long-edge ceiling the capture constraints are meant to enforce. Exported
-// so tests assert the intent rather than a magic number.
+// RETIRED with the capture ceiling it described (see above). Kept only so any
+// remaining import fails loudly at the type level rather than silently reading
+// undefined — delete once nothing references it.
+/** @deprecated capture is no longer size-capped; the cap is PRACTICE_VIDEO_ENCODING. */
 export const PRACTICE_MAX_CAPTURE_EDGE = 1280;

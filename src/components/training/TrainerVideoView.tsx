@@ -23,6 +23,10 @@ export default function TrainerVideoView({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const roomRef = useRef<import('livekit-client').Room | null>(null);
   const [status, setStatus] = useState<VideoStatus>('connecting');
+  // Why the preview failed, when we know. "Video unavailable" alone cannot tell a
+  // non-admin session apart from a server with no LiveKit credentials — both
+  // happened during this build, and both look identical without this.
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
   // Host audio is OFF by default and scoped to THIS tab. A trainer machine can
   // hold several controller tabs, and LiveKit's bare attach() would create its
   // own unmuted <audio> for each one — every host's mic playing at once. The
@@ -45,7 +49,19 @@ export default function TrainerVideoView({
         body: JSON.stringify({ role: 'controller', session: sessionId }),
       });
       if (!res.ok) {
-        if (!cancelled) setStatus('error');
+        // Name the cause on screen. "Video unavailable" alone cannot distinguish
+        // a non-admin session from a server with no LiveKit credentials, and both
+        // have happened during this build.
+        if (!cancelled) {
+          setStatus('error');
+          setErrorDetail(
+            res.status === 403
+              ? 'this account is not an admin'
+              : res.status === 500
+                ? 'LiveKit is not configured on the server'
+                : `token failed (${res.status})`,
+          );
+        }
         return;
       }
       const { token, url } = (await res.json()) as { token?: string; url?: string };
@@ -163,7 +179,9 @@ export default function TrainerVideoView({
             ? 'Connecting…'
             : status === 'waiting'
               ? 'Waiting for host video…'
-              : 'Video unavailable'}
+              : errorDetail
+                ? `Video unavailable — ${errorDetail}`
+                : 'Video unavailable'}
         </div>
       )}
       {status === 'live' && auction && (
