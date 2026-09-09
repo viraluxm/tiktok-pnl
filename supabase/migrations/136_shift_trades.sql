@@ -59,8 +59,18 @@
 --   SHIFT_OFFERED; offer.ts refuses offering a shift in an active trade), so the two transfer
 --   mechanisms never hold the same shift at once.
 --
--- ADDITIVE AND BACKWARD-COMPATIBLE. Nothing existing is altered. Rollback is
--- `drop function public.lensed_approve_shift_trade(uuid, uuid, date); drop table public.shift_trades;`.
+-- ADDITIVE AND BACKWARD-COMPATIBLE. Nothing existing is altered, so this MAY BE APPLIED BEFORE
+-- THE CODE DEPLOY: until the new bundle ships, nothing calls the RPC and nothing reads the table.
+--
+-- ROLLBACK. The APP can be rolled back with this migration in place — the old bundle has no trade
+-- surface and simply ignores both objects. Reverting the SCHEMA is only for abandoning the feature:
+--     drop function if exists public.lensed_approve_shift_trade(uuid, uuid, date);
+--     drop table if exists public.shift_trades;          -- DESTROYS the trade history
+-- Note the asymmetry: dropping the table loses who traded what, but an approved trade has ALREADY
+-- moved the two assignments in shift_instances and those stay moved. That is correct (the people
+-- worked the shifts they swapped into) but it means the drop is not an undo. Capture the history
+-- first if any trade has been approved:
+--     select * from public.shift_trades order by created_at;
 
 begin;
 
