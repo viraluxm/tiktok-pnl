@@ -1,6 +1,18 @@
--- 138_practice_sessions.sql
+-- 141_practice_sessions.sql
 --
--- RENAMED FROM 136_practice_sessions.sql. Prefix 136 was free across every ref when this was
+-- RENAMED TWICE: 136 -> 138 -> 141. The SECOND rename (2026-09-09) happened because origin/main
+-- advanced again — PR #236 (feat/employee-portal-redesign) landed `138_shift_trades.sql` AND
+-- `139_shift_approved_minutes.sql`, both now on main and therefore taking precedence over this
+-- chain's 138/139. `140_squish_multibind_stable_plan.sql` is also claimed on a branch, so 141/142
+-- were the first free pair.
+--
+-- THIS IS THE THIRD RENUMBER IN THIS REPO'S RECENT HISTORY (134 was renamed off 129; real
+-- collisions already exist at 115 and 116). A sequential prefix cannot be reserved, ~40 unmerged
+-- branches each hold a claim, and any scan is only valid for as long as it takes the next PR to
+-- merge. Worth discussing a timestamp prefix (the Supabase CLI's own default,
+-- YYYYMMDDHHMMSS_name.sql) which cannot collide by construction.
+--
+-- ORIGINALLY RENAMED FROM 136_practice_sessions.sql. Prefix 136 was free across every ref when this was
 -- written and applied (2026-09-08/09), but origin/main advanced 11 commits during that window and
 -- PR #231 landed 136_squish_multibind_audit_timeout_fix.sql — which, being merged to main, has
 -- precedence (the same resolution 134 documents for its own rename off 129). A third claim,
@@ -8,7 +20,7 @@
 -- TWICE (137_shift_approved_minutes.sql, 137_squish_multibind_onhold_and_order.sql). So the first
 -- genuinely free prefix was 138.
 --
--- THE RENAME IS PURELY A REPO-RECORD CHANGE. The filename is stored nowhere; the objects below were
+-- BOTH RENAMES ARE PURELY A REPO-RECORD CHANGE. The filename is stored nowhere; the objects below were
 -- already applied to live under the old name and are UNAFFECTED. Content is byte-identical to what
 -- ran — only the prefix moved.
 --

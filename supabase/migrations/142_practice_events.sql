@@ -1,6 +1,11 @@
--- 139_practice_events.sql
+-- 142_practice_events.sql
 --
--- Prefix 139: RE-SCANNED across tracked files, untracked working-tree files and every branch and
+-- RENAMED FROM 139_practice_events.sql (2026-09-09): PR #236 landed
+-- `139_shift_approved_minutes.sql` on main, which takes precedence. Its sibling moved 138 -> 141
+-- in the same pass; see the note there about this repo's chronic prefix collisions. The rename is
+-- a repo-record change only — the objects below are already applied and unaffected.
+--
+-- ORIGINAL HEADER — Prefix 139: RE-SCANNED across tracked files, untracked working-tree files and every branch and
 -- remote immediately before writing (2026-09-09). 136 is claimed THREE ways
 -- (practice_sessions -> renamed to 138, squish_multibind_audit_timeout_fix on main, shift_trades on
 -- origin/feat/employee-portal-redesign) and 137 TWICE (shift_approved_minutes,
