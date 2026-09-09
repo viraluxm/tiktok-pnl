@@ -328,5 +328,21 @@ check(
   'the list is refreshed only when something actually changed',
   /const changed =/.test(sessionsHook),
 );
+check(
+  'reconcile falls back to STORAGE for the byte size (listEgress carries no fileResults)',
+  /sizeFromStorage/.test(reconcile) && /RECORDING_BUCKET/.test(reconcile),
+);
+check(
+  'it does NOT fabricate a duration (only the webhook knows it)',
+  !/duration_ms: *[0-9]/.test(reconcile) && /Duration is deliberately NOT guessed/.test(reconcile),
+);
+check(
+  'already-complete rows missing a size are backfilled',
+  /\.is\('size_bytes', null\)/.test(reconcile),
+);
+check(
+  'a storage failure does not fail the whole reconcile',
+  /storage unreachable/.test(reconcile),
+);
 
 console.log(`\n${passed} checks passed`);

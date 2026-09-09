@@ -1,7 +1,7 @@
 import 'server-only';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { EgressStatus } from '@livekit/protocol';
-import { egressClient, resolveRecordingConfig } from '@/lib/training/recording';
+import { RECORDING_BUCKET, egressClient, resolveRecordingConfig } from '@/lib/training/recording';
 
 // Fills in recordings that the webhook never completed.
 //
@@ -58,6 +58,36 @@ function describeFailure(status: EgressStatus | undefined, error: string | undef
   return error || 'Egress failed without a reason';
 }
 
+// Byte size read straight from the bucket.
+//
+// WHY THIS FALLBACK EXISTS. listEgress() returns NO fileResults — verified against
+// live, even when filtering by a single egressId — so reconciling can recover a
+// recording's STATUS but never its duration or size. Only the egress_ended webhook
+// payload carries those. Without this, a reconciled row reads a bare "Recorded"
+// with no indication of whether the file is 9 MB or 9 bytes, which is exactly the
+// question someone scanning 100 sessions needs answered.
+//
+// Duration is deliberately NOT guessed. It is knowable only from the webhook, and a
+// fabricated figure would be worse than an absent one.
+async function sizeFromStorage(
+  admin: SupabaseClient,
+  storagePath: string | null,
+): Promise<number | null> {
+  if (!storagePath) return null;
+  const slash = storagePath.lastIndexOf('/');
+  if (slash <= 0) return null;
+  const folder = storagePath.slice(0, slash);
+  const name = storagePath.slice(slash + 1);
+  try {
+    const { data } = await admin.storage.from(RECORDING_BUCKET).list(folder, { search: name });
+    const hit = (data ?? []).find((o) => o.name === name);
+    const size = (hit?.metadata as { size?: unknown } | undefined)?.size;
+    return typeof size === 'number' && size > 0 ? size : null;
+  } catch {
+    return null; // storage unreachable — a missing size is not worth failing over
+  }
+}
+
 export async function reconcileRecordings(
   admin: SupabaseClient,
   ownerId: string,
@@ -82,7 +112,7 @@ export async function reconcileRecordings(
   const cutoff = new Date(Date.now() - MIN_AGE_MS).toISOString();
   const { data: rows } = await admin
     .from('practice_recordings')
-    .select('id, external_id, started_at')
+    .select('id, external_id, started_at, storage_path')
     .eq('status', 'recording')
     .in('session_id', sessionIds)
     .lt('started_at', cutoff);
@@ -146,11 +176,35 @@ export async function reconcileRecordings(
     if (status === 'failed') patch.error = describeFailure(job.status, job.error).slice(0, 2000);
     if (file?.filename) patch.storage_path = file.filename;
     if (file?.duration) patch.duration_ms = Math.round(Number(file.duration) / 1_000_000);
-    if (file?.size) patch.size_bytes = Number(file.size);
+    if (file?.size) {
+      patch.size_bytes = Number(file.size);
+    } else if (status === 'complete') {
+      // listEgress carries no fileResults, so ask storage for the size instead.
+      const fromStorage = await sizeFromStorage(admin, (row.storage_path as string | null) ?? null);
+      if (fromStorage !== null) patch.size_bytes = fromStorage;
+    }
 
     await admin.from('practice_recordings').update(patch).eq('id', row.id);
     if (status === 'complete') result.completed++;
     else result.failed++;
+  }
+
+  // Rows completed earlier without a size (reconciled before this fallback existed,
+  // or completed by a webhook that carried no file info). Cheap to repair, and it is
+  // the difference between "Recorded" and "Recorded · 9 MB".
+  const { data: sizeless } = await admin
+    .from('practice_recordings')
+    .select('id, storage_path')
+    .eq('status', 'complete')
+    .is('size_bytes', null)
+    .in('session_id', sessionIds)
+    .limit(50);
+  for (const row of sizeless ?? []) {
+    const size = await sizeFromStorage(admin, (row.storage_path as string | null) ?? null);
+    if (size !== null) {
+      await admin.from('practice_recordings').update({ size_bytes: size }).eq('id', row.id);
+      result.completed++;
+    }
   }
 
   return result;
