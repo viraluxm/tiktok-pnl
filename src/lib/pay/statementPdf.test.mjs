@@ -48,12 +48,17 @@ const stmtUrl = transpile('./statement.ts', 'statement.mjs', {
   "'@/lib/employees'": `'${employeesUrl}'`,
   "'@/lib/schedule/timezone'": `'${tzUrl}'`,
 });
-const brandUrl = transpile('../brand/viraluxLockup.ts', 'viraluxLockup.mjs');
 const pdfUrl = transpile('./statementPdf.ts', 'statementPdf.mjs', {
   "'./statement'": `'${stmtUrl}'`,
-  "'@/lib/brand/viraluxLockup'": `'${brandUrl}'`,
   "'pdf-lib'": `'${pathToFileURL(shim).href}'`,
 });
+
+// The brand mark is a normal file under public/, fetched at render time because the document is
+// built in the browser. Node has no origin to fetch a root-relative path from, so the tests hand
+// the renderer the very bytes that ship — which also proves the asset exists and is a real PNG.
+const LOCKUP_PATH = fileURLToPath(new URL('../../../public/viralux-lockup.png', import.meta.url));
+const LOCKUP_BYTES = readFileSync(LOCKUP_PATH);
+const loadLogo = async () => new Uint8Array(LOCKUP_BYTES);
 
 const punchUrl = transpile('../shifts/punchEdit.ts', 'punchEdit.mjs', {
   "'@/lib/schedule/timezone'": `'${tzUrl}'`,
@@ -99,6 +104,8 @@ function isoAdd(iso, n) {
 }
 const build = (shifts, employee = EMP(), at = '2026-09-08T17:00:00.000Z') =>
   buildPayStatement({ employee, period: PERIOD, shifts, generatedAtISO: at });
+// Every render in this file goes through the same seam, so no test silently drops the branding.
+const render = (statement) => renderPayStatementPdf(statement, { loadLogo });
 
 // Pull every string drawn into the document, so assertions can be about what a reader actually
 // sees rather than about the call sequence that produced it. Content streams are Flate-compressed,
@@ -164,7 +171,7 @@ const SHIFTS = [
 console.log('\n§1 It is a real PDF, on US Letter paper');
 {
   const statement = build(SHIFTS);
-  const bytes = await renderPayStatementPdf(statement);
+  const bytes = await render(statement);
   check('the output is a PDF', Buffer.from(bytes.subarray(0, 5)).toString() === '%PDF-');
   check('and it is not empty', bytes.length > 2000, `${bytes.length} bytes`);
   const boxes = await pageSizes(bytes);
@@ -177,12 +184,12 @@ console.log('\n§1 It is a real PDF, on US Letter paper');
 console.log('\n§2 The same statement always produces the same bytes');
 {
   const s = build(SHIFTS);
-  const a = await renderPayStatementPdf(s);
-  const b = await renderPayStatementPdf(build(SHIFTS)); // rebuilt statement, same inputs
+  const a = await render(s);
+  const b = await render(build(SHIFTS)); // rebuilt statement, same inputs
   check('two renders are byte-identical', Buffer.from(a).equals(Buffer.from(b)),
     `${a.length} vs ${b.length} bytes`);
 
-  const later = await renderPayStatementPdf(build(SHIFTS, EMP(), '2026-09-09T09:00:00.000Z'));
+  const later = await render(build(SHIFTS, EMP(), '2026-09-09T09:00:00.000Z'));
   check('a different generated-at DOES change the document', !Buffer.from(a).equals(Buffer.from(later)),
     'the timestamp is real, not decorative');
   check('the document carries the caller\'s date, not today\'s',
@@ -193,7 +200,7 @@ console.log('\n§2 The same statement always produces the same bytes');
 console.log('\n§3 The document says who, when and on what terms');
 {
   const statement = build(SHIFTS);
-  const text = textOf(await renderPayStatementPdf(statement));
+  const text = textOf(await render(statement));
 
   check('it is titled as a payroll hours statement', text.includes('EMPLOYEE PAYROLL HOURS STATEMENT'));
   check('the employee is named', text.includes('Employee Name:') && text.includes('Carlos Medina'));
@@ -211,6 +218,34 @@ console.log('\n§3 The document says who, when and on what terms');
   })(), 'gross hours and money only');
   check('no Lensed branding on the employee document', !/lensed/i.test(text));
 
+  // The Viralux mark is the SUPPLIED lockup, shipped as a normal public asset and embedded as an
+  // image — so the assertion is that the document actually carries one, at the supplied proportions.
+  check('the brand asset ships in public/', LOCKUP_BYTES.length > 1000 &&
+    LOCKUP_BYTES.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+    `${LOCKUP_PATH.split('/').pop()}, ${LOCKUP_BYTES.length} bytes`);
+  const withLogo = await render(statement);
+  const withoutLogo = await renderPayStatementPdf(statement, { loadLogo: async () => null });
+  check('the lockup is embedded in the document', withLogo.length > withoutLogo.length + 5000,
+    `${withLogo.length} vs ${withoutLogo.length} bytes`);
+  check('a lockup that fails to load does not deny anyone their statement',
+    textOf(withoutLogo).includes('EMPLOYEE PAYROLL HOURS STATEMENT') &&
+      textOf(withoutLogo).includes(formatMoney(statement.totals.gross)));
+  check('the renderer points at the public asset, not an inlined blob', (() => {
+    // Comments stripped: this file explains at length WHY the asset is not base64, and matching the
+    // explanation instead of the code is how a guard silently rots.
+    const raw = readFileSync(fileURLToPath(new URL('./statementPdf.ts', import.meta.url)), 'utf8');
+    const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    return src.includes("'/viralux-lockup.png'") && !/base64/i.test(src);
+  })());
+
+  // The excluded records live on screen, folded away — never on the employee's document.
+  check('the fixture really has excluded records', statement.excluded.length > 0, `${statement.excluded.length}`);
+  check('none of them reach the PDF', (() => {
+    const t = text.toLowerCase();
+    return !t.includes('not included in pay') && !t.includes('unconfirmed punch') &&
+      !t.includes('open clock-in') && !t.includes('scheduled only') && !t.includes('not paid');
+  })(), 'the statement states payable hours; the panel explains what is missing');
+
   check('the totals block is present and reads off the statement',
     text.includes('Total Hours This Pay Period:') &&
       text.includes(statement.totals.paidHours.toFixed(2)) &&
@@ -226,7 +261,7 @@ console.log('\n§4 Two weeks, every calendar day, subtotals that reconcile');
 {
   const statement = build(SHIFTS);
   const weeks = payPeriodWeeks(statement);
-  const text = textOf(await renderPayStatementPdf(statement));
+  const text = textOf(await render(statement));
 
   check('both week headings are printed with their own ranges',
     text.includes(`Week 1: ${formatPeriodRange(weeks[0].start, weeks[0].end)}`) &&
@@ -297,7 +332,7 @@ console.log('\n§5 It says nothing about whether a record looks wrong');
     }),
   ];
   const statement = build(dup);
-  const text = textOf(await renderPayStatementPdf(statement));
+  const text = textOf(await render(statement));
 
   check('no review or anomaly section anywhere', (() => {
     const t = text.toLowerCase();
@@ -320,16 +355,16 @@ console.log('\n§6 One page when it reasonably can be, and it holds up at the ed
   for (const d of ['24', '25', '26', '27', '28']) ordinary.push(punch(`2026-08-${d}`, '09:00', '17:00'));
   for (const d of ['31']) ordinary.push(punch(`2026-08-${d}`, '09:00', '17:00'));
   for (const d of ['01', '02', '03', '04']) ordinary.push(punch(`2026-09-${d}`, '09:00', '17:00'));
-  const ordinaryPages = await pageSizes(await renderPayStatementPdf(build(ordinary)));
+  const ordinaryPages = await pageSizes(await render(build(ordinary)));
   check('a normal two-week statement is ONE Letter page', ordinaryPages.length === 1,
     `${ordinaryPages.length} pages, 10 worked days`);
 
   // The fixture with a second record on a day still fits.
-  const fixturePages = await pageSizes(await renderPayStatementPdf(build(SHIFTS)));
+  const fixturePages = await pageSizes(await render(build(SHIFTS)));
   check('...and so does one with a doubled-up day', fixturePages.length === 1, `${fixturePages.length}`);
 
   const empty = build([]);
-  const emptyText = textOf(await renderPayStatementPdf(empty));
+  const emptyText = textOf(await render(empty));
   check('a period with no worked time still renders every day as Off',
     emptyText.includes('Off') && emptyText.includes('August 24') && emptyText.includes('September 6'));
   check('...and reads as zero owed', emptyText.includes('$0.00') && emptyText.includes('0.00'));
@@ -348,7 +383,7 @@ console.log('\n§6 One page when it reasonably can be, and it holds up at the ed
     many.push(manual(`2026-09-${dd}`, '11:00', '15:00'));
   }
   const big = build(many);
-  const bytes = await renderPayStatementPdf(big);
+  const bytes = await render(big);
   const boxes = await pageSizes(bytes);
   const text = textOf(bytes);
   check('a genuinely crowded period paginates rather than overflowing', boxes.length >= 2,
@@ -364,7 +399,7 @@ console.log('\n§6 One page when it reasonably can be, and it holds up at the ed
 
   // A name long enough to collide with the period block must be trimmed, not overlapped.
   const longName = build(SHIFTS, EMP({ name: 'Bartholomew Fitzgerald-Montgomery III of the Warehouse' }));
-  const longText = textOf(await renderPayStatementPdf(longName));
+  const longText = textOf(await render(longName));
   check('an over-long name is truncated with an ellipsis rather than overrunning',
     longText.includes('Bartholomew') && /…/.test(longText));
 
@@ -385,7 +420,7 @@ console.log('\n§7 A correction reaches the paper');
   // "screen and PDF are one calculation" claim, end to end.
   const row = punch('2026-08-27', '06:04', '14:02', { break_minutes: 62 });
   const before = build([row]);
-  const beforeText = textOf(await renderPayStatementPdf(before));
+  const beforeText = textOf(await render(before));
   check('the original document shows the original figures',
     beforeText.includes(formatMoney(before.totals.gross)) && beforeText.includes('2:02 PM'),
     formatMoney(before.totals.gross));
@@ -393,7 +428,7 @@ console.log('\n§7 A correction reaches the paper');
   const patch = buildShiftEditPatch(row, { start_time: '06:04', end_time: '13:02' });
   check('the edit patched the punch instant, which is what pay reads', patch.clock_out_at !== undefined);
   const after = build([{ ...row, ...patch }]);
-  const afterText = textOf(await renderPayStatementPdf(after));
+  const afterText = textOf(await render(after));
 
   check('one hour came off the statement',
     Math.abs(after.totals.paidHours - (before.totals.paidHours - 1)) < 1e-9,

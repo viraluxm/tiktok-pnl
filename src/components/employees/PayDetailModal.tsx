@@ -324,28 +324,40 @@ export default function PayDetailModal({
           </div>
         )}
 
-        {/* ── Not paid ───────────────────────────────────────────────────────── */}
-        {statement.excluded.length > 0 && <NotPaid rows={statement.excluded} />}
-
         <p className="mt-5 text-[10.5px] leading-relaxed text-tt-muted">
           Hours and pay for this period only — not lifetime, and not a running balance. Amounts are
           gross; no deductions are applied.
         </p>
+
+        {/* ── Not paid, folded away ──────────────────────────────────────────── */}
+        {statement.excluded.length > 0 && <NotPaid rows={statement.excluded} />}
       </div>
     </div>,
     document.body,
   );
 }
 
-// Records inside the period that carry no money. Stated plainly and without alarm, because a light
-// total is easier to understand when you can see what is not in it.
+// Records inside the period that carry no money — an unconfirmed punch, an open clock-in, a day
+// that was only ever scheduled. Kept because they are the honest answer to "why is this total
+// lighter than I expected", and folded shut because they are not what anyone opens this panel to
+// read. Closed by default, last on the page, and worded as facts: no count badge, no colour, no
+// suggestion that anything here is a mistake.
+//
+// A native <details> rather than component state — the same disclosure the Shifts drawer already
+// uses, and it stays keyboard- and screen-reader-operable for free.
 function NotPaid({ rows }: { rows: ExcludedRow[] }) {
   return (
-    <div className="mt-5">
-      <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-tt-muted">
-        In this period but not paid
-      </div>
-      <div className="space-y-1.5">
+    <details className="group mt-4 border-t border-tt-border pt-3">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[11.5px] text-tt-muted transition-colors hover:text-tt-text">
+        <span>
+          {rows.length === 1 ? '1 record' : `${rows.length} records`} not included in pay
+        </span>
+        <span className="shrink-0 font-semibold text-tt-cyan">
+          <span className="group-open:hidden">View</span>
+          <span className="hidden group-open:inline">Hide</span>
+        </span>
+      </summary>
+      <div className="mt-2.5 space-y-1.5">
         {rows.map((r) => (
           <div
             key={r.shiftId}
@@ -362,6 +374,6 @@ function NotPaid({ rows }: { rows: ExcludedRow[] }) {
           </div>
         ))}
       </div>
-    </div>
+    </details>
   );
 }

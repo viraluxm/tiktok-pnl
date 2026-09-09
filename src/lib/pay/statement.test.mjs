@@ -492,10 +492,10 @@ console.log('\n§12 There is only one payroll calculation');
   check('the PDF renderer cannot see payroll at all',
     !pdfSrc.includes('@/lib/employees') && !pdfSrc.includes('paidShiftHours') &&
       !pdfSrc.includes('isPayableShift') && !pdfSrc.includes('computePay'));
-  check('the PDF renderer imports only the statement model and the brand asset', (() => {
+  check('the PDF renderer imports only the statement model', (() => {
     const specs = [...pdfSrc.matchAll(/from '([^']+)';/g)].map((m) => m[1]);
-    return specs.length > 0 && specs.every((x) => x === './statement' || x === '@/lib/brand/viraluxLockup');
-  })(), 'pdf-lib is a dynamic import inside the function');
+    return specs.length > 0 && specs.every((x) => x === './statement');
+  })(), 'pdf-lib is a dynamic import; the brand mark is a fetched public asset');
   check('the PDF renderer never does rate arithmetic',
     !/\*\s*(statement\.)?rate|rate\s*\*/.test(pdfSrc), 'it prints statement.totals, it does not derive them');
   check('the PDF renderer sums nothing of its own — weeks come from the model',
@@ -519,6 +519,19 @@ console.log('\n§12 There is only one payroll calculation');
   check('the tile grid has no review badge', !/badge|reviewCount/i.test(strip(grid)));
   check('the detail panel groups by day rather than listing a flat table',
     /workedDayGroups\(statement\)/.test(modal));
+
+  // The not-paid records stay reachable but folded shut, last on the page — context when someone
+  // goes looking for it, never something competing with the payable rows.
+  check('the not-paid records are a disclosure, closed by default',
+    /<details/.test(modal) && !/<details[^>]*\bopen\b/.test(modal));
+  check('...labelled by count, in plain words',
+    /not included in pay/.test(modal) && /<summary/.test(modal));
+  check('...and it sits after the payable rows, not before them',
+    modal.indexOf('workedDayGroups') < modal.indexOf('not included in pay'));
+  check('the disclosure carries no count badge or colour alarm',
+    !/bg-tt-yellow|text-tt-yellow|bg-tt-red|text-tt-red/.test(
+      modal.slice(modal.indexOf('function NotPaid'))),
+    'muted and dashed only');
 
   // The Pay tab must keep feeding computePay the period rows and nothing else.
   const viewSrc = src('../../components/employees/PayView.tsx').replace(/\/\/[^\n]*/g, '');

@@ -1,4 +1,3 @@
-import { VIRALUX_LOCKUP_ASPECT, VIRALUX_LOCKUP_PNG_BASE64 } from '@/lib/brand/viraluxLockup';
 import {
   formatBreak,
   formatClock12,
@@ -34,6 +33,43 @@ import {
 //
 // DETERMINISTIC. The only time in the document is statement.generatedAtISO, which the caller
 // supplies; the PDF's own Creation/Modification dates are set from it too.
+
+// ── Branding ─────────────────────────────────────────────────────────────────────────────────
+//
+// THE ARTWORK IS THE SUPPLIED LOCKUP, UNCHANGED. `public/viralux-lockup.png` is `Viralux Logo.ai`'s
+// own mark-over-wordmark lockup, cropped to its artwork bounding box and nothing else — the
+// proportions, the internal spacing and the wordmark are exactly as supplied. It reads clearly at
+// the 58pt header height used here; the wordmark spans almost the full width of the lockup, so it
+// survives the reduction far better than the 8:1 height ratio suggests.
+//
+// TWO THINGS THE MASTER CANNOT DO, both verified rather than assumed:
+//   * It cannot be embedded as vector. The .ai IS a PDF and pdf-lib's embedPdf() reads it happily,
+//     but the artboard carries a full-bleed charcoal rectangle behind the white artwork, so it
+//     lands on a white payroll sheet as a dark block (rendered and looked at). It also costs
+//     ~1.1MB per document. Cropping the embedded page does not help: the fill is behind the mark,
+//     not around it.
+//   * It cannot be used at its supplied polarity. White-on-charcoal prints as that same block.
+// So the shipped PNG is the master with its luminance taken as ALPHA — the ground's own luminance
+// remapped to fully transparent, which is what stops a grey haze washing over the page — and flat
+// brand charcoal #373535, sampled from the master, as the ink. Shapes untouched, nothing redrawn.
+//
+// It is a normal file under public/, not base64 in a source file, and it is FETCHED because the
+// document is built in the browser. A failure to load leaves the rest of the statement intact
+// rather than denying someone their payroll paperwork over a missing image.
+const LOCKUP_URL = '/viralux-lockup.png';
+const LOCKUP_ASPECT = 387 / 520; // the supplied lockup's own proportions
+
+export type LogoLoader = () => Promise<Uint8Array | null>;
+
+async function fetchLockup(): Promise<Uint8Array | null> {
+  try {
+    const res = await fetch(LOCKUP_URL);
+    if (!res.ok) return null;
+    return new Uint8Array(await res.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
 
 // ── Page geometry (points; 72pt = 1in) ───────────────────────────────────────────────────────
 const PAGE_W = 612; // 8.5in
@@ -153,14 +189,19 @@ function endCell(row: StatementRow): string {
  * pdf-lib is imported dynamically: it is ~350KB and has no business in the dashboard bundle until
  * someone actually asks for a document. Same treatment the shipping-label panel gives it.
  */
-export async function renderPayStatementPdf(statement: PayStatement): Promise<Uint8Array> {
+export async function renderPayStatementPdf(
+  statement: PayStatement,
+  /** Overridable so tests can supply the asset from disk; production fetches it from public/. */
+  opts: { loadLogo?: LogoLoader } = {},
+): Promise<Uint8Array> {
   const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
   const doc = await PDFDocument.create();
 
   const regular = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
   const C = (c: { r: number; g: number; b: number }) => rgb(c.r, c.g, c.b);
-  const logo = await doc.embedPng(VIRALUX_LOCKUP_PNG_BASE64);
+  const logoBytes = await (opts.loadLogo ?? fetchLockup)();
+  const logo = logoBytes ? await doc.embedPng(logoBytes) : null;
 
   const generated = new Date(statement.generatedAtISO);
   doc.setTitle(`Employee Payroll Hours Statement — ${statement.employee.name}`);
@@ -200,20 +241,21 @@ export async function renderPayStatementPdf(statement: PayStatement): Promise<Ui
   const centred = (s: string, cx: number, baseline: number, size: number, font: PdfFont, color: typeof INK) =>
     text(s, cx - font.widthOfTextAtSize(s, size) / 2, baseline, size, font, color);
 
-  // ── Masthead: Viralux lockup top-left, title centred on its own line beneath ────────────────
-  // The lockup is wide enough that a title centred on the page would collide with it, so the two
-  // sit on separate lines. Costs no more height than the stacked lockup did and keeps the title as
-  // prominent as it is on the statement this follows.
-  const LOGO_H = 26;
-  page.drawImage(logo, {
-    x: MARGIN,
-    y: y - LOGO_H,
-    width: LOGO_H * VIRALUX_LOCKUP_ASPECT,
-    height: LOGO_H,
-  });
-  y -= LOGO_H + 18;
-  centred('EMPLOYEE PAYROLL HOURS STATEMENT', PAGE_W / 2, y, 17, bold, INK);
-  y -= 12;
+  // ── Masthead: the supplied lockup top-left, title centred on the page beside it ─────────────
+  // The lockup is portrait and narrow (43pt wide at 58pt tall), and the centred title spans roughly
+  // x 137-475, so the two share one band without touching — which is both the layout of the
+  // statement this follows and cheaper in height than stacking them.
+  const LOGO_H = 58;
+  if (logo) {
+    page.drawImage(logo, {
+      x: MARGIN,
+      y: y - LOGO_H,
+      width: LOGO_H * LOCKUP_ASPECT,
+      height: LOGO_H,
+    });
+  }
+  centred('EMPLOYEE PAYROLL HOURS STATEMENT', PAGE_W / 2, y - 36, 17, bold, INK);
+  y -= LOGO_H + 8;
   page.drawLine({
     start: { x: MARGIN, y },
     end: { x: PAGE_W - MARGIN, y },
