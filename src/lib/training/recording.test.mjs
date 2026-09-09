@@ -255,15 +255,22 @@ check(
   })(),
 );
 check(
-  'the capture constraints are still untouched (portrait framing preserved)',
+  'the capture declaration carries no size constraint at all',
   (() => {
+    // The capture ceiling was REMOVED (it broke publishing); the cap now lives in
+    // PRACTICE_VIDEO_ENCODING, applied at publish. Anything size-shaped
+    // reappearing here is the regression to catch.
     const media = readFileSync(fileURLToPath(new URL('./media.ts', import.meta.url)), 'utf8');
     const block = media.slice(
       media.indexOf('PRACTICE_VIDEO_CAPTURE'),
       media.indexOf('};', media.indexOf('PRACTICE_VIDEO_CAPTURE')),
     );
-    return !/\bideal\s*:/.test(block) && !/\bexact\s*:/.test(block) && /max: 1280/.test(block);
+    return !/\b(width|height|frameRate)\s*:/.test(block) && /facingMode/.test(block);
   })(),
+);
+check(
+  'the bandwidth cap moved to the publish encoding instead',
+  /videoEncoding: PRACTICE_VIDEO_ENCODING/.test(publish),
 );
 
 console.log(`\n${passed} checks passed`);

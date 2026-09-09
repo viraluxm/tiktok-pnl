@@ -2,7 +2,7 @@
 
 import { useCallback, useRef } from 'react';
 import type { Room } from 'livekit-client';
-import { PRACTICE_ROOM_OPTIONS } from '@/lib/training/media';
+import { PRACTICE_ROOM_OPTIONS, PRACTICE_VIDEO_ENCODING } from '@/lib/training/media';
 
 // Publishes the host's EXISTING camera track to LiveKit for the trainer preview,
 // and RETURNS THE PUBLISHED TRACK SIDS.
@@ -123,6 +123,10 @@ export function useVideoPublish(sessionId: string) {
           // 'balanced' is exactly what getDefaultDegradationPreference would have
           // returned for a sub-1080p camera, so behaviour is unchanged.
           degradationPreference: 'balanced',
+          // The bandwidth cap, moved here from the capture constraints (see
+          // media.ts). Capping the upload is what actually saves Wi-Fi, and it
+          // involves no constraint parsing, so it cannot break publishing.
+          videoEncoding: PRACTICE_VIDEO_ENCODING,
         });
 
         // Publish the existing mic track too, if present — best-effort / non-fatal.
