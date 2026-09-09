@@ -59,8 +59,8 @@ export function ClockControls({
     return () => { active = false; };
   }, [fetchState]);
 
-  // Mark this control "active" for its whole lifetime so the page's background auto-refresh
-  // (ScheduleAutoRefresh) never remounts it — which also keeps it from interrupting the QR sheet or
+  // Mark this control "active" for its whole lifetime so the portal's background snapshot refetch
+  // (PortalProvider.useSnapshot's refetchInterval) never remounts it — which also keeps it from interrupting the QR sheet or
   // an in-flight punch, both of which live inside this mounted control. See ./clockActivity.
   useEffect(() => acquireClockActivity(), []);
 

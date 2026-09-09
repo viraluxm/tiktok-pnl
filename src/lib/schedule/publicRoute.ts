@@ -31,6 +31,20 @@ export async function guardPublicWrite(
   return { resolved };
 }
 
+// Read-side guard for the portal's JSON GETs: rate-limit (token + IP, no write bucket) then resolve
+// the employee. Same contract as guardPublicWrite — on failure return the response as-is.
+export async function guardPublicRead(
+  token: string,
+  req: Request,
+): Promise<{ resolved: ResolvedEmployee } | { response: NextResponse }> {
+  if (!guardPublicReadAllowed(token, clientIp(req))) {
+    return { response: NextResponse.json({ error: 'Too many requests' }, { status: 429 }) };
+  }
+  const resolved = await resolveEmployeeByToken(token);
+  if (!resolved) return { response: NextResponse.json({ error: 'Not found' }, { status: 404 }) };
+  return { resolved };
+}
+
 // Read-side limiter for the page loads (token + IP, no write bucket).
 export function guardPublicReadAllowed(token: string, ip: string): boolean {
   return scheduleIpLimiter.check(`sched-ip:${ip}`).success && scheduleTokenLimiter.check(`sched-tok:${token}`).success;

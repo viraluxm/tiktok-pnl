@@ -322,7 +322,7 @@ async function getSchedule(
   const worked = await pageAll<Record<string, unknown>>((f: number, t: number) => {
     let q = ctx.admin
       .from('shifts')
-      .select('id, employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, auto_closed, punch_method')
+      .select('id, employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, auto_closed, punch_method, approved_minutes')
       .in('user_id', ctx.ownerIds)
       .gte('date', from).lte('date', to)
       .order('id', { ascending: true })
@@ -532,7 +532,7 @@ async function getPay(ctx: ToolCtx, input: { date_in_period?: string }) {
 
   const sh = await pageAll<Record<string, unknown>>((f: number, t: number) =>
     ctx.admin.from('shifts')
-      .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at')
+      .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, approved_minutes')
       .in('user_id', ctx.ownerIds)
       .gte('date', period.start).lte('date', period.end)
       .order('employee_id', { ascending: true }).range(f, t));

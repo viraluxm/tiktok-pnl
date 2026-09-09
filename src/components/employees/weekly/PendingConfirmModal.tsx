@@ -19,12 +19,15 @@ export default function PendingConfirmModal({
   monthLabel,
   onClose,
   onConfirm,
+  onApprovedMinutes,
   onEdit,
 }: {
   byDate: Map<string, CalendarDay>;
   monthLabel: string;
   onClose: () => void;
-  onConfirm: (shiftId: string, confirmed: boolean) => Promise<void>;
+  onConfirm: (shiftId: string, confirmed: boolean, approvedMinutes?: number | null) => Promise<void>;
+  /** Payroll-only correction on an already-confirmed shift (migration 137). Forwarded to the tile. */
+  onApprovedMinutes?: (shiftId: string, approvedMinutes: number | null) => Promise<void>;
   onEdit: (shiftId: string) => void;
 }) {
   // Oldest first: the longest-waiting punch is the one most likely to hold up a pay period.
@@ -75,6 +78,7 @@ export default function PendingConfirmModal({
                 person={person}
                 dateLabel={shortDate(date)}
                 onConfirm={onConfirm}
+                onApprovedMinutes={onApprovedMinutes}
                 onEdit={onEdit}
               />
             ))}

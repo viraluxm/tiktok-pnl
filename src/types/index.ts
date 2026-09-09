@@ -143,6 +143,12 @@ export interface Shift {
   clock_in_at?: string | null;
   clock_out_at?: string | null;
   auto_closed?: boolean;       // reconciler auto-closed a forgotten/over-long open punch — FLAG for review
+  // APPROVED HOURS (migration 137). The manager-confirmed FINAL PAYABLE duration in whole minutes.
+  // NULL = never explicitly approved → payroll falls back to the legacy paidShiftHours calculation,
+  // which is what leaves historical pay untouched. For a live host this is the verified live-session
+  // duration, NOT the clock-in→clock-out span; the punch above stays as the attendance record and is
+  // never edited to move this number. Server-only (shifts_guard_confirmation + the lensed_* RPCs).
+  approved_minutes?: number | null;
   created_at: string;
   updated_at: string;
 }

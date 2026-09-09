@@ -77,7 +77,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   const { apply: applySchedule } = useScheduleBulk();
   const grid = useMemo(() => monthGridDays(anchor), [anchor]);
 
-  const { shifts, addShift, updateShift, deleteShift, confirmShift } = useShifts(grid.gridStart, grid.gridEnd);
+  const { shifts, addShift, updateShift, deleteShift, confirmShift, setApprovedMinutes } = useShifts(grid.gridStart, grid.gridEnd);
   // `upsertException` still feeds the shift editor's skip/modify-occurrence actions for a
   // rule-materialized PUNCH row (a `shifts` row carrying source_rule_id). The rule/exception LISTS
   // are no longer read here — this calendar's scheduled layer is shift_instances only.
@@ -178,8 +178,15 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
     return n;
   }, [byDate, anchor]);
 
-  async function handleConfirm(shiftId: string, confirmed: boolean) {
-    await confirmShift.mutateAsync({ id: shiftId, confirmed });
+  // Confirmation carries the manager's APPROVED MINUTES (migration 137) in the same call, so a
+  // confirmed shift can never be left paying its clocked span for want of a second request.
+  async function handleConfirm(shiftId: string, confirmed: boolean, approvedMinutes?: number | null) {
+    await confirmShift.mutateAsync({ id: shiftId, confirmed, approvedMinutes });
+  }
+
+  /** Payroll-only correction: change what a confirmed shift PAYS without touching its punch. */
+  async function handleApprovedMinutes(shiftId: string, approvedMinutes: number | null) {
+    await setApprovedMinutes.mutateAsync({ id: shiftId, approvedMinutes });
   }
 
   // PLAN. One bulk request for the whole crew through the SAME write path the employee Schedule
@@ -363,6 +370,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           dateLabel={fullDateLabel(openDay.date)}
           onClose={() => setOpenDate(null)}
           onConfirm={handleConfirm}
+          onApprovedMinutes={handleApprovedMinutes}
           onEdit={openEditor}
           onAddShift={openPlainAdd}
           onRemoveScheduled={removeScheduled}
@@ -402,6 +410,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           monthLabel={monthTitle(anchor)}
           onClose={() => setShowPending(false)}
           onConfirm={handleConfirm}
+          onApprovedMinutes={handleApprovedMinutes}
           onEdit={openEditor}
         />
       )}

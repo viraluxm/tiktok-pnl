@@ -1,17 +1,24 @@
-// Proof for the shifts-calendar day model. calendarModel.ts is pure with NO value imports, so we
-// transpile it alone.  Run:  node src/lib/schedule/calendarModel.test.mjs
+// Proof for the shifts-calendar day model. calendarModel.ts has ONE value import — the canonical
+// payroll duration from '@/lib/employees' (see its header) — so that specifier is rewritten to the
+// transpiled real module and everything else still loads alone.
+//   Run:  node src/lib/schedule/calendarModel.test.mjs
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os'; import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict'; import ts from 'typescript';
 
-const src = readFileSync(fileURLToPath(new URL('./calendarModel.ts', import.meta.url)), 'utf8');
-const { outputText } = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
-const out = join(mkdtempSync(join(tmpdir(), 'cm-')), 'cm.mjs'); writeFileSync(out, outputText);
+const dir = mkdtempSync(join(tmpdir(), 'cm-'));
+function transpile(rel, name, rewrites = {}) {
+  const source = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  let { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
+  for (const [from, to] of Object.entries(rewrites)) outputText = outputText.split(from).join(to);
+  const p = join(dir, name); writeFileSync(p, outputText); return pathToFileURL(p).href;
+}
+const employees = transpile('../employees.ts', 'employees.mjs');
 const {
-  buildCalendarDays, punchHours, wallHours, densityLevel, isPaydayISO, formatDelta, initialsOf,
+  buildCalendarDays, punchHours, punchClockedHours, wallHours, densityLevel, isPaydayISO, formatDelta, initialsOf,
   canRemoveScheduled, ruleDatesOwnedByInstances,
-} = await import(pathToFileURL(out).href);
+} = await import(transpile('./calendarModel.ts', 'cm.mjs', { "'@/lib/employees'": `'${employees}'` }));
 
 let passed = 0;
 const check = (n, c, x = '') => { assert.ok(c, `FAIL: ${n} ${x}`); console.log(`  ✓ ${n}`); passed++; };
@@ -227,5 +234,19 @@ check('duplicates collapse', keys([inst(), inst()]).length === 1);
 const owned = ruleDatesOwnedByInstances([inst()]);
 owned.add('r9|2026-01-01');
 check('returns a fresh mutable Set', owned.size === 2 && ruleDatesOwnedByInstances([inst()]).size === 1);
+
+console.log('\nAPPROVED vs CLOCKED (migration 137)');
+{
+  // punchHours PAYS; punchClockedHours describes the punch. They diverge exactly when a manager
+  // approved a different duration — the live-host case the column exists for.
+  const p = punch({ clock_in_at: '2026-08-31T17:48:00-07:00', clock_out_at: '2026-09-01T02:20:00-07:00' });
+  check('with no approval the two figures agree', punchHours(p) === punchClockedHours(p), `${punchHours(p)}`);
+  const approved = { ...p, approved_minutes: 478 };
+  check('approved 478 min pays 7.97h', punchHours(approved) === 7.97, `${punchHours(approved)}`);
+  check('…while clocked still reads 8.53h', punchClockedHours(approved) === 8.53, `${punchClockedHours(approved)}`);
+  check('an explicit 0 approves zero rather than falling back to the span', punchHours({ ...p, approved_minutes: 0 }) === 0);
+  check('a break is still subtracted from the clocked figure',
+    punchClockedHours({ ...p, break_minutes: 30 }) === 8.03, `${punchClockedHours({ ...p, break_minutes: 30 })}`);
+}
 
 console.log(`\n${passed} checks passed\n`);

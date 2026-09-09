@@ -39,7 +39,10 @@ const emit = (rel, name, rewrites = {}) => {
 };
 
 const { generateRecurringShifts } = await import(emit('../employees.ts', 'employees.mjs'));
-const { ruleDatesOwnedByInstances } = await import(emit('./calendarModel.ts', 'calendarModel.mjs'));
+// calendarModel takes the canonical payroll duration from '@/lib/employees' (migration 137).
+const { ruleDatesOwnedByInstances } = await import(emit('./calendarModel.ts', 'calendarModel.mjs', {
+  "'@/lib/employees'": `'${urlOf('employees.mjs')}'`,
+}));
 emit('./timezone.ts', 'timezone.mjs');
 emit('./hours.ts', 'hours.mjs', {
   "'@/lib/employees'": `'${urlOf('employees.mjs')}'`, "'./timezone'": `'${urlOf('timezone.mjs')}'`,

@@ -98,7 +98,7 @@ export async function GET(req: Request) {
   // (indexed, plain range) rather than composing an .or() across two columns.
   const { data: shiftRows, error: shiftErr } = await supabase
     .from('shifts')
-    .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at')
+    .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, approved_minutes')
     .gte('date', addDaysISO(day, -1))
     .lte('date', addDaysISO(day, 1));
   if (shiftErr) {

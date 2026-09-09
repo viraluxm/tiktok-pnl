@@ -33,7 +33,7 @@ export interface EmployeePay {
 // recurring `GeneratedShift`s satisfy it. The time-clock fields are optional so generated
 // recurring instances (which never carry them) are treated as plain, always-payable shifts.
 export type ShiftLike = Pick<Shift, 'employee_id' | 'start_time' | 'end_time'> &
-  Partial<Pick<Shift, 'source' | 'source_rule_id' | 'confirmed_at' | 'break_minutes' | 'clock_in_at' | 'clock_out_at'>>;
+  Partial<Pick<Shift, 'source' | 'source_rule_id' | 'confirmed_at' | 'break_minutes' | 'clock_in_at' | 'clock_out_at' | 'approved_minutes'>>;
 
 // A shift counts toward pay when it is COMPLETED, not a materialized-from-schedule row, and not
 // an UNCONFIRMED time-clock shift.
@@ -52,20 +52,73 @@ export function isPayableShift(s: ShiftLike): boolean {
   return true;
 }
 
-// Net paid hours for one shift: its worked span minus unpaid break minutes, floored at 0.
+// APPROVED HOURS (migration 137) — the manager-confirmed payable duration, when one exists.
+//
+// THREE QUANTITIES, ONE OF THEM PAYS:
+//   SCHEDULED  the plan            → shift_instances, never payable
+//   CLOCKED    the attendance      → clock_in_at / clock_out_at (see clockedShiftHours)
+//   APPROVED   what payroll pays   → approved_minutes, and it WINS here when set
+//
+// For a LIVE HOST payable time is the verified live-session duration, which is normally SHORTER
+// than the clock-in→clock-out span (they punch in before going live and out after). Before this
+// column the only way to make payroll match was to rewrite the punch, destroying the attendance
+// record to move a payroll number. Now the punch stays truthful and the approved figure pays.
+//
+// LEGACY FALLBACK, AND WHY IT IS A NULL CHECK. Every shift that existed before 137 has
+// approved_minutes NULL and therefore keeps its exact previous figure — deploying this code
+// recalculates nothing and re-pays nobody. `== null` (not a falsy check) is load-bearing: an
+// approved duration of 0 is a real decision ("this shift pays nothing") and must not fall through
+// to the clocked span.
+//
+// WHAT THIS DOES NOT DO: it does not make a shift payable. isPayableShift() is still the only
+// payability gate, so an unconfirmed punch with an approved duration stays out of pay entirely.
+export function paidShiftHours(s: ShiftLike): number {
+  if (s.approved_minutes != null) return Math.max(0, s.approved_minutes / 60);
+  return clockedShiftHours(s);
+}
+
+// Net hours from the ATTENDANCE record: the worked span minus unpaid break minutes, floored at 0.
+// This was paidShiftHours' entire body before migration 137 and is unchanged — it is both the
+// legacy payroll figure (used whenever approved_minutes is NULL) and the "clocked" number the
+// manager tile and the employee timecard show beside the approved one.
+//
 // break_minutes is 0/absent for every non-time-clock shift, so their hours are unchanged.
 //
 // For a time-clock shift with the real punch INSTANTS (migration 072), derive hours from the
 // true span (clock_out_at - clock_in_at). start_time/end_time are only local time-of-day, so
 // their midnight wrap silently undercounts any span > 24h (a 26h forgotten-clock-out read as
 // 2h). The instants have no such ceiling. Manual/recurring shifts keep the time-of-day path.
-export function paidShiftHours(s: ShiftLike): number {
+export function clockedShiftHours(s: ShiftLike): number {
   const breakHours = (s.break_minutes ?? 0) / 60;
   if (s.clock_in_at && s.clock_out_at) {
     const spanH = (new Date(s.clock_out_at).getTime() - new Date(s.clock_in_at).getTime()) / 3_600_000;
     return Math.max(0, spanH - breakHours);
   }
   return Math.max(0, shiftHours(s.start_time, s.end_time) - breakHours);
+}
+
+/** Whole minutes, rounded, for a duration in hours — the unit approved_minutes is stored in. */
+export function hoursToMinutes(hours: number): number {
+  return Math.max(0, Math.round(hours * 60));
+}
+
+/**
+ * The approved duration a manager should be OFFERED as the default at confirmation.
+ *
+ * Fulfillment (and anyone who is not a live host): the existing canonical payable duration, so the
+ * default reproduces today's payroll exactly — breaks already subtracted, instants preferred.
+ *
+ * A LIVE HOST gets NO default: null. Their payable time is verified live time, and there is no
+ * authoritative shift→live-session link in this schema to read it from (live_sessions.host_id
+ * attributes a session to a host, but liveHoursForHostDate clips to one Pacific day, which
+ * under-reports every 6pm–2am host shift — and matching a session to a shift by time overlap would
+ * be exactly the guesswork we refuse to put behind payroll). So the manager states it, and the
+ * confirm RPC refuses the shift without it. Returning null here rather than the clocked span is
+ * the point: a host must never be paid their punch span by default.
+ */
+export function defaultApprovedMinutes(s: ShiftLike, isLiveHost: boolean): number | null {
+  if (isLiveHost) return null;
+  return hoursToMinutes(clockedShiftHours(s));
 }
 
 // Per-employee hours + derived pay owed for the given set of shifts (already scoped to

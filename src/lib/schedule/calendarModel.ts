@@ -2,14 +2,20 @@
  * Shifts-calendar day model — pure, dependency-free assembly of ONE day cell.
  *
  * Keep this file free of value imports from '@/…' or npm so the repo's transpile-at-runtime
- * .test.mjs pattern can load it alone (see calendarModel.test.mjs). Callers do the fetching,
- * recurring generation and timezone flattening; this file only assembles + classifies.
+ * .test.mjs pattern can load it alone (see calendarModel.test.mjs). ONE EXCEPTION, added with
+ * migration 137: the payroll duration itself comes from '@/lib/employees'. The alternative was a
+ * second copy of the pay rule (the old punchHours only promised in a comment to "mirror"
+ * paidShiftHours), and the approved-hours override turned that promise into a live way for the
+ * manager calendar and Pay to disagree about what a shift pays. The tests rewrite the specifier,
+ * exactly as hours.ts's tests already do.
  *
  * THE RULE THIS ENCODES: a punch is the truth. A scheduled span is context shown NEXT TO the
  * punch, never instead of it, and never summed into anything payable. That mirrors the pay path
  * (isPayableShift / computePay read real `shifts` rows only) so the calendar can never imply a
  * number payroll would not pay.
  */
+
+import { paidShiftHours, clockedShiftHours, type ShiftLike } from '@/lib/employees';
 
 // ── inputs ───────────────────────────────────────────────────────────────────
 
@@ -35,6 +41,8 @@ export interface CalPunch {
   clock_out_at: string | null;
   break_minutes: number;
   confirmed_at: string | null;
+  /** migration 137 — the manager-approved payable minutes, or null (legacy / not approved). */
+  approved_minutes?: number | null;
   auto_closed?: boolean;
 }
 
@@ -80,7 +88,16 @@ export interface DayPunch {
   id: string;
   start_time: string;
   end_time: string | null;
+  /** The PAYING figure: approved minutes when approved, else the legacy clocked calculation. */
   hours: number;
+  /**
+   * The ATTENDANCE figure: what the punch itself spans, net of break. Equal to `hours` until a
+   * manager approves a different duration — the two are shown side by side so a host's clocked
+   * span and their approved live time can never be mistaken for each other.
+   */
+  clockedHours: number;
+  /** migration 137 — the approved payable minutes, or null when the legacy figure is paying. */
+  approvedMinutes: number | null;
   breakMinutes: number;
   /** True when nothing is holding this row out of pay. A manual row is never gated. */
   confirmed: boolean;
@@ -230,17 +247,37 @@ function round2(n: number): number {
 }
 
 /**
- * Paid hours for a punch. Prefers the real instants (they have no 24h ceiling — a forgotten
- * clock-out spanning 26h must read as 26h, not a wrapped 2h), else the wall clock. Break is
- * subtracted either way. Mirrors paidShiftHours in src/lib/employees.ts.
+ * PAID hours for a punch — approved minutes when a manager approved a duration (migration 137),
+ * else the clocked calculation below.
+ *
+ * This used to reimplement paidShiftHours and promise in a comment to "mirror" it. It now CALLS
+ * it: two copies of the payroll rule is exactly how the manager calendar and Pay would come to
+ * disagree about what a shift pays, and the approved-hours override made that risk concrete.
  */
 export function punchHours(p: CalPunch): number {
-  const breakHours = (p.break_minutes ?? 0) / 60;
-  if (p.clock_in_at && p.clock_out_at) {
-    const span = (Date.parse(p.clock_out_at) - Date.parse(p.clock_in_at)) / 3_600_000;
-    if (Number.isFinite(span)) return round2(Math.max(0, span - breakHours));
-  }
-  return round2(Math.max(0, wallHours(p.start_time, p.end_time) - breakHours));
+  return round2(paidShiftHours(toShiftLike(p)));
+}
+
+/**
+ * CLOCKED hours for a punch: what the attendance record spans, net of unpaid break, ignoring any
+ * approved duration. Prefers the real instants (they have no 24h ceiling — a forgotten clock-out
+ * spanning 26h must read as 26h, not a wrapped 2h), else the wall clock.
+ */
+export function punchClockedHours(p: CalPunch): number {
+  return round2(clockedShiftHours(toShiftLike(p)));
+}
+
+/** The punch as the payroll module's input shape. `employee_id` is irrelevant to both figures. */
+function toShiftLike(p: CalPunch): ShiftLike {
+  return {
+    employee_id: p.employee_id,
+    start_time: p.start_time,
+    end_time: p.end_time,
+    break_minutes: p.break_minutes,
+    clock_in_at: p.clock_in_at,
+    clock_out_at: p.clock_out_at,
+    approved_minutes: p.approved_minutes ?? null,
+  };
 }
 
 // ── assembly ─────────────────────────────────────────────────────────────────
@@ -363,6 +400,8 @@ export function buildCalendarDays(args: {
           start_time: rawPunch.start_time,
           end_time: rawPunch.end_time,
           hours: punchHours(rawPunch),
+          clockedHours: punchClockedHours(rawPunch),
+          approvedMinutes: rawPunch.approved_minutes ?? null,
           breakMinutes: rawPunch.break_minutes ?? 0,
           confirmed: isTimeClock ? rawPunch.confirmed_at != null : true,
           confirmable: isTimeClock,

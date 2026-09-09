@@ -190,20 +190,53 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
   });
 
   // Manager confirmation gate for TIME-CLOCK shifts — SERVER-AUTHORITATIVE (migration 071).
-  // The browser sends ONLY the shift id; the RPC derives the user from auth.uid(), verifies
-  // ownership + source='time_clock' + a closed linked entry + no open break, then stamps
-  // confirmed_at = now() and confirmed_by = auth.uid() in Postgres. A BEFORE UPDATE guard
-  // (070) blocks any direct write to those columns, so this RPC is the ONLY way confirmation
-  // can change. The kiosk never calls it. Manual shifts ignore confirmation — pay unchanged.
+  // The browser sends the shift id and, since migration 137, the APPROVED MINUTES; the RPC derives
+  // the user from auth.uid(), verifies ownership + source='time_clock' + a closed linked entry +
+  // no open break, then stamps confirmed_at = now(), confirmed_by = auth.uid() and the approved
+  // duration in Postgres. A BEFORE UPDATE guard (070, widened by 137) blocks any direct write to
+  // those columns, so this RPC is the ONLY way confirmation or approved hours can change. The
+  // kiosk never calls it. Manual shifts ignore confirmation — pay unchanged.
+  //
+  // APPROVED MINUTES ARE PART OF THE SAME CALL on purpose. Confirming and approving must be one
+  // transaction: a confirm that succeeded while a follow-up approval failed would leave the shift
+  // payable at its CLOCKED span, which for a live host is the overpayment this change removes.
+  // ⚠️ `?? null` IS LOAD-BEARING — do not simplify it away. The new RPC's p_approved_minutes has
+  // NO DEFAULT (migration 137 keeps the legacy one-argument overload for the deployment window, and
+  // a default would make a one-argument call ambiguous). JSON.stringify DROPS an undefined value,
+  // so passing `approvedMinutes` straight through would send only p_shift_id — which resolves to
+  // the LEGACY overload and confirms a live host with no approved duration at all, silently. An
+  // explicit null keeps the call two-argument, and the new RPC then refuses the host shift.
   const confirmShift = useMutation({
-    mutationFn: async ({ id, confirmed }: { id: string; confirmed: boolean }) => {
+    mutationFn: async ({ id, confirmed, approvedMinutes }: { id: string; confirmed: boolean; approvedMinutes?: number | null }) => {
       // rpc-grants: lensed_confirm_time_clock_shift, lensed_unconfirm_time_clock_shift
       // (dynamic .rpc(fn) — annotation lets check-rpc-grants.mjs verify both grants.)
       const fn = confirmed
         ? 'lensed_confirm_time_clock_shift'
         : 'lensed_unconfirm_time_clock_shift';
-      const { data, error } = await supabase.rpc(fn, { p_shift_id: id });
+      const args = confirmed
+        ? { p_shift_id: id, p_approved_minutes: approvedMinutes ?? null }
+        : { p_shift_id: id };
+      const { data, error } = await supabase.rpc(fn, args);
       if (error) throw new Error(error.message); // message is a stable token (see confirmErrorMessage)
+      return data;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shifts'] }),
+  });
+
+  // PAYROLL-ONLY CORRECTION on an already-confirmed shift (migration 137). This is the answer to
+  // "the punch is right but the payable duration is wrong" — the case that used to be fixed by
+  // editing the punch. Attendance corrections still go through updateShift above; the two are
+  // deliberately different actions with different targets.
+  //
+  // Passing null withdraws the approval and returns the shift to the legacy calculation.
+  const setApprovedMinutes = useMutation({
+    mutationFn: async ({ id, approvedMinutes }: { id: string; approvedMinutes: number | null }) => {
+      // No `rpc-grants:` annotation needed — a literal name is collected directly by the checker.
+      const { data, error } = await supabase.rpc('lensed_set_approved_minutes', {
+        p_shift_id: id,
+        p_approved_minutes: approvedMinutes,
+      });
+      if (error) throw new Error(error.message);
       return data;
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shifts'] }),
@@ -218,5 +251,6 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
     updateShift,
     deleteShift,
     confirmShift,
+    setApprovedMinutes,
   };
 }

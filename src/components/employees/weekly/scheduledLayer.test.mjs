@@ -50,7 +50,9 @@ console.log('\n1. the active manager calendar has no recurring projection');
 console.log('\n2. the employee-facing surfaces are instance-only too');
 {
   for (const [label, rel] of [
-    ['MySchedule (/s week view)', '../../../app/s/[token]/MySchedule.tsx'],
+    ['portalSnapshot (/s data builder)', '../../../lib/schedule/portalSnapshot.ts'],
+    ['portal HomeScreen (/s)', '../../../components/portal/HomeScreen.tsx'],
+    ['portal ScheduleScreen (/s)', '../../../components/portal/ScheduleScreen.tsx'],
     ['mySchedule server read', '../../../lib/schedule/mySchedule.ts'],
     ['EmployeeScheduleBuilder', '../schedule/EmployeeScheduleBuilder.tsx'],
     ['schedulePlan (the planner)', '../../../lib/schedule/schedulePlan.ts'],

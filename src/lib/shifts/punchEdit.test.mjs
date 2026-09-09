@@ -391,14 +391,24 @@ console.log('\n10 — raw punch log untouched');
     [...new Set(tables)].join(','));
 
   const rpcs = [...hookCode.matchAll(/\.rpc\(([^)]*)\)/g)].map((m) => m[1].trim());
-  // TWO call sites, and only these two: the dynamic confirm/unconfirm pair (`fn`), and the
-  // guarded manual-worked creator that REPLACED addShift's raw insert (migration 131). This guard
-  // exists to catch an unreviewed third write path appearing in the hook, so it is widened by
-  // exactly the one call that was added — not relaxed to "any rpc".
-  check('LOOKUP GUARD: both RPC call sites are present', rpcs.length === 2, rpcs.join(' | '));
-  check('the hook calls only the confirm pair and the guarded worked-shift creator',
-    rpcs.every((r) => r.startsWith('fn') || r.startsWith("'lensed_create_manual_worked_shift'")),
+  // THREE call sites, and only these three: the dynamic confirm/unconfirm pair (`fn`), the guarded
+  // manual-worked creator that REPLACED addShift's raw insert (migration 131), and the approved-
+  // minutes correction (migration 137) — the payroll-only fix that exists so a wrong payable
+  // duration is no longer corrected by rewriting the punch. This guard exists to catch an
+  // unreviewed write path appearing in the hook, so it is widened by exactly the calls that were
+  // added — never relaxed to "any rpc".
+  check('LOOKUP GUARD: all three RPC call sites are present', rpcs.length === 3, rpcs.join(' | '));
+  check('the hook calls only the confirm pair, the worked-shift creator and the approved-minutes fix',
+    rpcs.every((r) => r.startsWith('fn')
+      || r.startsWith("'lensed_create_manual_worked_shift'")
+      || r.startsWith("'lensed_set_approved_minutes'")),
     rpcs.join(' | '));
+  // The approved-minutes path must not be a back door into the punch: it sends the shift id and a
+  // duration, nothing else.
+  const approvedCall = rpcs.find((r) => r.startsWith("'lensed_set_approved_minutes'")) ?? '';
+  check('the approved-minutes RPC sends only the shift id and the minutes',
+    /p_shift_id/.test(approvedCall) && /p_approved_minutes/.test(approvedCall)
+    && !/clock_in_at|clock_out_at|start_time|end_time/.test(approvedCall), approvedCall.replace(/\s+/g, ' '));
   // The point of routing creation through the RPC: there is no longer ANY raw insert into shifts
   // from the client, so the overlap guard cannot be bypassed by the app itself.
   check('the hook never inserts into shifts directly any more', !/\.from\('shifts'\)\s*\.insert/.test(hookCode));

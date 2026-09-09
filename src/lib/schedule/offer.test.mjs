@@ -237,9 +237,12 @@ console.log('\n8. PAYROLL INVARIANT across the whole module');
   // explaining the removal cannot keep this assertion green on its own.
   check('offer.ts no longer writes attendance_events anywhere',
     !/from\('attendance_events'\)/.test(src));
-  check('the only tables it names in code are shift_instances / shift_claims / employees',
+  // shift_trades (136) is the one addition since Phase 2: offerShift reads it to refuse offering a
+  // shift that is in a pending trade. It is a SCHEDULING table — the payroll invariant this section
+  // pins (no shifts, no employee_time_entries, no attendance_events) is unchanged.
+  check('the only tables it names in code are shift_instances / shift_claims / shift_trades / employees',
     [...new Set([...src.matchAll(/from\('([a-z_]+)'\)/g)].map((m) => m[1]))].sort().join() ===
-    ['employees', 'shift_claims', 'shift_instances'].join());
+    ['employees', 'shift_claims', 'shift_instances', 'shift_trades'].join());
   const tables = new Set(log().filter((r) => r.op !== 'select').map((r) => r.table));
   check('no payroll table was written in any scenario above', !tables.has('shifts') && !tables.has('employee_time_entries'));
 }
