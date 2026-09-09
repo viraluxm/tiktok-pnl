@@ -20,7 +20,7 @@
 //                      red. Neither half is sufficient alone; do not delete one as redundant.
 //
 // Run:  TZ=UTC node src/lib/schedule/ruleProjectionSuppression.test.mjs
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -112,19 +112,35 @@ console.log('\nPUBLIC TEAM BOARD');
   check('no stored instances at all → every rule date projects', none.length === 3, none.join(','));
 }
 
-console.log('\nSOURCE GUARD — the board must pass the suppression set, not an empty one');
+console.log('\nSOURCE GUARD — the public board must not project rules AT ALL (Phase 2)');
 {
-  const src = readFileSync(fileURLToPath(new URL('../../app/s/team/[token]/page.tsx', import.meta.url)), 'utf8');
-  const call = src.slice(src.indexOf('generateRecurringShifts('));
-  const args = call.slice(0, call.indexOf('))') + 1);
-  check('the board imports the helper', src.includes('ruleDatesOwnedByInstances'));
-  check('the generator call does NOT pass `new Set()`', !args.includes('new Set()'), args.replace(/\s+/g, ' ').slice(0, 90));
-  check('it passes the owned-by-instance set', args.includes('ownedByInstance'));
-  // Suppression is worthless if the column is never read.
-  check('shift_rule_id is selected from shift_instances', /\.select\('id, employee_id[^']*shift_rule_id'\)/.test(src));
-  // The set must be derived from the RAW instances, not the post-filter visible list.
-  check('the set is built from `instances`, not the filtered `shifts`',
-    /ruleDatesOwnedByInstances\(\s*\(instances/.test(src));
+  // STRONGER THAN THE OLD GUARD. This used to assert the board passed a correct suppression set to
+  // generateRecurringShifts(). Phase 2 removed the projection from that board entirely, so there is
+  // no set to get right any more — the only correct assertion is that the generator is never
+  // reached from an employee-facing surface. Suppression still matters for resolveScheduledSpan(),
+  // which is covered below and is where the helper now earns its keep.
+  const boardPath = fileURLToPath(new URL('../../app/s/team/[token]/page.tsx', import.meta.url));
+  const raw = readFileSync(boardPath, 'utf8');
+  // Strip comments before asserting: this file EXPLAINS the removal in prose, and matching the
+  // explanation instead of the code would make the guard permanently, silently green.
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  check('board does not call generateRecurringShifts', !src.includes('generateRecurringShifts('));
+  check('board does not import it', !/import[^;]*generateRecurringShifts/.test(src));
+  check('board reads no shift_rules', !src.includes("from('shift_rules')"));
+  check('board reads no shift_exceptions', !src.includes("from('shift_exceptions')"));
+  check('board still reads real shift_instances', src.includes("from('shift_instances')"));
+
+  // The whole point: ZERO employee-reachable surfaces may synthesize a recurring schedule.
+  const sDir = fileURLToPath(new URL('../../app/s', import.meta.url));
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
+  const offenders = walk(sDir).filter((f) => /\.(ts|tsx)$/.test(f)).filter((f) => {
+    const t = readFileSync(f, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    return t.includes('generateRecurringShifts(');
+  });
+  check('NO file under src/app/s/ synthesizes recurring shifts', offenders.length === 0,
+    offenders.map((f) => f.split('/app/')[1]).join(',') || 'none');
 }
 
 console.log('\nSCHEDULED SPAN (the real module)');

@@ -1235,15 +1235,74 @@
 
   // Auto-bind the staged set to a sale. Returns the bind-time snapshot (so the
   // caller can render the bound items even after the auto-clear below). We clear
-  // the staged pills AFTER snapshotting on EVERY bind that had a staged set —
+  // the staged pills AFTER snapshotting on EVERY FIRST bind that had a staged set —
   // paid and failed-payment alike — so no SKU silently carries into the next
   // auction. `previousSkus` keeps the last set for the manual ↻ re-run.
+  //
+  // A payment-status FLIP is NOT a bind. auction_result/get is cumulative, so an
+  // order first seen unpaid re-arrives paid seconds later — by which time the
+  // operator has normally already scanned the NEXT item. Treating that flip as a
+  // fresh bind stole the next item's staged pill, overwrote the display mapping,
+  // and nulled capture_events.bound_sku_id (the RPC's transition path ignores the
+  // SKUs it is handed, so the DB row itself stayed correct). On a flip we now
+  // dispatch a TRANSITION-only message: no snapshot, no restage, no clearStaged.
   function autoBind(sale) {
     if (!sale || !sale.orderId) return [];
     // New order → binds (get() is undefined ≠ token). Same-status repeat →
-    // skipped. Status flip (failed→paid) → binds again so the RPC can transition.
+    // skipped. Status flip (failed→paid) → dispatches a transition (below).
     var token = saleStatusToken(sale);
-    if (boundOrderStatus.get(sale.orderId) === token) return [];
+    var prevToken = boundOrderStatus.get(sale.orderId);
+    if (prevToken === token) return [];
+
+    // ── Status flip: transition only ────────────────────────────────────────
+    // We have processed this order before at a DIFFERENT status. The background's
+    // flip branch re-calls the RPC against the ORIGINAL session; the RPC decrements
+    // the originally-bound lines and ignores p_skus. Send no staged SKUs and mark
+    // the message isFlip so the background never mistakes an empty set for
+    // "nothing staged" and downgrades a real transition to captured-only.
+    if (prevToken !== undefined) {
+      var flipDispatched = false;
+      dlog('bind.flip_sent', 'info', 'AUTO_BIND transition dispatched (no staging touched)',
+        { order: sale.orderId, from: prevToken, to: token, stagedNow: stagedSkus.length });
+      try {
+        chrome.runtime.sendMessage({
+          type: 'AUTO_BIND',
+          sale: sale,
+          stagedSkus: [],
+          isFlip: true,
+        }, function (resp) {
+          if (chrome.runtime.lastError) {
+            console.error('[LENSED][TT] flip sendMessage error:', chrome.runtime.lastError);
+            dlog('bind.reply', 'error', 'AUTO_BIND flip no reply (runtime error)',
+              { order: sale.orderId, error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'lastError' });
+            return;
+          }
+          var okFlip = !!(resp && resp.ok);
+          dlog('bind.reply', okFlip ? 'info' : 'warn', 'AUTO_BIND flip reply', {
+            order: sale.orderId, ok: okFlip, bound: !!(resp && resp.bound), flip: true,
+            reason: (resp && resp.reason) || null, code: (resp && resp.code) || null,
+          });
+          if (resp && resp.ok === false && resp.reason !== 'not_authenticated') {
+            console.warn('[LENSED][TT] flip not fully OK:', sale.orderId, resp.reason, resp.code || '');
+            showBindIssue(resp);
+          }
+        });
+        flipDispatched = true;
+      } catch (err) {
+        console.error('[LENSED][TT] flip dispatch failed:', err);
+        dlog('bind.dispatch_failed', 'error', 'AUTO_BIND flip dispatch threw', { order: sale.orderId });
+      }
+      // Commit the token only on a dispatched message, so a failed dispatch leaves
+      // the flip retry-able on the next cumulative snapshot.
+      if (flipDispatched) {
+        boundOrderStatus.set(sale.orderId, token);
+        capMap(boundOrderStatus);
+        diag.lastBindTs = Date.now();
+      }
+      // Return the ORIGINAL bind's items so the caller re-renders this order with
+      // what it is actually bound to, not with whatever is staged for the next one.
+      return sessionBoundSkus.get(sale.orderId) || [];
+    }
     // The dedup token is committed AFTER the AUTO_BIND message is dispatched (below),
     // so a synchronous throw before dispatch can't permanently suppress a retry.
 
@@ -1813,6 +1872,7 @@
       (boundSkus && boundSkus.length ? boundSkus : null);
 
     var row = el('div', 'lensed-sale' + (wasBound ? ' bound' : ''));
+    if (sale.orderId) row.setAttribute('data-order', sale.orderId);
 
     // \u2500\u2500 Line 1: "#order \u00B7 @buyer" (left, ellipsizes) + "price \u00B7 status" (right).
     // Text-first \u2014 no thumbnail. All values via textContent (never innerHTML).
@@ -1846,10 +1906,29 @@
       }
     }
 
-    salesListEl.insertBefore(row, salesListEl.firstChild);
+    // A payment-status flip re-renders an order that is ALREADY in the list. Replace
+    // that row in place (keeping its position) so the operator sees Unpaid → Paid on
+    // the one row, instead of the same order appearing twice with different items.
+    var existing = null;
+    if (sale.orderId) {
+      try { existing = salesListEl.querySelector('[data-order="' + cssEscapeAttr(sale.orderId) + '"]'); } catch (_) { existing = null; }
+    }
+    if (existing) {
+      salesListEl.replaceChild(row, existing);
+    } else {
+      salesListEl.insertBefore(row, salesListEl.firstChild);
+    }
     while (salesListEl.children.length > MAX_VISIBLE_SALES) {
       salesListEl.removeChild(salesListEl.lastChild);
     }
+  }
+
+  // order_id is digits in practice, but never interpolate an unvalidated value into a
+  // selector — fall back to a scan when it is anything else.
+  function cssEscapeAttr(v) {
+    var str = String(v);
+    if (!/^[A-Za-z0-9_-]+$/.test(str)) throw new Error('unsafe order id for selector');
+    return str;
   }
 
   // ── Live order counter: persistence + session scoping ───────────────
@@ -2687,7 +2766,13 @@
         return;
       }
 
-      var wasBound = boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && hadStaged;
+      // A flip re-renders an order we already processed. It is "bound" if the ORIGINAL
+      // bind attached items — not because something happens to be staged for the NEXT
+      // auction right now (that staging is no longer consumed by a flip).
+      var isFlipRender = boundOrderStatus.get(sale.orderId) !== undefined;
+      var wasBound = isFlipRender
+        ? !!(sale.orderId && sessionBoundSkus.get(sale.orderId))
+        : (boundOrderStatus.get(sale.orderId) !== saleStatusToken(sale) && hadStaged);
       var boundSkus = autoBind(sale);
 
       // Render in overlay
@@ -2846,6 +2931,12 @@
     }
     if (channelMapState && handle &&
         normHandle(String(channelMapState.handle || '')).toLowerCase() === normHandle(String(handle)).toLowerCase()) {
+      if (channelMapState.guardOn === false) {
+        // Guard offline (map empty/unavailable). Garbage was rejected by the denylist;
+        // a plausible handle was written via fallback — show it, but flag the guard is off.
+        if (channelMapState.classification === 'garbage') return null;
+        return { name: name, src: src, key: key, state: 'guard_offline' };
+      }
       if (channelMapState.known) return { name: name, src: src, key: key, state: 'known' };
       if (channelMapState.classification === 'plausible') return { name: name, src: src, key: key, state: 'unmapped' };
       return null; // garbage — do not present a bogus channel
@@ -2876,7 +2967,12 @@
     sessionStatusEl.appendChild(document.createTextNode('Connected'));
     sessionStatusEl.appendChild(el('span', 'lensed-acct-sep', ' \u00b7 '));
     var acct = accountDisplay();
-    if (acct && acct.state === 'unmapped') {
+    if (acct && acct.state === 'guard_offline') {
+      var goff = el('span', 'lensed-acct-warn', '\u26a0 ' + acct.name + ' (guard offline)');
+      goff.title = 'Channel guard is OFFLINE (channel_store_map unavailable) \u2014 handle written via '
+        + 'fallback detection, NOT validated against the known-channel set. Check RLS / connectivity.';
+      sessionStatusEl.appendChild(goff);
+    } else if (acct && acct.state === 'unmapped') {
       var warn = el('span', 'lensed-acct-warn', '\u26a0 unmapped: ' + acct.name);
       warn.title = 'Detected channel "' + acct.name + '" is not in the channel\u2192store map. '
         + 'Add it in Lensed to attribute this session (nothing was written).';
@@ -3185,6 +3281,52 @@
   // Returns { label, why, scanned, topRightCount, samples } \u2014 label is null if nothing
   // confident was found. Our own overlay lives in a shadow root, so it is invisible to
   // these document queries and can never be picked up.
+  // Class string of an element (handles SVG className objects).
+  function classOf(n) {
+    var c = n && n.className;
+    if (c && typeof c === 'object' && 'baseVal' in c) return c.baseVal || '';
+    return typeof c === 'string' ? c : '';
+  }
+
+  // Is this m4b_avatar in the COLLAPSED, VISIBLE header (NOT the account-switcher dropdown,
+  // not otherwise hidden)? The dropdown (div.absolute.top-32.right-0 ... hidden) holds OTHER
+  // accounts and is the source of the jumbosteals->lotsofsteals bug, so it is excluded in
+  // BOTH states: 'hidden' when collapsed, and absolute+top-32/right-0 when open.
+  function isCollapsedHeaderAvatar(el) {
+    try {
+      var n = el;
+      while (n && n.nodeType === 1 && n !== document.body) {
+        var cls = classOf(n);
+        if (/\bhidden\b/.test(cls)) return false;
+        if (/\babsolute\b/.test(cls) && (/\btop-32\b/.test(cls) || /\bright-0\b/.test(cls))) return false;
+        var st = null; try { st = getComputedStyle(n); } catch (_) {}
+        if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+        n = n.parentElement;
+      }
+      if (el.getClientRects().length === 0) return false; // not laid out -> hidden
+      return true;
+    } catch (_) { return false; }
+  }
+
+  // The handle is the text beside the avatar within the collapsed-header parent
+  // (div.flex-c.cursor-pointer): the first direct child that is NOT the avatar branch and
+  // carries text; fallback to parent text minus the avatar's own text.
+  function handleTextBesideAvatar(parent, avatar) {
+    try {
+      var kids = parent.children || [];
+      for (var i = 0; i < kids.length; i++) {
+        var elc = kids[i];
+        if (elc === avatar || elc.contains(avatar)) continue; // skip the avatar branch
+        var t = (elc.textContent || '').trim();
+        if (t) return t;
+      }
+      var pt = (parent.textContent || '').trim();
+      var at = (avatar.textContent || '').trim();
+      if (pt && at) pt = pt.split(at).join('').trim();
+      return pt || null;
+    } catch (_) { return null; }
+  }
+
   function detectVisibleAccount() {
     var best = null;         // { text, score, why }
     var samples = [];        // rejected top-right texts, for the failure diagnostic
@@ -3201,6 +3343,28 @@
       }
       if (!best || score > best.score) best = { text: normHandle(t), score: score, why: why };
     }
+
+    // PRIMARY - structural anchor. data-tid is a TEST id TikTok's own tests depend on, so it
+    // is far more stable than classes/screen position. The account name is the span beside
+    // [data-tid="m4b_avatar"] in the collapsed header (div.flex-c.cursor-pointer). We read
+    // ONLY the visible collapsed header - never the account-switcher dropdown or a hidden node.
+    try {
+      var avatars = document.querySelectorAll('[data-tid="m4b_avatar"]');
+      for (var a = 0; a < avatars.length; a++) {
+        var av = avatars[a];
+        if (!isCollapsedHeaderAvatar(av)) continue; // excludes dropdown + hidden
+        scanned++; topRightCount++;
+        var hparent = av.closest('div.flex-c.cursor-pointer') || av.parentElement;
+        if (!hparent || !isCollapsedHeaderAvatar(hparent)) continue;
+        var anchoredHandle = handleTextBesideAvatar(hparent, av);
+        if (anchoredHandle) consider(anchoredHandle, 10, 'data-tid=m4b_avatar'); // score 10 -> trusted at once
+      }
+    } catch (_) {}
+
+    // FALLBACK - only if the anchor found nothing (a layout without the test id). Legacy
+    // top-right scan, kept as a safety net; weak by design so the known-set guard + the
+    // two-sighting corroboration filter any corner garbage. NOT the primary path.
+    if (!best) {
 
     // Strategy 1 \u2014 avatar alt text near the top (avatars usually carry the account name).
     try {
@@ -3246,6 +3410,8 @@
         if (txt) consider(txt, 6, 'top-right-text');
       }
     } catch (_) {}
+
+    }
 
     return {
       label: best ? best.text : null,

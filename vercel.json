@@ -1,13 +1,45 @@
 {
   "fluid": true,
   "crons": [
-    { "path": "/api/cron/auto-end-sessions", "schedule": "*/30 * * * *" },
-    { "path": "/api/cron/materialize-shifts", "schedule": "0 8 * * *" },
-    { "path": "/api/cron/materialize-schedule", "schedule": "0 9 * * *" },
-    { "path": "/api/cron/refresh-tiktok-tokens", "schedule": "0 */6 * * *" },
-    { "path": "/api/cron/resolve-channels", "schedule": "*/5 * * * *" },
-    { "path": "/api/cron/reconcile-time-clock", "schedule": "0 * * * *" },
-    { "path": "/api/cron/sync-orders", "schedule": "*/30 * * * *" },
-    { "path": "/api/cron/capture-health", "schedule": "*/5 * * * *" }
+    {
+      "path": "/api/cron/auto-end-sessions",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/materialize-shifts",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/cron/materialize-schedule",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/cron/refresh-tiktok-tokens",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/resolve-channels",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-time-clock",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-orders",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/capture-health",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-refunds?days=2",
+      "schedule": "0 */2 * * *"
+    },
+    {
+      "path": "/api/cron/sync-refunds?days=30",
+      "schedule": "30 7 * * *"
+    }
   ]
 }

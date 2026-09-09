@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { fmt } from '@/lib/calculations';
 import {
   computePay,
@@ -11,11 +11,16 @@ import {
   fmtPayDate,
   fmtMonthDay,
 } from '@/lib/employees';
+import { buildPayStatement, type PayStatement } from '@/lib/pay/statement';
+import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
 import PayGrid, { type PayTile } from './PayGrid';
+import PayDetailModal from './PayDetailModal';
+import ShiftEditorModal, { type EditorIntent } from './weekly/ShiftEditorModal';
+import { makeEditorHandlers } from './weekly/editorHandlers';
 
 // Pay sub-tab role filter (ported from PR #69). 'all' = everyone (default); others match
 // employees.role. Purely display — narrows which payroll rows show; no new calc/query.
@@ -26,6 +31,13 @@ const PAY_ROLE_OPTIONS: { value: PayRole; label: string }[] = [
   { value: 'host', label: 'Host' },
 ];
 
+/** Which person's detail is open, and the timestamp the statement/PDF is stamped with. Captured
+ *  at OPEN time rather than during render, so nothing here reads a clock while rendering. */
+interface DetailTarget {
+  employee: Employee;
+  generatedAtISO: string;
+}
+
 // Pay owed for the current biweekly pay period — unchanged behaviour, extracted from the
 // original EmployeesTab. Scoped to its OWN pay period (not the dashboard FiltersBar), with
 // prev/next navigation. Reuses computePay's exact hours×rate math (open + skipped excluded).
@@ -35,8 +47,15 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   const payday = useMemo(() => paydayAtOffset(periodOffset), [periodOffset]);
   const period = useMemo(() => payPeriodFor(payday), [payday]);
 
-  const { shifts: periodShifts } = useShifts(period.start, period.end);
-  const { rules, exceptions } = useShiftRules();
+  // The period's rows, and the mutations the record editor saves through. Scoped to exactly the
+  // pay period — the same query, and therefore the same computePay input, this tab has always used.
+  const {
+    shifts: periodShifts,
+    addShift,
+    updateShift,
+    deleteShift,
+  } = useShifts(period.start, period.end);
+  const { rules, exceptions, upsertException } = useShiftRules();
 
   const periodMaterialized = useMemo(
     () => new Set(periodShifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
@@ -63,6 +82,59 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     }
     return m;
   }, [periodGenerated]);
+
+  // ── Detail + editing ───────────────────────────────────────────────────────────────────────
+  const [detail, setDetail] = useState<DetailTarget | null>(null);
+  const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
+
+  // THE STATEMENT IS BUILT ONCE, HERE, and handed to both the detail panel and (through it) the
+  // PDF. Neither renders arithmetic of its own.
+  const statement: PayStatement | null = useMemo(
+    () =>
+      detail
+        ? buildPayStatement({
+            employee: detail.employee,
+            period: { start: period.start, end: period.end, payday },
+            shifts: periodShifts,
+            generatedAtISO: detail.generatedAtISO,
+          })
+        : null,
+    [detail, period.start, period.end, payday, periodShifts],
+  );
+
+  // The editor's own card model, built by the SAME indexer the calendars use — never by hand, so
+  // a Pay Details edit opens at the identical prefill (shiftEditPrefill) the calendar would.
+  const cardById = useMemo(() => {
+    const dates = new Set(periodShifts.map((s) => s.date));
+    const m = new Map<string, WeekShiftCard>();
+    for (const arr of indexWeekCards(periodShifts, [], dates).values()) {
+      for (const c of arr) m.set(c.id, c);
+    }
+    return m;
+  }, [periodShifts]);
+
+  const nameById = useCallback(
+    (id: string) => employees.find((e) => e.id === id)?.name ?? 'Unknown',
+    [employees],
+  );
+
+  // The app's ONE shift-editor wiring. Saving goes through useShifts.updateShift →
+  // buildShiftEditPatch, which is what decides whether a correction lands on the punch instants
+  // or the wall clock — i.e. the Pay Details edit writes the exact interval payroll reads.
+  const editorHandlers = useMemo(
+    () => makeEditorHandlers({ employees, nameById, addShift, updateShift, deleteShift, upsertException }),
+    [employees, nameById, addShift, updateShift, deleteShift, upsertException],
+  );
+
+  const canEdit = useCallback((shiftId: string) => cardById.has(shiftId), [cardById]);
+  const openEditor = useCallback(
+    (shiftId: string) => {
+      const card = cardById.get(shiftId);
+      if (card) setEditorIntent({ mode: 'card', card });
+    },
+    [cardById],
+  );
+
   // Role filter applied on the already-computed pay rows (no recompute — just narrows which
   // rows show). The period selector still drives the numbers.
   const filteredPay = useMemo(
@@ -92,6 +164,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   );
 
   return (
+    <>
     <div className="bg-tt-card border border-tt-border rounded-[14px] backdrop-blur-xl overflow-hidden">
       <div className="px-6 py-5 border-b border-tt-border">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -175,6 +248,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
         rows={tiles}
         fmt={fmt}
         fmtHours={fmtHours}
+        onOpen={(t) => setDetail({ employee: t.employee, generatedAtISO: new Date().toISOString() })}
         emptyMessage={
           pay.length === 0
             ? 'No employees yet'
@@ -184,5 +258,27 @@ export default function PayView({ employees }: { employees: Employee[] }) {
         }
       />
     </div>
+
+    {/* Rendered as SIBLINGS of the panel above, not inside it: the panel is `backdrop-blur-xl
+        overflow-hidden`, which would become the containing block for a fixed child and clip it.
+        (PayDetailModal also portals to body; the editor keeps the placement every other caller
+        gives it.) */}
+    {statement && (
+      <PayDetailModal
+        statement={statement}
+        onClose={() => setDetail(null)}
+        onEditRow={openEditor}
+        canEdit={canEdit}
+      />
+    )}
+    {editorIntent && (
+      <ShiftEditorModal
+        intent={editorIntent}
+        handlers={editorHandlers}
+        initialScreen="edit"
+        onClose={() => setEditorIntent(null)}
+      />
+    )}
+    </>
   );
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { attachLocations } from '@/lib/shipping/scanResolve';
+import { normalizeTracking, attachLocations, DO_NOT_PACK, refundBlockedOrders } from '@/lib/shipping/scanResolve';
+import { REASON_CANCELED } from '@/lib/shipping/refundGuard';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOrderById } from '@/lib/tiktok/client';
 import { getFreshToken, refreshConnection, isExpiredCredsError, type ConnRow } from '@/lib/tiktok/tokens';
@@ -16,60 +17,20 @@ function logScan(fields: { user_id: string; store_id: string | null; raw_scan: s
 
 // Statuses that must NOT be packed into the box: cancelled/held (never ship) and already-gone
 // (re-picking = over-pick). Everything else — AWAITING_COLLECTION / AWAITING_SHIPMENT — is packable.
-const DO_NOT_PACK = new Set(['CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
+// DO_NOT_PACK lives in scanResolve.ts — see the note there. This route kept its own copy, the
+// same shape of duplication that made PR #225's parser fix invisible (PR #227).
 
 const BUCKET = 'inventory-thumbnails';
 
-// USPS IMpb mod-10 check digit, computed over the first 21 of a 22-digit tracking.
-// (Rightmost of the 21 weighted ×3, then alternating ×1/×3.) Used to disambiguate the
-// canonical tracking when a scanned barcode carries extra padding digits.
-function uspsTrackingValid(t: string): boolean {
-  if (!/^\d{22}$/.test(t)) return false;
-  let sum = 0;
-  for (let i = 0; i < 21; i++) sum += Number(t[i]) * (((20 - i) % 2 === 0) ? 3 : 1);
-  return ((10 - (sum % 10)) % 10) === Number(t[21]);
-}
-
-// Normalize a scanned shipping-label / tracking string to the canonical 22-digit USPS IMpb
-// tracking (starts 92/93/94/95). Returns null when the scan isn't a tracking → order_id path.
-// Handles three real-world barcode shapes:
-//   • bare 22-digit tracking scanned on its own;
-//   • "420" + ZIP(5 or 9) + 22-digit IMpb concatenated routing label (tracking is a clean
-//     22-digit, check-valid substring);
-//   • HAZMAT-style labels whose barcode pads the serial with an EXTRA leading zero, so the
-//     tracking region is 23+ digits and the printed human-readable tracking is NOT a contiguous
-//     substring. We recover it deterministically by collapsing the longest zero-run one digit
-//     at a time until a check-valid 22-digit form remains.
-//     e.g. "4208914992362903942203000007067" → "9236290394220300007067".
-function normalizeTracking(digits: string): string | null {
-  if (/^9[2-5]\d{20}$/.test(digits)) return digits;               // bare canonical tracking
-  // Candidate regions: the whole string, and after stripping "420" + ZIP5 / ZIP+4 routing.
-  const regions = [digits];
-  if (digits.startsWith('420')) { regions.push(digits.slice(8)); regions.push(digits.slice(12)); }
-  for (const region of regions) {
-    // (1) a clean 22-digit window starting 9[2-5] that passes the USPS check digit.
-    for (let i = 0; i + 22 <= region.length; i++) {
-      if (!/^9[2-5]/.test(region.slice(i, i + 2))) continue;
-      const win = region.slice(i, i + 22);
-      if (uspsTrackingValid(win)) return win;
-    }
-    // (2) over-length region (barcode padded the serial with extra zeros): collapse the
-    //     longest zero-run until 22 digits remain, then require a valid check digit. Only
-    //     fires when no clean window validated, so it never rewrites a legitimate tracking.
-    const start = region.search(/9[2-5]/);
-    if (start >= 0 && region.length - start > 22 && region.length - start <= 26) {
-      let s = region.slice(start);
-      while (s.length > 22) {
-        let best = -1, bestLen = 0; const re = /0+/g; let mm: RegExpExecArray | null;
-        while ((mm = re.exec(s))) if (mm[0].length > bestLen) { bestLen = mm[0].length; best = mm.index; }
-        if (best < 0) break;                                       // no zeros to collapse
-        s = s.slice(0, best) + s.slice(best + 1);                  // drop one zero from the longest run
-      }
-      if (s.length === 22 && /^9[2-5]/.test(s) && uspsTrackingValid(s)) return s;
-    }
-  }
-  return null;
-}
+// The barcode parse lives in ONE place: src/lib/shipping/scanResolve.ts.
+//
+// It used to be duplicated here, and on 2026-09-08 that cost a night of packing. PR #225 fixed a
+// false-positive parse (a check-valid 22-digit window can start inside the "420"+ZIP routing
+// prefix) in scanResolve.ts only — this copy kept the bug, and this is the route the Shipping
+// tab's scanner actually calls, so the fix appeared to do nothing. Two labels were photographed
+// failing hours after that deploy.
+//
+// Do not re-inline it. A parser with two copies is a parser with two behaviours.
 
 // POST: resolve a packing "box" from a scanned slip order_id.
 //
@@ -238,8 +199,14 @@ export async function POST(req: Request) {
 
   // Effective status: live when we have it, else stored. Partition the box into pick vs do-not-pack.
   const effStatus = (id: string) => liveStatus.get(id) ?? boxRows.get(id)?.status ?? '';
-  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(effStatus(id)));
-  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(effStatus(id)));
+  // A refund or cancellation outranks the order status: TikTok has already paid the buyer back,
+  // so the parcel must not go out whatever the order still says.
+  // Own admin client: the one above is scoped inside the live-status try block, and
+  // order_refund_state is service-role-only (RLS, no public policies).
+  const refundBlocked = await refundBlockedOrders(createAdminClient(), [user.id], orderIds);
+  const packStatus = (id: string) => (refundBlocked.has(id) ? REASON_CANCELED : effStatus(id));
+  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(packStatus(id)));
+  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(packStatus(id)));
 
   // 3) Bound auction items for ALL box orders; map item→order so SKUs attribute to their order
   //    (needed to split pickable SKUs from the excluded "would-have-packed" list).
@@ -343,7 +310,11 @@ export async function POST(req: Request) {
   }
   const excluded = excludedOrderIds.map((id) => ({
     order_id: id,
-    reason: effStatus(id) || 'UNKNOWN',   // CANCELLED / ON_HOLD / IN_TRANSIT / DELIVERED / COMPLETED
+    // packStatus, NOT effStatus: the same function that decided to exclude the order must name
+    // the reason, or the two disagree. They did — this route reported a refunded order as
+    // COMPLETED, so the station showed the generic do-not-pack wording instead of
+    // "ORDER CANCELED, NO NEED TO PACK" while the box was in fact refunded.
+    reason: packStatus(id) || 'UNKNOWN',   // CANCELED / CANCELLED / ON_HOLD / IN_TRANSIT / DELIVERED / COMPLETED
     skus: linesByOrder.get(id) ?? [],      // what would have been packed — for the picker's awareness
   }));
 

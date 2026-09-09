@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { routePositionMap, sectionRoutePosition, slotAddress } from '@/lib/mapping/route';
+import { REASON_CANCELED } from '@/lib/shipping/refundGuard';
 
 // Shared scan → box resolution used by both /api/shipping/pick-list (the
 // operator-facing picker, scoped to the caller's own user_id) and
@@ -16,7 +17,45 @@ export const BUCKET = 'inventory-thumbnails';
 // Statuses that must NOT be packed into the box: cancelled/held (never ship)
 // and already-gone (re-picking = over-pick). Everything else —
 // AWAITING_COLLECTION / AWAITING_SHIPMENT — is packable.
-export const DO_NOT_PACK = new Set(['CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED']);
+// REASON_CANCELED is stamped by the refund guard (order_refund_state, migration 133) for orders
+// TikTok has refunded or cancelled. Before it existed, a refunded order in AWAITING_COLLECTION was
+// indistinguishable from a live one and would have been packed and shipped.
+export const DO_NOT_PACK = new Set([
+  'CANCELLED', 'ON_HOLD', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED', REASON_CANCELED,
+]);
+
+/**
+ * Which of these orders TikTok has refunded or cancelled.
+ *
+ * Shared by BOTH pick paths on purpose. /api/shipping/pick-list and /api/station/scan each kept
+ * their own copy of DO_NOT_PACK, and a duplicated parser in exactly that shape cost a night of
+ * packing on 2026-09-08 (PR #227): fixing one copy was indistinguishable from fixing the rule.
+ *
+ * A read failure returns EMPTY rather than throwing, so a refund-table problem degrades to the
+ * old behaviour instead of stopping the station. That is the wrong direction for safety, so it is
+ * the one case where the guard can miss — worth it against the alternative of a warehouse that
+ * cannot pack anything because one table is unavailable.
+ */
+export async function refundBlockedOrders(
+  db: SupabaseClient,
+  userIds: string[],
+  orderIds: string[],
+): Promise<Set<string>> {
+  const blocked = new Set<string>();
+  if (!orderIds.length) return blocked;
+  // Chunked at 200: the undici 16KB request-header ceiling on `.in()` lists, same reason as
+  // IN_CHUNK in src/lib/db/readAll.ts. A box is small, but a caller could pass more.
+  for (let i = 0; i < orderIds.length; i += 200) {
+    const { data, error } = await db.from('order_refund_state')
+      .select('order_id')
+      .in('user_id', userIds)
+      .in('order_id', orderIds.slice(i, i + 200))
+      .eq('blocks_packing', true);
+    if (error) return blocked;
+    for (const r of (data ?? []) as Array<{ order_id: string }>) blocked.add(String(r.order_id));
+  }
+  return blocked;
+}
 
 // USPS IMpb mod-10 check digit, computed over the first 21 of a 22-digit
 // tracking. (Rightmost of the 21 weighted ×3, then alternating ×1/×3.) Used to
@@ -43,9 +82,36 @@ function uspsTrackingValid(t: string): boolean {
 //     e.g. "4208914992362903942203000007067" → "9236290394220300007067".
 export function normalizeTracking(digits: string): string | null {
   if (/^9[2-5]\d{20}$/.test(digits)) return digits;               // bare canonical tracking
-  // Candidate regions: the whole string, and after stripping "420" + ZIP5 / ZIP+4 routing.
-  const regions = [digits];
-  if (digits.startsWith('420')) { regions.push(digits.slice(8)); regions.push(digits.slice(12)); }
+
+  // (0) STRUCTURE BEFORE SEARCH. A "420" routing label is a DOCUMENTED layout — "420" + ZIP5 or
+  //     ZIP+4, then the 22-digit IMpb — so when stripping the prefix leaves exactly a valid
+  //     tracking, that is the answer and no search is needed.
+  //
+  //     This must come first, because searching finds the WRONG tracking on real labels. The
+  //     check digit is one digit: about 1 in 10 arbitrary 22-digit windows passes it by chance,
+  //     and a window starting inside the ZIP can be one of them. Measured on a live failure
+  //     (lots of steals, 2026-09-07): "420" + "79928" + "9200190394220319214706" has TWO
+  //     check-valid windows — a false one at offset 5 spanning the ZIP into the tracking, and the
+  //     real one at offset 8. Left-to-right search returned the false one, the scanner looked up
+  //     a tracking no order has ever had, and the picker was told "No matching order" while the
+  //     box sat AWAITING_COLLECTION in the database.
+  if (digits.startsWith('420')) {
+    for (const zipLen of [5, 9]) {
+      const rest = digits.slice(3 + zipLen);
+      if (/^9[2-5]\d{20}$/.test(rest) && uspsTrackingValid(rest)) return rest;
+    }
+  }
+
+  // Candidate regions for the fallback search.
+  //
+  // On a "420" label the routing prefix is DEFINITIONALLY NOT PART OF THE TRACKING, so the whole
+  // string is not a candidate at all: any window starting inside "420"+ZIP is spurious by
+  // construction, and excluding it removes that whole class of false positive rather than
+  // out-ranking it. Only the ZIP-stripped regions are searched, which is also what lets the
+  // HAZMAT zero-collapse below work on the tracking region instead of the routing digits.
+  const regions: string[] = digits.startsWith('420')
+    ? [digits.slice(8), digits.slice(12)]
+    : [digits];
   for (const region of regions) {
     // (1) a clean 22-digit window starting 9[2-5] that passes the USPS check digit.
     for (let i = 0; i + 22 <= region.length; i++) {
@@ -114,6 +180,43 @@ export async function resolveBox(
     const { data } = await db.from('synced_order_ids').select(SEL)
       .in('user_id', userIds).eq('tracking_number', tracking);
     seed = (data ?? []) as SeedRow[];
+
+    // ── A SUPERSEDED LABEL still names its box. ──
+    //
+    // TikTok re-labels combine shipments (one consolidated label -> N per-package labels), so a
+    // label already printed and stuck to a parcel can carry a tracking the order no longer
+    // stores. The parcel is physically right there; only our current-value lookup has moved on.
+    // Two records remember what was printed, and both are consulted before giving up:
+    //
+    //   1. tracking_correction_log.old_tracking — every supersede, now captured by a database
+    //      trigger (migration 132) so no write path can skip it;
+    //   2. shipping_label_purchases.tracking_number — what Lensed itself bought and printed,
+    //      which is authoritative for our own labels regardless of what sync later reported.
+    //
+    // Order matters only for cost: both are indexed point lookups and only run on a miss, so a
+    // normal scan pays nothing for this.
+    if (!seed.length) {
+      const ids = new Set<string>();
+
+      const { data: superseded } = await db.from('tracking_correction_log')
+        .select('order_id').in('user_id', userIds).eq('old_tracking', tracking);
+      for (const r of (superseded ?? []) as Array<{ order_id: string }>) ids.add(r.order_id);
+
+      if (!ids.size) {
+        const { data: printed } = await db.from('shipping_label_purchases')
+          .select('order_ids').in('user_id', userIds)
+          .eq('tracking_number', tracking).eq('status', 'purchased');
+        for (const r of (printed ?? []) as Array<{ order_ids: string[] | null }>) {
+          for (const id of r.order_ids ?? []) ids.add(id);
+        }
+      }
+
+      if (ids.size) {
+        const { data } = await db.from('synced_order_ids').select(SEL)
+          .in('user_id', userIds).in('order_id', [...ids]);
+        seed = (data ?? []) as SeedRow[];
+      }
+    }
   }
   // Order-id fallback (also belt-and-suspenders when a parsed tracking matched nothing —
   // today ~93% of synced_order_ids rows have a NULL tracking_number).

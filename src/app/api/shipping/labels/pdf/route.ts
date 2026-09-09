@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { readAllPaged } from '@/lib/db/readAll';
 import { getFreshToken, type ConnRow } from '@/lib/tiktok/tokens';
 import { getPackageDocument } from '@/lib/tiktok/client';
 import {
@@ -100,14 +101,33 @@ export async function GET(req: Request) {
 
   const admin = createAdminClient();
 
-  const { data: rowData, error } = await admin
-    .from('shipping_label_purchases')
-    .select(`${LEDGER_COLUMNS}, run_id`)
-    .eq('user_id', user.id)
-    .in('run_id', runIds);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-  let rows = (rowData ?? []) as Row[];
+  // PAGED, because PostgREST caps a response at 1000 rows and says nothing about it.
+  //
+  // This silently truncated every large stack. Three runs printed together are 2,399 rows; the
+  // unpaged read returned 1,000 of them, so a "Singles only" print of 976 labels built 239 and
+  // looked like a merge bug. Nothing errored, the PDF opened, and the count was simply wrong —
+  // the failure mode this cap always has. Rows are only a lookup pool here (both item builders
+  // sort internally), so the order exists solely to make the paging deterministic.
+  let rows: Row[];
+  try {
+    rows = await readAllPaged<Row>(
+      (from, to) => admin
+        .from('shipping_label_purchases')
+        .select(`${LEDGER_COLUMNS}, run_id`)
+        .eq('user_id', user.id)
+        .in('run_id', runIds)
+        .order('run_id', { ascending: true })
+        .order('print_seq', { ascending: true, nullsFirst: false })
+        .order('group_key', { ascending: true })
+        .range(from, to),
+      'labels/pdf rows',
+    );
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : String(e) },
+      { status: 500 },
+    );
+  }
   // A store filter still applies when one is given, so single-shop printing is unchanged.
   if (storeId) rows = rows.filter((r) => String(r.store_id ?? '') === storeId);
   if (!rows.length) {

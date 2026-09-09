@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 import type { Employee } from '@/types';
 import { validateShiftTimes } from '@/lib/weeklySchedule';
+import { assertBreakShape, assertBreakFitsSpan, wallClockSpanMinutes } from '@/lib/shifts/punchEdit';
 import PersonAvatar from './PersonAvatar';
 import HoverCard, { type HoverPayload } from './HoverCard';
 
@@ -57,17 +58,32 @@ export default function DayAddShiftModal({
   onClose,
   onCreateScheduled,
   onCreateWorked,
+  initialMode,
+  initialEmployeeIds,
+  initialStart,
+  initialEnd,
 }: {
   dateLabel: string;
   employees: Employee[];
   onClose: () => void;
   onCreateScheduled: (employeeIds: string[], startTime: string, endTime: string) => Promise<void>;
-  onCreateWorked: (employeeIds: string[], startTime: string, endTime: string | null) => Promise<void>;
+  onCreateWorked: (
+    employeeIds: string[], startTime: string, endTime: string | null, breakMinutes: number,
+  ) => Promise<void>;
+  // PREFILLS, applied once at mount. Set by the "Add Worked Time" action on a did-not-clock-in
+  // tile, which knows the person and the shift they were scheduled for. They seed the form and
+  // nothing more — every field stays editable, because the scheduled span is a guess at what was
+  // worked, not a record of it. The caller must remount (a changing `key`) to seed a new intent.
+  initialMode?: Mode;
+  initialEmployeeIds?: string[];
+  initialStart?: string;
+  initialEnd?: string;
 }) {
-  const [mode, setMode] = useState<Mode>('scheduled');
-  const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [start, setStart] = useState('');
-  const [end, setEnd] = useState('');
+  const [mode, setMode] = useState<Mode>(initialMode ?? 'scheduled');
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(initialEmployeeIds ?? []));
+  const [start, setStart] = useState(initialStart ?? '');
+  const [end, setEnd] = useState(initialEnd ?? '');
+  const [breakMinutes, setBreakMinutes] = useState('0');
   const [openEnded, setOpenEnded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,11 +122,24 @@ export default function DayAddShiftModal({
     if (picked.size === 0) return setError('Pick at least one person.');
     if (!start) return setError('Start time is required.');
     if (!isOpen && !end) return setError('End time is required.');
+    // The break is validated with the SAME helpers the merged break editor uses, so a value the
+    // form accepts is one the RPC will accept too. The RPC re-asserts both — this is the fast
+    // message, not the boundary.
+    let brk = 0;
+    if (mode === 'worked') {
+      brk = Number(breakMinutes === '' ? 0 : breakMinutes);
+      try {
+        assertBreakShape(brk);
+        assertBreakFitsSpan(brk, wallClockSpanMinutes(start, isOpen ? null : end));
+      } catch (e) {
+        return setError((e as Error).message);
+      }
+    }
     setBusy(true);
     try {
       const ids = [...picked];
       if (mode === 'scheduled') await onCreateScheduled(ids, start, end);
-      else await onCreateWorked(ids, start, isOpen ? null : end);
+      else await onCreateWorked(ids, start, isOpen ? null : end, brk);
       onClose();
     } catch (e) {
       setError((e as Error).message);
@@ -215,10 +244,25 @@ export default function DayAddShiftModal({
               </span>
             </label>
             {mode === 'worked' && (
-              <label className="flex items-center gap-2 pl-6 text-sm text-tt-text">
-                <input type="checkbox" checked={openEnded} onChange={(e) => setOpenEnded(e.target.checked)} className="h-4 w-4" />
-                Currently in shift <span className="text-tt-muted">(no end time yet — they clock out normally)</span>
-              </label>
+              <>
+                <label className="flex items-center gap-2 pl-6 text-sm text-tt-text">
+                  <input type="checkbox" checked={openEnded} onChange={(e) => setOpenEnded(e.target.checked)} className="h-4 w-4" />
+                  Currently in shift <span className="text-tt-muted">(no end time yet — they clock out normally)</span>
+                </label>
+                {/* Unpaid break, written to shifts.break_minutes — the SAME column the merged break
+                    editor corrects. No employee_time_breaks row is created: nobody punched out for
+                    a break, the manager is stating how long it was. */}
+                <label className="flex items-center gap-2 pl-6 text-sm text-tt-text">
+                  <span className="shrink-0">Break</span>
+                  <input
+                    type="number" min={0} step={1} inputMode="numeric" value={breakMinutes}
+                    onChange={(e) => setBreakMinutes(e.target.value)}
+                    className="w-20 rounded-lg border border-tt-input-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text focus:border-tt-cyan focus:outline-none"
+                    aria-label="Unpaid break in minutes"
+                  />
+                  <span className="text-tt-muted">minutes</span>
+                </label>
+              </>
             )}
           </div>
         </details>

@@ -158,6 +158,20 @@ export function canRemoveScheduled(
   return p.state === 'scheduled';
 }
 
+// ── the Add Worked Time rule ─────────────────────────────────────────────────
+
+/*
+ * canAddWorkedTime USED TO LIVE HERE and was deliberately moved to
+ * src/lib/shifts/manualWorked.ts (canAddWorkedTimeAt).
+ *
+ * The rule became TIME-aware: a same-day shift whose scheduled end has passed is eligible, one
+ * still in progress is not. Deciding that needs the span's real END INSTANT in the business
+ * timezone, which needs schedule/timezone — and this file must stay free of value imports so the
+ * repo's transpile-at-runtime .test.mjs pattern can load it alone (see the header). Keeping a
+ * day-granular copy here as well would leave two rules disagreeing about the same button, so
+ * there is exactly one.
+ */
+
 // ── recurrence: what a stored row already owns ───────────────────────────────
 
 /**

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { formatTime12 } from '@/lib/weeklySchedule';
 import { confirmErrorMessage } from '@/lib/timeclock';
 import { canRemoveScheduled, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
+import { canAddWorkedTimeAt } from '@/lib/shifts/manualWorked';
 import PersonAvatar from './PersonAvatar';
 
 // One person's day as a TILE: avatar on top, name under it, the facts under that.
@@ -31,13 +32,17 @@ function range(start: string, end: string | null): string {
 export default function PersonCard({
   person,
   dateLabel,
+  dateISO,
   onConfirm,
   onEdit,
   onRemoveScheduled,
+  onAddWorkedTime,
 }: {
   person: DayPerson;
   /** Shown only in the pending overlay, where cards span many days. */
   dateLabel?: string;
+  /** 'YYYY-MM-DD' for this cell. Required for the Add Worked Time affordance (see below). */
+  dateISO?: string;
   onConfirm: (shiftId: string, confirmed: boolean) => Promise<void>;
   onEdit?: (shiftId: string) => void;
   /**
@@ -46,16 +51,41 @@ export default function PersonCard({
    * Remove action, which is how the pending-confirmations overlay keeps its punch-only vocabulary.
    */
   onRemoveScheduled?: (instanceId: string) => void;
+  /**
+   * ASK to record worked time for a tile that shows "Did not clock in". The container owns the
+   * form (it knows the date and holds the modal); this tile only surfaces the affordance — the
+   * same split as onRemoveScheduled. Absent → no action, which is how the pending-confirmations
+   * overlay keeps its punch-only vocabulary.
+   */
+  onAddWorkedTime?: (person: DayPerson) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const badge = badgeFor(person);
   const { punch, scheduled } = person;
 
-  // Remove Shift is offered on a PLAN-ONLY tile and nowhere else. The rule itself lives in
-  // calendarModel (canRemoveScheduled) so it is pure and unit-tested; a tile with any punch is
-  // excluded there, which is what keeps this action away from worked/payroll rows.
-  const canRemove = !!onRemoveScheduled && canRemoveScheduled(person);
+  // ADD WORKED TIME. Eligibility is TIME-based: offered once the scheduled period has ENDED, so a
+  // same-day miss is correctable immediately instead of waiting for midnight, and an overnight span
+  // is not eligible until it finishes on the following calendar day. The rule lives in
+  // shifts/manualWorked (canAddWorkedTimeAt) so it is pure and unit-tested. `dateISO` absent → the
+  // affordance is simply not offered rather than guessed at from the display label.
+  const canAddWorked =
+    !!onAddWorkedTime && !!dateISO && canAddWorkedTimeAt(person, dateISO);
+
+  // REMOVE SHIFT is offered on a PLAN-ONLY tile and nowhere else. The rule lives in calendarModel
+  // (canRemoveScheduled); a tile with any punch is excluded there, which keeps this action away
+  // from worked/payroll rows.
+  //
+  // `&& !canAddWorked` is PRECEDENCE, and it became load-bearing when eligibility went time-based.
+  // canRemoveScheduled is still DAY-granular ('scheduled' covers anything today or later), so a
+  // shift TODAY whose period has already ended now satisfies BOTH rules, and the tile would offer
+  // Remove Shift and Add Worked Time at the same time. Once a shift is over the honest question is
+  // "what did they work?", not "cancel the plan" — so Add Worked Time wins.
+  //
+  // Not a safety hole in either direction: planShiftRemoval() on the server independently refuses
+  // to remove an already-started shift. This just stops the tile offering something the server
+  // would reject, and leaves canRemoveScheduled's own rule and tests untouched.
+  const canRemove = !!onRemoveScheduled && canRemoveScheduled(person) && !canAddWorked;
 
   async function run(confirmed: boolean) {
     if (!punch) return;
@@ -128,6 +158,18 @@ export default function PersonCard({
             type="button" onClick={() => onRemoveScheduled(scheduled.id)}
             className="flex-1 rounded-lg border border-tt-border px-2 py-1.5 text-[11px] font-semibold text-tt-muted transition-colors hover:border-tt-red/40 hover:bg-tt-red/10 hover:text-tt-red"
           >Remove Shift</button>
+        </div>
+      )}
+
+      {/* THE MISSED-PUNCH CORRECTION. Only on a past scheduled day with no punch at all, so it can
+          never appear beside worked time that already exists. Wording is deliberate: this records
+          what the manager says was worked, it does not invent a clock-in. */}
+      {canAddWorked && (
+        <div className="mt-2 flex w-full">
+          <button
+            type="button" onClick={() => onAddWorkedTime(person)}
+            className="flex-1 rounded-lg border border-tt-yellow/40 bg-tt-yellow/10 px-2 py-1.5 text-[11px] font-semibold text-tt-yellow transition-colors hover:bg-tt-yellow/20"
+          >Add Worked Time</button>
         </div>
       )}
 

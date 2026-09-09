@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isSlotCode, normalizeSlotCode } from '@/lib/mapping/slotCode';
+import { packBlockHeadline } from '@/lib/shipping/refundGuard';
 
 export interface PackStationEndpoints {
   boxes: string;
@@ -242,6 +243,10 @@ export default function PackStationOverlay({
   const [err, setErr] = useState<string | null>(null);
   const [justDone, setJustDone] = useState(false);
   const [abandon, setAbandon] = useState<null | { scan: string | null }>(null);
+
+  // Why this box cannot be packed, in the picker's words. Derived from the excluded reasons the
+  // route already returns, so the wording cannot drift from the data.
+  const blockHeadline = packBlockHeadline(box?.excluded ?? []);
   // Transient feedback for a section scan. Toned, because "you are at the wrong shelf" and
   // "this one is already done" call for opposite reactions and a picker reads this in about
   // half a second.
@@ -748,8 +753,10 @@ export default function PackStationOverlay({
         {screen === 'empty' && box && (
           <div className="w-full max-w-sm mx-auto px-5 text-center">
             <div className="text-tt-red text-6xl mb-3">🚫</div>
-            <div className="text-2xl font-extrabold break-words">Nothing to pack</div>
-            <div className="mt-2 text-tt-muted break-words">Every order in this box is do-not-pack (cancelled / on-hold / already shipped). Set the label aside.</div>
+            {/* The headline names WHY, because the action differs: a cancelled order is finished
+                and its label is rubbish, while "already shipped" means go find the duplicate. */}
+            <div className="text-2xl font-extrabold break-words">{blockHeadline.title}</div>
+            <div className="mt-2 text-tt-muted break-words">{blockHeadline.detail}</div>
             <button onClick={backToReady} className="mt-8 w-full min-h-[56px] py-5 rounded-2xl bg-tt-red text-white text-xl font-extrabold cursor-pointer hover:opacity-90">
               Set aside &amp; scan next
             </button>

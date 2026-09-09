@@ -13,12 +13,22 @@ import {
 import { scheduleIsEmpty } from '@/lib/schedule/eligibility';
 import { DROP_CAP } from '@/lib/schedule/drops';
 import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate, isOvernight } from '@/lib/schedule/format';
-import { ReleaseButton, ClaimButton } from './parts';
+// ClaimButton only. The legacy ReleaseButton is deliberately no longer rendered: Phase 2's
+// "Drop Shift" is the employee's one drop affordance, and offering a shift the Phase 1 way would
+// null employee_id and strip the worker's responsibility — the exact thing Phase 2 forbids. The
+// /s/[token]/release endpoint and ReleaseButton itself are left in place, unreferenced from this
+// page, so nothing that still points at them breaks.
+import { ClaimButton } from './parts';
 import { ClockControls } from './ClockControls';
 import TimeOffButton from './TimeOffButton';
 import { ScheduleAutoRefresh } from './ScheduleAutoRefresh';
 import MySchedule from './MySchedule';
+import TeamSchedule from './TeamSchedule';
+import ScheduleTabs from './ScheduleTabs';
+import { DropShiftButton, CancelOfferButton } from './phase2Parts';
 import { getWeekSchedule, resolveWeekStart } from '@/lib/schedule/mySchedule';
+import { getTeamSchedule, resolveTeamWeek } from '@/lib/schedule/teamSchedule';
+import { getAvailableShifts, getMyPickupRequests } from '@/lib/schedule/offer';
 import { laTodayISO } from '@/lib/schedule/timezone';
 
 export const dynamic = 'force-dynamic';
@@ -33,10 +43,14 @@ export default async function SchedulePage({
   searchParams,
 }: {
   params: Promise<{ token: string }>;
-  searchParams: Promise<{ week?: string | string[] }>;
+  searchParams: Promise<{ week?: string | string[]; view?: string | string[] }>;
 }) {
   const { token } = await params;
-  const { week } = await searchParams;
+  const { week, view } = await searchParams;
+  // Two views on ONE permanent link — never a second token, never a login. `?view=team` is the only
+  // switch; anything else is My Schedule, so a mangled URL degrades to the default rather than 404s.
+  const rawView = Array.isArray(view) ? view[0] : view;
+  const isTeamView = rawView === 'team';
 
   const ip = (await headers()).get('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
   if (!guardPublicReadAllowed(token, ip)) {
@@ -55,13 +69,27 @@ export default async function SchedulePage({
   const nowMs = now.getTime();
   const todayISO = laTodayISO(now);
   const weekStart = resolveWeekStart(week, todayISO);
-  const [myShifts, board, pendingClaims, { period, drops }, weekSchedule] = await Promise.all([
-    getMyShifts(employee),
-    getBoard(employee),
-    getMyPendingClaims(employee),
-    getCurrentPeriodDrops(employee),
-    getWeekSchedule(employee, weekStart),
-  ]);
+  const teamWeekStart = resolveTeamWeek(week, todayISO);
+  const [myShifts, board, pendingClaims, { period, drops }, weekSchedule, teamWeek, available, myPickups] =
+    await Promise.all([
+      getMyShifts(employee),
+      getBoard(employee),
+      getMyPendingClaims(employee),
+      getCurrentPeriodDrops(employee),
+      getWeekSchedule(employee, weekStart),
+      getTeamSchedule(employee, teamWeekStart),
+      getAvailableShifts(employee, now),
+      getMyPickupRequests(employee),
+    ]);
+  // Offered shifts are STILL MINE, so they stay in My Schedule and are merely marked. This maps
+  // instance id -> the CURRENT offer_id, which the card needs so Cancel Offer can name the exact
+  // cycle it is closing; a stale tab then fails the CAS instead of cancelling a newer offer.
+  const offeredOfferIdById = new Map(
+    myShifts
+      .map((s) => s as { id: string; offer_state?: string | null; offer_id?: string | null })
+      .filter((s) => s.offer_state === 'offered' && s.offer_id)
+      .map((s) => [s.id, s.offer_id as string]),
+  );
 
   const periodEndLabel = fmtCalendarDate(period.end);
   const atCap = drops.drops >= DROP_CAP;
@@ -82,6 +110,41 @@ export default async function SchedulePage({
   // MY SCHEDULE always renders — it is the answer to "when do I work", week by week, and a week of
   // "Off" is a real answer. The action cards below only appear when there is something to act on.
   const mySchedule = <MySchedule token={token} schedule={weekSchedule} todayISO={todayISO} />;
+  const tabs = <ScheduleTabs token={token} active={isTeamView ? 'team' : 'mine'} availableCount={available.length} />;
+
+  // TEAM SCHEDULE is its own view of the same page and the same token. Clock controls live on My
+  // Schedule, so this branch renders no punch UI at all.
+  if (isTeamView) {
+    return (
+      <Shell>
+        {pageHeader}
+        {tabs}
+        <TeamSchedule token={token} week={teamWeek} available={available} todayISO={todayISO} />
+      </Shell>
+    );
+  }
+
+  // WHICH shift, not just how many. getMyPickupRequests already returns the span, and a worker
+  // who asked for cover needs to see the date to know whether to keep their evening free — a bare
+  // count made them go hunting through Team Schedule to find out what they had asked for.
+  const pickupBanner = myPickups.length > 0 && (
+    <div key="pickups" className="mb-6 rounded-lg border border-tt-cyan/40 bg-tt-cyan/10 px-4 py-3">
+      <p className="text-sm font-semibold text-tt-cyan">
+        Pickup requested{myPickups.length > 1 ? ` · ${myPickups.length}` : ''}
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {myPickups.map((p) => (
+          <li key={p.claim_id} className="text-xs text-tt-muted">
+            {fmtDateLA(p.starts_at)} · {fmtTimeRangeLA(p.starts_at, p.ends_at)}
+            {isOvernight(p.starts_at, p.ends_at) && <span className="ml-1">🌙 +1d</span>}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1.5 text-xs text-tt-muted">
+        Waiting for manager approval — not yours until it&rsquo;s approved.
+      </p>
+    </div>
+  );
 
   // Nothing to act on in any section → just the schedule. (Previously an empty-state sentence;
   // the week view now says the same thing more usefully.)
@@ -89,8 +152,10 @@ export default async function SchedulePage({
     return (
       <Shell>
         {pageHeader}
+        {tabs}
+        {pickupBanner}
         {mySchedule}
-        <Empty>Nothing to claim or approve right now.</Empty>
+        <Empty>Nothing to pick up or approve right now.</Empty>
       </Shell>
     );
   }
@@ -129,15 +194,37 @@ export default async function SchedulePage({
           nowMs <= new Date(s.ends_at).getTime() + 60 * 60_000;
         return (
           <Card key={s.id}>
-            <div className="flex items-center justify-between gap-3">
+            {/* flex-wrap, not a plain row: the OFFERED state puts a badge AND a Cancel Offer
+                button on the right, which together leave only a few pixels of headroom at 375px
+                and overflow at 320px or with a wider time string ("11:00 AM – 11:00 PM").
+                Wrapping costs nothing on desktop (it still fits one line) and drops the controls
+                to their own line when they cannot fit. */}
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
               <ShiftFacts inst={s} />
               <div className="shrink-0">
-                {s.status === 'released' ? (
+                {/* OFFERED IS CHECKED FIRST, before status. A shift may legitimately be
+                    status='claimed' AND offer_state='offered' (claimed via the legacy OT flow, then
+                    offered), and in that state the live offer is what the worker needs to act on —
+                    testing status first would show a dead "Picked up" label with no way to cancel. */}
+                {offeredOfferIdById.has(s.id) ? (
+                  // Offered, and still theirs. Say so plainly — the worker must not think they are
+                  // off the hook — and give them the way back out.
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-xs text-tt-yellow">Offered · still yours</span>
+                    <CancelOfferButton
+                      token={token}
+                      instanceId={s.id}
+                      offerId={offeredOfferIdById.get(s.id) as string}
+                      startsAt={s.starts_at}
+                      endsAt={s.ends_at}
+                    />
+                  </div>
+                ) : s.status === 'released' ? (
                   <span className="text-xs text-tt-yellow">Released · waiting for pickup</span>
                 ) : s.status === 'claimed' ? (
                   <span className="text-xs text-tt-green">Picked up</span>
                 ) : releasableNow ? (
-                  <ReleaseButton token={token} instanceId={s.id} periodEnd={periodEndLabel} atCap={atCap} dropsUsed={drops.drops} dropCap={DROP_CAP} />
+                  <DropShiftButton token={token} instanceId={s.id} startsAt={s.starts_at} endsAt={s.ends_at} />
                 ) : null}
               </div>
             </div>
@@ -176,6 +263,8 @@ export default async function SchedulePage({
   return (
     <Shell>
       {pageHeader}
+      {tabs}
+      {pickupBanner}
       {mySchedule}
 
       {/* An in-flight OT claim leads (the viewer just filed it and wants to see it landed), then:

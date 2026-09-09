@@ -80,13 +80,35 @@ export function summarizeSpend(prices: number[], boxes: number): SpendEstimate {
  */
 export type UnboundPolicy = 'skip' | 'include';
 
+/**
+ * How far a plan may shrink between review and authorisation before it is treated as broken
+ * rather than as drift.
+ *
+ * Measured drift on a live 1,324-box night was 1,329 -> 1,324 -> 1,325 over a couple of
+ * minutes, well under 1%: orders keep landing in open combine groups, each one pushing its box
+ * back under the age floor, while other boxes age past it. A shrink inside this band is normal
+ * and costs nothing — buying FEWER boxes than reviewed can never overspend. A shrink outside it
+ * means the scope or the sync resolved to something different from what was read, which is
+ * worth a human's eyes even though it is not a money risk.
+ */
+export const SHRINK_TOLERANCE = 0.05;
+
+/** Floor on that allowance, so a 15-box run is not held to a 0.75-box tolerance. */
+export const MIN_SHRINK_ALLOWANCE = 5;
+
 export interface AuthorizeInput {
   /** LABEL_PURCHASE_ENABLED === '1'. Anything else means log-only. */
   enabled: boolean;
-  /** Boxes this scope resolved, after removing everything already in the ledger. */
-  boxes: number;
-  /** The count the caller read on the dry run and is authorising. Null when absent. */
-  confirmBoxes: number | null;
+  /**
+   * Group keys this scope resolved, in print order, after removing everything already in the
+   * ledger. Duplicates are collapsed — one box cannot be bought twice inside one manifest.
+   */
+  resolvedKeys: readonly string[];
+  /**
+   * The group keys the caller read on the dry run and is authorising. Null when absent, which
+   * is refused: an unreviewed manifest has no approval behind it.
+   */
+  reviewedKeys: readonly string[] | null;
   /** Boxes in this run with no SKU on file. */
   unboundCount: number;
   /** What to do about them. Null when the caller has not said, which is refused if any exist. */
@@ -103,11 +125,19 @@ export type AuthorizeRefusal =
   | 'over_cap';
 
 export type AuthorizeResult =
-  | { ok: true; buy: number }
+  | {
+      ok: true;
+      /** Exactly the boxes that were BOTH reviewed and still resolve, in print order. */
+      buy: string[];
+      /** Reviewed but no longer resolving — bought elsewhere, cancelled, or aged back out. */
+      dropped: number;
+      /** Now resolving but never reviewed. NEVER bought; left for the next run. */
+      added: number;
+    }
   | { ok: false; code: AuthorizeRefusal; reason: string };
 
 /**
- * Whether a manifest may be authorised, and how many boxes it covers.
+ * Whether a manifest may be authorised, and which boxes it covers.
  *
  * THIS IS THE ONLY GATE, and it runs ONCE per run rather than once per call. Authorising writes
  * the whole manifest to the ledger as claimed rows and buys nothing; the purchase route then
@@ -115,32 +145,65 @@ export type AuthorizeResult =
  * and cannot be bought inside one request — but the operator asked not to split a day across
  * several approvals, and re-approving between chunks is exactly that.
  *
- * `confirmBoxes` guards a plan that MOVED: the caller passes the count it saw on the dry run and
- * it must match exactly, so if a show ended or a sync landed in between, this refuses rather
- * than authorising a set nobody read. It replaces the old per-call `limit` as the thing standing
- * between a click and a large purchase — the limit is gone because SCOPE now bounds the run, and
- * a limit on top would have forced the multiple batches the operator specifically ruled out.
+ * THE APPROVAL IS A SET, NOT A COUNT. The caller passes the group keys it saw on the dry run and
+ * only their INTERSECTION with what now resolves may be bought. Two consequences, both load-
+ * bearing:
+ *
+ *   - A box that appeared after the review is never bought, however many did. The spend cannot
+ *     exceed what was read, and the stack cannot contain a parcel nobody looked at.
+ *   - Ordinary drift no longer blocks the purchase. This replaced an exact count match, which
+ *     was unwinnable at scale: `authorize` re-resolves the whole run (~20s of TikTok
+ *     verification for 4,200 orders) and orders keep arriving during a show, so a 1,324-box
+ *     night drifted by +/-1 between the check and the claim and refused every attempt. The set
+ *     gives the same protection against overspending without the deadlock, because the bound is
+ *     "was this box reviewed", not "did the total hold still".
+ *
+ * A shrink is reported, not refused, until it passes SHRINK_TOLERANCE — buying fewer boxes than
+ * approved is safe by construction, but a large drop means the scope resolved to something other
+ * than what was read and deserves a second look.
  */
 export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
   const cap = input.cap ?? MAX_MANIFEST_BOXES;
   if (!input.enabled) {
     return { ok: false, code: 'disabled', reason: 'LABEL_PURCHASE_ENABLED is not 1 — log-only' };
   }
-  if (!Number.isFinite(input.boxes) || input.boxes <= 0) {
+
+  // Deduped, because a repeated key would inflate every count below and claim one box twice.
+  const resolved = dedupe(input.resolvedKeys);
+  if (!resolved.length) {
     return { ok: false, code: 'nothing_to_buy', reason: 'no boxes left to buy' };
   }
-  if (input.confirmBoxes == null) {
+  if (input.reviewedKeys == null) {
     return {
       ok: false, code: 'confirm_missing',
-      reason: 'confirm_boxes is required — read the check and pass the box count it reports',
+      reason: 'reviewed_keys is required — read the check and pass back the boxes it listed',
     };
   }
-  if (input.confirmBoxes !== input.boxes) {
+  const reviewed = new Set(dedupe(input.reviewedKeys));
+
+  // Print order comes from the CURRENT plan, so captions and sequence describe the stack that
+  // will actually be assembled; membership comes from the review.
+  const buy = resolved.filter((k) => reviewed.has(k));
+  const added = resolved.length - buy.length;
+  const dropped = reviewed.size - buy.length;
+
+  if (!buy.length) {
     return {
       ok: false, code: 'confirm_mismatch',
-      reason: `plan moved since it was reviewed: confirm_boxes=${input.confirmBoxes} but ${input.boxes} boxes now resolve — check again`,
+      reason: `none of the ${reviewed.size} box(es) you reviewed still resolve — ${resolved.length} different box(es) do. Check again before buying anything.`,
     };
   }
+  const allowance = Math.max(
+    MIN_SHRINK_ALLOWANCE,
+    Math.ceil(reviewed.size * SHRINK_TOLERANCE),
+  );
+  if (dropped > allowance) {
+    return {
+      ok: false, code: 'confirm_mismatch',
+      reason: `plan moved since it was reviewed: ${dropped} of the ${reviewed.size} box(es) you approved no longer resolve (more than the ${allowance} this tolerates) — check again`,
+    };
+  }
+
   // Asked before the cap, because the answer changes how many boxes the run contains.
   if (input.unboundCount > 0 && input.unboundPolicy == null) {
     return {
@@ -148,13 +211,25 @@ export function authorizeRun(input: AuthorizeInput): AuthorizeResult {
       reason: `${input.unboundCount} box(es) in this batch have no SKU on file. Wait for them to be bound and check again, or pass unbound=skip to buy the rest, or unbound=include to buy them too (their labels tell the picker nothing and must be looked up by hand).`,
     };
   }
-  if (input.boxes > cap) {
+  if (buy.length > cap) {
     return {
       ok: false, code: 'over_cap',
-      reason: `${input.boxes} boxes exceeds the ${cap}-box ceiling for one run — narrow the scope to a single day or fewer shows`,
+      reason: `${buy.length} boxes exceeds the ${cap}-box ceiling for one run — narrow the scope to a single day or fewer shows`,
     };
   }
-  return { ok: true, buy: input.boxes };
+  return { ok: true, buy, dropped, added };
+}
+
+/** Order-preserving de-duplication, ignoring blanks. */
+function dedupe(keys: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const k of keys) {
+    if (typeof k !== 'string' || k === '' || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
 }
 
 /**
