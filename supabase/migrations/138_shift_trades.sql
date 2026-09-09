@@ -1,11 +1,17 @@
--- 136_shift_trades.sql — one-for-one SHIFT TRADES between two employees (employee portal v1).
+-- 138_shift_trades.sql — one-for-one SHIFT TRADES between two employees (employee portal v1).
 --
--- ⚠️ NOT APPLIED. This DB has NO migration ledger — migrations are applied BY HAND and the repo file
---    is the only record (see CONVENTIONS.md). Prefix 136 was free across origin/main, every local
---    and remote branch, and every sibling worktree at authoring time (135 was the highest claimed,
---    on a branch). Do NOT backfill a lower gap.
---    ➜ RE-INSPECT THE LIVE SCHEMA BEFORE APPLYING: confirm public.shift_trades and
---      public.lensed_approve_shift_trade do not exist (verified absent 2026-09-08, read-only).
+-- ✅ APPLIED TO PRODUCTION 2026-09-09 04:00 UTC. This DB has NO migration ledger — migrations are
+--    applied BY HAND and the repo file is the only record (see CONVENTIONS.md), so this line IS the
+--    record. DO NOT APPLY IT AGAIN: `shift_trades`, its indexes, its policy and
+--    `lensed_approve_shift_trade` all exist in production already. Re-applying is harmless (every
+--    statement is `if not exists` / `create or replace`) but pointless.
+--
+-- 🔢 RENUMBERED 136 → 138, BOOKKEEPING ONLY. It was applied as `136_shift_trades.sql`, and while it
+--    sat unmerged, PR #231 landed its own 136 and 137 on main. Two files per prefix in a repo whose
+--    filenames ARE the ledger is a real double-apply hazard, so this one moved to the next free
+--    prefix. Not one byte of executable SQL changed in the move — only these comments. Prefixes 138
+--    and 139 were free across origin/main, every local and remote branch, and every sibling
+--    worktree when the rename was made. Do NOT backfill a lower gap.
 --
 -- LOCK FOOTPRINT (CLAUDE.md "classify by LOCK FOOTPRINT"): CLASS A. One brand-new table, its own
 -- indexes and policy, and one NEW function. It rewrites no existing table and replaces no live

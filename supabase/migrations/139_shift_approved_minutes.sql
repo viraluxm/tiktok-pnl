@@ -1,13 +1,22 @@
--- 137_shift_approved_minutes.sql — APPROVED HOURS: the manager-confirmed payable duration,
+-- 139_shift_approved_minutes.sql — APPROVED HOURS: the manager-confirmed payable duration,
 -- stored separately from the attendance punch.
 --
--- ⚠️ NOT APPLIED. This DB has NO migration ledger — migrations are applied BY HAND and the repo
---    file is the only record (see CONVENTIONS.md). Prefix 137 was free across origin/main, every
---    local and remote branch, and every sibling worktree at authoring time (136 is the highest
---    claimed, on this branch, and is ALSO unapplied).
---    ➜ RE-INSPECT THE LIVE SCHEMA BEFORE APPLYING: confirm public.shifts has no approved_minutes
---      column (verified absent 2026-09-08, read-only) and that the two confirm functions still
---      match the bodies rebuilt below.
+-- ✅ APPLIED TO PRODUCTION 2026-09-09 04:00 UTC. This DB has NO migration ledger — migrations are
+--    applied BY HAND and the repo file is the only record (see CONVENTIONS.md), so this line IS the
+--    record. DO NOT APPLY IT AGAIN: `shifts.approved_minutes`, its VALIDATED check constraint, the
+--    widened guard, both confirm overloads and `lensed_set_approved_minutes` all exist in
+--    production already. Verified after applying: the legacy one-argument confirm body md5 was
+--    unchanged, and both call shapes resolve without ambiguity.
+--
+-- 🔢 RENUMBERED 137 → 139, BOOKKEEPING ONLY. It was applied as `137_shift_approved_minutes.sql`,
+--    and while it sat unmerged, PR #231 landed its own 136 and 137 on main. Two files per prefix in
+--    a repo whose filenames ARE the ledger is a real double-apply hazard, so this one moved to the
+--    next free prefix. Not one byte of executable SQL changed in the move — only these comments.
+--    ➜ ONE CONSEQUENCE TO KNOW: the `comment on function` text near the bottom of this file still
+--      reads "TRANSITION ONLY (migration 137)", and production's function comment reads the same.
+--      That string is EXECUTABLE SQL, not a comment, so editing it would change what this file
+--      does and would no longer match what is deployed. It is deliberately left alone. Read it as
+--      "the migration formerly numbered 137", i.e. this file.
 --
 -- ✅ DEPLOY ORDER — FULLY ADDITIVE. THIS MAY BE APPLIED **BEFORE** THE CODE DEPLOY.
 --    Nothing existing is dropped or narrowed, so there is no window in which shift confirmation
@@ -32,7 +41,7 @@
 --    be running the new client everywhere — i.e. no caller sends a bare p_shift_id to confirm any
 --    more — the legacy overload should be removed by its own migration:
 --
---        -- 138 (or the next free prefix), AFTER the new client is fully deployed:
+--        -- 140 (or the next free prefix), AFTER the new client is fully deployed:
 --        drop function if exists public.lensed_confirm_time_clock_shift(uuid);
 --
 --    Preconditions to verify before that cleanup, not after:
@@ -143,7 +152,7 @@
 -- Reverting the SCHEMA is only needed if the feature is abandoned:
 --     drop function if exists public.lensed_set_approved_minutes(uuid, integer);
 --     drop function if exists public.lensed_confirm_time_clock_shift(uuid, integer);
---     -- restore the pre-137 bodies of shifts_guard_confirmation() and
+--     -- restore the pre-139 bodies of shifts_guard_confirmation() and
 --     -- lensed_unconfirm_time_clock_shift(uuid) from migration 071/070 (or live prosrc backup)
 --     alter table public.shifts drop constraint if exists shifts_approved_minutes_range;
 --     alter table public.shifts drop column if exists approved_minutes;   -- DESTROYS approvals

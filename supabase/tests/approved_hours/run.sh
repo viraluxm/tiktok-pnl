@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Local DB verification for migration 137 (approved hours).
+# Local DB verification for migration 139 (approved hours).
 #
 # Boots a THROWAWAY Postgres 16 in Docker, applies the shared time-clock stub bootstrap + the REAL
 # repo migrations that build `shifts` and the time clock (044/047/052/055/070/071/072), then
-# applies the REAL 137 file verbatim and runs the assertions. Requires Docker only.
+# applies the REAL 139 file verbatim and runs the assertions. Requires Docker only.
 #
 #   usage:  supabase/tests/approved_hours/run.sh
 #   exit:   0 = all passed, 1 = something failed
@@ -14,7 +14,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TC="$SCRIPT_DIR/../timeclock"
 MIGDIR="$SCRIPT_DIR/../../migrations"
-MIG137="$MIGDIR/137_shift_approved_minutes.sql"
+MIG139="$MIGDIR/139_shift_approved_minutes.sql"
 CONTAINER="lensed_approved_test_$$"
 IMAGE="postgres:16-alpine"
 FAILED=0
@@ -25,7 +25,7 @@ trap cleanup EXIT
 psqlf(){ docker exec -i "$CONTAINER" psql -U postgres -d db -v ON_ERROR_STOP=1 "$@"; }
 psqlq(){ docker exec -i "$CONTAINER" psql -U postgres -d db -tA "$@"; }
 
-[ -f "$MIG137" ] || { echo "✗ migration not found: $MIG137"; exit 1; }
+[ -f "$MIG139" ] || { echo "✗ migration not found: $MIG139"; exit 1; }
 
 echo "▶ starting $IMAGE ..."
 docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=postgres "$IMAGE" >/dev/null || {
@@ -46,8 +46,8 @@ echo "── bootstrap (stubs, shared with the timeclock harness) ──"
 psqlf < "$TC/bootstrap.sql" >/dev/null || FAILED=1
 
 # 091 (badge kiosk) is deliberately NOT applied: it needs the badge/clock-code world, and the only
-# thing it adds to `shifts` is punch_method, which 137 neither reads nor writes.
-echo "── apply real migrations 044, 047, 052, 055, 070, 071, 072 (the pre-137 world) ──"
+# thing it adds to `shifts` is punch_method, which 139 neither reads nor writes.
+echo "── apply real migrations 044, 047, 052, 055, 070, 071, 072 (the pre-139 world) ──"
 for m in 044_create_employees_and_shifts 047_create_recurring_shifts 052_shifts_open_shift \
          055_shifts_source_rule_id 070_time_clock_attendance 071_time_clock_rpcs \
          072_time_clock_robustness; do
@@ -56,16 +56,16 @@ for m in 044_create_employees_and_shifts 047_create_recurring_shifts 052_shifts_
 done
 [ "$FAILED" -eq 0 ] || { echo "❌ base schema failed — aborting"; exit 1; }
 
-# The pre-137 world must have exactly ONE confirm overload, taking one argument.
+# The pre-139 world must have exactly ONE confirm overload, taking one argument.
 PRE=$(psqlq -c "select p.oid::regprocedure::text from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift'")
-[ "$PRE" = "lensed_confirm_time_clock_shift(uuid)" ] && echo "  ✓ pre-137 confirm signature: $PRE" \
-  || { echo "  ✗ unexpected pre-137 signature: $PRE"; FAILED=1; }
-# Fingerprint the legacy body now, so the additive check below can prove 137 left it alone.
+[ "$PRE" = "lensed_confirm_time_clock_shift(uuid)" ] && echo "  ✓ pre-139 confirm signature: $PRE" \
+  || { echo "  ✗ unexpected pre-139 signature: $PRE"; FAILED=1; }
+# Fingerprint the legacy body now, so the additive check below can prove 139 left it alone.
 LEGACY_PRE=$(psqlq -c "select md5(pg_get_functiondef('public.lensed_confirm_time_clock_shift(uuid)'::regprocedure))")
 
-echo "── apply migration 137 VERBATIM (it carries its own begin/commit) ──"
+echo "── apply migration 139 VERBATIM (it carries its own begin/commit) ──"
 APPLY_LOG=/tmp/ah_apply.$$
-if docker exec -i "$CONTAINER" psql -U postgres -d db -v ON_ERROR_STOP=1 < "$MIG137" >"$APPLY_LOG" 2>&1; then
+if docker exec -i "$CONTAINER" psql -U postgres -d db -v ON_ERROR_STOP=1 < "$MIG139" >"$APPLY_LOG" 2>&1; then
   echo "  ✓ applied — ended with $(tail -1 "$APPLY_LOG")"
 else
   echo "  ✗ MIGRATION FAILED TO APPLY:"; sed 's/^/    /' "$APPLY_LOG"; FAILED=1
@@ -83,7 +83,7 @@ VALID=$(psqlq -c "select convalidated from pg_constraint where conname='shifts_a
 [ "$VALID" = "t" ] && echo "  ✓ CHECK is VALIDATED (not left NOT VALID)" || { echo "  ✗ CHECK not validated"; FAILED=1; }
 
 # ── THE ADDITIVE-ROLLOUT PROPERTY ─────────────────────────────────────────────────────────────
-# BOTH overloads must exist after 137: the legacy one-argument function so the app deployed before
+# BOTH overloads must exist after 139: the legacy one-argument function so the app deployed before
 # Approved Hours keeps confirming during the rollout, and the new two-argument one for the new app.
 OVERLOADS=$(psqlq -c "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift'")
 SIGS=$(psqlq -c "select string_agg(p.oid::regprocedure::text, ' + ' order by p.oid::regprocedure::text) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='lensed_confirm_time_clock_shift'")
@@ -115,10 +115,10 @@ case "$TWOARG" in
   *SHIFT_NOT_FOUND*) echo "  ✓ two-argument call resolves (new body reached: SHIFT_NOT_FOUND)";;
   *) echo "  ✗ the two-argument call shape broke: $TWOARG"; FAILED=1;;
 esac
-# The legacy body must be UNCHANGED by 137 — byte-identical to what migration 071 created.
+# The legacy body must be UNCHANGED by 139 — byte-identical to what migration 071 created.
 LEGACY_071=$(docker exec -i "$CONTAINER" psql -U postgres -d db -tA -c "select md5(pg_get_functiondef('public.lensed_confirm_time_clock_shift(uuid)'::regprocedure))")
-[ "$LEGACY_071" = "$LEGACY_PRE" ] && echo "  ✓ the legacy body is byte-identical before and after 137" \
-  || { echo "  ✗ 137 CHANGED the legacy confirm body ($LEGACY_PRE -> $LEGACY_071)"; FAILED=1; }
+[ "$LEGACY_071" = "$LEGACY_PRE" ] && echo "  ✓ the legacy body is byte-identical before and after 139" \
+  || { echo "  ✗ 139 CHANGED the legacy confirm body ($LEGACY_PRE -> $LEGACY_071)"; FAILED=1; }
 # Transition markers, so the future cleanup has something to find.
 COMMENTED=$(psqlq -c "select coalesce(obj_description('public.lensed_confirm_time_clock_shift(uuid)'::regprocedure, 'pg_proc'), '') like '%TRANSITION ONLY%'")
 [ "$COMMENTED" = "t" ] && echo "  ✓ the legacy overload is marked TRANSITION ONLY" \
@@ -166,9 +166,9 @@ for FN in 'public.lensed_confirm_time_clock_shift(uuid,integer)' \
   [ "$got" = "t" ] && echo "  ✓ authenticated EXECUTE on $FN" || { echo "  ✗ authenticated lacks EXECUTE on $FN"; FAILED=1; }
 done
 
-echo "── idempotence: re-apply 137 on top of itself (with a live approval present) ──"
+echo "── idempotence: re-apply 139 on top of itself (with a live approval present) ──"
 BEFORE=$(psqlq -c "select md5(string_agg(pg_get_functiondef(p.oid), '|' order by p.oid::regprocedure::text)) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname in ('lensed_confirm_time_clock_shift','lensed_unconfirm_time_clock_shift','lensed_set_approved_minutes','shifts_guard_confirmation')")
-if docker exec -i "$CONTAINER" psql -U postgres -d db -v ON_ERROR_STOP=1 < "$MIG137" >/dev/null 2>&1; then
+if docker exec -i "$CONTAINER" psql -U postgres -d db -v ON_ERROR_STOP=1 < "$MIG139" >/dev/null 2>&1; then
   AFTER=$(psqlq -c "select md5(string_agg(pg_get_functiondef(p.oid), '|' order by p.oid::regprocedure::text)) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname in ('lensed_confirm_time_clock_shift','lensed_unconfirm_time_clock_shift','lensed_set_approved_minutes','shifts_guard_confirmation')")
   [ "$BEFORE" = "$AFTER" ] && echo "  ✓ re-apply clean; the four function bodies are byte-identical" \
     || { echo "  ✗ function bodies DRIFTED on re-apply"; FAILED=1; }
@@ -179,6 +179,6 @@ else echo "  ✗ re-apply FAILED"; FAILED=1; fi
 
 rm -f /tmp/ah_*.$$
 echo
-if [ "$FAILED" -eq 0 ]; then echo "✅ APPROVED HOURS (migration 137) DB TESTS PASSED"
+if [ "$FAILED" -eq 0 ]; then echo "✅ APPROVED HOURS (migration 139) DB TESTS PASSED"
 else echo "❌ APPROVED HOURS DB TESTS FAILED"; fi
 exit "$FAILED"

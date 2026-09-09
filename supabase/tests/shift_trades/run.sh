@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Local DB verification for migration 136 (shift trades).
+# Local DB verification for migration 138 (shift trades).
 #
 # Boots a THROWAWAY Postgres 16 in Docker, applies the shared stub bootstrap + the REAL repo
-# migrations that build the pre-136 world (044/047/085/086/090/129/130), then applies the REAL 136
+# migrations that build the pre-138 world (044/047/085/086/090/129/130), then applies the REAL 138
 # file verbatim and runs the assertions. Requires Docker only. Mirrors ../schedule_phase2/run.sh.
 #
 #   usage:  supabase/tests/shift_trades/run.sh
@@ -14,7 +14,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 P2="$SCRIPT_DIR/../schedule_phase2"
 MIGDIR="$SCRIPT_DIR/../../migrations"
-MIG136="$MIGDIR/136_shift_trades.sql"
+MIG138="$MIGDIR/138_shift_trades.sql"
 CONTAINER="lensed_trades_test_$$"
 IMAGE="postgres:16-alpine"
 DB="db"
@@ -27,7 +27,7 @@ trap cleanup EXIT
 psqlf(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 "$@"; }
 psqlq(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA "$@"; }
 
-[ -f "$MIG136" ] || { echo "✗ migration not found: $MIG136"; exit 1; }
+[ -f "$MIG138" ] || { echo "✗ migration not found: $MIG138"; exit 1; }
 
 echo "▶ starting $IMAGE ..."
 docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=postgres "$IMAGE" >/dev/null || {
@@ -63,16 +63,16 @@ done
 CATALOG_SQL="$SCRIPT_DIR/catalog.sql"
 psqlf -q -f - < "$CATALOG_SQL" > /tmp/tr_before.$$ 2>&1
 
-echo "── apply migration 136 VERBATIM (no -1: the file carries its own begin/commit) ──"
+echo "── apply migration 138 VERBATIM (no -1: the file carries its own begin/commit) ──"
 APPLY_LOG=/tmp/tr_apply.$$
-if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG136" >"$APPLY_LOG" 2>&1; then
+if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG138" >"$APPLY_LOG" 2>&1; then
   echo "  ✓ applied — ended with $(tail -1 "$APPLY_LOG")"
 else
   echo "  ✗ MIGRATION FAILED TO APPLY:"; sed 's/^/    /' "$APPLY_LOG"; FAILED=1
 fi
 [ "$FAILED" -eq 0 ] || { echo "❌ migration did not apply — aborting"; exit 1; }
 
-echo "── catalog: 136 must be purely ADDITIVE ──"
+echo "── catalog: 138 must be purely ADDITIVE ──"
 psqlf -q -f - < "$CATALOG_SQL" > /tmp/tr_after.$$ 2>&1
 REMOVED=$(diff /tmp/tr_before.$$ /tmp/tr_after.$$ | grep '^<' || true)
 if [ -z "$REMOVED" ]; then echo "  ✓ nothing dropped or narrowed on pre-existing tables"
@@ -169,8 +169,8 @@ SWAPPED=$(psqlq -c "select (select employee_id from public.shift_instances where
   && echo "  ✓ swapped exactly once" || { echo "  ✗ unexpected state: $SWAPPED"; FAILED=1; }
 
 # ── IDEMPOTENCE ────────────────────────────────────────────────────────────────────────────────
-echo "── idempotence: re-apply 136 on top of itself ──"
-if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG136" >/dev/null 2>&1; then
+echo "── idempotence: re-apply 138 on top of itself ──"
+if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG138" >/dev/null 2>&1; then
   psqlf -q -f - < "$CATALOG_SQL" > /tmp/tr_after2.$$ 2>&1
   if diff -q /tmp/tr_after.$$ /tmp/tr_after2.$$ >/dev/null; then echo "  ✓ re-apply clean; catalog byte-identical"
   else echo "  ✗ catalog DRIFTED on re-apply:"; diff /tmp/tr_after.$$ /tmp/tr_after2.$$ | sed 's/^/    /'; FAILED=1; fi
@@ -178,6 +178,6 @@ else echo "  ✗ re-apply FAILED"; FAILED=1; fi
 
 rm -f /tmp/tr_*.$$
 echo
-if [ "$FAILED" -eq 0 ]; then echo "✅ SHIFT TRADES (migration 136) DB TESTS PASSED"
+if [ "$FAILED" -eq 0 ]; then echo "✅ SHIFT TRADES (migration 138) DB TESTS PASSED"
 else echo "❌ SHIFT TRADES DB TESTS FAILED"; fi
 exit "$FAILED"

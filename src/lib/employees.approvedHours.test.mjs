@@ -1,4 +1,4 @@
-// APPROVED HOURS (migration 137) — the manager-confirmed payable duration, kept separate from the
+// APPROVED HOURS (migration 139) — the manager-confirmed payable duration, kept separate from the
 // attendance punch.
 //
 // THE RULE THIS FILE EXISTS TO PROTECT, in one sentence: payroll pays approved_minutes when a
@@ -79,11 +79,11 @@ console.log('\n1. THE PUNCH IS NOT THE PAYROLL FIGURE — and is never rewritten
 
   // NOTHING in the confirm path writes a clock instant. The RPC is the only writer of the approved
   // column, and its UPDATE names three columns — none of them a punch.
-  const mig = strip(read('../../supabase/migrations/137_shift_approved_minutes.sql'));
+  const mig = strip(read('../../supabase/migrations/139_shift_approved_minutes.sql'));
   const updates = [...mig.matchAll(/update public\.shifts[\s\S]*?where/g)].map((m) => m[0]);
-  check('migration 137 issues at least one shifts UPDATE', updates.length >= 3, `${updates.length}`);
+  check('migration 139 issues at least one shifts UPDATE', updates.length >= 3, `${updates.length}`);
   for (const u of updates) {
-    check('no shifts UPDATE in 137 touches clock_in_at / clock_out_at / start_time / end_time',
+    check('no shifts UPDATE in 139 touches clock_in_at / clock_out_at / start_time / end_time',
       !/clock_in_at|clock_out_at|start_time|end_time/.test(u));
   }
   const hook = strip(read('../hooks/useShifts.ts'));
@@ -159,9 +159,9 @@ console.log('\n5. LIVE HOST — no silent default, an explicit figure is require
 
   // The SQL guard and the TS normalisation must recognise the same host vocabulary, or a host could
   // be confirmed with no approved duration by whichever side disagreed.
-  const mig = read('../../supabase/migrations/137_shift_approved_minutes.sql');
+  const mig = read('../../supabase/migrations/139_shift_approved_minutes.sql');
   const sqlList = mig.match(/lower\(btrim\(e\.role\)\) in \(([^)]*)\)/);
-  check('137 gates the host requirement on a role predicate', !!sqlList);
+  check('139 gates the host requirement on a role predicate', !!sqlList);
   const sqlRoles = sqlList[1].split(',').map((x) => x.trim().replace(/'/g, ''));
   eq('the SQL host vocabulary is host / live host', sqlRoles.sort(), ['host', 'live host']);
   for (const r of sqlRoles) {
@@ -169,7 +169,7 @@ console.log('\n5. LIVE HOST — no silent default, an explicit figure is require
   }
   eq('teamOfRole normalises spacing/case the same way the SQL btrim+lower does',
     [TC.teamOfRole('  Host '), TC.teamOfRole('LIVE HOST')], ['host', 'host']);
-  check('137 raises HOST_APPROVED_MINUTES_REQUIRED rather than defaulting',
+  check('139 raises HOST_APPROVED_MINUTES_REQUIRED rather than defaulting',
     /HOST_APPROVED_MINUTES_REQUIRED/.test(mig));
   check('the manager tile refuses to submit a blank host figure (MISSING)',
     /parseApprovedInput\(approved\.hours, approved\.minutes, mustApprove\)/.test(read('../components/employees/weekly/PersonCard.tsx')));
@@ -208,7 +208,7 @@ console.log('\n6. THE MANAGER INPUT KERNEL');
   check('every refusal has a manager-readable sentence',
     Object.values(A.APPROVED_INPUT_MESSAGES).every((m) => typeof m === 'string' && m.length > 10));
   check('the input ceiling matches the DB CHECK (1440)',
-    A.MAX_APPROVED_MINUTES === 1440 && /approved_minutes <= 1440/.test(read('../../supabase/migrations/137_shift_approved_minutes.sql')));
+    A.MAX_APPROVED_MINUTES === 1440 && /approved_minutes <= 1440/.test(read('../../supabase/migrations/139_shift_approved_minutes.sql')));
 }
 
 console.log('\n7. ONE PAYROLL RULE — the manager calendar and the employee portal read the same figure');
@@ -347,27 +347,27 @@ console.log('\n10. SCHEDULED HOURS STAY SCHEDULED — shift_instances only, neve
 
 console.log('\n11. THE DATABASE IS THE BOUNDARY — approved_minutes is server-only');
 {
-  const mig = read('../../supabase/migrations/137_shift_approved_minutes.sql');
+  const mig = read('../../supabase/migrations/139_shift_approved_minutes.sql');
   check('the guard trigger now covers approved_minutes',
     /new\.approved_minutes is distinct from old\.approved_minutes/.test(mig));
   check('…and still refuses outside the confirm context',
     /coalesce\(current_setting\('lensed\.confirm_ctx', true\), ''\) <> 'on'/.test(mig));
-  // ADDITIVE ROLLOUT. The legacy one-argument confirm must survive 137 so the app deployed before
+  // ADDITIVE ROLLOUT. The legacy one-argument confirm must survive 139 so the app deployed before
   // Approved Hours keeps working during the rollout — and the new overload must have NO DEFAULT,
   // or `confirm(p_shift_id => …)` becomes ambiguous and EVERY existing confirm call breaks.
-  // SQL comments are `--` lines, which the JS-oriented strip() above does not touch. 137's header
+  // SQL comments are `--` lines, which the JS-oriented strip() above does not touch. 139's header
   // QUOTES the future cleanup DROP and the rollback DROPs as documentation, so the executable
   // statements have to be isolated before asserting that nothing is dropped.
   const migCode = mig.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n');
   check('no DROP of a function, table or column survives in executable SQL',
     !/\bdrop\s+(function|table|column)\b/i.test(migCode),
     (migCode.match(/\bdrop\s+\w+[^\n;]*/gi) ?? []).join(' | '));
-  check('the only DROP at all is 137 re-creating its OWN check constraint idempotently',
+  check('the only DROP at all is 139 re-creating its OWN check constraint idempotently',
     (migCode.match(/\bdrop\s+\w+/gi) ?? []).every((d) => /drop constraint/i.test(d))
     && /drop constraint if exists shifts_approved_minutes_range/.test(migCode));
   check('…specifically, the legacy one-argument confirm is never dropped',
     !/drop function if exists public\.lensed_confirm_time_clock_shift\(uuid\)\s*;/.test(migCode));
-  check('…and is not reissued either, so 137 cannot drift it (071 stays its only definition)',
+  check('…and is not reissued either, so 139 cannot drift it (071 stays its only definition)',
     !/create or replace function public\.lensed_confirm_time_clock_shift\(\s*p_shift_id uuid\s*\)/.test(migCode));
   check('the NEW overload takes two arguments with NO default (the anti-ambiguity rule)',
     /create or replace function public\.lensed_confirm_time_clock_shift\(\s*p_shift_id uuid,\s*p_approved_minutes integer\s*\)/.test(migCode)
@@ -379,15 +379,15 @@ console.log('\n11. THE DATABASE IS THE BOUNDARY — approved_minutes is server-o
     /CLEANUP, LATER AND SEPARATELY/.test(mig) && /pg_stat_user_functions/.test(mig));
   check('the header states the migration may be applied BEFORE the code deploy',
     /MAY BE APPLIED \*\*BEFORE\*\* THE CODE DEPLOY/.test(mig));
-  check('137 documents its rollback, including that dropping the column destroys approvals',
+  check('139 documents its rollback, including that dropping the column destroys approvals',
     /^-- ROLLBACK$/m.test(mig) && /DESTROYS approvals/.test(mig));
   // Applying by hand against a table the kiosk writes: without a lock timeout the ALTER waits on
   // any in-flight punch and every reader queues behind its lock request.
-  check('137 sets a lock_timeout before touching shifts',
+  check('139 sets a lock_timeout before touching shifts',
     /^set local lock_timeout = '3s';$/m.test(migCode));
   // And it must stay ONE transaction: the widened guard dereferences new.approved_minutes, so the
   // column has to exist first — splitting them would leave the column briefly UNGUARDED.
-  check('137 is exactly one transaction (no unguarded window between column and guard)',
+  check('139 is exactly one transaction (no unguarded window between column and guard)',
     (migCode.match(/^begin;$/gm) ?? []).length === 1
     && (migCode.match(/^commit;$/gm) ?? []).length === 1);
   check('…and the column is added BEFORE the guard is replaced (plpgsql late binding)',
@@ -402,8 +402,19 @@ console.log('\n11. THE DATABASE IS THE BOUNDARY — approved_minutes is server-o
   check('all three functions are granted to authenticated only (manager session, auth.uid())',
     (mig.match(/grant execute on function[^\n]*to authenticated;/g) ?? []).length === 3
     && !/to service_role/.test(mig));
-  check('the migration declares itself unapplied and names the deploy order',
-    /NOT APPLIED/.test(mig) && mig.includes('FULLY ADDITIVE') && mig.includes('THE CODE DEPLOY'));
+  // This file IS the ledger — the DB has none — so the header must say what production actually
+  // holds. It used to assert "NOT APPLIED"; the migration has since been applied, and the file was
+  // renumbered 137 -> 139 because PR #231 landed its own 137 on main while this branch sat unmerged.
+  check('the migration records that it IS applied to production, and does not still claim otherwise',
+    /APPLIED TO PRODUCTION/.test(mig) && !/⚠️ NOT APPLIED/.test(mig));
+  check('…and warns against applying it a second time',
+    /DO NOT APPLY IT AGAIN/.test(mig));
+  check('…and records the renumber, so the prefix change is traceable',
+    /RENUMBERED 137 → 139/.test(mig) && /BOOKKEEPING ONLY/.test(mig));
+  check('…and explains why the in-database function comment still says "migration 137"',
+    /EXECUTABLE SQL, not a comment/.test(mig));
+  check('the migration still names the deploy order',
+    mig.includes('FULLY ADDITIVE') && mig.includes('THE CODE DEPLOY'));
   check('the new RPC is NOT registered as service-role-only',
     !/lensed_set_approved_minutes/.test(read('../../scripts/check-rpc-grants.mjs')));
 }
