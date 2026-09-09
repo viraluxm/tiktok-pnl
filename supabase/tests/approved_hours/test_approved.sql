@@ -294,9 +294,22 @@ begin
     format('select public.lensed_confirm_time_clock_shift(%L, 60)', s), 'SHIFT_NOT_FOUND');
   perform t_reject('a foreign owner cannot change its approved minutes',
     format('select public.lensed_set_approved_minutes(%L, 60)', s), 'SHIFT_NOT_FOUND');
+  -- A shift UUID is not a capability. The foreign owner holds a perfectly valid `authenticated`
+  -- session and the correct id; the tenant predicate inside the SELECT is what refuses them.
+  perform t_reject('a foreign owner cannot unconfirm it either',
+    format('select public.lensed_unconfirm_time_clock_shift(%L)', s), 'SHIFT_NOT_FOUND');
+  perform t_reject('…nor confirm it through the LEGACY overload',
+    format('select public.lensed_confirm_time_clock_shift(%L)', s), 'SHIFT_NOT_FOUND');
+  perform t_reject('…nor withdraw the approval by passing null',
+    format('select public.lensed_set_approved_minutes(%L, null)', s), 'SHIFT_NOT_FOUND');
+
   perform set_config('test.user_id', 'a0000000-0000-4000-8000-000000000001', true);
-  perform t_eq('the approval is unchanged after both attempts',
+  perform t_eq('the approval is unchanged after every cross-owner attempt',
     (select approved_minutes from public.shifts where id = s), 480);
+  perform t_eq('…and so is the confirmation',
+    (select confirmed_at is not null from public.shifts where id = s), true);
+  perform t_eq('…and so is the punch',
+    (select clock_in_at is not null and clock_out_at is not null from public.shifts where id = s), true);
 
   perform t_report('tenancy');
 end $$;

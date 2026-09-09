@@ -129,6 +129,32 @@ for FN in 'public.lensed_confirm_time_clock_shift(uuid)' 'public.lensed_confirm_
   [ "$g" = "t" ] && echo "  ✓ authenticated may call $FN" || { echo "  ✗ authenticated cannot call $FN"; FAILED=1; }
 done
 
+# ── AUTHORIZATION PROOF — a GRANT is not authorization ────────────────────────────────────────
+# All three new functions must be SECURITY INVOKER, so RLS on `shifts` still applies as the caller
+# and the function cannot become a privilege-escalation hole if a policy is ever relaxed.
+for FN in 'public.lensed_confirm_time_clock_shift(uuid,integer)' \
+          'public.lensed_unconfirm_time_clock_shift(uuid)' \
+          'public.lensed_set_approved_minutes(uuid,integer)'; do
+  d=$(psqlq -c "select prosecdef from pg_proc where oid = '$FN'::regprocedure")
+  [ "$d" = "f" ] && echo "  ✓ SECURITY INVOKER: $FN" \
+    || { echo "  ✗ $FN is SECURITY DEFINER — it would bypass RLS"; FAILED=1; }
+done
+# With NO identity (the anon path: `authenticated` and PUBLIC both hold EXECUTE), every mutation
+# path must refuse before it looks at anything. This is the assertion that says out loud that the
+# GRANT is not the authorization boundary.
+noauth(){ docker exec -i "$CONTAINER" psql -U postgres -d db -tA -c \
+  "set \"test.user_id\" = ''; $1" 2>&1 || true; }
+for CALL in "public.lensed_confirm_time_clock_shift('00000000-0000-4000-8000-000000000000'::uuid, 60)" \
+            "public.lensed_confirm_time_clock_shift('00000000-0000-4000-8000-000000000000'::uuid)" \
+            "public.lensed_set_approved_minutes('00000000-0000-4000-8000-000000000000'::uuid, 60)" \
+            "public.lensed_unconfirm_time_clock_shift('00000000-0000-4000-8000-000000000000'::uuid)"; do
+  out=$(noauth "select $CALL;")
+  case "$out" in
+    *NOT_AUTHENTICATED*) echo "  ✓ refused with no identity: ${CALL%%(*}";;
+    *) echo "  ✗ ${CALL%%(*} did NOT refuse an unauthenticated caller: $out"; FAILED=1;;
+  esac
+done
+
 echo "── assertions ──"
 psqlf < "$SCRIPT_DIR/test_approved.sql" 2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
 
