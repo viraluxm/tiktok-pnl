@@ -280,19 +280,21 @@ export default function MemberAuditPage() {
                   {/* One line with qty 2 is the SAME item scanned twice — there is no choice to
                       make there, only a confirmation, so the prompt must not ask "which". */}
                   {!r.unpacked
-                    ? 'Too late to fix — this box is already gone'
+                    ? (r.pack_verified ? 'Too late to fix — both items are in the box' : 'Too late to fix — this box has already shipped')
                     : r.line_count === 1 ? 'Scanned twice — keep one of them?' : 'Which item did they win?'}
                 </div>
 
-                {/* Keep is WITHHELD on a box that already went out. Both units were picked and
-                    shipped, so "keep one" would return a unit to stock that is with the customer —
-                    it trades a COGS error for an inventory error. Dismiss is still offered: that is
-                    the honest resolution for these. (The API still permits the write; this is the
-                    UI refusing to invite it.) */}
+                {/* Keep is WITHHELD once the units are physically committed. "Keep one" restocks a
+                    unit that is either in a sealed box or already with the customer — it trades a
+                    COGS error for an inventory error. Dismiss stays available: it is the honest
+                    resolution for these. (The API still permits the write; this is the UI refusing
+                    to invite it.) The two cases read differently on purpose — a packed box is still
+                    in the building and a person could open it, a shipped one is beyond reach. */}
                 {!r.unpacked && (
                   <div className="rounded-lg border-2 border-tt-red/40 bg-tt-red/10 px-3 py-2 text-xs text-tt-red">
-                    Both items were picked and shipped on this order. Correcting it now would put a
-                    unit back in stock that the customer already has. Dismiss it instead.
+                    {r.pack_verified
+                      ? 'Both items were packed into this box. Correcting it here would restock a unit that is sealed in the parcel — pull the box and repack it, or dismiss this.'
+                      : 'This order has already shipped. Correcting it now would put a unit back in stock that the customer already has. Dismiss it instead.'}
                   </div>
                 )}
                 <div className="flex flex-col gap-2">
