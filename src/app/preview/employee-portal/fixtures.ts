@@ -13,6 +13,7 @@ import { addDaysISO } from '@/lib/schedule/timezone';
 import { weekBoundsMonSun, instanceHours } from '@/lib/schedule/hours';
 import { payPeriodContaining } from '@/lib/employees';
 import { buildTimecard, type TimecardShiftRow } from '@/lib/schedule/timecardModel';
+import { buildCalendarDays, type DayPerson } from '@/lib/schedule/calendarModel';
 import { buildTradeOptions, planTradeRequest, otherDates, TRADE_REFUSAL_MESSAGES, type TradeableInstance } from '@/lib/schedule/tradePlan';
 import { laTodayISO } from '@/lib/schedule/timezone';
 
@@ -30,6 +31,20 @@ export interface DemoTrade {
   status: TradeView['status']; coworker_response: 'accepted' | 'declined' | null; coworker_responded_at: string | null; decided_at: string | null; decision_note: string | null; cancelled_at: string | null; created_at: string;
 }
 export interface DemoTimeOff { id: string; employee_id: string; start_date: string; end_date: string; reason: string | null; status: 'pending' | 'approved' | 'denied'; decision_note: string | null; created_at: string; decided_at: string | null }
+/** A punch awaiting (or holding) a manager's approval, for the confirmation tiles. */
+export interface DemoConfirmable {
+  id: string;
+  employee_id: string;
+  date: string;
+  start_time: string;
+  end_time: string;
+  clock_in_at: string;
+  clock_out_at: string;
+  break_minutes: number;
+  confirmed_at: string | null;
+  approved_minutes: number | null;
+}
+
 export interface DemoWorld {
   viewerId: string;
   employees: DemoEmployee[];
@@ -38,6 +53,8 @@ export interface DemoWorld {
   trades: DemoTrade[];
   timeOff: DemoTimeOff[];
   punches: TimecardShiftRow[];
+  /** the manager's confirmation queue (separate from the viewer's own timecard rows) */
+  confirmable: DemoConfirmable[];
   clockedInAt: string | null;
   log: string[];
 }
@@ -87,26 +104,44 @@ export function initialWorld(): DemoWorld {
   const seen = new Set<string>();
   const unique = instances.filter((i) => { const k = `${i.employee_id}|${i.shift_date}`; if (seen.has(k)) return false; seen.add(k); return true; });
 
-  const lastWeek = (n: number) => addDaysISO(week.start, n - 7);
+  // APPROVED HOURS (migration 137). The viewer is a LIVE HOST, so their approved duration is the
+  // verified live time — deliberately SHORTER than the clocked span, which is the case the portal
+  // has to explain. `approved_minutes: null` on one row shows the legacy fallback beside it.
   const punch = (id: string, date: string, inH: number, inM: number, outDate: string, outH: number, outM: number, extra: Partial<TimecardShiftRow> = {}): TimecardShiftRow => ({
     id, employee_id: CARLOS, date, start_time: `${String(inH).padStart(2, '0')}:${String(inM).padStart(2, '0')}:00`, end_time: `${String(outH).padStart(2, '0')}:${String(outM).padStart(2, '0')}:00`,
     source: 'time_clock', source_rule_id: null, confirmed_at: '2026-01-01T00:00:00Z', break_minutes: 0,
-    clock_in_at: at(date, inH, inM), clock_out_at: at(outDate, outH, outM), auto_closed: false, ...extra,
+    clock_in_at: at(date, inH, inM), clock_out_at: at(outDate, outH, outM), auto_closed: false,
+    approved_minutes: 478, ...extra,
   });
   // Last week: four confirmed evening punches. This week: one punch for every day already behind
   // us (so the week total is never empty after Monday), with the second left unconfirmed and the
   // third entered by a manager, so all three timecard states are visible.
-  const punches: TimecardShiftRow[] = [
-    punch('p-lw-1', lastWeek(0), 17, 58, lastWeek(1), 2, 4),
-    punch('p-lw-2', lastWeek(1), 18, 2, lastWeek(2), 2, 7),
-    punch('p-lw-3', lastWeek(3), 17, 55, lastWeek(4), 1, 58),
-    punch('p-lw-4', lastWeek(5), 18, 0, lastWeek(6), 2, 0, { break_minutes: 30 }),
+  // PAST DAYS INSIDE THE CURRENT PAY PERIOD — the only days the timecard's two windows can show.
+  // Early in a period there may be just one, so the states are STACKED as extra entries on the
+  // newest day (a split shift, which the model already renders with a day total) rather than
+  // placed on dates the screen would filter out. Every approval state stays reviewable on any
+  // weekday: approved (the live-host case, shorter than clocked), AWAITING APPROVAL, and a LEGACY
+  // confirmed row with no approval at all, whose clocked figure is what pays.
+  const periodStart = payPeriodContaining(today).start;
+  const pastInPeriod: string[] = [];
+  for (let back = 1; back <= 14; back++) {
+    const date = d(-back);
+    if (date < periodStart) break;
+    pastInPeriod.push(date);
+  }
+  // Each state gets its OWN realistic window, so stacked entries on one day read as a plausible
+  // split shift rather than a 16-hour span.
+  const specs: Array<{ inH: number; inM: number; outH: number; outM: number; overnight: boolean; extra: Partial<TimecardShiftRow> }> = [
+    // The live-host case: clocked 8h05m, approved 7h58m — shorter, and the screen says why.
+    { inH: 18, inM: 2, outH: 2, outM: 7, overnight: true, extra: { approved_minutes: 478 } },
+    // Awaiting approval: the punch landed, no manager has confirmed it, so no figure is final.
+    { inH: 6, inM: 0, outH: 10, outM: 0, overnight: false, extra: { confirmed_at: null, approved_minutes: null } },
+    // Legacy: confirmed before approved hours existed. Its clocked figure (3h30m − 30m break) pays.
+    { inH: 11, inM: 0, outH: 14, outM: 30, overnight: false, extra: { break_minutes: 30, approved_minutes: null } },
   ];
-  const past = [0, 1, 2, 3, 4, 5, 6].map(dow).filter((date) => date < today);
-  past.forEach((date, n) => {
-    if (n === 1) punches.push(punch(`p-w-${n}`, date, 18, 2, addDaysISO(date, 1), 2, 7, { confirmed_at: null }));
-    else if (n === 2) punches.push({ id: `p-w-${n}`, employee_id: CARLOS, date, start_time: '18:00:00', end_time: '02:00:00', source: 'manual', source_rule_id: null, confirmed_at: null, break_minutes: 0, clock_in_at: null, clock_out_at: null, auto_closed: false });
-    else punches.push(punch(`p-w-${n}`, date, 17, 58, addDaysISO(date, 1), 2, 4));
+  const punches: TimecardShiftRow[] = pastInPeriod.length === 0 ? [] : specs.map((spec, i) => {
+    const date = pastInPeriod[Math.min(i, pastInPeriod.length - 1)];
+    return punch(`p-${i}`, date, spec.inH, spec.inM, spec.overnight ? addDaysISO(date, 1) : date, spec.outH, spec.outM, spec.extra);
   });
 
   const now = new Date().toISOString();
@@ -134,6 +169,20 @@ export function initialWorld(): DemoWorld {
       { id: 'to-juan', employee_id: JUAN, start_date: d(24), end_date: d(25), reason: 'Wedding', status: 'pending', decision_note: null, created_at: addDaysISO(today, -1) + 'T15:00:00Z', decided_at: null },
     ],
     punches,
+    // One LIVE HOST punch (must be given a figure) and one FULFILLMENT punch (prefilled with the
+    // canonical clocked duration) — the two shapes a manager actually confirms.
+    confirmable: [
+      {
+        id: 'cf-carlos', employee_id: CARLOS, date: d(-1), start_time: '17:48:00', end_time: '02:20:00',
+        clock_in_at: at(d(-1), 17, 48), clock_out_at: at(d(0), 2, 20),
+        break_minutes: 0, confirmed_at: null, approved_minutes: null,
+      },
+      {
+        id: 'cf-madison', employee_id: MADISON, date: d(-1), start_time: '05:58:00', end_time: '14:04:00',
+        clock_in_at: at(d(-1), 5, 58), clock_out_at: at(d(-1), 14, 4),
+        break_minutes: 30, confirmed_at: null, approved_minutes: null,
+      },
+    ],
     clockedInAt: null,
     log: [],
   };
@@ -222,8 +271,21 @@ export function weekFor(w: DemoWorld, start: string): PortalWeek {
 }
 
 export function timecardFor(w: DemoWorld): TimecardPayload {
+  // Madison is FULFILLMENT: her approved duration equals the canonical payable figure (the span
+  // minus her unpaid break), which is the default a manager confirms at. Reviewing both viewers
+  // shows the two shapes side by side without touching production data.
+  const madisonPunches: TimecardShiftRow[] = w.punches
+    .filter((p) => p.clock_in_at && p.date < today)
+    .slice(0, 3)
+    .map((p, i) => ({
+      ...p, id: `m-${p.id}`, employee_id: MADISON,
+      start_time: '06:00:00', end_time: '14:00:00',
+      clock_in_at: at(p.date, 5, 58), clock_out_at: at(p.date, 14, 4),
+      break_minutes: 30, confirmed_at: i === 0 ? null : '2026-01-01T00:00:00Z',
+      approved_minutes: i === 0 ? null : 456, // 8h06m span − 30m break = 7h36m = 456
+    }));
   return buildTimecard({
-    shifts: w.viewerId === CARLOS ? w.punches : [],
+    shifts: w.viewerId === CARLOS ? w.punches : w.viewerId === MADISON ? madisonPunches : [],
     open: w.clockedInAt && w.viewerId === CARLOS ? { clocked_in_at: w.clockedInAt, on_break: false, needs_manual_close: false } : null,
     todayISO: today, week, period: payPeriodContaining(today),
   });
@@ -321,11 +383,59 @@ export const act = {
       log: [`Manager approved the trade — ${nameOf(w, t.requester_employee_id)} and ${nameOf(w, t.target_employee_id)} swapped`, ...w.log],
     };
   },
+  /**
+   * Confirm / unconfirm a punch, carrying the approved minutes — mirroring
+   * lensed_confirm_time_clock_shift, INCLUDING its refusal to confirm a live host without a
+   * figure, so the preview shows the same error the server would raise.
+   */
+  confirmPunch: (id: string, confirmed: boolean, approvedMinutes: number | null): Mutation => (w) => {
+    const c = w.confirmable.find((x) => x.id === id);
+    if (!c) return w;
+    if (confirmed && empOf(w, c.employee_id).role === 'host' && approvedMinutes == null && c.approved_minutes == null) {
+      throw new Error('HOST_APPROVED_MINUTES_REQUIRED');
+    }
+    return {
+      ...w,
+      confirmable: w.confirmable.map((x) => (x.id === id
+        ? confirmed
+          ? { ...x, confirmed_at: x.confirmed_at ?? nowISO(), approved_minutes: approvedMinutes ?? x.approved_minutes }
+          : { ...x, confirmed_at: null, approved_minutes: null }
+        : x)),
+      log: [confirmed
+        ? `Manager confirmed ${nameOf(w, c.employee_id)} — approved ${approvedMinutes ?? c.approved_minutes} min (punch untouched)`
+        : `Manager unconfirmed ${nameOf(w, c.employee_id)} — approval withdrawn`, ...w.log],
+    };
+  },
   decideTimeOff: (id: string, status: 'approved' | 'denied'): Mutation => (w) => ({ ...w, timeOff: w.timeOff.map((r) => (r.id === id ? { ...r, status, decided_at: nowISO() } : r)), log: [`Manager ${status} time off`, ...w.log] }),
   setViewer: (id: string): Mutation => (w) => ({ ...w, viewerId: id }),
   toggleClockedIn: (): Mutation => (w) => ({ ...w, clockedInAt: w.clockedInAt ? null : at(today, 17, 58) }),
   reset: (): Mutation => () => initialWorld(),
 };
+
+/**
+ * The manager's confirmation tiles, built with the REAL buildCalendarDays so PersonCard receives
+ * exactly the DayPerson shape production gives it (including clockedHours and approvedMinutes).
+ */
+export function confirmationTiles(w: DemoWorld): { key: string; person: DayPerson; dateLabel: string }[] {
+  const out: { key: string; person: DayPerson; dateLabel: string }[] = [];
+  for (const c of w.confirmable) {
+    const emp = empOf(w, c.employee_id);
+    const days = buildCalendarDays({
+      employees: [{ id: emp.id, name: emp.name, role: emp.role }],
+      punches: [{
+        id: c.id, employee_id: c.employee_id, source: 'time_clock', date: c.date,
+        start_time: c.start_time, end_time: c.end_time,
+        clock_in_at: c.clock_in_at, clock_out_at: c.clock_out_at,
+        break_minutes: c.break_minutes, confirmed_at: c.confirmed_at,
+        approved_minutes: c.approved_minutes, auto_closed: false,
+      }],
+      scheduled: [], days: [c.date], view: 'clocked', todayISO: today,
+    });
+    const person = days.get(c.date)?.people[0];
+    if (person) out.push({ key: c.id, person, dateLabel: c.date });
+  }
+  return out;
+}
 
 /** Planned shifts in the requested range for the manager's time-off conflict count. */
 export function timeOffConflicts(w: DemoWorld, r: DemoTimeOff): number {

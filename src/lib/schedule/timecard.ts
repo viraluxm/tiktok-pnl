@@ -20,7 +20,7 @@ import type { ClockState, TimecardPayload } from './portalTypes';
 // "period you're next paid for". Both come from employees.ts; nothing here re-derives a calendar.
 
 const SHIFT_COLS =
-  'id, employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, auto_closed';
+  'id, employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, auto_closed, approved_minutes';
 
 type Admin = ReturnType<typeof createAdminClient>;
 

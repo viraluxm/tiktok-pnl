@@ -154,14 +154,14 @@ export function HomeScreen({
               type="button"
               onClick={() => go({ tab: 'hours' })}
               className="group -my-1 rounded-r-xl py-1 pl-4 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70"
-              aria-label="Worked this week — open your timecard"
+              aria-label="Approved hours this week — open your timecard"
             >
               <p className="flex items-center gap-1 text-[13px] font-medium text-tt-muted">
-                Worked <ChevronRight size={14} className="text-tt-muted transition-transform group-hover:translate-x-0.5" />
+                Approved <ChevronRight size={14} className="text-tt-muted transition-transform group-hover:translate-x-0.5" />
               </p>
               <p className="mt-0.5 text-2xl font-semibold tabular-nums tracking-tight text-tt-text">{fmtHours(snap.thisWeek.workedHours)}</p>
               <p className="mt-0.5 text-[12px] text-tt-muted">
-                {snap.thisWeek.pendingHours > 0 ? `+ ${fmtHours(snap.thisWeek.pendingHours)} awaiting confirmation` : 'From your clock-ins'}
+                {snap.thisWeek.pendingHours > 0 ? `+ ${fmtHours(snap.thisWeek.pendingHours)} awaiting approval` : 'Payroll hours'}
               </p>
             </button>
           </div>

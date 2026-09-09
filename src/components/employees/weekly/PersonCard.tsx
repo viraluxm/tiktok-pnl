@@ -2,9 +2,13 @@
 
 import { useState } from 'react';
 import { formatTime12 } from '@/lib/weeklySchedule';
-import { confirmErrorMessage } from '@/lib/timeclock';
+import { confirmErrorMessage, teamOfRole } from '@/lib/timeclock';
 import { canRemoveScheduled, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
 import { canAddWorkedTimeAt } from '@/lib/shifts/manualWorked';
+import {
+  APPROVED_INPUT_MESSAGES, approvedMinutesRequired, formatApprovedMinutes, parseApprovedInput, splitApprovedMinutes,
+} from '@/lib/shifts/approvedHours';
+import { hoursToMinutes } from '@/lib/employees';
 import PersonAvatar from './PersonAvatar';
 
 // One person's day as a TILE: avatar on top, name under it, the facts under that.
@@ -34,6 +38,7 @@ export default function PersonCard({
   dateLabel,
   dateISO,
   onConfirm,
+  onApprovedMinutes,
   onEdit,
   onRemoveScheduled,
   onAddWorkedTime,
@@ -43,7 +48,14 @@ export default function PersonCard({
   dateLabel?: string;
   /** 'YYYY-MM-DD' for this cell. Required for the Add Worked Time affordance (see below). */
   dateISO?: string;
-  onConfirm: (shiftId: string, confirmed: boolean) => Promise<void>;
+  /**
+   * Confirm / unconfirm. `approvedMinutes` is the FINAL PAYABLE duration (migration 137) and is
+   * sent in the same call as the confirmation, because the two must land together: a confirm that
+   * succeeded without its approval would pay a live host their clocked span.
+   */
+  onConfirm: (shiftId: string, confirmed: boolean, approvedMinutes?: number | null) => Promise<void>;
+  /** Change ONLY the payable duration on an already-confirmed shift. Absent → no adjust action. */
+  onApprovedMinutes?: (shiftId: string, approvedMinutes: number | null) => Promise<void>;
   onEdit?: (shiftId: string) => void;
   /**
    * ASK to remove this person's one-off scheduled shift. The container owns the confirmation and
@@ -63,6 +75,20 @@ export default function PersonCard({
   const [err, setErr] = useState<string | null>(null);
   const badge = badgeFor(person);
   const { punch, scheduled } = person;
+
+  // APPROVED HOURS (migration 137) — what payroll pays, kept apart from what the punch says.
+  //
+  // A LIVE HOST must be given an explicit figure: their payable time is verified live time, and
+  // there is no authoritative shift→live-session link to read it from, so defaulting to the
+  // clocked span would quietly overpay. Everyone else defaults to the canonical clocked figure,
+  // which reproduces today's payroll exactly.
+  const isHost = teamOfRole(person.role) === 'host';
+  const mustApprove = approvedMinutesRequired(teamOfRole(person.role));
+  const defaultMinutes = punch && !punch.isOpen
+    ? (punch.approvedMinutes ?? (mustApprove ? null : hoursToMinutes(punch.clockedHours)))
+    : null;
+  const [approved, setApproved] = useState(() => splitApprovedMinutes(defaultMinutes));
+  const [adjusting, setAdjusting] = useState(false);
 
   // ADD WORKED TIME. Eligibility is TIME-based: offered once the scheduled period has ENDED, so a
   // same-day miss is correctable immediately instead of waiting for midnight, and an overnight span
@@ -89,16 +115,64 @@ export default function PersonCard({
 
   async function run(confirmed: boolean) {
     if (!punch) return;
+    // Unconfirming withdraws the approval too (the RPC clears it), so no figure is read here.
+    if (!confirmed) {
+      setBusy(true); setErr(null);
+      try { await onConfirm(punch.id, false); } catch (e) { setErr(confirmErrorMessage((e as Error).message)); } finally { setBusy(false); }
+      return;
+    }
+    const parsed = parseApprovedInput(approved.hours, approved.minutes, mustApprove);
+    if (!parsed.ok) { setErr(APPROVED_INPUT_MESSAGES[parsed.code]); return; }
     setBusy(true);
     setErr(null);
     try {
-      await onConfirm(punch.id, confirmed);
+      await onConfirm(punch.id, true, parsed.minutes);
     } catch (e) {
       setErr(confirmErrorMessage((e as Error).message));
     } finally {
       setBusy(false);
     }
   }
+
+  /** Payroll-only correction on an already-confirmed shift. The punch is never touched. */
+  async function saveApproved() {
+    if (!punch || !onApprovedMinutes) return;
+    const parsed = parseApprovedInput(approved.hours, approved.minutes, mustApprove);
+    if (!parsed.ok) { setErr(APPROVED_INPUT_MESSAGES[parsed.code]); return; }
+    setBusy(true);
+    setErr(null);
+    try {
+      await onApprovedMinutes(punch.id, parsed.minutes);
+      setAdjusting(false);
+    } catch (e) {
+      setErr(confirmErrorMessage((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const approvedInputs = (
+    <div className="mt-2 w-full text-left">
+      <div className="text-[9px] font-bold uppercase tracking-wider text-tt-muted">Approved hours</div>
+      <div className="mt-1 flex items-center gap-1">
+        <input
+          type="number" min={0} max={24} inputMode="numeric" aria-label="Approved hours"
+          value={approved.hours} onChange={(e) => setApproved((a) => ({ ...a, hours: e.target.value }))}
+          className="min-w-0 flex-1 rounded-lg border border-tt-input-border bg-tt-input-bg px-1.5 py-1 text-center text-[13px] tabular-nums text-tt-text"
+        />
+        <span className="text-[10px] text-tt-muted">hrs</span>
+        <input
+          type="number" min={0} max={59} inputMode="numeric" aria-label="Approved minutes"
+          value={approved.minutes} onChange={(e) => setApproved((a) => ({ ...a, minutes: e.target.value }))}
+          className="min-w-0 flex-1 rounded-lg border border-tt-input-border bg-tt-input-bg px-1.5 py-1 text-center text-[13px] tabular-nums text-tt-text"
+        />
+        <span className="text-[10px] text-tt-muted">min</span>
+      </div>
+      {isHost && (
+        <p className="mt-1 text-[9px] leading-snug text-tt-muted">Live Host hours are verified live time, not the clocked span.</p>
+      )}
+    </div>
+  );
 
   return (
     <div className="flex flex-col items-center rounded-xl border border-tt-border bg-white/[0.02] p-3 text-center">
@@ -110,13 +184,15 @@ export default function PersonCard({
 
       <span className={`mt-1.5 rounded-full border px-2 py-0.5 text-[9.5px] font-semibold ${badge.cls}`}>{badge.text}</span>
 
-      {/* THE PUNCH — the only figure that pays, so it is the biggest thing on the tile. */}
+      {/* CLOCKED — the attendance record. Labelled, because since migration 137 it is NOT
+          necessarily what pays, and a manager confirming a host shift must see both figures. */}
       <div className="mt-2 w-full">
         {punch ? (
           <>
+            <div className="text-[9px] font-bold uppercase tracking-wider text-tt-muted">Clocked</div>
             <div className="text-[12.5px] font-medium tabular-nums text-tt-text">{range(punch.start_time, punch.end_time)}</div>
             <div className="text-[10.5px] tabular-nums text-tt-muted">
-              {punch.isOpen ? 'in progress' : `${punch.hours}h`}
+              {punch.isOpen ? 'in progress' : formatApprovedMinutes(hoursToMinutes(punch.clockedHours))}
               {punch.breakMinutes > 0 && ` · ${punch.breakMinutes}m break`}
             </div>
           </>
@@ -124,6 +200,14 @@ export default function PersonCard({
           <div className="text-[12.5px] font-medium text-tt-muted">No punch</div>
         )}
       </div>
+
+      {/* APPROVED — what payroll pays. Only meaningful once a figure exists. */}
+      {punch && !punch.isOpen && punch.approvedMinutes != null && !adjusting && (
+        <div className="mt-1.5 w-full">
+          <div className="text-[9px] font-bold uppercase tracking-wider text-tt-muted">Approved</div>
+          <div className="text-[12.5px] font-semibold tabular-nums text-tt-green">{formatApprovedMinutes(punch.approvedMinutes)}</div>
+        </div>
+      )}
 
       {/* THE PLAN — context, never the headline. */}
       <div className="mt-1 w-full text-[10px] leading-snug text-tt-muted">
@@ -173,6 +257,10 @@ export default function PersonCard({
         </div>
       )}
 
+      {/* The manager's payable figure. Shown while confirming (so it lands in the same call) and
+          while correcting an already-confirmed shift. */}
+      {punch && !punch.isOpen && punch.confirmable && (!punch.confirmed || adjusting) && approvedInputs}
+
       {/* Actions. Edit is offered on ANY real punch — a 19h forgotten clock-out has to be
           correctable, and refusing to confirm it is not a fix. */}
       {punch && (
@@ -197,6 +285,30 @@ export default function PersonCard({
             )
           )}
         </div>
+      )}
+
+      {/* PAYROLL-ONLY CORRECTION. Offered on a confirmed punch so a wrong payable duration is
+          fixed HERE rather than by rewriting the clock-in and clock-out. */}
+      {punch && !punch.isOpen && punch.confirmed && onApprovedMinutes && (
+        adjusting ? (
+          <div className="w-full">
+            <div className="flex w-full gap-1.5 pt-2">
+              <button
+                type="button" disabled={busy} onClick={() => { setAdjusting(false); setErr(null); setApproved(splitApprovedMinutes(punch.approvedMinutes ?? defaultMinutes)); }}
+                className="flex-1 rounded-lg border border-tt-border px-2 py-1.5 text-[11px] font-semibold text-tt-muted transition-colors hover:bg-tt-card-hover hover:text-tt-text disabled:opacity-50"
+              >Cancel</button>
+              <button
+                type="button" disabled={busy} onClick={saveApproved}
+                className="flex-1 rounded-lg bg-tt-cyan/20 px-2 py-1.5 text-[11px] font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/30 disabled:opacity-50"
+              >{busy ? '…' : 'Save'}</button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button" onClick={() => { setAdjusting(true); setErr(null); }}
+            className="mt-1.5 text-[10px] font-semibold text-tt-muted underline transition-colors hover:text-tt-text"
+          >Adjust approved hours</button>
+        )
       )}
     </div>
   );

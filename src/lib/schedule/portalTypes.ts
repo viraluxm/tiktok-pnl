@@ -158,9 +158,14 @@ export interface PortalSnapshot {
     end: string;
     /** planned hours from shift_instances */
     scheduledHours: number;
-    /** paid hours from real punches (isPayableShift + paidShiftHours) */
+    /**
+     * PAYABLE hours from real punches (isPayableShift + paidShiftHours) — i.e. the manager-approved
+     * duration wherever one exists (migration 137), else the legacy clocked calculation. Surfaced
+     * to the employee as "Approved". Kept named workedHours because it is the same canonical figure
+     * the rest of the app calls worked/paid hours; the label changed, the source did not.
+     */
     workedHours: number;
-    /** completed time-clock hours a manager has not confirmed yet — excluded from workedHours */
+    /** completed time-clock hours a manager has not approved yet — excluded from workedHours */
     pendingHours: number;
   };
   payPeriod: { start: string; end: string; workedHours: number; pendingHours: number };
@@ -185,8 +190,23 @@ export interface TimecardEntry {
   date: string;
   clock_in: string; // ISO instant
   clock_out: string | null; // null only for an in-progress manual open shift
-  /** canonical paid duration (paidShiftHours); 0 when open */
+  /**
+   * The PAYABLE duration (paidShiftHours): the manager-approved minutes when they exist, else the
+   * legacy clocked calculation. 0 when the punch is still open. Never a pay AMOUNT — no rate or
+   * money ever reaches this payload.
+   */
   hours: number;
+  /**
+   * The ATTENDANCE duration: what the punch itself spans, net of unpaid break. Shown beside
+   * `hours` so a live host can see that their 8h32m on the clock was approved as 7h58m of live
+   * time — and that the difference is not a lost punch.
+   */
+  clocked_hours: number;
+  /**
+   * migration 137 — the manager-approved payable minutes, or null when no explicit approval exists
+   * (a legacy confirmed shift, or one still awaiting confirmation).
+   */
+  approved_minutes: number | null;
   break_minutes: number;
   payable: boolean;
   state: TimecardEntryState;

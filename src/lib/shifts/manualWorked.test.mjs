@@ -48,7 +48,11 @@ const manualUrl = transpile('./manualWorked.ts', 'manualWorked.mjs', {
   "'./punchEdit'": `'${punchUrl}'`,
   "'@/lib/schedule/timezone'": `'${tzUrl}'`,
 });
-const calUrl = transpile('../schedule/calendarModel.ts', 'calendarModel.mjs');
+// calendarModel takes the canonical payroll duration from '@/lib/employees' (migration 137).
+const employeesUrl = transpile('../employees.ts', 'employees.mjs');
+const calUrl = transpile('../schedule/calendarModel.ts', 'calendarModel.mjs', {
+  "'@/lib/employees'": `'${employeesUrl}'`,
+});
 
 const {
   workedTimePrefill, manualWorkedErrorMessage, canAddWorkedTimeAt, scheduledEndInstant,

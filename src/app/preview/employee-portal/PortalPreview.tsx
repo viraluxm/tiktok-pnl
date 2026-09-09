@@ -6,12 +6,13 @@ import { PortalProvider } from '@/components/portal/PortalProvider';
 import { PortalApp } from '@/components/portal/PortalApp';
 import PickupRequestsPanel from '@/components/employees/PickupRequestsPanel';
 import TradeRequestsPanel from '@/components/employees/TradeRequestsPanel';
+import PersonCard from '@/components/employees/weekly/PersonCard';
+import { fmtShortDate } from '@/lib/schedule/portalModel';
 import { fmtDateLA, fmtTimeRangeLA } from '@/lib/schedule/format';
 import { instanceHours } from '@/lib/schedule/hours';
-import { fmtShortDate } from '@/lib/schedule/portalModel';
 import {
   initialWorld, snapshotFor, weekFor, timecardFor, tradeOptionsFor, act, nameOf, timeOffConflicts,
-  CARLOS, JUAN, MADISON, type DemoWorld, type Mutation, type PortalClient,
+  CARLOS, JUAN, MADISON, confirmationTiles, type DemoWorld, type Mutation, type PortalClient,
 } from './fixtures';
 
 // The interactive half of /preview/employee-portal. ZERO NETWORK: the PortalClient below resolves
@@ -129,6 +130,29 @@ export default function PortalPreview() {
             {pendingPickups.length + pendingTrades.length + pendingTimeOff.length === 0 && (
               <p className="rounded-lg border border-dashed border-tt-border px-4 py-8 text-center text-sm text-tt-muted">Nothing waiting for a manager. Switch to Carlos or Juan and make a request.</p>
             )}
+
+            {/* SHIFT CONFIRMATION — the REAL PersonCard the Team → Shifts overlays mount, so the
+                approved-hours entry can be reviewed without a login. A LIVE HOST must be given a
+                figure before Confirm will submit; a FULFILLMENT tile is prefilled with the
+                canonical clocked duration. Both handlers mutate this preview's world only. */}
+            <div className="rounded-[14px] border border-tt-border bg-tt-card/60 px-5 py-4">
+              <p className="text-sm font-semibold">Shift confirmation · approved hours</p>
+              <p className="mt-1 text-xs text-tt-muted">
+                Clocked is the attendance record. Approved hours are what payroll pays — a Live Host&apos;s
+                are verified live time, so the punch is never edited to change them.
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+                {confirmationTiles(world).map(({ key, person, dateLabel }) => (
+                  <PersonCard
+                    key={key}
+                    person={person}
+                    dateLabel={fmtShortDate(dateLabel)}
+                    onConfirm={(shiftId, confirmed, approvedMinutes) => apply(act.confirmPunch(shiftId, confirmed, approvedMinutes ?? null))}
+                    onApprovedMinutes={(shiftId, approvedMinutes) => apply(act.confirmPunch(shiftId, true, approvedMinutes))}
+                  />
+                ))}
+              </div>
+            </div>
           </div>
           {world.log.length > 0 && (
             <div className="mt-8">

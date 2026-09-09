@@ -1,11 +1,18 @@
-import { isPayableShift, paidShiftHours } from '@/lib/employees';
+import { clockedShiftHours, isPayableShift, paidShiftHours } from '@/lib/employees';
 import { shiftBusinessDate } from '@/lib/labor';
 import { laWallTimeToUtc, addDaysISO } from './timezone';
 import type { TimecardDay, TimecardEntry, TimecardEntryState, TimecardOpenPunch, TimecardPayload, TimecardWindow } from './portalTypes';
 
 // The employee's READ-ONLY timecard, derived from real `shifts` rows the same way payroll reads
-// them. The hours/payability logic is isPayableShift + paidShiftHours reused VERBATIM — this module
-// never subtracts timestamps of its own, so what the employee sees is what pay computes.
+// them. The hours/payability logic is isPayableShift + paidShiftHours + clockedShiftHours reused
+// VERBATIM — this module never subtracts timestamps of its own, so what the employee sees is what
+// pay computes.
+//
+// Every entry carries BOTH durations, because after migration 137 they are different questions:
+//   clocked_hours    what the punch spans (attendance)
+//   hours            what payroll pays  (the manager-approved minutes when they exist)
+// A live host normally sees the second smaller than the first — that is the verified live time,
+// not a lost punch, and the screen says so.
 //
 // What is and is not a "worked" entry:
 //   • source_rule_id != null  → a materialized PLAN row (frozen schedule). Not worked time. Skipped.
@@ -34,6 +41,8 @@ export interface TimecardShiftRow {
   clock_in_at: string | null;
   clock_out_at: string | null;
   auto_closed: boolean | null;
+  /** migration 137 — the manager-approved payable minutes, or null. */
+  approved_minutes?: number | null;
 }
 
 export interface OpenEntryRow {
@@ -61,7 +70,9 @@ export function toTimecardEntry(s: TimecardShiftRow): TimecardEntry | null {
   else if (s.end_time == null) clock_out = null;
   else clock_out = wallToInstant(wallCrossesMidnight(s.start_time, s.end_time) ? addDaysISO(s.date, 1) : s.date, s.end_time);
 
-  const payable = isPayableShift({
+  // ONE input shape for both canonical calls, so the payable figure and the clocked figure can
+  // never be computed from different facts.
+  const asShift = {
     employee_id: s.employee_id,
     start_time: s.start_time,
     end_time: s.end_time,
@@ -71,15 +82,14 @@ export function toTimecardEntry(s: TimecardShiftRow): TimecardEntry | null {
     break_minutes: s.break_minutes ?? 0,
     clock_in_at: s.clock_in_at,
     clock_out_at: s.clock_out_at,
-  });
-  const hours = clock_out == null ? 0 : paidShiftHours({
-    employee_id: s.employee_id,
-    start_time: s.start_time,
-    end_time: s.end_time,
-    break_minutes: s.break_minutes ?? 0,
-    clock_in_at: s.clock_in_at,
-    clock_out_at: s.clock_out_at,
-  });
+    approved_minutes: s.approved_minutes ?? null,
+  };
+  const payable = isPayableShift(asShift);
+  // APPROVED (payable) vs CLOCKED (attendance) — the whole point of migration 137. paidShiftHours
+  // returns the approved minutes when a manager set them; clockedShiftHours always describes the
+  // punch. An open punch has no completed duration, so both read 0 and the UI says "in progress".
+  const hours = clock_out == null ? 0 : paidShiftHours(asShift);
+  const clockedHours = clock_out == null ? 0 : clockedShiftHours(asShift);
 
   let state: TimecardEntryState;
   if (clock_out == null) state = 'in_progress';
@@ -93,6 +103,8 @@ export function toTimecardEntry(s: TimecardShiftRow): TimecardEntry | null {
     clock_in,
     clock_out,
     hours,
+    clocked_hours: clockedHours,
+    approved_minutes: s.approved_minutes ?? null,
     break_minutes: s.break_minutes ?? 0,
     payable,
     state,
