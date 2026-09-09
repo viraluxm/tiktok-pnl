@@ -1,10 +1,20 @@
--- 136_practice_sessions.sql
+-- 138_practice_sessions.sql
 --
--- Prefix 136 is the next free across tracked files, untracked working-tree files, ALL branches and
--- ALL remotes as of 2026-09-08 (130-135 are taken: 130 schedule_phase2_attendance_and_cancel,
--- 131 manual_worked_shift_rpc, 132 tracking_history_trigger, 133 order_refund_state,
--- 134 squish_multibind_audit, 135 squish_multibind_pack_state). Re-scan before applying if any
--- time has passed — this DB has no migration ledger, so this file is the only record.
+-- RENAMED FROM 136_practice_sessions.sql. Prefix 136 was free across every ref when this was
+-- written and applied (2026-09-08/09), but origin/main advanced 11 commits during that window and
+-- PR #231 landed 136_squish_multibind_audit_timeout_fix.sql — which, being merged to main, has
+-- precedence (the same resolution 134 documents for its own rename off 129). A third claim,
+-- 136_shift_trades.sql, also exists on origin/feat/employee-portal-redesign, and 137 is claimed
+-- TWICE (137_shift_approved_minutes.sql, 137_squish_multibind_onhold_and_order.sql). So the first
+-- genuinely free prefix was 138.
+--
+-- THE RENAME IS PURELY A REPO-RECORD CHANGE. The filename is stored nowhere; the objects below were
+-- already applied to live under the old name and are UNAFFECTED. Content is byte-identical to what
+-- ran — only the prefix moved.
+--
+-- This is exactly the skip/double-apply hazard CLAUDE.md warns about: this DB has no migration
+-- ledger, so re-scan tracked files, untracked working-tree files AND every branch/remote
+-- immediately before applying anything — a scan that is even hours old can be wrong.
 --
 -- ═════════════════════════════════════════════════════════════════════════════
 -- APPLIED TO LIVE on 2026-09-09 03:48 UTC, at the user's explicit instruction.

@@ -23,6 +23,8 @@ const launcher = read('../../components/training/PracticeModeLauncher.tsx');
 const controlClient = read('../../components/training/ControlClient.tsx');
 const trainerEventsSrc = read('../../components/training/trainerEvents.ts');
 const deleteRoute = read('../../app/api/admin/training/sessions/[id]/route.ts');
+const logHook = read('./usePracticeLog.ts');
+const eventsRoute = read('../../app/api/admin/training/events/route.ts');
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -266,5 +268,80 @@ check(
   'the controller surfaces it to management',
   /Host has no microphone/.test(controlClient),
 );
+
+// ── P0-5: the event timeline must record OUTCOMES, at the right moments ──
+//
+// The overlay is DOM, not part of the video track, so replay re-renders it from
+// this log. That only works if the log says what the screen DID — not what the
+// controller asked for. These pin the emit points where the host decides an
+// outcome; a log built from commands would replay comments that were suppressed
+// and bids whose totals it cannot know.
+const addComment = functionBody(liveSimulator, 'addComment');
+check(
+  'a comment is logged AFTER the blocked-user check, so suppressed comments are never logged',
+  addComment.indexOf("blockedRef.current.has(username)") <
+    addComment.indexOf("practiceLog.event('comment'"),
+);
+const placeBid = functionBody(liveSimulator, 'placeBid');
+check(
+  'a bid logs the resulting TOTAL, not just the command',
+  /practiceLog\.event\('bid', \{[^}]*total: auctionBidRef\.current/.test(placeBid),
+);
+const endAuction = functionBody(liveSimulator, 'endAuction');
+check(
+  'auction_end reads the winner from a REF, not state (it runs in a timer closure)',
+  /winner: auctionWinnerRef\.current/.test(endAuction),
+);
+check(
+  'the winner ref exists so that read cannot be stale',
+  /const auctionWinnerRef = useRef<string \| null>\(null\)/.test(liveSimulator),
+);
+const startRuntime = functionBody(liveSimulator, 'startRuntime');
+check(
+  'practiceLog.start() runs BEFORE the first viewers emit (it sets the offset epoch)',
+  startRuntime.indexOf('practiceLog.start()') < startRuntime.indexOf('updateViewers()'),
+);
+const completePractice = functionBody(liveSimulator, 'completePractice');
+check('the timeline is closed on a clean finish', /practiceLog\.finish\(\)/.test(completePractice));
+check(
+  'every logged kind is emitted from the host',
+  ['comment', 'bid', 'auction_start', 'auction_end', 'auction_reset', 'block', 'viewers']
+    .every((k) => new RegExp(`practiceLog\\.event\\('${k}'`).test(liveSimulator)),
+);
+
+// ── the log must not lose events on a blip, and must not retry forever ──
+check(
+  'a 5xx or network failure REQUEUES the batch rather than dropping it',
+  /res\.status >= 500\) bufferRef\.current\.requeue\(batch\)/.test(logHook) &&
+    /catch \{\s*\n\s*bufferRef\.current\.requeue\(batch\)/.test(logHook),
+);
+check(
+  'a 4xx is NOT requeued (it would block every later event behind it forever)',
+  /res\.status >= 500/.test(logHook),
+);
+check(
+  'flushes are serialised so a slow request cannot post the same batch twice',
+  /if \(flushingRef\.current\) return;/.test(logHook),
+);
+check(
+  'the final flush uses sendBeacon with an explicit application\/json Blob',
+  /sendBeacon/.test(logHook) && /type: 'application\/json'/.test(logHook),
+);
+check(
+  'a refused beacon requeues rather than silently losing the tail',
+  /!navigator\.sendBeacon[\s\S]{0,120}requeue\(batch\)/.test(logHook),
+);
+
+// ── the events route is the enforcer ──
+check(
+  'the events route validates EVERY event before inserting ANY (no partial timeline)',
+  /for \(const \[i, event\] of body\.events\.entries\(\)\)/.test(eventsRoute) &&
+    eventsRoute.indexOf('validatePracticeEvent') < eventsRoute.indexOf(".from('practice_events')"),
+);
+check(
+  'the events route confirms the session belongs to this owner before writing',
+  eventsRoute.indexOf(".eq('owner_id', gate.ownerId)") < eventsRoute.indexOf(".from('practice_events')"),
+);
+check('the events route caps the batch size', /PRACTICE_LOG_MAX_BATCH/.test(eventsRoute));
 
 console.log(`\n${passed} checks passed`);

@@ -14,6 +14,7 @@ import { PRACTICE_VIDEO_CAPTURE } from '@/lib/training/media';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import { useVideoPublish } from '@/lib/training/useVideoPublish';
 import { usePracticeHeartbeat } from '@/lib/training/usePracticeHeartbeat';
+import { usePracticeLog } from '@/lib/training/usePracticeLog';
 import { shortTrainingSessionLabel } from '@/lib/training/session';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
@@ -91,6 +92,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const auctionBidRef = useRef(0);
   const auctionSecondsRef = useRef(AUCTION_START_SECONDS);
   const auctionActiveRef = useRef(false);
+  // endAuction fires from the auction tick's closure, so the winner must come from
+  // a ref — reading auctionWinner state there would log a stale (or null) winner.
+  const auctionWinnerRef = useRef<string | null>(null);
   // Mirrors micMissing for broadcastSessionState, which runs inside the session
   // tick's closure and would otherwise read a stale value.
   const micMissingRef = useRef(false);
@@ -117,6 +121,13 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     end: registryEnd,
     unregistered: sessionUnregistered,
   } = usePracticeHeartbeat(sessionId);
+
+  // Records what this screen actually DID, so a replay can re-render the overlay
+  // over the footage (the overlay is DOM, not part of the video track). The host is
+  // the only party that knows the applied bid total, the winner, and which comments
+  // were suppressed — so the emit points below sit where each outcome is decided,
+  // never where a command arrives.
+  const practiceLog = usePracticeLog(sessionId);
 
   function handleEvent(event: TrainerEvent) {
     switch (event.action) {
@@ -189,6 +200,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // ---- Comments: driven by the trainer controller ----
   function addComment(username: string, text: string) {
     if (blockedRef.current.has(username)) return; // blocked user suppressed
+    // Logged AFTER the suppression check, so the timeline holds only comments the
+    // host really showed. Logging the incoming command instead would make a replay
+    // display a comment that never appeared on screen.
+    practiceLog.event('comment', { username, text });
     commentIdRef.current += 1;
     const next: LiveComment = { id: commentIdRef.current, username, text };
     setComments((prev) => [...prev, next].slice(-4));
@@ -204,6 +219,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // the rest of this practice session (reset on restart / reload).
   function blockUser(comment: LiveComment) {
     blockedRef.current.add(comment.username);
+    practiceLog.event('block', { username: comment.username });
     setComments((prev) => prev.filter((c) => c.username !== comment.username));
     showToast('User blocked');
   }
@@ -223,6 +239,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     const minV = elapsed < 240 ? 1 : 200;
     v = Math.min(800, Math.max(minV, v));
     viewersRef.current = v;
+    // Throttled inside the buffer to PRACTICE_VIEWERS_LOG_MS: the ramp samples every
+    // 2.5s, which would be ~720 rows a session for a cosmetic number the replay
+    // step-holds anyway.
+    practiceLog.event('viewers', { count: v });
     setViewers(v);
   }
 
@@ -240,6 +260,8 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     setAuctionSeconds(AUCTION_START_SECONDS);
     setAuctionSoldAt(null);
     setAuctionPhase('running');
+    auctionWinnerRef.current = null;
+    practiceLog.event('auction_start', {});
 
     auctionTickRef.current = setInterval(() => {
       auctionSecondsRef.current -= 1;
@@ -259,9 +281,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     if (!auctionActiveRef.current) return;
     if (auctionSecondsRef.current <= 0) return;
 
-    auctionBidRef.current += bidIncrement(amount);
+    const increment = bidIncrement(amount);
+    auctionBidRef.current += increment;
+    // The outcome, not the command: the resulting TOTAL is what the screen showed,
+    // and is the thing the controller's placeBid message cannot know.
+    practiceLog.event('bid', { username, increment, total: auctionBidRef.current });
     setAuctionBid(auctionBidRef.current);
     setAuctionWinner(username);
+    auctionWinnerRef.current = username;
     auctionSecondsRef.current = AUCTION_BID_RESET_SECONDS;
     setAuctionSeconds(AUCTION_BID_RESET_SECONDS);
 
@@ -278,6 +305,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     clearIntervalRef(auctionTickRef);
     setAuctionSoldAt(auctionBidRef.current);
     setAuctionPhase('ended');
+    practiceLog.event('auction_end', {
+      sold_at: auctionBidRef.current,
+      winner: auctionWinnerRef.current,
+    });
     broadcastAuctionState(false, auctionBidRef.current, null);
     // Briefly show the sold state, then reset the card to ready.
     clearTimeoutRef(endedResetRef);
@@ -293,12 +324,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // Manual reset from the controller: clear the auction back to ready immediately.
   function resetAuction() {
     auctionActiveRef.current = false;
+    practiceLog.event('auction_reset', {});
     stopAuctionTimers();
     auctionBidRef.current = 0;
     auctionSecondsRef.current = AUCTION_START_SECONDS;
     setAuctionPhase('idle');
     setAuctionBid(0);
     setAuctionWinner(null);
+    auctionWinnerRef.current = null;
     setAuctionSoldAt(null);
     setAuctionSeconds(AUCTION_START_SECONDS);
     broadcastAuctionState(false, 0, null);
@@ -325,6 +358,11 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     setAuctionBid(0);
     setAuctionSoldAt(null);
     setAuctionSeconds(AUCTION_START_SECONDS);
+    auctionWinnerRef.current = null;
+
+    // Sets the monotonic epoch EVERY offset is measured from, so it must run before
+    // any other emit below (updateViewers fires immediately after this).
+    practiceLog.start();
 
     sessionTickRef.current = setInterval(() => {
       sessionSecondsRef.current -= 1;
@@ -366,6 +404,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     // is idempotent (roomRef/streamRef are nulled), so the unmount cleanup and
     // restartPractice() can both call it again safely.
     stopStream();
+    // Close the timeline and ship what is left immediately, rather than waiting up
+    // to one flush interval while the session is already over.
+    practiceLog.finish();
     // Record the clean finish in the registry. Best-effort: an un-ended session
     // decays from 'live' to 'Disconnected' on its own once heartbeats stop, so a
     // failure here costs a label, not correctness.
