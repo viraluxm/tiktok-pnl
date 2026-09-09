@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import QRCode from 'qrcode';
 import {
   shortTrainingSessionLabel,
@@ -393,9 +394,17 @@ function SessionHistory({ sessions }: { sessions: PracticeSessionRow[] }) {
         <ul className="mt-3 divide-y divide-tt-border">
           {sessions.map((s) => (
             <li key={s.id} className="flex items-baseline justify-between gap-3 py-2.5">
-              <span className="min-w-0 truncate text-[13px] font-medium text-tt-text">
+              {/* A finished session's name IS the way into its replay — the row
+                  already carries everything a reviewer needs to decide whether to
+                  watch it, so making it the link avoids a redundant "watch" column.
+                  Sessions with no footage still link: the timeline alone is
+                  reviewable, and the player says so. */}
+              <Link
+                href={`/admin/training/replays/${s.id}`}
+                className="min-w-0 truncate text-[13px] font-medium text-tt-cyan hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
+              >
                 {s.trainee_name || 'Unnamed'}
-              </span>
+              </Link>
               <span className="flex shrink-0 items-baseline gap-3 text-[12px] tabular-nums text-tt-muted">
                 <span>{formatPracticeRunLength(s)}</span>
                 {/* Footage. A FAILED recording is the thing someone has to act on,
