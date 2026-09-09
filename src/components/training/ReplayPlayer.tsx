@@ -185,19 +185,38 @@ export default function ReplayPlayer({ data }: { data: ReplayData }) {
           </span>
         </div>
 
-        {/* Scrub bar */}
-        <input
-          type="range"
-          min={0}
-          max={Math.max(1, durationMs)}
-          value={Math.min(videoMs, Math.max(1, durationMs))}
-          onChange={(e) => {
-            const v = videoRef.current;
-            if (v) v.currentTime = Number(e.target.value) / 1000;
-          }}
-          aria-label="Scrub the recording"
-          className="w-full cursor-pointer accent-[#FE2C55]"
-        />
+        {/* Scrub bar. Given a deliberately chunky track and a visible filled
+            portion: at default browser styling this read as a hairline on a dark
+            background and was missed entirely on first use. A control nobody can
+            see is a control that does not exist. */}
+        <div className="space-y-1.5">
+          <input
+            type="range"
+            min={0}
+            max={Math.max(1, durationMs)}
+            value={Math.min(videoMs, Math.max(1, durationMs))}
+            step={100}
+            onChange={(e) => {
+              const v = videoRef.current;
+              if (v) v.currentTime = Number(e.target.value) / 1000;
+            }}
+            aria-label="Scrub the recording"
+            className="h-2 w-full cursor-pointer appearance-none rounded-full outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-white [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow"
+            style={{
+              // Filled portion in the brand red, remainder muted — so the position
+              // is readable at a glance without a second element to keep in sync.
+              background: `linear-gradient(to right, #FE2C55 ${
+                durationMs > 0 ? Math.min(100, (videoMs / durationMs) * 100) : 0
+              }%, rgba(255,255,255,0.18) ${
+                durationMs > 0 ? Math.min(100, (videoMs / durationMs) * 100) : 0
+              }%)`,
+            }}
+          />
+          <div className="flex justify-between text-[11px] tabular-nums text-tt-muted">
+            <span>Drag to scrub</span>
+            <span>{durationMs > 0 ? formatClock(Math.floor(durationMs / 1000)) : ''}</span>
+          </div>
+        </div>
 
         {/* Auction markers — the reason a 30-minute file is reviewable at all. A
             manager wants the moments the candidate ran an auction, not to scrub
