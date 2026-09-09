@@ -74,6 +74,12 @@
 
 begin;
 
+-- Fail fast rather than queue. The foreign keys below take SHARE ROW EXCLUSIVE on employees,
+-- shift_instances and auth.users; if any is mid-write the CREATE TABLE would wait and readers
+-- would pile up behind it. 3s per the Class A recipe: on a timeout nothing is applied, and it is
+-- safe to retry.
+set local lock_timeout = '3s';
+
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- 1. THE TABLE
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════

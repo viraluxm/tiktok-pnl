@@ -381,6 +381,20 @@ console.log('\n11. THE DATABASE IS THE BOUNDARY — approved_minutes is server-o
     /MAY BE APPLIED \*\*BEFORE\*\* THE CODE DEPLOY/.test(mig));
   check('137 documents its rollback, including that dropping the column destroys approvals',
     /^-- ROLLBACK$/m.test(mig) && /DESTROYS approvals/.test(mig));
+  // Applying by hand against a table the kiosk writes: without a lock timeout the ALTER waits on
+  // any in-flight punch and every reader queues behind its lock request.
+  check('137 sets a lock_timeout before touching shifts',
+    /^set local lock_timeout = '3s';$/m.test(migCode));
+  // And it must stay ONE transaction: the widened guard dereferences new.approved_minutes, so the
+  // column has to exist first — splitting them would leave the column briefly UNGUARDED.
+  check('137 is exactly one transaction (no unguarded window between column and guard)',
+    (migCode.match(/^begin;$/gm) ?? []).length === 1
+    && (migCode.match(/^commit;$/gm) ?? []).length === 1);
+  check('…and the column is added BEFORE the guard is replaced (plpgsql late binding)',
+    migCode.indexOf('add column if not exists approved_minutes')
+      < migCode.indexOf('create or replace function public.shifts_guard_confirmation'));
+  check('…and the header explains why the file is not split',
+    /ONE TRANSACTION, DELIBERATELY/.test(mig) && /has no field/.test(mig));
   check('unconfirming clears the approval (no payable-looking number on an unconfirmed shift)',
     /set confirmed_at = null, confirmed_by = null, approved_minutes = null/.test(mig));
   check('the correction RPC refuses an unconfirmed time-clock shift', /SHIFT_NOT_CONFIRMED/.test(mig));

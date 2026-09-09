@@ -53,9 +53,18 @@
 --
 -- LOCK FOOTPRINT (CLAUDE.md "classify by LOCK FOOTPRINT"): CLASS A.
 --   • `add column ... integer` NULLABLE WITH NO DEFAULT → catalog-only in PG11+, no table rewrite.
---   • one CHECK on the new column only. It is added NOT VALID and then VALIDATED separately, so the
---     initial ALTER takes ACCESS EXCLUSIVE for an instant and the scan runs under SHARE UPDATE
---     EXCLUSIVE (no writer blocked). Every existing row has NULL and passes trivially.
+--   • one CHECK on the new column only, added NOT VALID and then VALIDATED, so the ADD itself never
+--     scans. Every existing row is NULL and passes trivially (673 rows live, read 2026-09-08).
+--   • ⚠️ ONE TRANSACTION, DELIBERATELY — do NOT split this file into a transaction per statement
+--     group, despite that being the usual Class A recipe. The widened guard function dereferences
+--     `new.approved_minutes`, and a plpgsql body is parsed on first execution: install it before
+--     the column exists and EVERY update to `shifts` fails with "record new has no field
+--     approved_minutes". So the guard must follow the column — and if the two were in separate
+--     transactions there would be a window in which the column exists UNGUARDED, i.e. writable by
+--     any authenticated PostgREST session. Keeping one transaction closes that window; the cost is
+--     that VALIDATE runs while the ADD's ACCESS EXCLUSIVE lock is still held, which at this table's
+--     size is immaterial. `set local lock_timeout` below makes the wait fail fast instead of
+--     queueing readers behind it.
 --   • `create or replace` on shifts_guard_confirmation() — a trigger function on `shifts`. `shifts`
 --     is NOT a capture/order-sync table and is not read during a live show, but it IS written by
 --     the kiosk clock-out path, so run each group in its own transaction with
@@ -142,6 +151,11 @@
 --     select id, employee_id, date, approved_minutes from public.shifts where approved_minutes is not null;
 
 begin;
+
+-- Fail fast rather than queue. `shifts` is written by the kiosk clock-out path, so if a punch is
+-- mid-transaction the ALTER below would wait — and every reader would pile up behind its lock
+-- request. 3s per the Class A recipe: on a timeout, nothing is applied, and it is safe to retry.
+set local lock_timeout = '3s';
 
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- 1. THE COLUMN
