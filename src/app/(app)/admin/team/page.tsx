@@ -17,7 +17,14 @@ const ROLE_LABEL: Record<string, string> = {
   member: 'Team member',
   station: 'Fulfillment station',
   timeclock: 'Time clock kiosk',
+  seller: 'External seller',
 };
+
+// An external seller is listed here but NOT creatable here — deliberately absent from ROLE_OPTIONS.
+// They are a separate tenant (their own shop, their own orders), provisioned by
+// scripts/create-seller.mjs because it also needs an organization_members row. This page exists for
+// them so there is somewhere in the app that answers "who has access?" and can take it away.
+const SELLER_ROLE = 'seller';
 
 // Member capability scopes — must match KNOWN_MEMBER_SCOPES on the server and the middleware
 // allowlist. Each is a /team page + its owner-scoped /api/member/* routes.
@@ -33,7 +40,8 @@ const SCOPE_LABEL: Record<string, string> = { binding: 'Binding', inventory: 'In
 interface TeamMember {
   id: string;
   email: string | null;
-  role: ManagedRole;
+  // Listed roles, which is a SUPERSET of the creatable ones (ManagedRole) — sellers appear here.
+  role: ManagedRole | typeof SELLER_ROLE;
   store_id: string | null;   // station: single assigned store
   stores: string[] | null;   // member: multiple assigned stores
   scopes: string[] | null;   // member: capability scopes
@@ -285,13 +293,29 @@ export default function TeamPage() {
                   return (
                     <tr key={m.id} className="border-b border-[rgba(255,255,255,0.04)]">
                       <td className="px-3 py-2 text-[13px] text-tt-text">{m.email ?? '—'}</td>
-                      <td className="px-3 py-2 text-[13px] text-tt-text">{ROLE_LABEL[m.role] ?? m.role}</td>
                       <td className="px-3 py-2 text-[13px] text-tt-text">
-                        {m.role === 'station' || m.stores?.includes('*')
-                          ? 'All stores'
-                          : m.stores?.length
-                            ? m.stores.map((id) => storeName(id)).join(', ')
-                            : storeName(m.store_id)}
+                        {ROLE_LABEL[m.role] ?? m.role}
+                        {m.role === SELLER_ROLE && (
+                          <span
+                            className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-tt-cyan/10 text-tt-cyan border border-tt-cyan/25"
+                            title="Sells on their own shop from your shared inventory. Not staff — they cannot reach your dashboard, payroll or admin."
+                          >
+                            external
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-[13px] text-tt-text">
+                        {m.role === SELLER_ROLE ? (
+                          // Not an assignment of ours: a seller owns their own shop. Showing one of
+                          // our store names here would be actively misleading.
+                          <span className="text-tt-muted">Their own shop</span>
+                        ) : m.role === 'station' || m.stores?.includes('*') ? (
+                          'All stores'
+                        ) : m.stores?.length ? (
+                          m.stores.map((id) => storeName(id)).join(', ')
+                        ) : (
+                          storeName(m.store_id)
+                        )}
                       </td>
                       <td className="px-3 py-2 text-[13px]">
                         {m.role !== 'member' ? (

@@ -5,14 +5,28 @@ import { createAdminClient } from '@/lib/supabase/admin';
 
 export const dynamic = 'force-dynamic';
 
-// Only these two roles are ever created or listed here. The middleware confines
-// any unrecognized role to nothing, so we NEVER write a role outside this set —
-// a typo would create a locked-out user.
+// Roles this endpoint may CREATE. The middleware confines any unrecognized role to nothing, so we
+// NEVER write a role outside this set — a typo would create a locked-out user.
 const MANAGED_ROLES = ['member', 'station', 'timeclock'] as const;
 type ManagedRole = (typeof MANAGED_ROLES)[number];
 
 function isManagedRole(v: unknown): v is ManagedRole {
   return typeof v === 'string' && (MANAGED_ROLES as readonly string[]).includes(v);
+}
+
+// Roles this endpoint LISTS. 'seller' is listed but deliberately NOT creatable here: an external
+// seller is a separate tenant, not a sub-user — provisioning one also needs an organization_members
+// row (that membership is what grants shared-inventory access) and deliberately no store_members
+// row from us, so it goes through scripts/create-seller.mjs. Putting it in the role picker next to
+// three options that behave nothing like it is just a way to create the wrong account by accident.
+//
+// Listing them here is what makes them VISIBLE and REVOKABLE: without it, a seller account exists
+// with no representation anywhere in the app, and cutting off access means the Supabase dashboard.
+const LISTED_ROLES = [...MANAGED_ROLES, 'seller'] as const;
+type ListedRole = (typeof LISTED_ROLES)[number];
+
+function isListedRole(v: unknown): v is ListedRole {
+  return typeof v === 'string' && (LISTED_ROLES as readonly string[]).includes(v);
 }
 
 // The only capability scopes a 'member' may hold. Each maps 1:1 to a /team page + its owner-scoped
@@ -60,11 +74,11 @@ export async function GET() {
   }
 
   const members = all
-    .filter((u) => isManagedRole(u.app_metadata?.role))
+    .filter((u) => isListedRole(u.app_metadata?.role))
     .map((u) => ({
       id: u.id,
       email: u.email ?? null,
-      role: u.app_metadata?.role as ManagedRole,
+      role: u.app_metadata?.role as ListedRole,
       // Return whichever assignment shape is present: station carries a single
       // store_id, member carries a stores array.
       store_id: u.app_metadata?.store_id ?? null,
