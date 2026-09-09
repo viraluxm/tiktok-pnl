@@ -55,6 +55,15 @@ export const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
   // the picker saw.
   binding: ['/team/binding', '/team/audit', '/team/oos', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores', '/api/member/audit', '/api/member/oos'],
   inventory: ['/team/inventory', '/api/member/inventory'],
+  // '/team/staff' is the READ-ONLY manager surface: roster, instance schedule, time-clock punches,
+  // host performance, drop counts. It carries NO pay — no rates, no pay owed — and offers no edit,
+  // no shift confirm and no token mint, so holding this scope cannot move payroll. Correcting a
+  // punch is deliberately NOT here: it needs a write route that does not exist yet.
+  // '/api/member/team' covers all five children (roster / shifts / attendance / host-performance /
+  // host-live-hours) through the startsWith match in isPathAllowed — they are never listed
+  // separately. The page and its routes shipped in 206c68be; this entry and KNOWN_MEMBER_SCOPES
+  // were the only things missing, which left the scope unreachable and unprovisionable.
+  team: ['/team/staff', '/api/member/team'],
 };
 
 /**

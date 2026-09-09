@@ -142,6 +142,29 @@ test('the out-of-stock lookup rides the binding scope too', () => {
   assert.equal(isPathAllowed('/team/oos', station), false);
 });
 
+test('the team scope reaches /team/staff and its API children — and nothing that pays', () => {
+  const c = confinementFor('member', ['team']);
+  assert.equal(c.home, '/team/staff');
+  assert.equal(isPathAllowed('/team/staff', c), true);
+  // The five children are reached through the startsWith match, never listed separately.
+  for (const child of ['roster', 'shifts', 'attendance', 'host-performance', 'host-live-hours']) {
+    assert.equal(isPathAllowed(`/api/member/team/${child}`, c), true, child);
+  }
+  // This scope is a READ surface. Nothing that carries pay, edits the roster, or confirms a
+  // punch may be reachable from it — those live on owner-only routes.
+  assert.equal(isPathAllowed('/api/team', c), false, '/api/team stays deliberately unreachable');
+  assert.equal(isPathAllowed('/api/admin/team', c), false, 'the owner sub-user admin API');
+  assert.equal(isPathAllowed('/dashboard', c), false);
+  // It does not leak the other scopes' pages, and they do not leak it.
+  assert.equal(isPathAllowed('/team/binding', c), false);
+  assert.equal(isPathAllowed('/team/inventory', c), false);
+  const binder = confinementFor('member', ['binding']);
+  assert.equal(isPathAllowed('/team/staff', binder), false);
+  assert.equal(isPathAllowed('/api/member/team/roster', binder), false);
+  const station = confinementFor('station', []);
+  assert.equal(isPathAllowed('/team/staff', station), false);
+});
+
 test('member with an UNKNOWN scope contributes nothing (fail closed) and lands on no-access', () => {
   const c = confinementFor('member', ['payroll']);
   assert.deepEqual(c.allow, []);
