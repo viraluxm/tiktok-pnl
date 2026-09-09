@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import LiveOverlay from './LiveOverlay';
 import { HOST_NAME, type LiveComment } from './simulatorData';
@@ -17,6 +17,7 @@ import { usePracticeHeartbeat } from '@/lib/training/usePracticeHeartbeat';
 import { usePracticeLog } from '@/lib/training/usePracticeLog';
 import { usePracticeRecording } from '@/lib/training/usePracticeRecording';
 import { shortTrainingSessionLabel } from '@/lib/training/session';
+import { practiceEndpoints, type PracticeTransport } from '@/lib/training/transport';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
 type AuctionPhase = 'idle' | 'running' | 'ended';
@@ -51,7 +52,26 @@ function clearTimeoutRef(ref: MutableRefObject<ReturnType<typeof setTimeout> | n
   }
 }
 
-export default function LiveSimulator({ sessionId }: { sessionId: string }) {
+// `transport` decides which API surface this host talks to and which Realtime
+// client it builds. 'admin' is the signed-in staff path; 'token' is an audition
+// candidate on their own phone with no Lensed account, holding only an opaque
+// per-session token. The mode is threaded through rather than sniffed, so there is
+// never any doubt at a call site about which credentials are in play.
+export default function LiveSimulator({
+  sessionId,
+  transport = { mode: 'admin', sessionId },
+}: {
+  sessionId: string;
+  transport?: PracticeTransport;
+}) {
+  // Memoised on the two values it derives from, so the endpoint object is stable
+  // and the hooks below do not re-subscribe on every render.
+  const endpoints = useMemo(
+    () => practiceEndpoints(transport),
+    [transport.mode, transport.token], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  // A tokenised page must never construct the cookie-managing Supabase client.
+  const sessionless = transport.mode === 'token';
   const [sessionState, setSessionState] = useState<SessionState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -109,10 +129,15 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // Realtime: receive trainer commands. Comments/bids are driven by the
   // controller (no automation). Declared early so channelSend is available to
   // the handlers below; handleEvent is hoisted.
-  const { send: channelSend } = useSessionChannel(sessionId, 'host', handleEvent);
+  const { send: channelSend, status: channelStatus } = useSessionChannel(
+    sessionId,
+    'host',
+    handleEvent,
+    sessionless,
+  );
 
   // Best-effort: publish the existing camera track to LiveKit for the trainer preview.
-  const { publish: publishVideo, stop: stopVideo } = useVideoPublish(sessionId);
+  const { publish: publishVideo, stop: stopVideo } = useVideoPublish(sessionId, endpoints);
 
   // Reports liveness to the shared session registry so every admin's launcher can
   // see which sessions are actually running. Self-throttling, so it rides the
@@ -121,18 +146,18 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     beat: registryBeat,
     end: registryEnd,
     unregistered: sessionUnregistered,
-  } = usePracticeHeartbeat(sessionId);
+  } = usePracticeHeartbeat(sessionId, endpoints);
 
   // Records what this screen actually DID, so a replay can re-render the overlay
   // over the footage (the overlay is DOM, not part of the video track). The host is
   // the only party that knows the applied bid total, the winner, and which comments
   // were suppressed — so the emit points below sit where each outcome is decided,
   // never where a command arrives.
-  const practiceLog = usePracticeLog(sessionId);
+  const practiceLog = usePracticeLog(sessionId, endpoints);
 
   // Server-side recording (LiveKit Cloud track-composite egress). Additive: a
   // failure never stops the practice, but it IS shown — see the indicator below.
-  const recording = usePracticeRecording(sessionId);
+  const recording = usePracticeRecording(sessionId, endpoints);
 
   function handleEvent(event: TrainerEvent) {
     switch (event.action) {
@@ -643,6 +668,20 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
             : recording.state.kind === 'dry-run'
               ? 'Recording OFF (dry run) — nothing is being saved'
               : `Not recording — ${recording.state.reason}`}
+        </div>
+      )}
+
+      {/* Realtime is how comments and bids arrive. If the channel is down the host
+          sees a working camera and an inexplicably silent audience, so say so. This
+          matters most on the tokenised page, whose session-less anon client is a
+          different Realtime path from the signed-in one. */}
+      {channelStatus === 'error' && (
+        <div
+          role="status"
+          className="pointer-events-none absolute left-3 right-3 z-30 rounded-md bg-tt-yellow/90 px-2 py-1 text-center text-[10px] font-semibold leading-snug text-black"
+          style={{ top: 'calc(env(safe-area-inset-top) + 5.2rem)' }}
+        >
+          Trainer channel unavailable — comments and bids will not appear.
         </div>
       )}
 

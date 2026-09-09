@@ -1,6 +1,19 @@
--- 141_practice_sessions.sql
+-- 144_practice_sessions.sql
 --
--- RENAMED TWICE: 136 -> 138 -> 141. The SECOND rename (2026-09-09) happened because origin/main
+-- RENAMED THREE TIMES: 136 -> 138 -> 141 -> 144. The third move (2026-09-09) is because
+-- `141_bind_review_too_late_verdict.sql` landed ON origin/main and therefore takes precedence.
+--
+-- NOTE ON ORDER: this file now sorts AFTER 142_practice_events.sql and
+-- 143_practice_recordings.sql, which reference the table it creates. That is a rename artifact, not
+-- an apply order — all three were applied in the order 144(as 136) -> 142(as 139) -> 143, and all
+-- three are already live. Do not attempt to replay any of them.
+--
+-- FOUR renumbers of one chain in one day is the system failing, not bad luck: a sequential prefix
+-- cannot be reserved while ~40 unmerged branches each hold a claim, so any scan is valid only until
+-- the next PR merges. Timestamp prefixes (YYYYMMDDHHMMSS_name.sql, the Supabase CLI default) cannot
+-- collide by construction and would end this entirely.
+--
+-- EARLIER RENAMES: 136 -> 138 -> 141. The SECOND rename (2026-09-09) happened because origin/main
 -- advanced again — PR #236 (feat/employee-portal-redesign) landed `138_shift_trades.sql` AND
 -- `139_shift_approved_minutes.sql`, both now on main and therefore taking precedence over this
 -- chain's 138/139. `140_squish_multibind_stable_plan.sql` is also claimed on a branch, so 141/142

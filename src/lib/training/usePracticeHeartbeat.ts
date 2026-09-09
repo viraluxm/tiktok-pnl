@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { PRACTICE_HEARTBEAT_MS } from '@/lib/training/registry';
+import type { PracticeEndpoints } from '@/lib/training/transport';
 
 // Reports a running host's liveness to the session registry (migration 136).
 //
@@ -14,7 +15,7 @@ import { PRACTICE_HEARTBEAT_MS } from '@/lib/training/registry';
 // NON-FATAL, ALWAYS. Practice must keep working when the registry is unreachable:
 // every failure is swallowed. Liveness is derived from last_seen_at freshness, so a
 // missed beat costs a label in the launcher, never the session itself.
-export function usePracticeHeartbeat(sessionId: string) {
+export function usePracticeHeartbeat(sessionId: string, endpoints: PracticeEndpoints) {
   // TRUE once the registry has said 404 — this session id is not registered (a
   // hand-typed or stale link). Surfaced to the host, because otherwise the session
   // would run fine while being invisible in every manager's launcher.
@@ -51,7 +52,7 @@ export function usePracticeHeartbeat(sessionId: string) {
     lastBeatRef.current = now;
     inFlightRef.current = true;
 
-    void fetch(`/api/admin/training/sessions/${sessionId}/heartbeat`, { method: 'POST' })
+    void fetch(endpoints.heartbeat, { method: 'POST' })
       .then((res) => {
         if (!mountedRef.current) return;
         // An expired session is 307'd to /login by middleware, and fetch follows
@@ -69,7 +70,7 @@ export function usePracticeHeartbeat(sessionId: string) {
       .finally(() => {
         inFlightRef.current = false;
       });
-  }, [sessionId]);
+  }, [endpoints.heartbeat]);
 
   // Marks the session cleanly finished. Idempotent server-side (the first
   // ended_at wins), and latching endedRef stops any further beats from re-opening
@@ -77,10 +78,10 @@ export function usePracticeHeartbeat(sessionId: string) {
   const end = useCallback(() => {
     if (endedRef.current) return;
     endedRef.current = true;
-    void fetch(`/api/admin/training/sessions/${sessionId}/end`, { method: 'POST' }).catch(() => {
+    void fetch(endpoints.end, { method: 'POST' }).catch(() => {
       /* non-fatal: an un-ended session decays to 'stale' on its own */
     });
-  }, [sessionId]);
+  }, [endpoints.end]);
 
   // Best-effort finish when the tab goes away. A normal fetch is cancelled during
   // unload, so this uses sendBeacon, which the browser delivers after teardown.
@@ -93,14 +94,14 @@ export function usePracticeHeartbeat(sessionId: string) {
       if (endedRef.current) return;
       endedRef.current = true;
       try {
-        navigator.sendBeacon?.(`/api/admin/training/sessions/${sessionId}/end`);
+        navigator.sendBeacon?.(endpoints.end);
       } catch {
         /* ignore */
       }
     };
     window.addEventListener('pagehide', onPageHide);
     return () => window.removeEventListener('pagehide', onPageHide);
-  }, [sessionId]);
+  }, [endpoints.end]);
 
   return { beat, end, unregistered };
 }

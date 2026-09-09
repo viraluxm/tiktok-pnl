@@ -3,6 +3,7 @@
 import { useCallback, useRef } from 'react';
 import type { Room } from 'livekit-client';
 import { PRACTICE_ROOM_OPTIONS, PRACTICE_VIDEO_ENCODING } from '@/lib/training/media';
+import type { PracticeEndpoints } from '@/lib/training/transport';
 
 // Publishes the host's EXISTING camera track to LiveKit for the trainer preview,
 // and RETURNS THE PUBLISHED TRACK SIDS.
@@ -29,7 +30,7 @@ export interface PublishedTracks {
   audioTrackId: string | null;
 }
 
-export function useVideoPublish(sessionId: string) {
+export function useVideoPublish(sessionId: string, endpoints: PracticeEndpoints) {
   const roomRef = useRef<Room | null>(null);
 
   const stop = useCallback(async () => {
@@ -53,10 +54,10 @@ export function useVideoPublish(sessionId: string) {
       try {
         const { Room, LocalVideoTrack, LocalAudioTrack, Track } = await import('livekit-client');
 
-        const res = await fetch('/api/training/video-token', {
+        const res = await fetch(endpoints.livekitToken.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: 'host', session: sessionId }),
+          body: JSON.stringify(endpoints.livekitToken.body),
         });
         // An expired session is 307'd to /login by middleware and, because fetch
         // follows redirects, arrives as a 200 with HTML — res.ok would be TRUE.
@@ -159,7 +160,7 @@ export function useVideoPublish(sessionId: string) {
         return { ok: false, reason: `publish failed — ${detail}` };
       }
     },
-    [sessionId, stop],
+    [endpoints, stop],
   );
 
   return { publish, stop };

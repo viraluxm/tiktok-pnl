@@ -41,6 +41,10 @@ export interface PracticeSessionRow {
   event_count: number;
   // This session's recordings, newest first. Empty when nothing was recorded.
   recordings: PracticeRecordingRow[];
+  // The opaque token behind the public /p/<token> host link. Null for sessions
+  // created before tokenised access existed — those still work via the admin host
+  // route, they just cannot be handed to someone without a login.
+  host_token: string | null;
 }
 
 // Human summary of a session's footage, for the History row.

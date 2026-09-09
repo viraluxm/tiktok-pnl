@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 import type { PublishResult } from '@/lib/training/useVideoPublish';
+import type { PracticeEndpoints } from '@/lib/training/transport';
 
 // Starts and stops the server-side recording for one practice session.
 //
@@ -15,7 +16,7 @@ export type RecordingState =
   | { kind: 'recording' }
   | { kind: 'failed'; reason: string };
 
-export function usePracticeRecording(sessionId: string) {
+export function usePracticeRecording(sessionId: string, endpoints: PracticeEndpoints) {
   const [state, setState] = useState<RecordingState>({ kind: 'idle' });
   // Latched so a retry or a double-mount cannot start two egresses for one run.
   const startedRef = useRef(false);
@@ -33,11 +34,13 @@ export function usePracticeRecording(sessionId: string) {
       const tracks = published.tracks;
       startedRef.current = true;
       try {
-        const res = await fetch('/api/admin/training/recording/start', {
+        // session_id is included only in admin mode; the tokenised route takes the
+        // session from its path and must not accept one from the body.
+        const res = await fetch(endpoints.recordingStart, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            session_id: sessionId,
+            ...(endpoints.mode === 'admin' ? { session_id: sessionId } : {}),
             video_track_id: tracks.videoTrackId,
             audio_track_id: tracks.audioTrackId,
           }),
@@ -68,7 +71,7 @@ export function usePracticeRecording(sessionId: string) {
         });
       }
     },
-    [sessionId],
+    [sessionId, endpoints],
   );
 
   // Asks egress to stop. Fire-and-forget: LiveKit finalises on its own when the
@@ -77,14 +80,14 @@ export function usePracticeRecording(sessionId: string) {
   const stop = useCallback(() => {
     if (!startedRef.current) return;
     startedRef.current = false;
-    void fetch('/api/admin/training/recording/stop', {
+    void fetch(endpoints.recordingStop, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify(endpoints.recordingStopBody),
     }).catch(() => {
       /* LiveKit finalises when the room empties */
     });
-  }, [sessionId]);
+  }, [endpoints]);
 
   return { state, start, stop };
 }

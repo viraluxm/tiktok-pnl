@@ -89,6 +89,15 @@ export function trainingControllerUrl(origin: string, sessionId: string): string
 // view. Kept here beside the other training URL helpers so both screens use one
 // definition.
 export const PRACTICE_BACK_HREF = '/dashboard?tab=shows';
+
+// The PUBLIC tokenised host path — what a candidate opens, and what the QR encodes.
+// Distinct from trainingHostPath(), which is the admin route and requires a login.
+export function practiceHostTokenPath(token: string): string {
+  return `/p/${encodeURIComponent(token)}`;
+}
+export function practiceHostTokenUrl(origin: string, token: string): string {
+  return new URL(practiceHostTokenPath(token), origin).toString();
+}
 export const PRACTICE_BACK_LABEL = '\u2190 Back to Shows';
 
 // LEGACY (migration 136): the launcher's session index now lives in the

@@ -9,6 +9,7 @@ import {
   trainingHostUrl,
   trainingControllerUrl,
   parseLauncherSessions,
+  practiceHostTokenUrl,
 } from '@/lib/training/session';
 import {
   derivePracticeStatus,
@@ -314,7 +315,7 @@ function SessionCard({
         </div>
       </div>
 
-      <HostQr sessionId={id} />
+      <HostQr sessionId={id} hostToken={session.host_token} />
 
       <div className="mt-3 grid grid-cols-2 gap-2">
         <a
@@ -327,7 +328,15 @@ function SessionCard({
         </a>
         <button
           type="button"
-          onClick={() => void onCopy(`host:${id}`, trainingHostUrl(window.location.origin, id))}
+          onClick={() =>
+            void onCopy(
+              `host:${id}`,
+              // Same preference as the QR: give out the link that needs no login.
+              session.host_token
+                ? practiceHostTokenUrl(window.location.origin, session.host_token)
+                : trainingHostUrl(window.location.origin, id),
+            )
+          }
           className="flex min-h-[40px] cursor-pointer items-center justify-center rounded-lg border border-tt-border bg-tt-input-bg px-3 text-[13px] font-medium text-tt-text transition-colors hover:bg-tt-card-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
         >
           {copied === `host:${id}` ? 'Copied!' : 'Copy Host Link'}
@@ -433,7 +442,7 @@ function SessionHistory({ sessions }: { sessions: PracticeSessionRow[] }) {
 // external QR service). The encoded value comes from trainingHostUrl() — the
 // exact same helper behind "Copy Host Link" — so scanning and copying always
 // resolve to the same URL.
-function HostQr({ sessionId }: { sessionId: string }) {
+function HostQr({ sessionId, hostToken }: { sessionId: string; hostToken: string | null }) {
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -441,7 +450,13 @@ function HostQr({ sessionId }: { sessionId: string }) {
     // `cancelled` keeps a late resolve from setting state after unmount (e.g. the
     // admin removes the card while generation is in flight).
     let cancelled = false;
-    const url = trainingHostUrl(window.location.origin, sessionId);
+    // Prefer the TOKENISED link: that is the one a candidate can open with no
+    // Lensed account, which is the whole point of the QR. Falls back to the admin
+    // host URL for sessions created before tokens existed — those still work, they
+    // just require a login.
+    const url = hostToken
+      ? practiceHostTokenUrl(window.location.origin, hostToken)
+      : trainingHostUrl(window.location.origin, sessionId);
     QRCode.toString(url, { type: 'svg', errorCorrectionLevel: 'M', margin: 4, width: 280 })
       .then((out) => {
         if (!cancelled) setSvg(out);
@@ -452,7 +467,7 @@ function HostQr({ sessionId }: { sessionId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, hostToken]);
 
   return (
     <div className="mt-3 flex flex-col items-center">
@@ -472,7 +487,9 @@ function HostQr({ sessionId }: { sessionId: string }) {
           </div>
         )}
       </div>
-      <p className="mt-2 text-[12px] text-tt-muted">Scan to join as host</p>
+      <p className="mt-2 text-center text-[12px] text-tt-muted">
+        {hostToken ? 'Scan to join as host — no login needed' : 'Scan to join as host (login required)'}
+      </p>
     </div>
   );
 }

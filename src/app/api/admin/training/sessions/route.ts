@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { requireTrainingAdmin } from '@/lib/training/adminGuard';
 import { isValidTrainingSessionId } from '@/lib/training/session';
+import { generatePracticeHostToken } from '@/lib/training/hostToken';
 import {
   isPracticePurpose,
   normalizeTraineeName,
@@ -20,7 +21,8 @@ export const dynamic = 'force-dynamic';
 
 // The columns the client needs. Enumerated rather than select('*') so adding an
 // internal column later cannot silently start shipping it to the browser.
-const ROW_COLUMNS = 'id, trainee_name, purpose, created_at, started_at, ended_at, last_seen_at';
+const ROW_COLUMNS =
+  'id, trainee_name, purpose, created_at, started_at, ended_at, last_seen_at, host_token';
 
 // The list additionally carries how many timeline events each session recorded, so
 // History can say what is actually there to replay. PostgREST computes this as an
@@ -118,6 +120,10 @@ export async function POST(req: Request) {
       created_by: gate.actorId,
       trainee_name: normalizeTraineeName(body.trainee_name),
       purpose,
+      // Minted at creation so the QR is scannable immediately. It is what lets a
+      // candidate join with no Lensed account; ending the session revokes it,
+      // because the resolver refuses an ended session.
+      host_token: generatePracticeHostToken(),
     })
     .select(ROW_COLUMNS)
     .single();

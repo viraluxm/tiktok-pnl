@@ -7,6 +7,7 @@ import {
   PRACTICE_LOG_MAX_BATCH,
   type PracticeEventKind,
 } from '@/lib/training/practiceLog';
+import type { PracticeEndpoints } from '@/lib/training/transport';
 
 // Buffers the host's timeline and ships it to /api/admin/training/events.
 //
@@ -16,7 +17,7 @@ import {
 //
 // The clock is performance.now(), never Date.now(): offsets must be monotonic so a
 // phone whose wall clock steps mid-session cannot desync the replay.
-export function usePracticeLog(sessionId: string) {
+export function usePracticeLog(sessionId: string, endpoints: PracticeEndpoints) {
   const bufferRef = useRef(createPracticeLogBuffer());
   const flushingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -30,10 +31,10 @@ export function usePracticeLog(sessionId: string) {
     if (batch.length === 0) return;
     flushingRef.current = true;
     try {
-      const res = await fetch('/api/admin/training/events', {
+      const res = await fetch(endpoints.events, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, events: batch }),
+        body: JSON.stringify(endpoints.eventsBody(batch)),
       });
       // A 4xx means this batch will NEVER be accepted (bad shape, or a session that
       // is not registered), so requeueing would retry it forever and block every
@@ -45,7 +46,7 @@ export function usePracticeLog(sessionId: string) {
     } finally {
       flushingRef.current = false;
     }
-  }, [sessionId]);
+  }, [endpoints]);
 
   // Begins the timeline: sets the monotonic epoch, clears any previous buffer and
   // anchors the log with session_start at offset 0.
@@ -97,13 +98,13 @@ export function usePracticeLog(sessionId: string) {
       const batch = bufferRef.current.take(PRACTICE_LOG_MAX_BATCH);
       if (batch.length === 0) return;
       try {
-        const blob = new Blob([JSON.stringify({ session_id: sessionId, events: batch })], {
+        const blob = new Blob([JSON.stringify(endpoints.eventsBody(batch))], {
           type: 'application/json',
         });
         // If the beacon is refused (over the ~64KB budget) put the batch back, so a
         // later flush can still try — the tab may yet survive (pagehide also fires
         // when a page is merely frozen into the back/forward cache).
-        if (!navigator.sendBeacon?.('/api/admin/training/events', blob)) {
+        if (!navigator.sendBeacon?.(endpoints.events, blob)) {
           bufferRef.current.requeue(batch);
         }
       } catch {
@@ -112,7 +113,7 @@ export function usePracticeLog(sessionId: string) {
     };
     window.addEventListener('pagehide', onPageHide);
     return () => window.removeEventListener('pagehide', onPageHide);
-  }, [sessionId]);
+  }, [endpoints]);
 
   return { start, event, finish, flush };
 }
