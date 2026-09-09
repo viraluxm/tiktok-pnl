@@ -26,7 +26,14 @@ export async function GET() {
       .in('user_id', ownerIds)
       .order('starts_at', { ascending: true }),
     admin.from('shifts')
-      .select('id, employee_id, date, start_time, end_time, store_id, source, confirmed_at, break_minutes, auto_closed, approved_minutes')
+      // EVERY field toTimecardEntry reads, and for a reason each:
+      //   source_rule_id — a materialized PLAN row is not worked time and must be dropped, not counted
+      //   clock_in_at / clock_out_at — the punch instants ARE the clocked duration; deriving hours from
+      //     the wall clock instead is what made this page disagree with payroll (and omitting the
+      //     instants from a projection is the same defect that produced the diverged rows in #170)
+      //   approved_minutes — migration 137: the manager-approved figure WINS over the clocked span
+      // Still no pay column: hours are a duration, never a rate or an amount.
+      .select('id, employee_id, date, start_time, end_time, store_id, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, auto_closed, approved_minutes')
       .in('user_id', ownerIds)
       .order('date', { ascending: false })
       .limit(500),
