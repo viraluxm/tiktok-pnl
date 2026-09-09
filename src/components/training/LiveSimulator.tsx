@@ -15,6 +15,7 @@ import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import { useVideoPublish } from '@/lib/training/useVideoPublish';
 import { usePracticeHeartbeat } from '@/lib/training/usePracticeHeartbeat';
 import { usePracticeLog } from '@/lib/training/usePracticeLog';
+import { usePracticeRecording } from '@/lib/training/usePracticeRecording';
 import { shortTrainingSessionLabel } from '@/lib/training/session';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
@@ -128,6 +129,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // were suppressed — so the emit points below sit where each outcome is decided,
   // never where a command arrives.
   const practiceLog = usePracticeLog(sessionId);
+
+  // Server-side recording (LiveKit Cloud track-composite egress). Additive: a
+  // failure never stops the practice, but it IS shown — see the indicator below.
+  const recording = usePracticeRecording(sessionId);
 
   function handleEvent(event: TrainerEvent) {
     switch (event.action) {
@@ -407,6 +412,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     // Close the timeline and ship what is left immediately, rather than waiting up
     // to one flush interval while the session is already over.
     practiceLog.finish();
+    // Ask egress to stop. Only the fast path — LiveKit finalises by itself when the
+    // room empties, so a host that closes the tab still gets a file.
+    recording.stop();
     // Record the clean finish in the registry. Best-effort: an un-ended session
     // decays from 'live' to 'Disconnected' on its own once heartbeats stop, so a
     // failure here costs a label, not correctness.
@@ -471,8 +479,13 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     setMicMissing(noMic);
     setSessionState('running');
     startRuntime();
-    // Best-effort publish of the existing camera (+ mic) tracks (no second getUserMedia).
-    void publishVideo(stream);
+    // Publish, then start recording with the SIDs it returns. Sequenced (not
+    // parallel) because a track-composite egress is defined BY those SIDs, so it
+    // cannot be requested until the tracks actually exist in the room.
+    void publishVideo(stream).then((tracks) => {
+      if (!mountedRef.current) return;
+      void recording.start(tracks);
+    });
   }
 
   function restartPractice() {
@@ -603,6 +616,33 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
           style={{ top: `calc(env(safe-area-inset-top) + ${micMissing ? '4.6rem' : '2.5rem'})` }}
         >
           Not in the session list — created outside Practice Mode.
+        </div>
+      )}
+
+      {/* Recording state. Unlike the live preview, a recording failure must be
+          visible on the host's own screen — a silently unrecorded audition cannot
+          be redone. 'dry-run' appears while PRACTICE_RECORDING_WRITE_ENABLED is
+          unset, so a test run is never mistaken for a real recording. */}
+      {recording.state.kind !== 'idle' && (
+        <div
+          role="status"
+          className="pointer-events-none absolute right-3 z-30 max-w-[62%] rounded-md px-2 py-1 text-[10px] font-semibold leading-snug backdrop-blur-sm"
+          style={{
+            top: 'calc(env(safe-area-inset-top) + 2.75rem)',
+            background:
+              recording.state.kind === 'failed'
+                ? 'rgba(254,44,85,0.92)'
+                : recording.state.kind === 'dry-run'
+                  ? 'rgba(0,0,0,0.6)'
+                  : 'rgba(0,0,0,0.55)',
+            color: '#fff',
+          }}
+        >
+          {recording.state.kind === 'recording'
+            ? '● Recording'
+            : recording.state.kind === 'dry-run'
+              ? 'Recording OFF (dry run) — nothing is being saved'
+              : `Not recording — ${recording.state.reason}`}
         </div>
       )}
 

@@ -5,7 +5,16 @@
 -- before applying — origin/main has moved twice during this chain's short life and taken a prefix
 -- pair each time.
 --
--- NOT YET APPLIED.
+-- ═════════════════════════════════════════════════════════════════════════════
+-- APPLIED TO LIVE on 2026-09-09 07:30 UTC. DO NOT REPLAY.
+-- Class A, mid-show. Verified: captures kept landing (capture_events 165,282 ->
+-- 165,288, 6 rows inside the window); 11 columns, RLS on with 0 policies, 3 indexes.
+-- Both index behaviours proven against the live table:
+--   * a duplicate external_id is rejected (23505) — webhook retries are idempotent
+--   * two 'browser' rows with a NULL external_id are both allowed (partial index)
+-- Prefixes were re-scanned immediately beforehand (140 claimed on a branch; 141/142
+-- are this chain's).
+-- ═════════════════════════════════════════════════════════════════════════════
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 -- WHAT THIS IS FOR

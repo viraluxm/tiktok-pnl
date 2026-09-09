@@ -7,7 +7,7 @@
 // Run:  node src/lib/training/practiceLog.test.mjs
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const src = readFileSync(fileURLToPath(new URL('./practiceLog.ts', import.meta.url)), 'utf8');
@@ -222,10 +222,14 @@ check('a non-object event is rejected', validate('nope') !== null && validate(nu
 
 // ── the kind list must match the CHECK constraint in migration 139 ──
 {
-  const mig = readFileSync(
-    fileURLToPath(new URL('../../../supabase/migrations/139_practice_events.sql', import.meta.url)),
-    'utf8',
-  );
+  // Resolved by SUFFIX, not by a fixed prefix. This chain has already been
+  // renumbered twice (136 -> 138 -> 141/142) because other branches landed the
+  // same prefixes on main, and a hard-coded number makes this test fail for a
+  // reason that has nothing to do with the code under test.
+  const migDir = fileURLToPath(new URL('../../../supabase/migrations/', import.meta.url));
+  const migName = readdirSync(migDir).find((f) => f.endsWith('_practice_events.sql'));
+  assert.ok(migName, 'could not find the practice_events migration');
+  const mig = readFileSync(migDir + migName, 'utf8');
   const inSql = KINDS.filter((k) => new RegExp(`'${k}'`).test(mig));
   check(
     'every app kind appears in the migration CHECK (a drift would silently vanish from replay)',

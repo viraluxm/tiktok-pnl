@@ -1,0 +1,89 @@
+'use client';
+
+import { useCallback, useRef, useState } from 'react';
+import type { PublishedTracks } from '@/lib/training/useVideoPublish';
+
+// Starts and stops the server-side recording for one practice session.
+//
+// NON-FATAL, LIKE EVERY OTHER PRACTICE PATH: a session must run even if recording
+// cannot start. But UNLIKE the live preview, a recording failure is SURFACED —
+// `state` drives a visible indicator, because a silently-unrecorded audition is
+// the exact outcome this feature exists to prevent.
+export type RecordingState =
+  | { kind: 'idle' }
+  | { kind: 'dry-run' } // flag off: the server reported the plan and wrote nothing
+  | { kind: 'recording' }
+  | { kind: 'failed'; reason: string };
+
+export function usePracticeRecording(sessionId: string) {
+  const [state, setState] = useState<RecordingState>({ kind: 'idle' });
+  // Latched so a retry or a double-mount cannot start two egresses for one run.
+  const startedRef = useRef(false);
+
+  const start = useCallback(
+    async (tracks: PublishedTracks | null) => {
+      if (startedRef.current) return;
+      // No published video track means LiveKit never came up. Say so plainly
+      // rather than leaving the indicator at idle, which reads as "not recording
+      // yet" instead of "will not record".
+      if (!tracks) {
+        setState({ kind: 'failed', reason: 'Video did not connect — nothing to record.' });
+        return;
+      }
+      startedRef.current = true;
+      try {
+        const res = await fetch('/api/admin/training/recording/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            video_track_id: tracks.videoTrackId,
+            audio_track_id: tracks.audioTrackId,
+          }),
+        });
+        // An expired session is 307'd to /login by middleware and arrives as a 200
+        // with HTML, so res.ok alone cannot be trusted here (same trap as the
+        // registry hooks).
+        if (res.redirected) {
+          setState({ kind: 'failed', reason: 'Sign-in expired — recording not started.' });
+          return;
+        }
+        const body = (await res.json().catch(() => null)) as
+          | { dry_run?: boolean; recording_id?: string; error?: string; detail?: string; missing?: string[] }
+          | null;
+        if (!res.ok) {
+          const reason =
+            body?.missing?.length
+              ? `Recording not configured (${body.missing.join(', ')})`
+              : body?.detail || body?.error || `Could not start recording (${res.status})`;
+          setState({ kind: 'failed', reason });
+          return;
+        }
+        setState(body?.dry_run ? { kind: 'dry-run' } : { kind: 'recording' });
+      } catch (err) {
+        setState({
+          kind: 'failed',
+          reason: err instanceof Error ? err.message : 'Could not reach the recorder.',
+        });
+      }
+    },
+    [sessionId],
+  );
+
+  // Asks egress to stop. Fire-and-forget: LiveKit finalises on its own when the
+  // room empties, and the webhook is what actually completes the row — so a failure
+  // here costs nothing.
+  const stop = useCallback(() => {
+    if (!startedRef.current) return;
+    startedRef.current = false;
+    void fetch('/api/admin/training/recording/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    }).catch(() => {
+      /* LiveKit finalises when the room empties */
+    });
+  }, [sessionId]);
+
+  return { state, start, stop };
+}
