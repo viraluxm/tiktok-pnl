@@ -2,6 +2,9 @@ import { NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+// One definition, shared with the edit route. These two used to hold their own copies, and the
+// copies drifted (create accepted 2 scopes, edit accepted 5) — see @/lib/member/scopes.
+import { KNOWN_MEMBER_SCOPES, validMemberScopes } from '@/lib/member/scopes';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,19 +18,6 @@ function isManagedRole(v: unknown): v is ManagedRole {
   return typeof v === 'string' && (MANAGED_ROLES as readonly string[]).includes(v);
 }
 
-// The only capability scopes a 'member' may hold. Each maps 1:1 to a /team page + its owner-scoped
-// /api/member/* routes in the middleware allowlist — adding a scope means adding it BOTH places.
-export const KNOWN_MEMBER_SCOPES = ['binding', 'inventory'] as const;
-
-// A non-empty, de-duplicated subset of KNOWN_MEMBER_SCOPES, or null if invalid. Fail closed: an
-// unknown scope would confine the member to nothing, so we reject it at write time.
-function validMemberScopes(raw: unknown): string[] | null {
-  if (!Array.isArray(raw)) return null;
-  const set = [...new Set(raw.filter((s): s is string => typeof s === 'string').map((s) => s.trim()))];
-  if (set.length === 0) return null;
-  if (set.some((s) => !(KNOWN_MEMBER_SCOPES as readonly string[]).includes(s))) return null;
-  return set;
-}
 
 // Supabase's User type doesn't surface banned_until in its public typings even
 // though the admin API returns it; narrow just what we read.
