@@ -36,13 +36,18 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   return NextResponse.json({ session: data as PracticeSessionRow });
 }
 
-// DELETE /api/admin/training/sessions/:id — the launcher's "Remove".
+// DELETE /api/admin/training/sessions/:id — discard a link created by mistake.
 //
-// A HARD DELETE, deliberately. A registry row carries no history worth keeping on
-// its own: it is a link plus four timestamps. Once recordings exist (Deploy 4) they
-// reference this row, and THAT is when removal must become a soft end rather than a
-// delete — the FK in migration 138 will be written ON DELETE CASCADE precisely so
-// this decision has to be revisited then rather than silently shedding recordings.
+// ONLY WHILE started_at IS NULL. A session that has actually RUN can never be
+// deleted, because it is the parent of its recording and its event timeline
+// (Deploys 3 and 4): deleting it would silently shed the replay. Sessions that ran
+// are finished with ended_at and move to the launcher's History section instead —
+// there is no UI path to delete one, and this route refuses even if called
+// directly.
+//
+// A never-started session, by definition, has no heartbeat, no footage and no
+// events, so discarding it loses nothing. That is the whole and only case this
+// route serves: a fat-fingered create.
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const gate = await requireTrainingAdmin();
   if (!gate.ok) return gate.response;
@@ -53,15 +58,35 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   }
 
   const admin = createAdminClient();
+  // The `is('started_at', null)` predicate IS the guard — enforced in the DELETE
+  // itself rather than by a read-then-write, so a session that starts between the
+  // check and the delete cannot slip through.
   const { data, error } = await admin
     .from('practice_sessions')
     .delete()
     .eq('owner_id', gate.ownerId)
     .eq('id', id)
+    .is('started_at', null)
     .select('id')
     .maybeSingle();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  if (!data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+
+  if (!data) {
+    // Nothing deleted: either it never existed, or it has run. Distinguish them so
+    // the refusal is explainable rather than a bare 404.
+    const { data: existing } = await admin
+      .from('practice_sessions')
+      .select('started_at')
+      .eq('owner_id', gate.ownerId)
+      .eq('id', id)
+      .maybeSingle();
+    if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    return NextResponse.json(
+      { error: 'This session has already run and is kept in history — it cannot be deleted.' },
+      { status: 409 },
+    );
+  }
+
   return NextResponse.json({ removed: id });
 }

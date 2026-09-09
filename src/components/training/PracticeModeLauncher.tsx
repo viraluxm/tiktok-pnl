@@ -12,9 +12,9 @@ import {
 } from '@/lib/training/session';
 import {
   derivePracticeStatus,
+  formatPracticeRunLength,
   PRACTICE_STATUS_LABEL,
   PRACTICE_TRAINEE_NAME_MAX,
-  type PracticePurpose,
   type PracticeSessionRow,
   type PracticeStatus,
 } from '@/lib/training/registry';
@@ -44,7 +44,6 @@ export default function PracticeModeLauncher() {
   const remove = useRemovePracticeSession();
 
   const [name, setName] = useState('');
-  const [purpose, setPurpose] = useState<PracticePurpose>('training');
   const [copied, setCopied] = useState<string | null>(null);
 
   // `now` drives the derived status badges between refetches, so a session that
@@ -56,19 +55,21 @@ export default function PracticeModeLauncher() {
     return () => clearInterval(t);
   }, []);
 
+  // ended_at IS the boundary between the two lists, so a session cannot be in both
+  // and a host that rejoins (restartPractice clears ended_at) moves back to Active
+  // by itself.
+  const active = useMemo(() => sessions.filter((s) => s.ended_at === null), [sessions]);
+  const history = useMemo(() => sessions.filter((s) => s.ended_at !== null), [sessions]);
   const liveCount = useMemo(
-    () => sessions.filter((s) => derivePracticeStatus(s, now) === 'live').length,
-    [sessions, now],
+    () => active.filter((s) => derivePracticeStatus(s, now) === 'live').length,
+    [active, now],
   );
 
   const createSession = useCallback(() => {
     // Fire-and-forget: the mutation invalidates the list on success, and its own
     // error state renders below. The id is minted SERVER-side now.
-    create.mutate(
-      { trainee_name: name.trim() || undefined, purpose },
-      { onSuccess: () => setName('') },
-    );
-  }, [create, name, purpose]);
+    create.mutate({ trainee_name: name.trim() || undefined }, { onSuccess: () => setName('') });
+  }, [create, name]);
 
   const copyLink = useCallback(async (label: string, url: string) => {
     try {
@@ -99,21 +100,6 @@ export default function PracticeModeLauncher() {
           placeholder="Trainee / candidate name (optional)"
           className="min-w-0 flex-1 rounded-xl border border-tt-input-border bg-tt-input-bg px-3 py-2.5 text-sm text-tt-text transition-colors focus:border-tt-cyan focus:outline-none"
         />
-        <div className="inline-flex shrink-0 rounded-xl border border-tt-border bg-tt-input-bg p-0.5">
-          {(['training', 'audition'] as const).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => setPurpose(p)}
-              aria-pressed={purpose === p}
-              className={`min-h-[40px] cursor-pointer rounded-lg px-4 text-[13px] font-semibold capitalize transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40 ${
-                purpose === p ? 'bg-tt-card text-tt-text shadow-sm' : 'text-tt-muted hover:text-tt-text'
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
         <button
           type="button"
           onClick={createSession}
@@ -132,8 +118,7 @@ export default function PracticeModeLauncher() {
 
       <div className="mt-4 flex items-center gap-3 text-[13px] text-tt-muted">
         <span>
-          <span className="font-semibold tabular-nums text-tt-text">{sessions.length}</span> session
-          {sessions.length === 1 ? '' : 's'}
+          <span className="font-semibold tabular-nums text-tt-text">{active.length}</span> active
         </span>
         {liveCount > 0 && (
           <span className="flex items-center gap-1.5 font-semibold text-tt-green">
@@ -151,27 +136,29 @@ export default function PracticeModeLauncher() {
         </p>
       ) : isLoading ? (
         <p className="mt-6 text-[13px] text-tt-muted">Loading sessions…</p>
-      ) : sessions.length === 0 ? (
+      ) : active.length === 0 ? (
         <p className="mt-6 text-[13px] text-tt-muted">
-          No sessions yet. Create one, then have the host scan its QR code or open the host link.
+          No active sessions. Create one, then have the host scan its QR code or open the host link.
         </p>
       ) : (
         <ul className="mt-6 grid gap-3 sm:grid-cols-2">
-          {sessions.map((s) => (
+          {active.map((s) => (
             <SessionCard
               key={s.id}
               session={s}
               status={derivePracticeStatus(s, now)}
               copied={copied}
               onCopy={copyLink}
-              onRemove={() => remove.mutate(s.id)}
-              removing={remove.isPending && remove.variables === s.id}
+              onDiscard={() => remove.mutate(s.id)}
+              discarding={remove.isPending && remove.variables === s.id}
             />
           ))}
         </ul>
       )}
+
+      <SessionHistory sessions={history} />
       {remove.error && (
-        <p className="mt-2 text-[13px] text-tt-red">Could not remove: {remove.error.message}</p>
+        <p className="mt-2 text-[13px] text-tt-red">Could not discard: {remove.error.message}</p>
       )}
     </div>
   );
@@ -242,15 +229,15 @@ function SessionCard({
   status,
   copied,
   onCopy,
-  onRemove,
-  removing,
+  onDiscard,
+  discarding,
 }: {
   session: PracticeSessionRow;
   status: PracticeStatus;
   copied: string | null;
   onCopy: (label: string, url: string) => Promise<void>;
-  onRemove: () => void;
-  removing: boolean;
+  onDiscard: () => void;
+  discarding: boolean;
 }) {
   const id = session.id;
   const rename = useRenamePracticeSession();
@@ -294,9 +281,8 @@ function SessionCard({
               {session.trainee_name || 'Unnamed'}
             </button>
           )}
-          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-tt-muted">
-            <span className="capitalize">{session.purpose}</span>
-            <span className="font-mono tabular-nums">{shortTrainingSessionLabel(id)}</span>
+          <div className="mt-0.5 font-mono text-[11px] tabular-nums text-tt-muted">
+            {shortTrainingSessionLabel(id)}
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
@@ -305,15 +291,21 @@ function SessionCard({
           >
             {PRACTICE_STATUS_LABEL[status]}
           </span>
-          <button
-            type="button"
-            onClick={onRemove}
-            disabled={removing}
-            className="cursor-pointer text-[12px] text-tt-muted transition-colors hover:text-tt-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
-            aria-label={`Remove session ${shortTrainingSessionLabel(id)}`}
-          >
-            {removing ? 'Removing…' : 'Remove'}
-          </button>
+          {/* Discard is offered ONLY for a session that has never run. Once a host
+              has started, the session owns its footage and event timeline, so it is
+              kept in History and there is no delete path — the route refuses too. */}
+          {session.started_at === null && (
+            <button
+              type="button"
+              onClick={onDiscard}
+              disabled={discarding}
+              className="cursor-pointer text-[12px] text-tt-muted transition-colors hover:text-tt-text disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
+              aria-label={`Discard unused session ${shortTrainingSessionLabel(id)}`}
+              title="Only an unused session can be discarded"
+            >
+              {discarding ? 'Discarding…' : 'Discard'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -357,6 +349,54 @@ function SessionCard({
         <p className="mt-2 text-[12px] text-tt-red">Rename failed: {rename.error.message}</p>
       )}
     </li>
+  );
+}
+
+// Finished sessions. They are KEPT, never deletable: a session that ran owns its
+// footage and its event timeline (Deploys 3 and 4), so this list is where a replay
+// will hang off. Collapsed by default so a long history never buries the active
+// sessions a manager is actually working with.
+function SessionHistory({ sessions }: { sessions: PracticeSessionRow[] }) {
+  const [open, setOpen] = useState(false);
+  if (sessions.length === 0) return null;
+
+  return (
+    <section className="mt-8 border-t border-tt-border pt-5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full cursor-pointer items-center justify-between text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
+      >
+        <span className="text-sm font-semibold text-tt-text">
+          History
+          <span className="ml-2 font-normal tabular-nums text-tt-muted">{sessions.length}</span>
+        </span>
+        <span className="text-[13px] text-tt-muted">{open ? 'Hide' : 'Show'}</span>
+      </button>
+
+      {open && (
+        <ul className="mt-3 divide-y divide-tt-border">
+          {sessions.map((s) => (
+            <li key={s.id} className="flex items-baseline justify-between gap-3 py-2.5">
+              <span className="min-w-0 truncate text-[13px] font-medium text-tt-text">
+                {s.trainee_name || 'Unnamed'}
+              </span>
+              <span className="flex shrink-0 items-baseline gap-3 text-[12px] tabular-nums text-tt-muted">
+                <span>{formatPracticeRunLength(s)}</span>
+                <span>
+                  {new Date(s.ended_at ?? s.created_at).toLocaleDateString(undefined, {
+                    month: 'short',
+                    day: 'numeric',
+                  })}
+                </span>
+                <span className="font-mono">{shortTrainingSessionLabel(s.id)}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

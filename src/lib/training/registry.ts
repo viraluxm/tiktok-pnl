@@ -80,9 +80,35 @@ export const PRACTICE_STATUS_LABEL: Record<PracticeStatus, string> = {
   ended: 'Ended',
 };
 
-// The two purposes a session can serve. Mirrors the CHECK constraint in migration
-// 136 — if these drift, an insert fails loudly rather than writing a value the
-// replay filter would silently drop.
+// How long a session actually ran, for the History list.
+//
+// Measured started_at -> ended_at, NOT created_at -> ended_at: creating a link and
+// starting a session are different moments (a link can sit unused for hours), so
+// using created_at would report wall-clock idle time as practice time.
+//
+// A session with no started_at never ran at all — that is a real and meaningful
+// outcome for an audition (a no-show), so it is labelled rather than shown as 0m.
+export function formatPracticeRunLength(
+  row: Pick<PracticeSessionRow, 'started_at' | 'ended_at'>,
+  nowMs: number = Date.now(),
+): string {
+  const started = epoch(row.started_at);
+  if (started === null) return 'Never started';
+  // An un-ended row is still running: measure to now so History stays correct even
+  // if a row lands here while a final write is in flight.
+  const finished = epoch(row.ended_at) ?? nowMs;
+  const secs = Math.max(0, Math.round((finished - started) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
+}
+
+// The two purposes a session can serve. NOT SURFACED IN THE UI: the
+// training/audition distinction turned out not to matter operationally, so the
+// launcher does not ask and the column simply takes its 'training' default. The
+// constant and validator are kept because the CHECK constraint in migration 136 is
+// still there — if a caller ever sends a purpose again, it must be a legal one.
 export const PRACTICE_PURPOSES = ['training', 'audition'] as const;
 export type PracticePurpose = (typeof PRACTICE_PURPOSES)[number];
 

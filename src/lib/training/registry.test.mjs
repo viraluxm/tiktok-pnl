@@ -154,4 +154,49 @@ check(
   `${NAME_MAX} chars`,
 );
 
+// ── History run length ──
+// Measured started_at -> ended_at, NOT created_at -> ended_at: a link can sit
+// unused for hours before a host starts, and counting that idle time as practice
+// time would make every History row wrong.
+function runLength(row, nowMs) {
+  const started = epoch(row.started_at);
+  if (started === null) return 'Never started';
+  const finished = epoch(row.ended_at) ?? nowMs;
+  const secs = Math.max(0, Math.round((finished - started) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
+}
+check(
+  'a session that never started says so (an audition no-show, not "0m")',
+  runLength({ started_at: null, ended_at: iso(0) }, NOW) === 'Never started',
+);
+check('sub-minute runs show seconds', runLength({ started_at: iso(-45_000), ended_at: iso(0) }, NOW) === '45s');
+check('a 12-minute run reads 12m', runLength({ started_at: iso(-12 * 60_000), ended_at: iso(0) }, NOW) === '12m');
+check(
+  'the full 30-minute practice session reads 30m',
+  runLength({ started_at: iso(-30 * 60_000), ended_at: iso(0) }, NOW) === '30m',
+);
+check(
+  'over an hour is h + zero-padded m',
+  runLength({ started_at: iso(-(63 * 60_000)), ended_at: iso(0) }, NOW) === '1h 03m',
+);
+check(
+  'a still-running row measures to now rather than showing nothing',
+  runLength({ started_at: iso(-5 * 60_000), ended_at: null }, NOW) === '5m',
+);
+check(
+  'a negative interval (skew) clamps to 0s instead of going negative',
+  runLength({ started_at: iso(0), ended_at: iso(-10_000) }, NOW) === '0s',
+);
+
+// ── the source must measure from started_at, never created_at ──
+check(
+  'formatPracticeRunLength reads started_at and never created_at',
+  /formatPracticeRunLength/.test(src) &&
+    /epoch\(row\.started_at\)/.test(src) &&
+    !/formatPracticeRunLength[\s\S]{0,600}created_at/.test(src),
+);
+
 console.log(`\n${passed} checks passed`);

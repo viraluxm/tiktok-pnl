@@ -1,11 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import {
-  PRACTICE_LIVE_WINDOW_MS,
-  type PracticePurpose,
-  type PracticeSessionRow,
-} from '@/lib/training/registry';
+import { PRACTICE_LIVE_WINDOW_MS, type PracticeSessionRow } from '@/lib/training/registry';
 
 const KEY = 'practice-sessions';
 
@@ -65,7 +61,8 @@ export function usePracticeSessions() {
 export function useCreatePracticeSession() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { trainee_name?: string; purpose?: PracticePurpose; id?: string }) => {
+    // `id` is only ever passed by the one-time legacy localStorage import.
+    mutationFn: async (input: { trainee_name?: string; id?: string }) => {
       const body = (await readJson(
         await fetch('/api/admin/training/sessions', {
           method: 'POST',

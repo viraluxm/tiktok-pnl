@@ -22,6 +22,7 @@ const videoPublish = read('./useVideoPublish.ts');
 const launcher = read('../../components/training/PracticeModeLauncher.tsx');
 const controlClient = read('../../components/training/ControlClient.tsx');
 const trainerEventsSrc = read('../../components/training/trainerEvents.ts');
+const deleteRoute = read('../../app/api/admin/training/sessions/[id]/route.ts');
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -159,7 +160,37 @@ check(
   'the launcher still truncates nothing',
   !/\.slice\(0,\s*\w+\)/.test(launcher),
 );
-check('manual Remove is still wired', /onRemove=\{\(\) => remove\.mutate\(s\.id\)\}/.test(launcher));
+check(
+  'discard is still wired for unused sessions',
+  /onDiscard=\{\(\) => remove\.mutate\(s\.id\)\}/.test(launcher),
+);
+// ── A session that RAN must be un-deletable: it owns its recording and event
+// timeline (Deploys 3/4), so deleting it would silently shed the replay. Enforced
+// in BOTH places — no button, and a route that refuses if called directly. ──
+check(
+  'the discard button is offered only when started_at is null',
+  /session\.started_at === null &&[\s\S]{0,600}onDiscard/.test(launcher),
+);
+check(
+  'the DELETE route itself refuses a session that has started',
+  /\.is\('started_at', null\)/.test(deleteRoute),
+);
+check(
+  'a refused delete explains itself rather than 404-ing',
+  /already run and is kept in history/.test(deleteRoute),
+);
+check(
+  'finished sessions are listed in History, not deleted',
+  /function SessionHistory/.test(launcher) && /ended_at !== null/.test(launcher),
+);
+check(
+  'active and history are split on ended_at (a session cannot be in both)',
+  /ended_at === null/.test(launcher) && /ended_at !== null/.test(launcher),
+);
+check(
+  'the training/audition toggle is gone from the launcher',
+  !/purpose/.test(launcher),
+);
 
 // ── P0-3: the CSP must name the LiveKit origin, DERIVED not hard-coded ──
 //
