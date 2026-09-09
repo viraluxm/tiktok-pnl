@@ -208,4 +208,77 @@ check(
   /res\.redirected/.test(hook),
 );
 
+// ── REGRESSION GUARD: the constraints handed to LocalVideoTrack must be
+// unwrappable by livekit-client, or publishTrack throws and NO video is ever
+// published — in every browser, silently.
+//
+// Verbatim port of livekit-client 2.20.0's unwrapConstraint. It is called during
+// publish as:
+//     track.constraints.height && unwrapConstraint(track.constraints.height) >= 1080
+// so a `{max}`-only range (which is what media.ts uses for capture, correctly, to
+// avoid pinning either axis) reaches the throw. The fix is to supply the track's
+// RESOLVED settings as plain numbers instead of letting LocalVideoTrack fall back
+// to getConstraints(). ──
+function unwrapConstraint(constraint) {
+  if (typeof constraint === 'string' || typeof constraint === 'number') return constraint;
+  if (Array.isArray(constraint)) return constraint[0];
+  if (constraint.exact !== undefined) {
+    return Array.isArray(constraint.exact) ? constraint.exact[0] : constraint.exact;
+  }
+  if (constraint.ideal !== undefined) {
+    return Array.isArray(constraint.ideal) ? constraint.ideal[0] : constraint.ideal;
+  }
+  throw Error('could not unwrap constraint');
+}
+check(
+  'a {max}-only range is exactly what livekit-client CANNOT unwrap (the bug)',
+  (() => { try { unwrapConstraint({ max: 1280 }); return false; } catch { return true; } })(),
+);
+check(
+  'LocalVideoTrack is NOT given undefined constraints (that falls back to the {max} ranges)',
+  !/new LocalVideoTrack\(videoTrack, undefined, true\)/.test(publish),
+);
+check(
+  'it is given constraints derived from the track\'s resolved settings',
+  /videoTrack\.getSettings\(\)/.test(publish) &&
+    /new LocalVideoTrack\(videoTrack, publishConstraints, true\)/.test(publish),
+);
+// Simulate the real shape those settings produce and assert it survives the helper.
+for (const settings of [
+  { width: 720, height: 1280, frameRate: 30 },   // portrait phone
+  { width: 1280, height: 720, frameRate: 30 },   // landscape laptop
+  { width: 640, height: 480, frameRate: 29.97 }, // odd framerate
+  {},                                            // dimensions not yet known
+]) {
+  const built = {
+    ...(typeof settings.width === 'number' ? { width: settings.width } : {}),
+    ...(typeof settings.height === 'number' ? { height: settings.height } : {}),
+    ...(typeof settings.frameRate === 'number' ? { frameRate: Math.round(settings.frameRate) } : {}),
+  };
+  check(
+    `settings ${JSON.stringify(settings)} produce publishable constraints`,
+    (() => {
+      try {
+        for (const v of Object.values(built)) unwrapConstraint(v);
+        // The guard in livekit-client is `track.constraints.height && ...`, so an
+        // absent height short-circuits before the throw — also safe.
+        return true;
+      } catch { return false; }
+    })(),
+  );
+}
+check(
+  'the capture constraints themselves are left alone (portrait framing preserved)',
+  (() => {
+    // Test the DECLARATION, not the file — media.ts's prose legitimately mentions
+    // "ideal" when explaining why it is not used.
+    const media = readFileSync(fileURLToPath(new URL('./media.ts', import.meta.url)), 'utf8');
+    const block = media.slice(
+      media.indexOf('PRACTICE_VIDEO_CAPTURE'),
+      media.indexOf('};', media.indexOf('PRACTICE_VIDEO_CAPTURE')),
+    );
+    return !/\bideal\s*:/.test(block) && !/\bexact\s*:/.test(block) && /max: 1280/.test(block);
+  })(),
+);
+
 console.log(`\n${passed} checks passed`);

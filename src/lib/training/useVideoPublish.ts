@@ -94,7 +94,33 @@ export function useVideoPublish(sessionId: string) {
 
         // Reuse the existing tracks; userProvidedTrack=true keeps device ownership
         // with the simulator (LiveKit won't stop/reacquire them).
-        const localVideo = new LocalVideoTrack(videoTrack, undefined, true);
+        //
+        // THE SECOND ARGUMENT IS LOAD-BEARING — DO NOT PASS undefined HERE.
+        // With no constraints supplied, LocalVideoTrack falls back to the track's
+        // own getConstraints(), which are PRACTICE_VIDEO_CAPTURE's `{ max: 1280 }`
+        // ranges. During publishTrack, livekit-client picks a degradation
+        // preference with:
+        //     track.constraints.height && unwrapConstraint(track.constraints.height) >= 1080
+        // and its unwrapConstraint() understands only a bare number, an array,
+        // `{exact}` or `{ideal}` — a `{max}`-only range falls through to
+        // `throw Error('could not unwrap constraint')`. That aborted every publish
+        // in EVERY browser: the camera ran and the host saw themselves, while the
+        // trainer sat on "Waiting for host video…" and nothing was ever recorded.
+        //
+        // Passing the track's RESOLVED settings as plain numbers fixes it at the
+        // only place that needs fixing. The capture constraints stay exactly as
+        // media.ts defines them — `{max}` with no `ideal`, so neither axis is
+        // pinned and a portrait phone keeps its framing — while what LiveKit reads
+        // is simply the size the camera actually produced.
+        const settings = videoTrack.getSettings();
+        const publishConstraints: MediaTrackConstraints = {
+          ...(typeof settings.width === 'number' ? { width: settings.width } : {}),
+          ...(typeof settings.height === 'number' ? { height: settings.height } : {}),
+          ...(typeof settings.frameRate === 'number'
+            ? { frameRate: Math.round(settings.frameRate) }
+            : {}),
+        };
+        const localVideo = new LocalVideoTrack(videoTrack, publishConstraints, true);
         const videoPub = await room.localParticipant.publishTrack(localVideo, {
           source: Track.Source.Camera,
           name: 'host-camera',
