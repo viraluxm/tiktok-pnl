@@ -83,6 +83,14 @@ export function trainingControllerUrl(origin: string, sessionId: string): string
 // to ~39 bytes, so even several hundred sessions stay far under the ~5 MiB
 // origin quota (40 ids ≈ 1.5 KB ≈ 0.03%). Kept pure so they're unit-testable.
 
+// LEGACY (migration 136): the launcher's session index now lives in the
+// practice_sessions table. parseLauncherSessions is still used, once, to IMPORT
+// whatever a browser's old localStorage array still holds; addLauncherSession and
+// removeLauncherSession below have no production caller any more and are kept only
+// so that import path stays covered. Do not wire them back into the launcher —
+// writing to localStorage again would reintroduce the per-browser index this
+// replaced.
+
 // Parse a raw localStorage value into a clean id list. Tolerates the previously
 // capped arrays, junk entries and malformed JSON; order is preserved.
 export function parseLauncherSessions(raw: string | null): string[] {

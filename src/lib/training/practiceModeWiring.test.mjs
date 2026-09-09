@@ -134,13 +134,32 @@ check(
   'no destructive slice(0, N) truncation remains',
   !/\.slice\(0,\s*\w+\)/.test(launcher),
 );
+// P0-2's concern was that the launcher's localStorage array was the ONLY record of
+// a session id, so truncating it would strand a running practice live. That record
+// now lives in practice_sessions (migration 136), which is shared across machines
+// and survives a cache clear — a strictly stronger guarantee than a non-destructive
+// local list. The assertions below therefore pin the NEW mechanism, and in
+// particular the one ordering that could still lose an id: the legacy list must be
+// IMPORTED before it is deleted.
 check(
-  'launcher uses the shared non-destructive list helpers',
-  /parseLauncherSessions/.test(launcher) &&
-    /addLauncherSession/.test(launcher) &&
-    /removeLauncherSession/.test(launcher),
+  'the launcher reads sessions from the registry, not from localStorage',
+  /usePracticeSessions\(\)/.test(launcher),
 );
-check('manual Remove is still wired', /removeSession\(id\)/.test(launcher));
+check(
+  'the legacy localStorage key is only ever READ and REMOVED, never written',
+  /getItem\(LEGACY_STORAGE_KEY\)/.test(launcher) &&
+    /removeItem\(LEGACY_STORAGE_KEY\)/.test(launcher) &&
+    !/setItem\(LEGACY_STORAGE_KEY/.test(launcher),
+);
+check(
+  'legacy ids are imported BEFORE the key is deleted (never the reverse)',
+  launcher.indexOf('mutateAsync({ id })') < launcher.indexOf('removeItem(LEGACY_STORAGE_KEY)'),
+);
+check(
+  'the launcher still truncates nothing',
+  !/\.slice\(0,\s*\w+\)/.test(launcher),
+);
+check('manual Remove is still wired', /onRemove=\{\(\) => remove\.mutate\(s\.id\)\}/.test(launcher));
 
 // ── P0-3: the CSP must name the LiveKit origin, DERIVED not hard-coded ──
 //

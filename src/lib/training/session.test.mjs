@@ -150,8 +150,18 @@ check(
     /const url = trainingHostUrl\(window\.location\.origin, sessionId\)/.test(launcherSrc),
 );
 check(
+  // The launcher now renders each session through a SessionCard, so the copy call
+  // goes via that card's onCopy prop rather than a local copyLink. The invariant
+  // being protected is unchanged: the copied URL comes from the shared helper, so
+  // it can never disagree with the QR code.
   'Copy Host Link copies trainingHostUrl(...)',
-  /copyLink\(`host:\$\{id\}`, trainingHostUrl\(window\.location\.origin, id\)\)/.test(launcherSrc),
+  /onCopy\(`host:\$\{id\}`, trainingHostUrl\(window\.location\.origin, id\)\)/.test(launcherSrc),
+);
+check(
+  'Copy Controller Link copies trainingControllerUrl(...)',
+  /onCopy\(\s*`ctrl:\$\{id\}`,\s*trainingControllerUrl\(window\.location\.origin, id\)/.test(
+    launcherSrc,
+  ),
 );
 check(
   'launcher builds no second/local host URL implementation',

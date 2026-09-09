@@ -13,6 +13,7 @@ import {
 import { PRACTICE_VIDEO_CAPTURE } from '@/lib/training/media';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import { useVideoPublish } from '@/lib/training/useVideoPublish';
+import { usePracticeHeartbeat } from '@/lib/training/usePracticeHeartbeat';
 import { shortTrainingSessionLabel } from '@/lib/training/session';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
@@ -107,6 +108,15 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
 
   // Best-effort: publish the existing camera track to LiveKit for the trainer preview.
   const { publish: publishVideo, stop: stopVideo } = useVideoPublish(sessionId);
+
+  // Reports liveness to the shared session registry so every admin's launcher can
+  // see which sessions are actually running. Self-throttling, so it rides the
+  // per-second session tick below rather than adding a timer of its own.
+  const {
+    beat: registryBeat,
+    end: registryEnd,
+    unregistered: sessionUnregistered,
+  } = usePracticeHeartbeat(sessionId);
 
   function handleEvent(event: TrainerEvent) {
     switch (event.action) {
@@ -323,11 +333,18 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         completePractice();
       } else {
         broadcastSessionState('running');
+        // Registry heartbeat. Called every second but self-throttled to one
+        // request per PRACTICE_HEARTBEAT_MS, so this adds no timer and stops
+        // automatically whenever the session clock stops.
+        registryBeat();
       }
     }, 1000);
 
     viewerTickRef.current = setInterval(updateViewers, 2500);
     updateViewers();
+    // Beat once up front so the launcher shows the session as live immediately
+    // rather than up to one heartbeat interval later.
+    registryBeat();
     // Initial mirror so the controller isn't blank for up to a second.
     broadcastSessionState('running');
   }
@@ -349,6 +366,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     // is idempotent (roomRef/streamRef are nulled), so the unmount cleanup and
     // restartPractice() can both call it again safely.
     stopStream();
+    // Record the clean finish in the registry. Best-effort: an un-ended session
+    // decays from 'live' to 'Disconnected' on its own once heartbeats stop, so a
+    // failure here costs a label, not correctness.
+    registryEnd();
   }
 
   async function startPractice() {
@@ -528,6 +549,19 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
           style={{ top: 'calc(env(safe-area-inset-top) + 2.5rem)' }}
         >
           No microphone — this session has no audio. Allow mic access and restart.
+        </div>
+      )}
+
+      {/* This session id is not in the shared registry, so it is invisible in every
+          manager's launcher (a hand-typed or stale link). The practice itself still
+          works, which is exactly why it needs saying. */}
+      {sessionUnregistered && (
+        <div
+          role="status"
+          className="pointer-events-none absolute left-3 z-30 max-w-[70%] rounded-md bg-black/60 px-2 py-1 text-[10px] font-semibold leading-snug text-white/90 backdrop-blur-sm"
+          style={{ top: `calc(env(safe-area-inset-top) + ${micMissing ? '4.6rem' : '2.5rem'})` }}
+        >
+          Not in the session list — created outside Practice Mode.
         </div>
       )}
 
