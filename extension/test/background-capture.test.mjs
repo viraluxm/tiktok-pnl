@@ -105,6 +105,14 @@ async function run() {
   const r4 = await send(l, { type: 'AUTO_BIND', sale: sale('order-A-1'), stagedSkus: [] });
   ok('dedup: same order+status → skipped:true, ok:true', r4 && r4.ok === true && r4.skipped === true, JSON.stringify(r4));
 
+  // A2b) EVERY capture POST, not just the first. 4ea2141a had to stamp ext_version in TWO
+  // literals (buildCaptureRow and upsertCaptureEvent's inlined copy); asserting only
+  // captureBodies[0] would pass with the hot-path literal stamped and the other missed.
+  const allBodies = sw.captureBodies.map((b) => { try { return JSON.parse(b); } catch (_) { return null; } });
+  ok('A2b) every capture POST body carries ext_version',
+     allBodies.length > 0 && allBodies.every((b) => b && b.ext_version === MANIFEST_VERSION),
+     JSON.stringify(allBodies.map((b) => b && b.ext_version)));
+
   console.log('\n' + (fail === 0 ? 'ALL PASS' : 'FAILURES') + `: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 }

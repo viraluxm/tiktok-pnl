@@ -2,9 +2,6 @@ import { notFound } from 'next/navigation';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { resolveOwnerByScheduleToken } from '@/lib/schedule/teamScheduleToken';
 import { laWallClockOf, laTodayISO } from '@/lib/schedule/timezone';
-import { generateRecurringShifts } from '@/lib/employees';
-import { ruleDatesOwnedByInstances } from '@/lib/schedule/calendarModel';
-import type { ShiftRule, ShiftException } from '@/types';
 import { monthGridDays, startOfMonthISO } from '@/lib/weeklySchedule';
 import TeamScheduleBoard, { type PublicShift } from './TeamScheduleBoard';
 
@@ -18,6 +15,11 @@ export const dynamic = 'force-dynamic';
 //
 // What this exposes: names, roles, and SCHEDULED spans. Deliberately NOT punches, hours worked,
 // hourly rate, or pay — a link that can be forwarded must not carry payroll.
+//
+// SCOPE. This is the OWNER-shared board (team_schedule_tokens -> a user_id), a different thing
+// from the employee portal at /s/[token] (employee_access_tokens -> an employee). The two token
+// namespaces are disjoint, so this route cannot redirect into the Phase 2 team view — a team token
+// does not identify an employee and would 404 there. See the audit note in the Phase 2 report.
 
 export default async function TeamSchedulePage({
   params,
@@ -38,7 +40,7 @@ export default async function TeamSchedulePage({
 
   // EVERY query is filtered by the owner resolved from the token. Service-role bypasses RLS, so
   // this explicit filter is the security boundary.
-  const [{ data: instances }, { data: employees }, { data: rules }, { data: exceptions }] = await Promise.all([
+  const [{ data: instances }, { data: employees }] = await Promise.all([
     admin
       .from('shift_instances')
       .select('id, employee_id, shift_date, starts_at, ends_at, status, released_at, role, shift_rule_id')
@@ -51,11 +53,6 @@ export default async function TeamSchedulePage({
       // Name + role ONLY. Never hourly_rate, never phone.
       .select('id, name, role, status')
       .eq('user_id', ownerId),
-    // Most of the schedule is still recurring RULES, not materialized instances (the forward
-    // materializer stopped in Aug 2026). Reading instances alone left this link almost empty
-    // past the first week, so project the rules here exactly as the admin calendar does.
-    admin.from('shift_rules').select('*').eq('user_id', ownerId).eq('active', true),
-    admin.from('shift_exceptions').select('*').eq('user_id', ownerId),
   ]);
 
   const nameById = new Map((employees ?? []).map((e) => [e.id as string, e]));
@@ -77,41 +74,18 @@ export default async function TeamSchedulePage({
     });
   }
 
-  // Rule projections, minus any day already frozen into a real instance, so a materialized day
-  // is not counted twice.
+  // NO RULE PROJECTION. This board is shift_instances ONLY.
   //
-  // The suppression set is built from ALL instances — BEFORE the display filter above — and keyed
-  // by (rule, date). `takenByInstance` below cannot do this job: it is derived from the VISIBLE
-  // list, so a cancelled or released occurrence is absent from it and the rule would re-project
-  // the very day a manager just removed. The rule key also survives a release, which nulls
-  // employee_id. Both guards are kept: this one owns rule-backed days, that one owns the
-  // employee+date collision for rows with no rule behind them.
-  const ownedByInstance = ruleDatesOwnedByInstances(
-    (instances ?? []) as { shift_rule_id: string | null; shift_date: string }[],
-  );
-  const takenByInstance = new Set(shifts.map((s) => `${s.employee_id}|${s.date}`));
-  for (const g of generateRecurringShifts(
-    (rules ?? []) as ShiftRule[],
-    (exceptions ?? []) as ShiftException[],
-    rangeStart,
-    rangeEnd,
-    ownedByInstance,
-  )) {
-    if (g.skipped) continue;
-    if (takenByInstance.has(`${g.employee_id}|${g.date}`)) continue;
-    const emp = nameById.get(g.employee_id);
-    if (!emp) continue;
-    shifts.push({
-      id: g.id,
-      employee_id: g.employee_id,
-      name: String(emp.name),
-      role: (emp.role as string | null) ?? null,
-      date: g.date,
-      start_time: g.start_time,
-      end_time: g.end_time,
-    });
-  }
-
+  // It used to also project active shift_rules through generateRecurringShifts(), because the
+  // forward materializer stopped in Aug 2026 and reading instances alone left the link nearly
+  // empty. Phase 1's Schedule Builder now writes real instances, and production currently has
+  // ZERO active shift_rules — so the projection contributes nothing today while keeping a second,
+  // divergent definition of "the schedule" alive on an employee-reachable surface. A projected row
+  // has no id to act on, cannot be offered or picked up, and disagrees with the Phase 2 team view
+  // at /s/[token]?view=team the moment anything is dropped.
+  //
+  // If a future account ever relies on rules again, the fix is to run the forward materializer for
+  // it — not to re-add a parallel read model here.
   return <TeamScheduleBoard shifts={shifts} todayISO={today} monthsAhead={2} />;
 }
 

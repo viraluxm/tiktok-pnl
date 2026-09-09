@@ -85,3 +85,11 @@ export const kioskSupervisorIpLimiter = createRateLimiter({ limit: 8, windowMs: 
 // Rotating-QR clock code issue: ~4 per 30s per employee, so a stuck /s/[token] sheet can't hammer
 // the issue endpoint (which rotates the code every 30s in normal use, with a 15s overlap).
 export const clockCodeLimiter = createRateLimiter({ limit: 4, windowMs: 30 * 1000 });
+
+// Admin chat assistant (/api/chat). Every message costs real money at the model provider and
+// can fan out into several tool round-trips, so this caps runaway cost — a stuck client
+// retrying in a loop, or a tab left open hammering send. Keyed per USER (the gate is already
+// role==='admin', so the population is tiny and trusted); 20/min is far above deliberate use
+// and still bounds a loop to cents rather than dollars. Per-process like every limiter in this
+// file (see the header) — a soft cap on Vercel, not a hard billing ceiling.
+export const chatLimiter = createRateLimiter({ limit: 20, windowMs: 60 * 1000 });

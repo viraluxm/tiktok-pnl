@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { DO_NOT_PACK, resolveBox, assembleBox } from '@/lib/shipping/scanResolve';
+import { DO_NOT_PACK, resolveBox, assembleBox, refundBlockedOrders } from '@/lib/shipping/scanResolve';
+import { REASON_CANCELED } from '@/lib/shipping/refundGuard';
 
 export const dynamic = 'force-dynamic';
 
@@ -61,15 +62,19 @@ export async function POST(req: Request) {
 
   // Partition pick vs do-not-pack on STORED status (no live refresh here).
   const effStatus = (id: string) => boxRows.get(id)?.status ?? '';
-  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(effStatus(id)));
-  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(effStatus(id)));
+  // A refund or cancellation outranks the order status — see pick-list, which must behave
+  // identically here.
+  const refundBlocked = await refundBlockedOrders(admin, ownerIds, orderIds);
+  const packStatus = (id: string) => (refundBlocked.has(id) ? REASON_CANCELED : effStatus(id));
+  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(packStatus(id)));
+  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(packStatus(id)));
 
   // 3–6c) Shared assembly: SKU lines + thumbnails + unbound/catalog classification.
   const { skus, excluded, missing_order_ids: unboundIds, missing_orders, catalog_orders, order_types } =
     await assembleBox(admin, ownerIds, {
       boxRows, orderIds, pickOrderIds, excludedOrderIds,
       orderDetail: new Map(),   // no live line-item names on the station path
-      statusOf: effStatus,
+      statusOf: packStatus,
     });
 
   return NextResponse.json({

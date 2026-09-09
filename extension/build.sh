@@ -13,6 +13,32 @@ TERSER="$SCRIPT_DIR/node_modules/.bin/terser"
 DEV_BUILD=0
 if [ "$1" = "--dev" ] || [ "${LENSED_DEV:-0}" = "1" ]; then DEV_BUILD=1; fi
 
+# ── CLEAN-TREE GATE ──────────────────────────────────────────────────────────────
+# The SHA stamped below is `rev-parse HEAD`, which describes the COMMIT — not the files
+# actually being minified. Build from a dirty tree and the two diverge silently: the
+# shipped v0.6.5 zip stamped 5a7fb675 but contained 7e41c114's channel-anchor fix, which
+# was still uncommitted at build time. That zip therefore claimed a provenance that could
+# not reproduce it, and it took a rebuild-and-byte-compare to find out what the fleet was
+# running. A stamp that can lie is worse than no stamp. Refuse to build instead.
+# Both halves matter. `diff HEAD` catches MODIFIED tracked files; the porcelain check also
+# catches UNTRACKED ones, because the rsync above copies everything in extension/ that is not
+# explicitly excluded — an untracked .js would ship in the zip while being absent from the
+# commit the SHA names. Ignored paths (dist/, *.zip, node_modules/) are not reported by
+# porcelain, so a normal working checkout passes.
+if git -C "$SCRIPT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  DIRTY=""
+  git -C "$SCRIPT_DIR" diff --quiet HEAD -- "$SCRIPT_DIR" || DIRTY="modified"
+  [ -n "$(git -C "$SCRIPT_DIR" status --porcelain -- "$SCRIPT_DIR")" ] && DIRTY="${DIRTY:+$DIRTY + }untracked"
+  if [ -n "$DIRTY" ]; then
+    echo "BUILD REFUSED: extension/ is not clean ($DIRTY)."
+    echo "The build stamps DIAG_BUILD_SHA from HEAD, so an unclean tree ships a SHA that"
+    echo "does not reproduce the zip. Commit (or stash) first, then rebuild."
+    echo ""
+    git -C "$SCRIPT_DIR" status --short -- "$SCRIPT_DIR"
+    exit 1
+  fi
+fi
+
 rm -rf "$DIST"
 mkdir -p "$DIST"
 

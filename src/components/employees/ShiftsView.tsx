@@ -9,6 +9,7 @@ import { employeeHasActiveRules } from '@/lib/schedule/scheduledSpan';
 import type { Employee, ShiftRule } from '@/types';
 import ScheduleMonthCalendar from './weekly/ScheduleMonthCalendar';
 import PendingClaimsPanel from './PendingClaimsPanel';
+import PickupRequestsPanel from './PickupRequestsPanel';
 import TeamScheduleLinkButton from './TeamScheduleLinkButton';
 import { Field, daysLabel, inputCls } from './shared';
 import MobileDataCard from '@/components/ui/MobileDataCard';
@@ -149,6 +150,9 @@ export default function ShiftsView({
 
       {/* Pending OT claims awaiting approval — no other surface owns these, so they stay up top. */}
       <PendingClaimsPanel />
+
+      {/* Phase 2 shift swaps. Its own queue: same table, different lifecycle and write path. */}
+      <PickupRequestsPanel />
 
       <ScheduleMonthCalendar employees={employees} />
 

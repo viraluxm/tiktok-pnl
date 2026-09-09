@@ -21,8 +21,9 @@
  *      after a show and waiting is nearly always right.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStores } from '@/hooks/useStores';
+import { MAX_SLICE_TRIES, retryWaitMs, shouldRetry } from '@/lib/shipping/printRetry';
 
 /** Boxes per drain request. ~50 calls sits well inside the route's time budget. */
 const DRAIN_CHUNK = 50;
@@ -62,6 +63,12 @@ interface DryRun {
   };
   spend_recent: SpendWindows;
   confirm_boxes: number;
+  /**
+   * The boxes this check is proposing, in print order. POSTed back to /authorize as the
+   * approval itself: only boxes in this list may be bought, so a box that appears between the
+   * check and the click is left for the next run instead of blocking this one.
+   */
+  reviewed_keys: string[];
   batches: Array<{ slip: string; boxes: number }>;
 }
 interface Progress { total: number; bought: number; failed: number; spent: number; done: boolean }
@@ -230,9 +237,14 @@ export default function LabelsPanel() {
     setBuying(true); setErr(null);
     try {
       const ap = scopeParams();
-      ap.set('confirm_boxes', String(plan.confirm_boxes));
       if (plan.counts.unbound_boxes > 0) ap.set('unbound', unbound === 'include' ? 'include' : 'skip');
-      const aRes = await fetch(`/api/shipping/labels/authorize?${ap.toString()}`, { method: 'POST' });
+      // The reviewed set travels in the BODY: ~35KB of group keys for a 1,300-box night, past
+      // what a query string carries.
+      const aRes = await fetch(`/api/shipping/labels/authorize?${ap.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewed_keys: plan.reviewed_keys ?? [] }),
+      });
       const aJson = await aRes.json();
       if (!aJson.authorized || !aJson.run_id) {
         setErr(aJson.reason ?? aJson.error ?? `Could not authorise (${aRes.status})`);
@@ -241,6 +253,17 @@ export default function LabelsPanel() {
       const id = aJson.run_id as string;
       setRunId(id);
       const total = (aJson.claimed as number) || n;
+      // Say so when the plan moved under us. Neither is a problem — the spend is bounded by
+      // what was reviewed — but silently buying a different number than the button promised
+      // would look like a bug.
+      const drifted: string[] = [];
+      if (aJson.dropped_since_review > 0) {
+        drifted.push(`${aJson.dropped_since_review} of the boxes you approved no longer needed buying`);
+      }
+      if (aJson.added_since_review > 0) {
+        drifted.push(`${aJson.added_since_review} new box(es) appeared and were left for the next run`);
+      }
+      if (drifted.length) setErr(`Bought ${total} of ${n}: ${drifted.join('; ')}.`);
       await drain(id, total, 0, 0, 0);
       setPlan(null);
       void loadHistory();
@@ -854,6 +877,13 @@ function DayCalendar({ days, today, selected, onToggle }: {
  * document, and a link would have opened a tab full of raw JSON; here that becomes an error
  * message. Nothing is lost either way — the labels are already bought and the stack can be
  * rebuilt at any time.
+ *
+ * THE BUILT FILE IS ALWAYS LEFT BEHIND AS A LINK. window.open() after a long await chain has
+ * lost its user-gesture credit, so Chrome blocks it silently — and a 977-label stack takes
+ * minutes to build, which is the case that matters. A blocked tab used to leave nothing but an
+ * error, discarding a file that had already cost every one of those TikTok round trips. Now the
+ * blob URL is held in state and rendered as "Open the PDF", which is a real click and cannot be
+ * blocked.
  */
 function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted, section }: {
   storeId?: string; runId?: string; runIds?: string[];
@@ -863,6 +893,15 @@ function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted,
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  /** A finished stack, held so a blocked pop-up still leaves something to click. */
+  const [ready, setReady] = useState<{ url: string; pages: number } | null>(null);
+
+  // A 1,400-page stack is tens of MB. Holding it is the point — the link has to keep working —
+  // but it should not outlive the panel. Tracked through a ref and released on unmount ONLY:
+  // keying this on `ready` would have StrictMode's double-invoked cleanup revoke the URL in dev
+  // the instant it was created, leaving a dead link that works in production and not locally.
+  const liveUrl = useRef<string | null>(null);
+  useEffect(() => () => { if (liveUrl.current) URL.revokeObjectURL(liveUrl.current); }, []);
 
   /**
    * Fetch every part and stitch them into ONE file in the browser.
@@ -872,11 +911,22 @@ function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted,
    * cannot be sent at all. Merging client-side keeps each response small while still handing
    * over a single PDF, which is what actually gets printed.
    *
+   * THE FIRST CALL MUST BE preview=1. Asking the route for the stack with no from/to makes it
+   * resolve, refetch and download EVERY label in one request — it only slices when a window is
+   * given. That is how a 977-label singles print across three shops died on a 504: none of those
+   * runs had cached doc_urls, so one request tried ~977 TikTok document fetches plus ~977
+   * doc_url refetches at a concurrency of 6, comfortably past the 300s ceiling. preview=1
+   * returns the same page sequence as JSON and short-circuits before any download, so the part
+   * count costs nothing and every byte afterwards is fetched exactly once inside a 60-label
+   * window. It also removes a plain waste: the old flow built the whole stack and then refetched
+   * all of it as slices.
+   *
    * pdf-lib is imported dynamically so its ~350KB stays out of the dashboard bundle until
    * someone prints.
    */
-  async function open() {
+  async function build() {
     setBusy(true); onError(''); setNote('');
+    if (ready) { URL.revokeObjectURL(ready.url); liveUrl.current = null; setReady(null); }
     try {
       // No store_id when runs are combined: they may come from different shops, and the route
       // resolves each label's credentials from its own store.
@@ -886,53 +936,72 @@ function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted,
         + (storeId && !many ? `&store_id=${encodeURIComponent(storeId)}` : '')
         + (section ? `&section=${section}` : '');
 
-      const fetchPart = async (from?: number, to?: number) => {
-        const u = from == null ? base : `${base}&from=${from}&to=${to}`;
-        const res = await fetch(u);
-        if (!res.ok) {
-          let msg = `Could not build the stack (${res.status})`;
-          try { const j = await res.json(); msg = j.error ?? msg; } catch { /* not JSON */ }
-          throw new Error(msg);
-        }
-        return {
-          bytes: new Uint8Array(await res.arrayBuffer()),
-          parts: Number(res.headers.get('X-Parts') ?? '1') || 1,
-          per: Number(res.headers.get('X-Labels-Per-Part') ?? '60') || 60,
-          total: Number(res.headers.get('X-Total-Labels') ?? '0') || 0,
-        };
+      const fail = async (res: Response) => {
+        let msg = `Could not build the stack (${res.status})`;
+        try { const j = await res.json(); msg = j.error ?? msg; } catch { /* not JSON */ }
+        return new Error(msg);
       };
 
-      setNote('Building…');
-      const first = await fetchPart();
-      let merged: Uint8Array<ArrayBufferLike> = first.bytes;
+      // ── How big is it? JSON only; downloads nothing. ──
+      setNote('Checking…');
+      const pRes = await fetch(`${base}&preview=1`);
+      if (!pRes.ok) throw await fail(pRes);
+      const plan = await pRes.json() as {
+        parts: number; labels_per_part: number; total_labels: number;
+      };
+      const per = plan.labels_per_part || 60;
+      const total = plan.total_labels || 0;
+      const parts = Math.max(1, plan.parts || 1);
+      if (!total) throw new Error('Nothing printable in that run');
 
-      if (first.parts > 1) {
+      // One window, retried. See printRetry.ts for why 4xx is not retried and why a retry is
+      // cheaper than the first attempt. `where` names the slice so a retry is visible on the
+      // button instead of looking like a hang.
+      const lost = () => new Error('Lost the connection while building the stack');
+      const fetchSlice = async (from: number, to: number, where: string) => {
+        for (let attempt = 1; ; attempt++) {
+          let res: Response | null = null;
+          try {
+            res = await fetch(`${base}&from=${from}&to=${to}`);
+          } catch { /* thrown fetch = no status; treated as 0 below */ }
+          if (res?.ok) return new Uint8Array(await res.arrayBuffer());
+          const status = res?.status ?? 0;
+          if (!shouldRetry(attempt, status)) throw res ? await fail(res) : lost();
+          setNote(`${where} — retrying (${attempt + 1}/${MAX_SLICE_TRIES})…`);
+          await new Promise((r) => setTimeout(r, retryWaitMs(attempt)));
+        }
+      };
+
+      // ── Fetch each 60-label window once, in order. ──
+      let merged: Uint8Array<ArrayBufferLike>;
+      let pages = 0;
+      if (parts === 1) {
+        // One window covers it, so the route's own PDF is the answer — no stitching, and no
+        // reason to pull pdf-lib in just to count pages.
+        setNote('Building…');
+        merged = await fetchSlice(0, total - 1, 'Building…');
+      } else {
         const { PDFDocument } = await import('pdf-lib');
         const out = await PDFDocument.create();
-        const add = async (bytes: Uint8Array<ArrayBufferLike>) => {
+        for (let i = 0; i < parts; i++) {
+          setNote(`Building… ${i + 1} of ${parts}`);
+          const from = i * per;
+          const bytes = await fetchSlice(from, Math.min(from + per - 1, total - 1), `Part ${i + 1} of ${parts}`);
           const src = await PDFDocument.load(bytes);
-          for (const p of await out.copyPages(src, src.getPageIndices())) out.addPage(p);
-        };
-        // Part 1 is the un-sliced response, which for a multi-part stack is the whole thing —
-        // so refetch it as an explicit slice rather than double-adding every label.
-        for (let i = 0; i < first.parts; i++) {
-          setNote(`Building… part ${i + 1} of ${first.parts}`);
-          const from = i * first.per;
-          const to = Math.min(from + first.per - 1, first.total - 1);
-          const part = await fetchPart(from, to);
-          await add(part.bytes);
+          for (const pg of await out.copyPages(src, src.getPageIndices())) out.addPage(pg);
         }
+        pages = out.getPageCount();
+        setNote('Stitching…');
         merged = await out.save();
       }
 
       const blob = new Blob([merged as unknown as BlobPart], { type: 'application/pdf' });
       const objUrl = URL.createObjectURL(blob);
+      // Kept regardless of whether the pop-up lands, so the work is never thrown away.
+      liveUrl.current = objUrl;
+      setReady({ url: objUrl, pages });
       const w = window.open(objUrl, '_blank');
-      if (!w) {
-        onError('Your browser blocked the new tab — allow pop-ups for this site, then print again.');
-      }
-      // Revoked late: revoking at once can race the new tab's load in some browsers.
-      setTimeout(() => URL.revokeObjectURL(objUrl), 120_000);
+      if (!w) onError('Your browser blocked the new tab — use the "Open the PDF" button.');
       // The route marked these labels printed; reload so the badge reflects it immediately.
       onPrinted?.();
     } catch (e) {
@@ -940,14 +1009,38 @@ function PrintButton({ storeId, runId, runIds, onError, small, label, onPrinted,
     } finally { setBusy(false); setNote(''); }
   }
 
+  const cls = small
+    ? 'cursor-pointer shrink-0 rounded-md border border-tt-border px-3 py-1.5 text-xs text-tt-text hover:border-tt-border-hover disabled:opacity-50'
+    : 'cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-50';
+
+  // Once a stack is built the button becomes the link to it: a real click, so no pop-up
+  // blocker can swallow it, and re-openable as many times as the printer needs.
+  if (ready && !busy) {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1.5">
+        <a
+          href={ready.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={small
+            ? 'shrink-0 rounded-md border border-tt-green px-3 py-1.5 text-xs font-semibold text-tt-green hover:bg-tt-green/10'
+            : 'rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black'}
+        >
+          Open the PDF{ready.pages ? ` (${ready.pages}p)` : ''}
+        </a>
+        <button
+          onClick={() => { URL.revokeObjectURL(ready.url); liveUrl.current = null; setReady(null); }}
+          className="cursor-pointer shrink-0 rounded-md border border-tt-border px-2 py-1.5 text-xs text-tt-muted hover:border-tt-border-hover"
+          title="Discard this build and start again"
+        >
+          ↺
+        </button>
+      </span>
+    );
+  }
+
   return (
-    <button
-      onClick={open}
-      disabled={busy}
-      className={small
-        ? 'cursor-pointer shrink-0 rounded-md border border-tt-border px-3 py-1.5 text-xs text-tt-text hover:border-tt-border-hover disabled:opacity-50'
-        : 'cursor-pointer rounded-md bg-tt-green px-4 py-2 text-sm font-semibold text-black disabled:opacity-50'}
-    >
+    <button onClick={build} disabled={busy} className={cls}>
       {busy ? (note || 'Building…') : label ?? (small ? 'Reprint' : 'Print labels')}
     </button>
   );

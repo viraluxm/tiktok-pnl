@@ -10,13 +10,20 @@ import {
   authorizeRun, estimateSizedSpend, readSpendWindows, MAX_MANIFEST_BOXES, type UnboundPolicy,
 } from '@/lib/shipping/purchaseGuards';
 
+/**
+ * Ceiling on the reviewed set, well clear of MAX_MANIFEST_BOXES so the cap refusal is what a
+ * too-large run hits, not a parse error. Guards only against an absurd body.
+ */
+const MAX_REVIEWED_KEYS = 20_000;
+
 export const dynamic = 'force-dynamic';
 // Verification of a 3,000-box manifest is ~10,000 orders, or 200 concurrent calls at roughly
 // 16s per 100 — plus the candidate and SKU reads and 15 chunked inserts. 120s was cutting it
 // close enough to truncate; the ceiling is the most this platform allows.
 export const maxDuration = 300;
 
-// POST   /api/shipping/labels/authorize?store_id=…&confirm_boxes=N[&day=|&session_ids=][&unbound=]
+// POST   /api/shipping/labels/authorize?store_id=…[&day=|&session_ids=][&unbound=]
+//        body: { "reviewed_keys": ["<group_key>", …] }
 // DELETE /api/shipping/labels/authorize?store_id=…&run_id=…
 //
 // AUTHORISE A MANIFEST. Resolves the scope, verifies it against TikTok, and writes every box to
@@ -32,6 +39,11 @@ export const maxDuration = 300;
 // live claim per box, enforced by a partial unique index — so a manifest cannot overlap another
 // one, and a crash mid-drain leaves a resumable run rather than an unknown state.
 //
+// WHAT IS APPROVED IS A SET OF BOXES, sent as `reviewed_keys` in the body rather than a count in
+// the query string — 1,324 keys is ~35KB, past what a URL carries. Only keys that were reviewed
+// AND still resolve are claimed, so a box that appeared since the check is never bought and the
+// spend cannot exceed what was read. It is in the body for size, not for secrecy.
+//
 // DELETE releases an unbought manifest. Without it a mis-scoped authorisation would block those
 // boxes from every future run until someone edited the table by hand.
 
@@ -42,7 +54,6 @@ export async function POST(req: Request) {
 
   const url = new URL(req.url);
   const storeId = url.searchParams.get('store_id');
-  const confirmRaw = url.searchParams.get('confirm_boxes');
   const unboundRaw = url.searchParams.get('unbound');
   if (!storeId) return NextResponse.json({ error: 'store_id is required' }, { status: 400 });
 
@@ -52,10 +63,31 @@ export async function POST(req: Request) {
   });
   if ('error' in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
-  const confirmBoxes = confirmRaw == null || confirmRaw.trim() === '' ? null : Number(confirmRaw);
-  if (confirmBoxes != null && !Number.isInteger(confirmBoxes)) {
-    return NextResponse.json({ error: 'confirm_boxes must be an integer' }, { status: 400 });
+  // The reviewed set. A missing or unparseable body leaves this null, which authorizeRun refuses
+  // as `confirm_missing` — the same answer a stale cached client gets, and a safe one: it buys
+  // nothing and tells the operator to re-check.
+  let reviewedKeys: string[] | null = null;
+  try {
+    const body = (await req.json()) as { reviewed_keys?: unknown } | null;
+    const raw = body?.reviewed_keys;
+    if (Array.isArray(raw)) {
+      if (raw.length > MAX_REVIEWED_KEYS) {
+        return NextResponse.json(
+          { error: `reviewed_keys holds ${raw.length} entries, over the ${MAX_REVIEWED_KEYS} ceiling` },
+          { status: 400 },
+        );
+      }
+      if (!raw.every((k) => typeof k === 'string')) {
+        return NextResponse.json({ error: 'reviewed_keys must be an array of strings' }, { status: 400 });
+      }
+      reviewedKeys = raw as string[];
+    } else if (raw !== undefined) {
+      return NextResponse.json({ error: 'reviewed_keys must be an array of strings' }, { status: 400 });
+    }
+  } catch {
+    // No body, or not JSON. Treated as "nothing reviewed".
   }
+
   if (unboundRaw != null && unboundRaw !== 'skip' && unboundRaw !== 'include') {
     return NextResponse.json({ error: "unbound must be 'skip' or 'include'" }, { status: 400 });
   }
@@ -102,9 +134,8 @@ export async function POST(req: Request) {
   // Walk the print sequence so print_seq and both caption levels are recorded in the order the
   // stack will actually be assembled — the plan cannot be re-derived once orders advance.
   const byKey = new Map(run.boxes.map((b) => [b.group_key, b]));
-  const manifest: Array<{
-    box: PlanBox; seq: number; banner: string | null; caption: string | null;
-  }> = [];
+  type Entry = { box: PlanBox; banner: string | null; caption: string | null };
+  const resolvedManifest: Entry[] = [];
   let banner: string | null = null;
   let caption: string | null = null;
   for (const page of planPageSequence(run.plan)) {
@@ -112,33 +143,37 @@ export async function POST(req: Request) {
     if (page.kind === 'slip') { caption = page.caption; continue; }
     const b = byKey.get(page.group_key);
     if (b && !owned.has(b.group_key)) {
-      manifest.push({ box: b, seq: manifest.length, banner, caption });
+      resolvedManifest.push({ box: b, banner, caption });
     }
   }
 
-  const summary = {
+  const buildSummary = async (entries: Entry[], extra: Record<string, unknown>) => ({
     store_id: storeId,
     scope: run.scope,
-    boxes: manifest.length,
-    orders: manifest.reduce((n, m) => n + m.box.order_ids.length, 0),
+    boxes: entries.length,
+    orders: entries.reduce((n, m) => n + m.box.order_ids.length, 0),
+    reviewed_boxes: reviewedKeys?.length ?? 0,
+    resolved_boxes: resolvedManifest.length,
     already_in_ledger: owned.size,
     unbound_boxes: run.unboundBoxes.length,
     unbound_policy: unboundPolicy,
     unbound_included: unboundPolicy === 'include',
     max_manifest_boxes: MAX_MANIFEST_BOXES,
-    spend_estimate: await estimateSizedSpend(admin, user.id, storeId, manifest.map((m) => m.box.order_ids.length)),
+    spend_estimate: await estimateSizedSpend(admin, user.id, storeId, entries.map((m) => m.box.order_ids.length)),
     spend_recent: await readSpendWindows(admin, user.id, storeId),
-  };
+    ...extra,
+  });
 
   const decision = authorizeRun({
     enabled: process.env.LABEL_PURCHASE_ENABLED === '1',
-    boxes: manifest.length,
-    confirmBoxes,
+    resolvedKeys: resolvedManifest.map((m) => m.box.group_key),
+    reviewedKeys,
     unboundCount: run.unboundBoxes.length,
     unboundPolicy,
   });
   if (!decision.ok) {
     const status = decision.code === 'disabled' || decision.code === 'nothing_to_buy' ? 200 : 409;
+    const summary = await buildSummary(resolvedManifest, {});
     console.log(`[labels/authorize] refused (${decision.code}): ${decision.reason}`, summary);
     return NextResponse.json(
       { authorized: false, code: decision.code, reason: decision.reason, ...summary },
@@ -146,16 +181,28 @@ export async function POST(req: Request) {
     );
   }
 
+  // ONLY the boxes that were reviewed AND still resolve. Print order and captions come from the
+  // current plan walk above, so the sequence describes the stack that will really be assembled;
+  // membership comes from the review, so nothing unread is bought.
+  const buyable = new Set(decision.buy);
+  const manifest = resolvedManifest.filter((m) => buyable.has(m.box.group_key));
+  const summary = await buildSummary(manifest, {
+    dropped_since_review: decision.dropped,
+    added_since_review: decision.added,
+  });
+
   // ── Claim the whole manifest. Chunked because one insert of 800 rows is a large statement. ──
   const runId = randomUUID();
   const CHUNK = 200;
   let claimed = 0;
   for (let i = 0; i < manifest.length; i += CHUNK) {
-    const rows = manifest.slice(i, i + CHUNK).map((m) => ({
+    const rows = manifest.slice(i, i + CHUNK).map((m, j) => ({
       user_id: user.id, store_id: storeId, run_id: runId,
       group_key: m.box.group_key, order_ids: m.box.order_ids,
       status: 'claimed', ship_type: shipTypeFor(m.box),
-      print_seq: m.seq, slip_caption: m.caption, banner_caption: m.banner,
+      // Contiguous over the FILTERED manifest — print_seq numbers the stack being bought, not
+      // the wider set that resolved.
+      print_seq: i + j, slip_caption: m.caption, banner_caption: m.banner,
       run_scope: run.scope,
     }));
     const { error } = await admin.from('shipping_label_purchases').insert(rows);
