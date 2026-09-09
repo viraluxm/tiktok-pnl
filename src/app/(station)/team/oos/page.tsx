@@ -23,6 +23,7 @@ interface Sku {
   location_label: string | null;
 }
 interface Result {
+  refund_blocked_order_ids: string[];
   scanned_value: string;
   resolved_via: string;
   tracking_number: string | null;
@@ -102,7 +103,22 @@ export default function MemberOosPage() {
 
       {res && (
         <div className="mt-5 space-y-4">
-          {/* ── The verdict, first and largest: it is the reason this page exists. ── */}
+          {/* ABOVE the verdict on purpose. If the parcel is refunded/cancelled it must not ship at
+              all, so "which item is short" is the wrong question — cancelling one line and buying a
+              new label would send a parcel that should have been pulled. */}
+          {res.refund_blocked_order_ids?.length > 0 && (
+            <div className="rounded-2xl border-2 border-tt-red bg-tt-red/20 px-4 py-3">
+              <div className="text-xs font-extrabold uppercase tracking-wide text-tt-red">
+                Do not ship — refunded or cancelled
+              </div>
+              <div className="mt-1 text-sm text-tt-text">
+                {res.refund_blocked_order_ids.length} order(s) in this parcel are refunded or
+                cancelled: <span className="font-mono break-all">{res.refund_blocked_order_ids.join(', ')}</span>.
+                Pull the box. Do not cancel a single line and re-label it.
+              </div>
+            </div>
+          )}
+          {/* ── The verdict: the reason this page exists. ── */}
           {res.verdict === 'one' && (
             <div className="rounded-2xl border-2 border-tt-red/60 bg-tt-red/10 px-4 py-3">
               <div className="text-xs font-bold uppercase tracking-wide text-tt-red">Cancel this item in Seller Center</div>

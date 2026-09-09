@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
-import { DO_NOT_PACK, resolveBox, assembleBox } from '@/lib/shipping/scanResolve';
+import { DO_NOT_PACK, resolveBox, assembleBox, refundBlockedOrders } from '@/lib/shipping/scanResolve';
+import { REASON_CANCELED } from '@/lib/shipping/refundGuard';
 
 export const dynamic = 'force-dynamic';
 
@@ -55,14 +56,21 @@ export async function GET(req: Request) {
   }
 
   const effStatus = (id: string) => boxRows.get(id)?.status ?? '';
-  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(effStatus(id)));
-  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(effStatus(id)));
+  // A refund or cancellation OUTRANKS the order status, exactly as in /api/station/scan and
+  // /api/shipping/pick-list. Without this the lookup would present a refunded box as an ordinary
+  // one and send someone to cancel a single line in Seller Center when the whole parcel must not
+  // ship at all. refundGuard.test.mjs asserts structurally that every route partitioning a box
+  // consults this — my first version of this route did not, and that test is what caught it.
+  const refundBlocked = await refundBlockedOrders(admin, ownerIds, orderIds);
+  const packStatus = (id: string) => (refundBlocked.has(id) ? REASON_CANCELED : effStatus(id));
+  const pickOrderIds = orderIds.filter((id) => !DO_NOT_PACK.has(packStatus(id)));
+  const excludedOrderIds = orderIds.filter((id) => DO_NOT_PACK.has(packStatus(id)));
 
   const { skus, excluded, missing_order_ids, missing_orders, catalog_orders, order_types } =
     await assembleBox(admin, ownerIds, {
       boxRows, orderIds, pickOrderIds, excludedOrderIds,
       orderDetail: new Map(),   // no live TikTok line names — that would mean a token refresh
-      statusOf: effStatus,
+      statusOf: packStatus,
     });
 
   const flagged = skus.filter((s) => s.shelf_out);
@@ -74,6 +82,8 @@ export async function GET(req: Request) {
   const verdict = flagged.length === 1 ? 'one' : flagged.length > 1 ? 'several' : 'none';
 
   return NextResponse.json({
+    // Louder than the verdict, because it changes what the reader should DO with the parcel.
+    refund_blocked_order_ids: orderIds.filter((id) => refundBlocked.has(id)),
     scanned_value: raw,
     resolved_via: resolvedVia,
     tracking_number: tracking,
