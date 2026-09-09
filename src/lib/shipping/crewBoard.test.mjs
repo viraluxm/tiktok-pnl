@@ -235,6 +235,70 @@ console.log('\nnight crew crossing midnight');
   check('open punch accrues to now', formatClocked(b.picking[0].clocked_ms) === '8.5h', formatClocked(b.picking[0].clocked_ms));
 }
 
+console.log('\ndoubles and straddling punches');
+{
+  // A real double: Alejandro, 2026-09-08 — AM 06:25->14:01 and PM 16:56->01:00 next day, BOTH
+  // punches filed under date '2026-09-08', so both reach both boards.
+  const day = '2026-09-08';
+  const am = crewRangeUtcMs(day, 'am', TZ);
+  const pmw = crewRangeUtcMs(day, 'pm', TZ);
+  const double = [{
+    employee_id: 'ale', name: 'Alejandro',
+    clock_in_at: iso(pt(2026, 9, 8, 6, 25)), clock_out_at: iso(pt(2026, 9, 8, 14, 1)),
+  }, {
+    employee_id: 'ale', name: 'Alejandro',
+    clock_in_at: iso(pt(2026, 9, 8, 16, 56)), clock_out_at: iso(pt(2026, 9, 9, 1, 0)),
+  }];
+  const amBox = { group_key: 'd1', picker_employee_id: 'ale', picker_name_snapshot: 'Alejandro', verified_at: iso(pt(2026, 9, 8, 9, 0)) };
+  const pmBox = { group_key: 'd2', picker_employee_id: 'ale', picker_name_snapshot: 'Alejandro', verified_at: iso(pt(2026, 9, 8, 20, 0)) };
+
+  const amB = aggregateCrewBoard([amBox], double, day, 'am', am.startMs, am.endMs, am.endMs, offsetAt, {}, null);
+  const pmB = aggregateCrewBoard([pmBox], double, day, 'pm', pmw.startMs, pmw.endMs, pmw.endMs, offsetAt, {}, null);
+
+  check('double: morning board shows ONLY the morning punch',
+    formatClocked(amB.picking[0].clocked_ms) === '7.6h', formatClocked(amB.picking[0].clocked_ms));
+  check('double: night board shows ONLY the night punch',
+    formatClocked(pmB.picking[0].clocked_ms) === '8.1h', formatClocked(pmB.picking[0].clocked_ms));
+  check('double: morning board counts only the morning box', amB.totalBoxes === 1 && amB.picking[0].boxes === 1);
+  check('double: night board counts only the night box', pmB.totalBoxes === 1 && pmB.picking[0].boxes === 1);
+  check('double: the two boards together account for the full 15.7h day',
+    Math.abs((amB.picking[0].clocked_ms + pmB.picking[0].clocked_ms) / 3_600_000 - 15.7) < 0.05,
+    `${((amB.picking[0].clocked_ms + pmB.picking[0].clocked_ms) / 3_600_000).toFixed(2)}h`);
+
+  // A STRADDLING punch: 2026-08-29, Alejandro clocked 05:59 -> 16:05, crossing the 15:00 split.
+  // Unclamped this single 10.1h punch would be counted IN FULL on both boards.
+  const sday = '2026-08-29';
+  const sam = crewRangeUtcMs(sday, 'am', TZ);
+  const spm = crewRangeUtcMs(sday, 'pm', TZ);
+  const straddle = [{
+    employee_id: 'ale', name: 'Alejandro',
+    clock_in_at: iso(pt(2026, 8, 29, 5, 59)), clock_out_at: iso(pt(2026, 8, 29, 16, 5)),
+  }];
+  const sBox = { group_key: 's1', picker_employee_id: 'ale', picker_name_snapshot: 'Alejandro', verified_at: iso(pt(2026, 8, 29, 9, 0)) };
+  const samB = aggregateCrewBoard([sBox], straddle, sday, 'am', sam.startMs, sam.endMs, sam.endMs, offsetAt, {}, null);
+  const spmB = aggregateCrewBoard([], straddle, sday, 'pm', spm.startMs, spm.endMs, spm.endMs, offsetAt, {}, null);
+
+  check('straddle: morning board clamps at 15:00 (05:59->15:00 = 9.0h, not 10.1h)',
+    formatClocked(samB.picking[0].clocked_ms) === '9.0h', formatClocked(samB.picking[0].clocked_ms));
+  check('straddle: night board sees only the 15:00->16:05 tail (1.1h)',
+    formatClocked(spmB.noPicks[0].clocked_ms) === '1.1h', formatClocked(spmB.noPicks[0].clocked_ms));
+  check('straddle: the two boards sum to the real punch length, not double it',
+    Math.abs((samB.picking[0].clocked_ms + spmB.noPicks[0].clocked_ms) / 3_600_000 - 10.1) < 0.05,
+    `${((samB.picking[0].clocked_ms + spmB.noPicks[0].clocked_ms) / 3_600_000).toFixed(2)}h`);
+
+  // A punch entirely outside the window contributes nothing at all — not even a zero row.
+  const nightOnly = [{ employee_id: 'blake', name: 'Blake', clock_in_at: iso(pt(2026, 9, 8, 17)), clock_out_at: iso(pt(2026, 9, 9, 1)) }];
+  const amOnly = aggregateCrewBoard([], nightOnly, day, 'am', am.startMs, am.endMs, am.endMs, offsetAt, {}, null);
+  check('a night-only punch does NOT appear on the morning board',
+    amOnly.picking.length === 0 && amOnly.noPicks.length === 0);
+
+  // An open punch on a FINISHED day is not "currently on the clock".
+  const openOld = [{ employee_id: 'x', name: 'X', clock_in_at: iso(pt(2026, 9, 8, 6)), clock_out_at: null }];
+  const past = aggregateCrewBoard([], openOld, day, 'am', am.startMs, am.endMs, pt(2026, 9, 9, 12), offsetAt, {}, null);
+  check('an open punch on a past board does not read as on-the-clock',
+    past.noPicks[0].on_clock === false);
+}
+
 console.log('\nhour labels');
 check('6 -> 6a', formatHourLabel(6) === '6a');
 check('12 -> 12p', formatHourLabel(12) === '12p');

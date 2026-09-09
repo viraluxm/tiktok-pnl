@@ -257,6 +257,16 @@ export function aggregateCrewBoard(
 
   // Punch lookup. Several punches for one person in a window are summed, and the board reports
   // whether ANY of them is still open.
+  //
+  // EVERY PUNCH IS CLAMPED TO THE CREW WINDOW. Two real cases require this:
+  //   • DOUBLES — people work a morning shift AND come back for the night (16 occurrences in the
+  //     21 days to 2026-09-09; Alejandro seven times, up to 16.4h). Their two punches are filed
+  //     under one calendar date, so both reach both boards; each board must count only its own.
+  //   • STRADDLING PUNCHES — a morning punch that runs past 15:00 (Alejandro and Mario both
+  //     clocked 06:00 -> 16:05 on 2026-08-29). Unclamped, that single 10h punch would be counted
+  //     in full on the morning board AND again on the night board.
+  // Clamping makes a person's clocked hours sum correctly across the two boards instead of
+  // double-counting the overlap.
   const punchByEmp = new Map<string, { ms: number; open: boolean; name: string }>();
   for (const p of punches) {
     const inMs = Date.parse(p.clock_in_at);
@@ -264,10 +274,19 @@ export function aggregateCrewBoard(
     const open = !p.clock_out_at;
     const outMs = open ? nowMs : Date.parse(p.clock_out_at as string);
     if (!Number.isFinite(outMs)) continue;
+
+    const from = Math.max(inMs, windowStartMs);
+    const to = Math.min(outMs, windowEndMs);
+    const ms = Math.max(0, to - from);
+    if (ms === 0) continue;                     // punch lies entirely outside this crew's window
+
+    // "On the clock" only means something on a board whose window is still running — an open
+    // punch on yesterday's board is not someone currently working.
+    const openHere = open && nowMs < windowEndMs;
+
     const prev = punchByEmp.get(p.employee_id);
-    const ms = Math.max(0, outMs - inMs);
-    if (prev) { prev.ms += ms; prev.open = prev.open || open; }
-    else punchByEmp.set(p.employee_id, { ms, open, name: p.name });
+    if (prev) { prev.ms += ms; prev.open = prev.open || openHere; }
+    else punchByEmp.set(p.employee_id, { ms, open: openHere, name: p.name });
   }
 
   const toRow = (a: Acc): CrewPickerRow => {
