@@ -26,12 +26,13 @@ const adminStub = write('admin.mjs', 'export function createAdminClient(){ retur
 const timezone = transpile('./timezone.ts', 'timezone.mjs');
 const weekly = transpile('../weeklySchedule.ts', 'weekly.mjs');
 const eligibility = transpile('./eligibility.ts', 'eligibility.mjs');
+const timeclock = transpile('../timeclock.ts', 'timeclock.mjs');
 const schedulePlan = transpile('./schedulePlan.ts', 'schedulePlan.mjs', {
   "'./timezone'": `'${timezone}'`, "'@/lib/weeklySchedule'": `'${weekly}'`, "'./eligibility'": `'${eligibility}'`,
 });
 const T = await import(transpile('./teamSchedule.ts', 'teamSchedule.mjs', {
   "'server-only'": `'${serverOnly}'`, "'@/lib/supabase/admin'": `'${adminStub}'`,
-  "'./timezone'": `'${timezone}'`, "'./schedulePlan'": `'${schedulePlan}'`,
+  "'./timezone'": `'${timezone}'`, "'./schedulePlan'": `'${schedulePlan}'`, "'@/lib/timeclock'": `'${timeclock}'`,
 }));
 
 class Rec {
@@ -67,16 +68,22 @@ const script = (instances, emps) => (r) => {
   return { data: [], error: null };
 };
 
-console.log('\n1. THE QUERY IS THE TENANT BOUNDARY');
+console.log('\n1. THE QUERY IS THE TENANT BOUNDARY — AND THE TEAM BOUNDARY');
 {
-  reset(script([], []));
+  reset(script([], [{ id: 'emp-me', name: 'Me', role: 'fulfillment' }, { id: 'emp-a', name: 'Carlos', role: 'fulfillment' }, { id: 'emp-h', name: 'Hana', role: 'host' }]));
   await T.getTeamSchedule(ME, '2026-09-07');
-  const q = globalThis.__LOG[0];
-  eq('reads shift_instances', q.table, 'shift_instances');
-  eq('scoped to the TOKEN-derived owner', q.f('eq', 'user_id'), OWNER);
+  const roster = globalThis.__LOG.find((r) => r.table === 'employees');
+  const q = globalThis.__LOG.find((r) => r.table === 'shift_instances');
+  eq('roster read first, scoped to the TOKEN-derived owner', roster.f('eq', 'user_id'), OWNER);
+  eq('instance read scoped to the TOKEN-derived owner', q.f('eq', 'user_id'), OWNER);
+  eq('instances requested ONLY for the viewer\'s team (host id never asked for)', q.f('in', 'employee_id'), ['emp-me', 'emp-a']);
   eq('active planned coverage only', q.f('in', 'status'), ['scheduled', 'claimed']);
-  check('assigned rows only', q.has('not', 'employee_id'));
   eq('bounded to the Mon→Sun week', [q.f('gte', 'shift_date'), q.f('lte', 'shift_date')], ['2026-09-07', '2026-09-13']);
+  reset(script([], [{ id: 'emp-h', name: 'Hana', role: 'host' }]));
+  const w = await T.getTeamSchedule(ME, '2026-09-07');
+  check('no teammates at all → no instance read is issued', !globalThis.__LOG.some((r) => r.table === 'shift_instances'));
+  eq('…and the week is empty, not an error', w.days.map((d) => d.shifts.length), [0, 0, 0, 0, 0, 0, 0]);
+  eq('the payload names the viewer\'s team', w.team, 'fulfillment');
 }
 
 console.log('\n2. FIELD EXPOSURE — an allow-list, never select(*)');
@@ -127,7 +134,7 @@ console.log('\n5. WEEK SHAPE, self-marking and overnight data');
   reset(script([
     inst({ id: 'a', employee_id: 'emp-me', shift_date: '2026-09-08' }),
     inst({ id: 'b', employee_id: 'emp-a', shift_date: '2026-09-09', starts_at: '2026-09-09T23:00:00+00:00', ends_at: '2026-09-10T09:00:00+00:00' }),
-  ], [{ id: 'emp-me', name: 'Me', role: 'fulfillment' }, { id: 'emp-a', name: 'Carlos', role: 'host' }]));
+  ], [{ id: 'emp-me', name: 'Me', role: 'fulfillment' }, { id: 'emp-a', name: 'Carlos', role: 'fulfillment' }]));
   const w = await T.getTeamSchedule(ME, '2026-09-09');
   eq('week normalises to its Monday', [w.start, w.end], ['2026-09-07', '2026-09-13']);
   eq('always seven days', w.days.length, 7);
@@ -137,6 +144,43 @@ console.log('\n5. WEEK SHAPE, self-marking and overnight data');
   const ov = w.days[2].shifts[0];
   check('overnight spans survive intact for the formatter', Date.parse(ov.ends_at) - Date.parse(ov.starts_at) === 10 * 3600_000);
   eq("role falls back to the row's own value", w.days[2].shifts[0].role, 'fulfillment');
+}
+
+console.log('\n5b. TEAM SCOPE — a Fulfillment viewer never receives a host row, and vice versa');
+{
+  const roster = [
+    { id: 'emp-me', name: 'Me', role: 'fulfillment' },
+    { id: 'emp-a', name: 'Carlos', role: 'fulfillment' },
+    { id: 'emp-h', name: 'Hana', role: 'host' },
+    { id: 'emp-l', name: 'Lee', role: 'Live Host' },     // free-text spelling still maps to host
+  ];
+  const all = [
+    inst({ id: 'me1', employee_id: 'emp-me', shift_date: '2026-09-08', role: null }),
+    inst({ id: 'a1', employee_id: 'emp-a', shift_date: '2026-09-08', role: null }),
+    inst({ id: 'h1', employee_id: 'emp-h', shift_date: '2026-09-08', role: null }),
+    inst({ id: 'l1', employee_id: 'emp-l', shift_date: '2026-09-08', role: 'host' }),
+    // a fulfillment employee assigned a one-time shift whose ROW says host — belongs to the other team
+    inst({ id: 'a2', employee_id: 'emp-a', shift_date: '2026-09-09', role: 'host' }),
+  ];
+  // The fake returns every instance regardless of the .in filter, so the JS re-check is exercised too.
+  reset(script(all, roster));
+  const w = await T.getTeamSchedule(ME, '2026-09-07');
+  const ids = w.days.flatMap((d) => d.shifts.map((s) => s.instance_id));
+  eq('fulfillment viewer: only fulfillment rows (mine + Carlos)', ids, ['me1', 'a1']);
+  check('no host name reaches the payload', !/Hana|Lee/.test(JSON.stringify(w)));
+  check('the row whose own role says host is dropped even though the person is fulfillment', !ids.includes('a2'));
+  eq('the instance query asked only for the two fulfillment ids', globalThis.__LOG.find((r) => r.table === 'shift_instances').f('in', 'employee_id'), ['emp-me', 'emp-a']);
+  eq('viewer is still present and marked', w.days[1].shifts.find((s) => s.instance_id === 'me1').is_me, true);
+
+  // The same world seen by a HOST.
+  const HOST_ME = { id: 'emp-h', user_id: OWNER, name: 'Hana', role: 'host', status: 'active' };
+  reset(script(all, roster));
+  const wh = await T.getTeamSchedule(HOST_ME, '2026-09-07');
+  const hids = wh.days.flatMap((d) => d.shifts.map((s) => s.instance_id));
+  eq('host viewer: only host rows (Hana + Lee)', hids.sort(), ['h1', 'l1']);
+  check('no fulfillment name reaches the host payload', !/Carlos|Me"/.test(JSON.stringify(wh)));
+  eq('team key normalises "Live Host" to host', wh.team, 'host');
+  eq('host instance query asked only for host ids', globalThis.__LOG.find((r) => r.table === 'shift_instances').f('in', 'employee_id').sort(), ['emp-h', 'emp-l']);
 }
 
 console.log('\n6. NO RECURRING PROJECTION, NO PAYROLL — instance-only by construction');

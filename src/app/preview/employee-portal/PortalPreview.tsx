@@ -11,7 +11,7 @@ import { instanceHours } from '@/lib/schedule/hours';
 import { fmtShortDate } from '@/lib/schedule/portalModel';
 import {
   initialWorld, snapshotFor, weekFor, timecardFor, tradeOptionsFor, act, nameOf, timeOffConflicts,
-  CARLOS, JUAN, type DemoWorld, type Mutation, type PortalClient,
+  CARLOS, JUAN, MADISON, type DemoWorld, type Mutation, type PortalClient,
 } from './fixtures';
 
 // The interactive half of /preview/employee-portal. ZERO NETWORK: the PortalClient below resolves
@@ -79,7 +79,7 @@ export default function PortalPreview() {
         <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-2">
           <span className="mr-1 text-[10px] font-bold uppercase tracking-wider text-tt-magenta">Preview</span>
           <span className="text-[11px] text-tt-muted">Viewing as</span>
-          {[CARLOS, JUAN].map((id) => (
+          {[CARLOS, JUAN, MADISON].map((id) => (
             <button key={id} type="button" onClick={() => { setManager(false); void apply(act.setViewer(id)); }}
               className={`${chip} ${!manager && world.viewerId === id ? 'bg-tt-cyan text-black' : 'bg-white/[0.06] text-tt-text hover:bg-white/10'}`}>
               {nameOf(world, id).split(' ')[0]}

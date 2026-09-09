@@ -102,84 +102,88 @@ function MyShiftsList({ shifts, released, today, nowMs, onOpen, snap, selected }
 
 // ── Team ──────────────────────────────────────────────────────────────────────────────────────
 
-function TeamList({ days, today, availableById, onCoworker }: {
-  days: { date: string; shifts: PortalTeamShift[] }[]; today: string; availableById: Map<string, AvailableItem>;
+function DayHeading({ date, today }: { date: string; today: string }) {
+  return (
+    <h3 className={`text-[11px] font-semibold uppercase tracking-[0.12em] ${date === today ? 'text-tt-cyan' : 'text-tt-muted'}`}>
+      {dowLong(date)} · {fmtMonthDay(date)}{date === today ? <span className="font-medium normal-case tracking-normal"> · Today</span> : null}
+    </h3>
+  );
+}
+
+// The SELECTED DAY of the viewer's own team (the server already scoped the payload to that team).
+function TeamDay({ date, shifts, today, availableById, onCoworker }: {
+  date: string; shifts: PortalTeamShift[]; today: string; availableById: Map<string, AvailableItem>;
   onCoworker: (s: PortalTeamShift, a: AvailableItem | null) => void;
 }) {
-  const withPeople = days.filter((d) => d.shifts.length > 0);
-  if (withPeople.length === 0) return <EmptyState title="Nobody is scheduled this week" />;
+  const sorted = [...shifts].sort((a, b) => (a.starts_at < b.starts_at ? -1 : a.starts_at > b.starts_at ? 1 : a.name.localeCompare(b.name)));
   return (
-    <div className="space-y-6">
-      {withPeople.map((d) => {
-        const roles = new Set(d.shifts.map((s) => (s.role ?? '').toLowerCase()));
-        const groups = roles.size > 1
-          ? ['host', 'fulfillment', ''].map((r) => ({ key: r, label: r ? roleLabel(r) : 'Other', list: d.shifts.filter((s) => (s.role ?? '').toLowerCase() === r || (!r && !['host', 'fulfillment'].includes((s.role ?? '').toLowerCase()))) })).filter((g) => g.list.length > 0)
-          : [{ key: 'all', label: '', list: d.shifts }];
-        return (
-          <section key={d.date} aria-label={dowLong(d.date)}>
-            <h3 className={`text-[11px] font-semibold uppercase tracking-[0.12em] ${d.date === today ? 'text-tt-cyan' : 'text-tt-muted'}`}>
-              {d.date === today ? 'Today · ' : ''}{dowLong(d.date)} <span className="font-medium normal-case tracking-normal">· {fmtMonthDay(d.date)}</span>
-            </h3>
-            {groups.map((g) => (
-              <div key={g.key} className="mt-2">
-                {g.label && <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-tt-muted/80">{g.label}</p>}
-                <ul className="-mx-2 divide-y divide-white/[0.05]">
-                  {g.list.map((s) => {
-                    const a = availableById.get(s.instance_id) ?? null;
-                    const canAct = !s.is_me;
-                    const inner = (
-                      <>
-                        <Avatar name={s.name} size="sm" ring={s.offered ? 'offered' : s.is_me ? 'me' : null} />
-                        <span className="min-w-0 flex-1">
-                          <span className={`block truncate text-[14px] ${s.is_me ? 'font-semibold text-tt-cyan' : 'font-medium text-tt-text'}`}>
-                            {s.name}{s.is_me ? ' (you)' : ''}
-                          </span>
-                          {s.offered && (
-                            <span className="block text-[12px] font-medium text-tt-yellow">
-                              {a && !a.refusal && !a.requested ? 'Offered · you can pick it up' : a?.requested ? 'Offered · you requested it' : 'Offered'}
-                            </span>
-                          )}
-                        </span>
-                        <span className="flex items-center gap-1 text-[13px] tabular-nums text-tt-muted">
-                          {fmtRangeLA(s.starts_at, s.ends_at)}
-                          {crossesMidnightLA(s.starts_at, s.ends_at) && <MoonIcon size={13} aria-label="overnight" />}
-                        </span>
-                        {canAct && <ChevronRight size={16} className="shrink-0 text-tt-muted/70" />}
-                      </>
-                    );
-                    return (
-                      <li key={s.instance_id}>
-                        {canAct ? (
-                          <button type="button" onClick={() => onCoworker(s, a)} className="flex w-full items-center gap-3 px-2 py-2.5 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70 rounded-xl">
-                            {inner}
-                          </button>
-                        ) : (
-                          <div className="flex items-center gap-3 px-2 py-2.5">{inner}</div>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            ))}
-          </section>
-        );
-      })}
-    </div>
+    <section aria-label={`Team on ${dowLong(date)}`}>
+      <DayHeading date={date} today={today} />
+      {sorted.length === 0 ? (
+        <p className="mt-3 text-[15px] text-tt-text">No one on your team is scheduled {dowLong(date)}.</p>
+      ) : (
+        <ul className="-mx-2 mt-2 divide-y divide-white/[0.05]">
+          {sorted.map((s) => {
+            const a = availableById.get(s.instance_id) ?? null;
+            const canAct = !s.is_me;
+            const inner = (
+              <>
+                <Avatar name={s.name} size="sm" ring={s.offered ? 'offered' : s.is_me ? 'me' : null} />
+                <span className="min-w-0 flex-1">
+                  <span className={`block truncate text-[14px] ${s.is_me ? 'font-semibold text-tt-cyan' : 'font-medium text-tt-text'}`}>
+                    {s.name}{s.is_me ? ' (you)' : ''}
+                  </span>
+                  {s.offered && (
+                    <span className="block text-[12px] font-medium text-tt-yellow">
+                      {a && !a.refusal && !a.requested ? 'Offered · open to you' : a?.requested ? 'Offered · you requested it' : 'Offered'}
+                    </span>
+                  )}
+                </span>
+                <span className="flex items-center gap-1 text-[13px] tabular-nums text-tt-muted">
+                  {fmtRangeLA(s.starts_at, s.ends_at)}
+                  {crossesMidnightLA(s.starts_at, s.ends_at) && <MoonIcon size={13} aria-label="overnight" />}
+                </span>
+                {canAct && <ChevronRight size={16} className="shrink-0 text-tt-muted/70" />}
+              </>
+            );
+            return (
+              <li key={s.instance_id}>
+                {canAct ? (
+                  <button type="button" onClick={() => onCoworker(s, a)} className="flex w-full items-center gap-3 rounded-xl px-2 py-2.5 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70">
+                    {inner}
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-3 px-2 py-2.5">{inner}</div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 
 // ── Available ─────────────────────────────────────────────────────────────────────────────────
 
-function AvailableList({ items, today, onPick }: { items: AvailableItem[]; today: string; onPick: (a: AvailableItem) => void }) {
-  if (items.length === 0) return <EmptyState title="No open shifts right now" body="When a coworker offers a shift, or a manager posts one, it shows up here." />;
+function AvailableDay({ date, items, today, onPick }: { date: string; items: AvailableItem[]; today: string; onPick: (a: AvailableItem) => void }) {
   return (
-    <ul className="-mx-2 divide-y divide-white/[0.05]">
+    <section aria-label={`Open shifts on ${dowLong(date)}`}>
+      <DayHeading date={date} today={today} />
+      {items.length === 0
+        ? <p className="mt-3 text-[15px] text-tt-text">No open shifts {dowLong(date)}.</p>
+        : <AvailableList items={items} onPick={onPick} />}
+    </section>
+  );
+}
+
+function AvailableList({ items, onPick }: { items: AvailableItem[]; onPick: (a: AvailableItem) => void }) {
+  return (
+    <ul className="-mx-2 mt-2 divide-y divide-white/[0.05]">
       {items.map((a) => {
         const can = !a.refusal && !a.requested;
         const inner = (
           <>
-            <DayStamp date={a.shift_date} today={today} />
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5 text-[15px] font-semibold tabular-nums text-tt-text">
                 {fmtRangeLA(a.starts_at, a.ends_at)}
@@ -283,18 +287,32 @@ export function ScheduleScreen({
   const availableById = useMemo(() => new Map(snap.available.map((a) => [a.id, a])), [snap.available]);
   const openCount = snap.available.filter((a) => !a.refusal && !a.requested).length;
   const next = pickNextShift(snap.upcoming, nowMs, today);
-  const selected = nav.day ?? defaultSelectedDay(weekStart, today, new Set(shiftsByDate.keys()));
   const weekEnd = addDaysISO(weekStart, 6);
   const releasedInWeek = snap.releasedByMe.filter((r) => r.shift_date >= weekStart && r.shift_date <= weekEnd);
-
   const seg: Segment = nav.seg;
-  const body = week.isLoading && !week.data
-    ? <div className="space-y-3"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-14" /></div>
-    : week.error && !week.data
-      ? <ErrorState message="Could not load this week." onRetry={() => week.refetch()} busy={week.isFetching} />
-      : seg === 'mine'
-        ? <MyShiftsList shifts={weekShifts} released={releasedInWeek} today={today} nowMs={nowMs} onOpen={onOpenShift} snap={snap} selected={selected} />
-        : <TeamList days={week.data?.team ?? []} today={today} availableById={availableById} onCoworker={onCoworker} />;
+
+  // Days the strip should dot, per segment: my shifts / my team's coverage / open shifts I can take.
+  const teamDates = useMemo(() => new Set((week.data?.team ?? []).filter((d) => d.shifts.length > 0).map((d) => d.date)), [week.data]);
+  const openByDate = useMemo(() => {
+    const m = new Map<string, Pick<PortalShift, 'offer_state'>>();
+    for (const a of snap.available) if (!a.refusal && a.shift_date >= weekStart && a.shift_date <= weekEnd) m.set(a.shift_date, { offer_state: null });
+    return m;
+  }, [snap.available, weekStart, weekEnd]);
+  const dotMap: ReadonlyMap<string, Pick<PortalShift, 'offer_state'>> =
+    seg === 'mine' ? shiftsByDate : seg === 'team' ? new Map([...teamDates].map((d) => [d, { offer_state: null }])) : openByDate;
+  const selected = nav.day ?? defaultSelectedDay(weekStart, today, new Set(dotMap.keys()));
+  const teamDay = (week.data?.team ?? []).find((d) => d.date === selected);
+  const openToday = snap.available.filter((a) => a.shift_date === selected);
+
+  const body = seg === 'open'
+    ? <AvailableDay date={selected} items={openToday} today={today} onPick={onPick} />
+    : week.isLoading && !week.data
+      ? <div className="space-y-3"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-14" /></div>
+      : week.error && !week.data
+        ? <ErrorState message="Could not load this week." onRetry={() => week.refetch()} busy={week.isFetching} />
+        : seg === 'mine'
+          ? <MyShiftsList shifts={weekShifts} released={releasedInWeek} today={today} nowMs={nowMs} onOpen={onOpenShift} snap={snap} selected={selected} />
+          : <TeamDay date={selected} shifts={teamDay?.shifts ?? []} today={today} availableById={availableById} onCoworker={onCoworker} />;
 
   return (
     <div>
@@ -306,25 +324,19 @@ export function ScheduleScreen({
         options={[{ value: 'mine', label: 'My Shifts' }, { value: 'team', label: 'Team' }, { value: 'open', label: 'Available', badge: openCount || undefined }]}
       />
       <div className="mt-5">
-        {seg !== 'open' ? (
-          <>
-            <WeekStrip
-              weekStart={weekStart}
-              todayISO={today}
-              selected={selected}
-              shiftsByDate={shiftsByDate}
-              nextShiftDate={next?.shift.shift_date ?? null}
-              onSelect={(d) => go({ day: d }, 'replace')}
-              onWeek={(w) => go({ week: w === mondayOf(today) ? null : w, day: null }, 'replace')}
-            />
-            <div className="mt-5">{body}</div>
-          </>
-        ) : (
-          <>
-            <p className="mb-3 text-[13px] text-tt-muted">Shifts you can pick up. A coworker&apos;s offered shift stays theirs until a manager approves you.</p>
-            <AvailableList items={snap.available} today={today} onPick={onPick} />
-          </>
+        <WeekStrip
+          weekStart={weekStart}
+          todayISO={today}
+          selected={selected}
+          shiftsByDate={dotMap}
+          nextShiftDate={seg === 'mine' ? next?.shift.shift_date ?? null : null}
+          onSelect={(d) => go({ day: d }, 'replace')}
+          onWeek={(w) => go({ week: w === mondayOf(today) ? null : w, day: null }, 'replace')}
+        />
+        {seg === 'open' && (
+          <p className="mt-3 text-[12px] text-tt-muted">A coworker&apos;s offered shift stays theirs until a manager approves you.</p>
         )}
+        <div className="mt-5">{body}</div>
       </div>
     </div>
   );

@@ -119,6 +119,15 @@ console.log('\n5. WEEK STRIP — seven cells, today/selected/scheduled/next/offe
   eq('next flag on TUE', cells.filter((c) => c.isNext).map((c) => c.dow), ['TUE']);
   eq('offered flag on THU', cells.filter((c) => c.isOffered).map((c) => c.dow), ['THU']);
   eq('mondayOf a Sunday is the previous Monday', M.mondayOf('2026-09-13'), '2026-09-07');
+  // The Home strip incident: on Tue Sep 8 the strip showed Aug 31 – Sep 6. Only Sep 7 may be
+  // labelled "This week"; the prior week is "Last week"; and Sunday still belongs to its Monday.
+  eq('weekLabel: Sep 7 on Sep 8 → This week', M.weekLabel('2026-09-07', TODAY), 'This week');
+  eq('weekLabel: Aug 31 on Sep 8 → Last week (never "This week")', M.weekLabel('2026-08-31', TODAY), 'Last week');
+  eq('weekLabel: Sep 14 on Sep 8 → Next week', M.weekLabel('2026-09-14', TODAY), 'Next week');
+  eq('weekLabel: two weeks out → no label', M.weekLabel('2026-09-21', TODAY), null);
+  eq('weekLabel: on Sunday Sep 13, Sep 7 is still This week', M.weekLabel('2026-09-07', '2026-09-13'), 'This week');
+  eq('weekLabel: on Sunday Sep 13, Sep 14 is Next week', M.weekLabel('2026-09-14', '2026-09-13'), 'Next week');
+  eq('weekLabel: on Monday Sep 14, Sep 7 becomes Last week', M.weekLabel('2026-09-07', '2026-09-14'), 'Last week');
   eq('mondayOf a Monday is itself', M.mondayOf('2026-09-07'), '2026-09-07');
   eq('default day: today when in week', M.defaultSelectedDay('2026-09-07', TODAY, new Set()), TODAY);
   eq('default day: first scheduled day in another week', M.defaultSelectedDay('2026-09-14', TODAY, new Set(['2026-09-16'])), '2026-09-16');

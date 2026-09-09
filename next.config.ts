@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // The Next.js dev-tools badge (the round "N") is DEV-ONLY and never renders in a production
+  // build, but at bottom-left it sits inside the employee portal's bottom navigation and reads
+  // like a fourth tab during review. Keep it available, out of the way.
+  devIndicators: { position: 'top-left' },
   async headers() {
     return [
       {

@@ -4,7 +4,7 @@
 //
 // Cast: Carlos (Live Host) is the default viewer; Juan (Live Host) is the coworker on the other
 // side of the trade and the pickup; Adriana (Live Host) offers a shift; Madison and Ana are
-// Fulfillment so Team shows role grouping and a shift Carlos cannot take.
+// Fulfillment — Madison is the third viewer, so Team can be reviewed from the other team's side.
 
 import type {
   AvailableItem, PortalClient as _PC, PortalShift, PortalSnapshot, PortalTeamShift, PortalWeek, TimecardPayload, TradeOptionsPayload, TradeView, TimeOffView, PickupRequestView,
@@ -211,9 +211,10 @@ export function weekFor(w: DemoWorld, start: string): PortalWeek {
   return {
     start, end: days[6],
     days: days.map((date) => { const i = w.instances.find((x) => x.employee_id === meId && x.shift_date === date && x.status !== 'released'); return { date, shift: i ? toShift(w, i, meId) : null }; }),
+    // TEAM SCOPE, mirroring teamSchedule.ts: only the viewer's own team ever appears.
     team: days.map((date) => ({
       date,
-      shifts: w.instances.filter((i) => i.shift_date === date && i.status !== 'released').sort((a, b) => a.starts_at.localeCompare(b.starts_at) || nameOf(w, a.employee_id).localeCompare(nameOf(w, b.employee_id))).map((i): PortalTeamShift => ({
+      shifts: w.instances.filter((i) => i.shift_date === date && i.status !== 'released' && empOf(w, i.employee_id).role === empOf(w, meId).role).sort((a, b) => a.starts_at.localeCompare(b.starts_at) || nameOf(w, a.employee_id).localeCompare(nameOf(w, b.employee_id))).map((i): PortalTeamShift => ({
         instance_id: i.id, name: nameOf(w, i.employee_id), role: i.role, starts_at: i.starts_at, ends_at: i.ends_at, hours: instanceHours(i.starts_at, i.ends_at), offered: i.offer_state === 'offered', offer_id: i.offer_id, is_me: i.employee_id === meId,
       })),
     })),

@@ -212,6 +212,19 @@ export function mondayOf(dateISO: string): string {
 }
 
 /**
+ * How the shown week relates to the ACTUAL current business week. Only the week that contains
+ * today (LA) is "This week"; the neighbours are named; anything further away gets no label. The
+ * strip header prints this beside the date range so a past week can never read as the current one.
+ */
+export function weekLabel(weekStart: string, todayISO: string): 'This week' | 'Last week' | 'Next week' | null {
+  const current = mondayOf(todayISO);
+  if (weekStart === current) return 'This week';
+  if (weekStart === addDaysISO(current, -7)) return 'Last week';
+  if (weekStart === addDaysISO(current, 7)) return 'Next week';
+  return null;
+}
+
+/**
  * Which day the strip should select when a week is shown: today when it is in this week, else the
  * first day with a shift, else the Monday. Never a day the user did not ask for when they did ask.
  */

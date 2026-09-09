@@ -1,7 +1,7 @@
 'use client';
 
 import { addDaysISO } from '@/lib/schedule/timezone';
-import { weekStripModel, fmtMonthDay, mondayOf } from '@/lib/schedule/portalModel';
+import { weekStripModel, fmtMonthDay, mondayOf, weekLabel } from '@/lib/schedule/portalModel';
 import type { PortalShift } from '@/lib/schedule/portalTypes';
 import { ChevronLeft, ChevronRight } from './icons';
 
@@ -25,28 +25,38 @@ export function WeekStrip({
 }) {
   const cells = weekStripModel({ weekStart, todayISO, selected, shiftsByDate, nextShiftDate });
   const isThisWeek = weekStart === mondayOf(todayISO);
+  const label = weekLabel(weekStart, todayISO);
   const navBtn = 'flex h-9 w-9 items-center justify-center rounded-lg text-tt-muted transition-colors hover:bg-white/10 hover:text-tt-text focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70';
 
   return (
     <div>
       {!compact && (
-        <div className="mb-2 flex items-center justify-between">
-          <button type="button" aria-label="Previous week" className={navBtn} onClick={() => onWeek(addDaysISO(weekStart, -7))}>
-            <ChevronLeft size={20} />
-          </button>
-          <div className="flex items-baseline gap-2">
-            <span className="text-sm font-semibold text-tt-text">
+        <div className="mb-2">
+          <div className="flex items-center justify-between">
+            <button type="button" aria-label="Previous week" className={navBtn} onClick={() => onWeek(addDaysISO(weekStart, -7))}>
+              <ChevronLeft size={20} />
+            </button>
+            {/* The relation to the real current week is part of the heading, so a past week can never
+                read as "this week"; the return control below is a button, not a caption. */}
+            <p className="text-sm font-semibold text-tt-text" aria-live="polite">
+              {label && <span className={`font-medium ${isThisWeek ? 'text-tt-cyan' : 'text-tt-muted'}`}>{label} · </span>}
               {fmtMonthDay(weekStart)} – {fmtMonthDay(addDaysISO(weekStart, 6))}
-            </span>
-            {!isThisWeek && (
-              <button type="button" onClick={() => onWeek(mondayOf(todayISO))} className="text-xs font-semibold text-tt-cyan hover:underline">
-                This week
-              </button>
-            )}
+            </p>
+            <button type="button" aria-label="Next week" className={navBtn} onClick={() => onWeek(addDaysISO(weekStart, 7))}>
+              <ChevronRight size={20} />
+            </button>
           </div>
-          <button type="button" aria-label="Next week" className={navBtn} onClick={() => onWeek(addDaysISO(weekStart, 7))}>
-            <ChevronRight size={20} />
-          </button>
+          {!isThisWeek && (
+            <div className="mt-1 flex justify-center">
+              <button
+                type="button"
+                onClick={() => onWeek(mondayOf(todayISO))}
+                className="rounded-full bg-tt-cyan/15 px-3 py-1 text-xs font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/25 focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70"
+              >
+                Back to this week
+              </button>
+            </div>
+          )}
         </div>
       )}
       <div role="listbox" aria-label="Days of the week" className="grid grid-cols-7 gap-1">

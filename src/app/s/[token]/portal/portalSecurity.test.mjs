@@ -68,6 +68,14 @@ console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
   const tc = strip(read(join(lib, 'timecard.ts')));
   check('timecard: shifts read is filtered to the token\'s employee', /from\('shifts'\)[\s\S]*?\.eq\('employee_id', employee\.id\)/.test(tc));
   check('timecard: employee_time_entries read is filtered to the token\'s employee', /from\('employee_time_entries'\)[\s\S]*?\.eq\('employee_id', employee\.id\)/.test(tc));
+  // TEAM BOUNDARY (Team schedule). The viewer's team comes from the token-resolved employee, the
+  // instance read asks ONLY for same-team roster ids, and the row's own role is re-checked.
+  const ts = strip(read(join(lib, 'teamSchedule.ts')));
+  check('teamSchedule: team derives from the TOKEN employee\'s role', /const team = teamOfRole\(employee\.role\)/.test(ts));
+  check('teamSchedule: roster read is owner-scoped', /from\('employees'\)[\s\S]*?\.eq\('user_id', employee\.user_id\)/.test(ts));
+  check('teamSchedule: instances are requested only for same-team ids', /from\('shift_instances'\)[\s\S]*?\.in\('employee_id', teamIds\)/.test(ts));
+  check('teamSchedule: a row whose own role names another team is dropped', /teamOfRole\(role\) !== team\) continue/.test(ts));
+  check('teamSchedule: never selects private employee columns', !/select\([^)]*(hourly_rate|phone|pin_hash|override_pin|photo_path)/.test(ts));
   const tr = strip(read(join(lib, 'trade.ts')));
   check('trade: the requester is always employee.id (never a parameter)', /requester_employee_id: employee\.id/.test(tr) && !/requester_employee_id: (body|input|req)\./.test(tr));
   check('trade: the target employee is derived from who OWNS the target shift', /readParty\(admin, owner, theirs\.employee_id\)/.test(tr));

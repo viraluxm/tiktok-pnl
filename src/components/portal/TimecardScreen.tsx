@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import type { PortalSnapshot, TimecardDay, TimecardEntry } from '@/lib/schedule/portalTypes';
 import {
-  fmtHours, fmtDuration, fmtTimeLA, fmtMonthDay, dowShort, dayNumber, laDateOf, dowLong, relativeDayLabel, fmtShortDate,
+  fmtHours, fmtDuration, fmtTimeLA, fmtMonthDay, dowShort, dayNumber, laDateOf, relativeDayLabel, fmtShortDate,
 } from '@/lib/schedule/portalModel';
 import { useTimecard } from './PortalProvider';
 import { SectionLabel, Segmented, EmptyState, ErrorState, Skeleton } from './ui';
@@ -26,25 +26,33 @@ function Entry({ e }: { e: TimecardEntry }) {
   const outDay = e.clock_out ? laDateOf(e.clock_out) : null;
   const crosses = outDay != null && outDay !== e.date;
   const sw = stateWords(e);
+  const lbl = 'text-[10px] font-semibold uppercase tracking-wider text-tt-muted';
   return (
     <div className="py-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <p className="text-[15px] tabular-nums text-tt-text">
-          <span className="font-semibold">{fmtTimeLA(e.clock_in)}</span>
-          <span className="text-tt-muted"> → </span>
-          {e.clock_out ? (
-            <span className="font-semibold">{crosses && <span className="mr-1 text-[12px] font-medium text-tt-muted">{dowShort(outDay as string)}</span>}{fmtTimeLA(e.clock_out)}</span>
-          ) : (
-            <span className="font-medium text-tt-green">now</span>
-          )}
-        </p>
-        <p className={`shrink-0 text-[15px] font-semibold tabular-nums ${e.payable ? 'text-tt-text' : 'text-tt-muted'}`}>{e.clock_out ? fmtDuration(e.hours) : '—'}</p>
+      <div className="grid grid-cols-[1fr_1fr_auto] items-end gap-3">
+        <div>
+          <p className={lbl}>Clock in</p>
+          <p className="text-[15px] font-semibold tabular-nums text-tt-text">{fmtTimeLA(e.clock_in)}</p>
+        </div>
+        <div>
+          <p className={lbl}>Clock out</p>
+          <p className="text-[15px] font-semibold tabular-nums text-tt-text">
+            {e.clock_out ? (
+              <>
+                {fmtTimeLA(e.clock_out)}
+                {crosses && <span className="ml-1 text-[11px] font-medium text-tt-muted">{dowShort(outDay as string)}</span>}
+              </>
+            ) : (
+              <span className="font-medium text-tt-green">In progress</span>
+            )}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className={lbl}>Worked</p>
+          <p className={`text-[15px] font-semibold tabular-nums ${e.payable ? 'text-tt-text' : 'text-tt-muted'}`}>{e.clock_out ? fmtDuration(e.hours) : '—'}</p>
+        </div>
       </div>
-      <p className="mt-0.5 flex flex-wrap gap-x-2 text-[12px] text-tt-muted">
-        <span>Clock in {fmtTimeLA(e.clock_in)}</span>
-        {e.clock_out && <span>· Clock out {fmtTimeLA(e.clock_out)}{crosses ? ` (${dowLong(outDay as string)})` : ''}</span>}
-        {e.break_minutes > 0 && <span>· {e.break_minutes} min break</span>}
-      </p>
+      {e.break_minutes > 0 && <p className="mt-1 text-[12px] text-tt-muted">{e.break_minutes} min unpaid break</p>}
       {sw && <p className={`mt-0.5 text-[12px] font-medium ${sw.tone}`}>{sw.text}</p>}
     </div>
   );
