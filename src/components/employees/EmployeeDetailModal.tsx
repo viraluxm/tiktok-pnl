@@ -173,10 +173,13 @@ export default function EmployeeDetailModal({
             type="button" onClick={() => { onClose(); onEdit(employee); }}
             className="flex-1 rounded-xl bg-tt-cyan/15 py-2.5 text-sm font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/25"
           >Edit</button>
+          {/* Removal archives (status -> 'former'); it never deletes the person or their
+              history. Already-former people have nothing left to remove. */}
           <button
             type="button" onClick={() => { onClose(); onDelete(employee); }}
-            className="flex-1 rounded-xl bg-tt-red/15 py-2.5 text-sm font-semibold text-tt-red transition-colors hover:bg-tt-red/25"
-          >Remove</button>
+            disabled={employee.status === 'former'}
+            className="flex-1 rounded-xl bg-tt-red/15 py-2.5 text-sm font-semibold text-tt-red transition-colors hover:bg-tt-red/25 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-tt-red/15"
+          >{employee.status === 'former' ? 'Removed' : 'Remove'}</button>
         </div>
       </div>
     </div>

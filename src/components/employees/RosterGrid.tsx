@@ -24,12 +24,19 @@ export default function RosterGrid({
   isLoading,
   onOpen,
   weekCounts,
+  emptyMessage,
 }: {
   employees: Employee[];
   isLoading: boolean;
   onOpen: (e: Employee) => void;
   /** Working days this Mon→Sun week per employee (real shift_instances). Absent → no summary line. */
   weekCounts?: Record<string, number>;
+  /**
+   * What to say when the list is empty for a reason other than "no team yet" — e.g. everyone
+   * left on the roster is a former employee the caller is filtering out. Absent → the
+   * first-run copy.
+   */
+  emptyMessage?: string;
 }) {
   const groups = useMemo(() => {
     const key = (e: Employee) => (e.role ?? '').trim().toLowerCase();
@@ -46,7 +53,7 @@ export default function RosterGrid({
   if (employees.length === 0) {
     return (
       <div className="px-5 py-12 text-center text-sm text-tt-muted">
-        {isLoading ? 'Loading…' : 'No employees yet — add your first team member'}
+        {isLoading ? 'Loading…' : emptyMessage ?? 'No employees yet — add your first team member'}
       </div>
     );
   }

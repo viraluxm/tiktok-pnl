@@ -8,6 +8,7 @@ import { useShiftInstances } from '@/hooks/useShiftInstances';
 import type { Employee, EmployeeStatus, ShiftInstance } from '@/types';
 import { laTodayISO, addDaysISO } from '@/lib/schedule/timezone';
 import { weekDatesFor, isWorkingInstance, type ScheduleCounts } from '@/lib/schedule/schedulePlan';
+import { visibleRoster, isFormer } from '@/lib/weeklySchedule';
 import EmployeeScheduleBuilder from './schedule/EmployeeScheduleBuilder';
 import PerformanceView from './PerformanceView';
 import { useHostPerformance, type HostAgg } from '@/hooks/useHostPerformance';
@@ -66,7 +67,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
       setSubView(s);
     }
   }, []);
-  const { employees, isLoading, addEmployee, updateEmployee, deleteEmployee } = useEmployees();
+  const { employees, isLoading, addEmployee, updateEmployee, archiveEmployee } = useEmployees();
   // Per-host auction badges (Roster). Read-only; empty until 056 attribution accrues.
   const { data: hostPerf } = useHostPerformance();
   // Schedule-link tokens (roster Create/Copy + Edit-modal Revoke/Regenerate).
@@ -142,10 +143,18 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
     }
   }
 
-  async function handleDelete(e: Employee) {
-    if (!confirm(`Remove ${e.name}? Their shifts will be deleted too.`)) return;
+  // Removal ARCHIVES (status -> 'former'). Nothing is deleted: shifts, worked time, pay and
+  // host attribution all stay. The old copy promised a shift delete this no longer does — and
+  // that delete could not have completed anyway for anyone who has hosted a show.
+  async function handleRemove(e: Employee) {
+    if (e.status === 'former') return;
+    if (!confirm(
+      `Remove ${e.name} from the roster?\n\n`
+      + 'They will be removed from active scheduling, but their historical shifts, time '
+      + 'records, and host history will be kept.',
+    )) return;
     try {
-      await deleteEmployee.mutateAsync(e.id);
+      await archiveEmployee.mutateAsync(e.id);
     } catch (err) {
       alert((err as Error).message);
     }
@@ -207,7 +216,7 @@ export default function EmployeesTab({ dateFrom, dateTo }: EmployeesTabProps) {
           onDismissWarn={() => setLinkWarn(false)}
           onAdd={openAdd}
           onEdit={openEdit}
-          onDelete={handleDelete}
+          onDelete={handleRemove}
         />
       )}
 
@@ -409,10 +418,15 @@ function RosterView({
   onDelete: (e: Employee) => void;
 }) {
   const [copiedAll, setCopiedAll] = useState(false);
+  // Removal archives rather than deletes, so the roster has to do the hiding. Default OFF —
+  // "Remove" must visibly take the person off the active roster.
+  const [showFormer, setShowFormer] = useState(false);
   const [detail, setDetail] = useState<Employee | null>(null);
   const [builderFor, setBuilderFor] = useState<Employee | null>(null);
   const [scheduleNotice, setScheduleNotice] = useState<string | null>(null);
   const anyLinks = employees.some((e) => e.status === 'active' && links[e.id]);
+  const formerCount = employees.filter(isFormer).length;
+  const roster = useMemo(() => visibleRoster(employees, showFormer), [employees, showFormer]);
 
   // Upcoming plan for the whole roster in ONE query: this Mon→Sun week (for the tile counts)
   // through four weeks out (for "Next shift" in the detail). Real shift_instances only — the same
@@ -466,6 +480,17 @@ function RosterView({
       <div className="px-6 py-5 border-b border-tt-border flex items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-tt-text">Team Roster</h2>
         <div className="flex items-center gap-2">
+          {formerCount > 0 && (
+            <button
+              onClick={() => setShowFormer((v) => !v)}
+              aria-pressed={showFormer}
+              className={`px-3 py-2 rounded-lg text-[13px] font-semibold transition-colors ${
+                showFormer ? 'bg-tt-cyan/15 text-tt-cyan' : 'bg-white/5 text-tt-muted hover:bg-white/10'
+              }`}
+            >
+              {showFormer ? 'Hide former' : `Show former (${formerCount})`}
+            </button>
+          )}
           {anyLinks && (
             <button
               onClick={handleCopyAll}
@@ -490,7 +515,13 @@ function RosterView({
           <button onClick={onDismissWarn} className="shrink-0 text-tt-yellow/70 hover:text-tt-yellow text-xs">Dismiss</button>
         </div>
       )}
-      <RosterGrid employees={employees} isLoading={isLoading} onOpen={openDetail} weekCounts={upcomingLoading ? undefined : weekCounts} />
+      <RosterGrid
+        employees={roster}
+        isLoading={isLoading}
+        onOpen={openDetail}
+        weekCounts={upcomingLoading ? undefined : weekCounts}
+        emptyMessage={formerCount > 0 ? 'No one on the active roster — all former employees are hidden' : undefined}
+      />
 
       {detail && (
         <EmployeeDetailModal
