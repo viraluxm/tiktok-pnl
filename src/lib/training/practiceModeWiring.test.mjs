@@ -20,6 +20,8 @@ const liveSimulator = read('../../components/training/LiveSimulator.tsx');
 const trainerVideo = read('../../components/training/TrainerVideoView.tsx');
 const videoPublish = read('./useVideoPublish.ts');
 const launcher = read('../../components/training/PracticeModeLauncher.tsx');
+const controlClient = read('../../components/training/ControlClient.tsx');
+const trainerEventsSrc = read('../../components/training/trainerEvents.ts');
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -139,5 +141,80 @@ check(
     /removeLauncherSession/.test(launcher),
 );
 check('manual Remove is still wired', /removeSession\(id\)/.test(launcher));
+
+// ── P0-3: the CSP must name the LiveKit origin, DERIVED not hard-coded ──
+//
+// LiveKit is self-hosted, so its wss host differs per environment. The header is
+// built from NEXT_PUBLIC_LIVEKIT_URL at build time. These assertions pin the two
+// security-relevant properties of that derivation: it accepts ONLY ws:/wss: (so a
+// malformed env value cannot inject a source expression or a whole directive),
+// and it fails OPEN to today's header when the var is unset (so a LiveKit-less
+// deploy is byte-identical to what ships now).
+check(
+  'a livekitConnectSrc() deriver exists',
+  /function livekitConnectSrc\(\)/.test(nextConfig),
+);
+check(
+  'it reads NEXT_PUBLIC_LIVEKIT_URL rather than a hard-coded host',
+  /process\.env\.NEXT_PUBLIC_LIVEKIT_URL/.test(nextConfig) &&
+    !/wss:\/\/[a-z0-9-]+\./i.test(nextConfig),
+);
+check(
+  'only ws:/wss: are accepted',
+  /protocol !== "wss:" && protocol !== "ws:"/.test(nextConfig),
+);
+check(
+  'an unset/unparseable value returns the empty string (fail open)',
+  (nextConfig.match(/return "";/g) || []).length >= 2,
+);
+check(
+  'the derived source is concatenated into connect-src',
+  /connect-src[^"]*tiktok-shops\.com" \+\s*\n?\s*livekitConnectSrc\(\)/.test(nextConfig),
+);
+
+// ── P0-4: a missing microphone must be VISIBLE on both screens ──
+//
+// Practice ran silently for a long time because the audio:false fallback in
+// startPractice was reached without anything reporting it. The header is fixed,
+// but a denied prompt or a mic-less device still lands in that same fallback —
+// and an audio track is a hard precondition for track-composite recording.
+const startPractice = functionBody(liveSimulator, 'startPractice');
+check(
+  'the host derives micMissing from the acquired audio tracks',
+  /getAudioTracks\(\)\.length === 0/.test(startPractice),
+);
+check(
+  'it is derived AFTER acquisition, so it covers both getUserMedia paths',
+  startPractice.indexOf('getAudioTracks().length === 0') >
+    startPractice.lastIndexOf('audio: false'),
+);
+check(
+  'the host renders a no-microphone warning',
+  /micMissing &&/.test(liveSimulator) && /No microphone/.test(liveSimulator),
+);
+check(
+  'the warning cannot swallow taps on the overlay beneath it',
+  /micMissing &&[\s\S]{0,400}pointer-events-none/.test(liveSimulator),
+);
+check(
+  'micMissing is mirrored to the controller on the existing sessionState tick',
+  /micMissing: micMissingRef\.current/.test(liveSimulator),
+);
+check(
+  'the broadcast reads a ref, not state, inside the tick closure',
+  /const micMissingRef = useRef\(false\)/.test(liveSimulator),
+);
+check(
+  'sessionState carries micMissing as OPTIONAL (old host tabs still type-check)',
+  /micMissing\?: boolean/.test(trainerEventsSrc),
+);
+check(
+  'the controller treats only an explicit true as missing, never undefined',
+  /event\.micMissing === true/.test(controlClient),
+);
+check(
+  'the controller surfaces it to management',
+  /Host has no microphone/.test(controlClient),
+);
 
 console.log(`\n${passed} checks passed`);

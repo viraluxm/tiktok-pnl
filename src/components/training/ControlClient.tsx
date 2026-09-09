@@ -43,6 +43,12 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
   const [sessionSecondsLeft, setSessionSecondsLeft] = useState<number | null>(null);
   const [sessionViewers, setSessionViewers] = useState(0);
   const [sessionPhase, setSessionPhase] = useState<'idle' | 'running' | 'complete'>('idle');
+  // Whether the HOST reports no microphone track. Surfaced next to the session
+  // stats so management learns a session is silent immediately, rather than after
+  // reviewing it. Starts false and is only ever set from a host broadcast, so it
+  // stays quiet until a host is actually connected — and it renders inside the
+  // showSessionStats block, which hides once the host leaves.
+  const [hostMicMissing, setHostMicMissing] = useState(false);
 
   // Auto-bidding is admin-controlled; Manual (false) is the default. The host
   // stays the authority that actually applies bids.
@@ -92,6 +98,7 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
       setSessionSecondsLeft(event.secondsLeft);
       setSessionViewers(event.viewers);
       setSessionPhase(event.phase);
+      setHostMicMissing(event.micMissing === true);
       return;
     }
     if (event.action !== 'auctionState') return;
@@ -265,6 +272,9 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
               Viewers
               <span className="font-semibold tabular-nums text-tt-text">{sessionViewers}</span>
             </span>
+            {hostMicMissing && (
+              <span className="font-semibold text-tt-yellow">· Host has no microphone</span>
+            )}
             {sessionPhase === 'complete' && (
               <span className="font-medium text-tt-muted">· Practice ended</span>
             )}

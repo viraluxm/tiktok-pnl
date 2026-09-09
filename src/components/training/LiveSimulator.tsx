@@ -62,6 +62,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const [auctionWinner, setAuctionWinner] = useState<string | null>(null);
   const [auctionSoldAt, setAuctionSoldAt] = useState<number | null>(null);
   const [showBidBump, setShowBidBump] = useState(false); // brief +7s indicator when a bid resets the timer
+  // TRUE when the running session has no microphone track. Practice ran silently
+  // for a long time (an app-wide `microphone=()` header denied every request while
+  // startPractice's catch quietly re-requested video-only), and nothing on either
+  // screen said so. The header is fixed, but a denied prompt or a mic-less device
+  // still lands in the same fallback — so the condition is surfaced rather than
+  // swallowed. It is also a hard precondition for recording: a track-composite
+  // egress needs an audio track to name.
+  const [micMissing, setMicMissing] = useState(false);
 
   // Media
   const streamRef = useRef<MediaStream | null>(null);
@@ -82,6 +90,9 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const auctionBidRef = useRef(0);
   const auctionSecondsRef = useRef(AUCTION_START_SECONDS);
   const auctionActiveRef = useRef(false);
+  // Mirrors micMissing for broadcastSessionState, which runs inside the session
+  // tick's closure and would otherwise read a stale value.
+  const micMissingRef = useRef(false);
 
   // Moderation (block/remove) — session-only, in-memory
   const blockedRef = useRef<Set<string>>(new Set());
@@ -130,6 +141,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       secondsLeft: Math.max(0, sessionSecondsRef.current),
       viewers: viewersRef.current,
       phase,
+      // Mirrored so the controller can warn management that this session has no
+      // audio BEFORE they spend 30 minutes on a silent audition. Read from a ref
+      // because this runs inside the session tick's closure.
+      micMissing: micMissingRef.current,
     });
   }
 
@@ -387,6 +402,11 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     }
 
     streamRef.current = stream;
+    // One check for both acquisition paths: the audio:false fallback above, and a
+    // first-call success that returned no audio track anyway.
+    const noMic = stream.getAudioTracks().length === 0;
+    micMissingRef.current = noMic;
+    setMicMissing(noMic);
     setSessionState('running');
     startRuntime();
     // Best-effort publish of the existing camera (+ mic) tracks (no second getUserMedia).
@@ -497,6 +517,19 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       >
         Session: {shortTrainingSessionLabel(sessionId)}
       </div>
+
+      {/* No-microphone warning. pointer-events-none so it can never swallow a tap
+          on the overlay beneath it; not dismissible, because a silent session is a
+          real defect for the whole run rather than a transient notice. */}
+      {micMissing && (
+        <div
+          role="status"
+          className="pointer-events-none absolute left-3 z-30 max-w-[70%] rounded-md bg-tt-yellow/90 px-2 py-1 text-[10px] font-semibold leading-snug text-black"
+          style={{ top: 'calc(env(safe-area-inset-top) + 2.5rem)' }}
+        >
+          No microphone — this session has no audio. Allow mic access and restart.
+        </div>
+      )}
 
       {sessionState === 'complete' && (
         <div
