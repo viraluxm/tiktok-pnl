@@ -49,7 +49,11 @@ export const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
   // SAME scope (the team that binds is the team that audits), so no new scope is provisioned and
   // no existing member's app_metadata has to change. '/api/member/audit' covers its /keep and
   // /dismiss children through the startsWith match in isPathAllowed.
-  binding: ['/team/binding', '/team/audit', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores', '/api/member/audit'],
+  // '/team/oos' + '/api/member/oos' are the out-of-stock lookup — a THIRD page of this same
+  // scope. It is read-only (it answers "which item in this box was short" from a stored flag)
+  // and reuses the same box resolution as the picking device, so it cannot disagree with what
+  // the picker saw.
+  binding: ['/team/binding', '/team/audit', '/team/oos', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores', '/api/member/audit', '/api/member/oos'],
   inventory: ['/team/inventory', '/api/member/inventory'],
 };
 

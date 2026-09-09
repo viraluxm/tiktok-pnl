@@ -13,13 +13,14 @@ import { createClient } from '@/lib/supabase/client';
 const NAV_ITEMS: Array<{ id: string; scope: string; href: string; label: string }> = [
   { id: 'binding', scope: 'binding', href: '/team/binding', label: 'Binding' },
   { id: 'audit', scope: 'binding', href: '/team/audit', label: 'Audit' },
+  { id: 'oos', scope: 'binding', href: '/team/oos', label: 'Out of stock' },
   { id: 'inventory', scope: 'inventory', href: '/team/inventory', label: 'Inventory' },
   { id: 'pnl', scope: 'pnl', href: '/team/pnl', label: 'P&L' },
   { id: 'shows', scope: 'shows', href: '/team/shows', label: 'Shows' },
   { id: 'team', scope: 'team', href: '/team/staff', label: 'Team' },
 ];
 
-export default function MemberNav({ active }: { active: 'binding' | 'audit' | 'inventory' | 'pnl' | 'shows' | 'team' }) {
+export default function MemberNav({ active }: { active: 'binding' | 'audit' | 'oos' | 'inventory' | 'pnl' | 'shows' | 'team' }) {
   const [scopes, setScopes] = useState<string[] | null>(null);
 
   useEffect(() => {
