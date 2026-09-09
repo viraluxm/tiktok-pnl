@@ -184,8 +184,12 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
   // APPROVED MINUTES ARE PART OF THE SAME CALL on purpose. Confirming and approving must be one
   // transaction: a confirm that succeeded while a follow-up approval failed would leave the shift
   // payable at its CLOCKED span, which for a live host is the overpayment this change removes.
-  // Undefined = not supplied (the RPC's argument defaults to null); the RPC refuses a host shift
-  // that has no approved duration.
+  // ⚠️ `?? null` IS LOAD-BEARING — do not simplify it away. The new RPC's p_approved_minutes has
+  // NO DEFAULT (migration 137 keeps the legacy one-argument overload for the deployment window, and
+  // a default would make a one-argument call ambiguous). JSON.stringify DROPS an undefined value,
+  // so passing `approvedMinutes` straight through would send only p_shift_id — which resolves to
+  // the LEGACY overload and confirms a live host with no approved duration at all, silently. An
+  // explicit null keeps the call two-argument, and the new RPC then refuses the host shift.
   const confirmShift = useMutation({
     mutationFn: async ({ id, confirmed, approvedMinutes }: { id: string; confirmed: boolean; approvedMinutes?: number | null }) => {
       // rpc-grants: lensed_confirm_time_clock_shift, lensed_unconfirm_time_clock_shift
