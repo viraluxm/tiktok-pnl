@@ -111,7 +111,15 @@ export default function FulfillmentPage() {
     <>
       <PackStationOverlay
         mode={mode}
-        endpoints={{ boxes: '/api/station/boxes', scan: '/api/station/scan', confirm: '/api/station/confirm', override: '/api/station/override' }}
+        endpoints={{
+          boxes: '/api/station/boxes',
+          scan: '/api/station/scan',
+          confirm: '/api/station/confirm',
+          override: '/api/station/override',
+          // A singles slip scanned on the packing screen credits the whole pile here, rather than
+          // failing as "No matching order" and sending the packer to a different screen.
+          singles: '/api/station/singles-scan',
+        }}
         pickers={pickers}
         storeLabel="All stores"
         pickerId={pickerId}
