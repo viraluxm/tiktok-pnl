@@ -753,6 +753,28 @@ export default function PackStationOverlay({
         <span className="text-[10px] font-semibold uppercase tracking-wider text-tt-muted pointer-events-none">Hold to exit</span>
       </div>
 
+      {/* SCAN RESULT — rendered ONCE, above every screen.
+          It used to live inside the pick-screen block, so it only appeared while a box was open
+          mid-pick. Every message raised from the READY screen — including the entire singles
+          batch flow, which is scanned from exactly there — was set and then never rendered: the
+          credit ran, said what happened, and the packer saw a blank screen. A message the
+          operator cannot see is the same as no message, and it made a working scan and a broken
+          one look identical. */}
+      {scanMsg && (
+        <div className="absolute inset-x-0 top-24 z-[210] flex items-center justify-center p-3 pointer-events-none">
+          <div
+            className={`w-full max-w-md rounded-xl text-center font-extrabold tracking-wide shadow-2xl ${
+              scanMsg.tone === 'error' ? 'bg-red-700/95 text-red-50'
+                : scanMsg.tone === 'ok' ? 'bg-tt-green/95 text-black'
+                  : 'bg-tt-cyan/95 text-black'
+            }`}
+            style={{ padding: '0.5em 0.6em', fontSize: 'clamp(1.05rem, 4.6vh, 2rem)' }}
+          >
+            {scanMsg.text}
+          </div>
+        </div>
+      )}
+
       <div className={`flex-1 min-h-0 w-full flex flex-col items-center overflow-x-hidden ${screen === 'pick' ? 'overflow-y-hidden p-3' : 'p-4 overflow-y-auto justify-center'}`}>
 
         {/* READY */}
@@ -973,24 +995,6 @@ export default function PackStationOverlay({
                       Unmapped
                     </span>
                   ) : null}
-                </div>
-              )}
-
-              {/* Section-scan result, over the item and sized to be read at arm's length. It
-                  sits here rather than under the controls, where it collided with Back/Next and
-                  was too small to catch. pointer-events-none so the hero stays a tap target. */}
-              {scanMsg && (
-                <div className="absolute inset-0 flex items-center justify-center p-3 pointer-events-none">
-                  <div
-                    className={`w-full rounded-xl text-center font-extrabold tracking-wide shadow-2xl ${
-                      scanMsg.tone === 'error' ? 'bg-red-700/95 text-red-50'
-                        : scanMsg.tone === 'ok' ? 'bg-tt-green/95 text-black'
-                          : 'bg-tt-cyan/95 text-black'
-                    }`}
-                    style={{ padding: '0.5em 0.6em', fontSize: 'clamp(1.05rem, 4.6vh, 2rem)' }}
-                  >
-                    {scanMsg.text}
-                  </div>
                 </div>
               )}
 
