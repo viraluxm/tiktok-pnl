@@ -3,16 +3,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import MemberNav from '@/components/member/MemberNav';
 import { DROP_CAP } from '@/lib/schedule/drops';
+import { toTimecardEntry, type TimecardShiftRow } from '@/lib/schedule/timecardModel';
+import { dowShort, fmtDuration, fmtTimeLA, laDateOf } from '@/lib/schedule/portalModel';
 
 // Member 'team' scope — READ-ONLY roster / schedule / performance under the bare (station) layout.
 // NO pay (no rates, no pay owed), NO edit actions, NO shift confirm, NO token mint. Fed by the
-// owner-scoped /api/member/team/* routes (host-performance returns counts only — no cost).
+// owner-scoped /api/member/team routes and their children (host-performance returns counts
+// only — no cost). NOTE: do not write the glob form of that path here — a bare '/*' reads as
+// an unterminated block comment to the source-scanning tests.
 
 interface Employee { id: string; name: string | null; role: string | null; status: string | null; hire_date: string | null; probation_end_date: string | null; store_id: string | null }
 interface HostAgg { asp7_n: number; asp7_hits: number; be14_n: number; be14_below: number }
 interface LiveSession { host_id: string | null; status: string | null; started_at: string | null; ended_at: string | null }
 interface ShiftInstance { id: string; employee_id: string | null; shift_date: string | null; starts_at: string | null; ends_at: string | null; status: string | null; source: string | null }
-interface Shift { id: string; employee_id: string | null; date: string | null; start_time: string | null; end_time: string | null; break_minutes: number | null; source: string | null }
+// The shift shape toTimecardEntry needs, with the nullability the API actually returns. Rows
+// missing an identity or a start are dropped below rather than coerced.
+type Shift = Partial<TimecardShiftRow> & { id: string; employee_id: string | null; date: string | null; start_time: string | null }
 interface DropRow { employee_id: string; drops: number; excused: number; releases: number; claims: number }
 
 const fmtDate = (iso: string | null) => {
@@ -27,14 +33,39 @@ const fmtDateTime = (iso: string | null) => {
 };
 const pct = (num: number, den: number) => (den <= 0 ? null : (num / den) * 100);
 const fmtPct = (v: number | null) => (v == null ? '—' : `${v.toFixed(0)}%`);
-// Hours from a time-clock shift (HH:MM[:SS] strings, overnight-aware), minus break.
-function shiftHours(s: Shift): number | null {
-  if (!s.start_time || !s.end_time) return null;
-  const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + (m || 0); };
-  let mins = toMin(s.end_time) - toMin(s.start_time);
-  if (mins < 0) mins += 24 * 60;
-  mins -= s.break_minutes ?? 0;
-  return mins > 0 ? mins / 60 : 0;
+// Hours are NOT computed here. toTimecardEntry is the same derivation the employee timecard uses,
+// and it calls paidShiftHours + clockedShiftHours from employees.ts verbatim — so what a manager
+// reads on this page is what payroll pays. This page previously subtracted its own wall-clock
+// times, which ignored both the punch instants and migration 137's approved_minutes and so
+// disagreed with Pay on exactly the time-clock rows a manager comes here to check.
+//
+// Returns null for a materialized PLAN row (source_rule_id set) — a plan is not worked time — and
+// for a row too incomplete to place on the clock.
+function timecardRow(s: Shift) {
+  if (!s.employee_id || !s.date || !s.start_time) return null;
+  return toTimecardEntry({
+    id: s.id,
+    employee_id: s.employee_id,
+    date: s.date,
+    start_time: s.start_time,
+    end_time: s.end_time ?? null,
+    source: s.source ?? 'manual',
+    source_rule_id: s.source_rule_id ?? null,
+    confirmed_at: s.confirmed_at ?? null,
+    break_minutes: s.break_minutes ?? 0,
+    clock_in_at: s.clock_in_at ?? null,
+    clock_out_at: s.clock_out_at ?? null,
+    auto_closed: s.auto_closed ?? false,
+    approved_minutes: s.approved_minutes ?? null,
+  });
+}
+
+// The one-line status a manager needs: why a row is not simply "done".
+function statusOf(e: NonNullable<ReturnType<typeof timecardRow>>): { text: string; tone: string } | null {
+  if (e.state === 'in_progress') return { text: 'In progress', tone: 'text-tt-green' };
+  if (e.state === 'auto_closed') return { text: 'Auto-closed — verify the clock-out', tone: 'text-tt-yellow' };
+  if (e.state === 'awaiting_confirmation') return { text: 'Awaiting approval', tone: 'text-tt-yellow' };
+  return e.source === 'manual' ? { text: 'Manager entry', tone: 'text-tt-muted' } : null;
 }
 
 type View = 'roster' | 'schedule' | 'performance';
@@ -75,6 +106,20 @@ export default function MemberStaffPage() {
   }, []);
 
   const nameById = useMemo(() => { const m = new Map<string, string>(); for (const e of employees) m.set(e.id, e.name ?? e.id); return m; }, [employees]);
+  // Worked-time rows, newest first. CLOCKED is the attendance record; APPROVED is what payroll
+  // pays — after migration 137 they answer different questions (a live host's approved time is
+  // normally shorter than their punch), so the table shows both rather than one number that
+  // answers neither. Plan rows and unplaceable rows drop out in timecardRow, so the
+  // table never counts a schedule projection as attendance. Sorted on the clock-in INSTANT rather
+  // than the wall-clock date so an overnight punch sits where it actually happened.
+  const timecardRows = useMemo(
+    () =>
+      shifts
+        .map((shift) => ({ shift, entry: timecardRow(shift) }))
+        .filter((r): r is { shift: Shift; entry: NonNullable<typeof r.entry> } => r.entry != null)
+        .sort((a, b) => Date.parse(b.entry.clock_in) - Date.parse(a.entry.clock_in)),
+    [shifts],
+  );
   const dropByEmp = useMemo(() => { const m = new Map<string, DropRow>(); for (const d of drops) m.set(d.employee_id, d); return m; }, [drops]);
   const liveHoursByHost = useMemo(() => {
     const m = new Map<string, number>();
@@ -145,16 +190,28 @@ export default function MemberStaffPage() {
             </TableCard>
           </Section>
           <Section title="Recent shifts (hours)">
-            <TableCard cols={['Employee', 'Date', 'Time', 'Hours']}>
-              {shifts.slice(0, 100).map((s) => (
-                <tr key={s.id} className="border-b border-[rgba(255,255,255,0.04)]">
-                  <td className="px-3 py-2 text-[13px] text-tt-text">{s.employee_id ? nameById.get(s.employee_id) ?? '—' : '—'}</td>
-                  <td className="px-3 py-2 text-[13px] text-tt-muted tabular-nums">{fmtDate(s.date)}</td>
-                  <td className="px-3 py-2 text-[13px] text-tt-muted tabular-nums">{s.start_time?.slice(0, 5) ?? '—'}–{s.end_time?.slice(0, 5) ?? '—'}</td>
-                  <td className="px-3 py-2 text-[13px] text-right tabular-nums">{(() => { const h = shiftHours(s); return h == null ? '—' : h.toFixed(2); })()}</td>
-                </tr>
-              ))}
-              {shifts.length === 0 && <tr><td colSpan={4} className="px-3 py-6 text-center text-tt-muted">No shifts.</td></tr>}
+            <TableCard cols={['Employee', 'Date', 'Clock in–out', 'Clocked', 'Approved', 'Status']}>
+              {timecardRows.slice(0, 100).map(({ shift, entry }) => {
+                const outDay = entry.clock_out ? laDateOf(entry.clock_out) : null;
+                const crosses = outDay != null && outDay !== entry.date;
+                const status = statusOf(entry);
+                return (
+                  <tr key={shift.id} className="border-b border-[rgba(255,255,255,0.04)]">
+                    <td className="px-3 py-2 text-[13px] text-tt-text">{shift.employee_id ? nameById.get(shift.employee_id) ?? '—' : '—'}</td>
+                    <td className="px-3 py-2 text-[13px] text-tt-muted tabular-nums">{fmtDate(entry.date)}</td>
+                    <td className="px-3 py-2 text-[13px] text-tt-muted tabular-nums">
+                      {fmtTimeLA(entry.clock_in)}–{entry.clock_out ? fmtTimeLA(entry.clock_out) : '—'}
+                      {crosses && <span className="ml-1 text-[11px] font-medium text-tt-muted">{dowShort(outDay as string)}</span>}
+                    </td>
+                    <td className="px-3 py-2 text-[13px] text-right text-tt-muted tabular-nums">{entry.clock_out ? fmtDuration(entry.clocked_hours) : '—'}</td>
+                    <td className="px-3 py-2 text-[13px] text-right tabular-nums">
+                      {entry.clock_out == null ? '—' : entry.payable ? fmtDuration(entry.hours) : <span className="text-tt-yellow">—</span>}
+                    </td>
+                    <td className={`px-3 py-2 text-[12px] font-medium ${status?.tone ?? 'text-tt-muted'}`}>{status?.text ?? '—'}</td>
+                  </tr>
+                );
+              })}
+              {timecardRows.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-tt-muted">No shifts.</td></tr>}
             </TableCard>
           </Section>
         </div>
