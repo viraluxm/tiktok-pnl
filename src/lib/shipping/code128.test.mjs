@@ -162,4 +162,44 @@ console.log('\nbatch codes');
     [...codes].every((c) => decode(encodeCode128B(c)).length === c.length + 3));
 }
 
+console.log('\nscan routing: a batch code can never be mistaken for anything else');
+{
+  // The packing screen routes on isBatchCode() BEFORE the box flow, so this discrimination is
+  // load-bearing: a false positive would swallow a shipping label that should have started a box.
+  const realTrackings = [
+    '9200190394220317900373', '9234690394220303317941', '9236290394220300014249',
+    '9234690394220303251672', '9200190394220317501884',
+  ];
+  for (const t of realTrackings) {
+    check(`tracking ${t.slice(0, 8)}… is NOT a batch code`, !isBatchCode(t));
+  }
+
+  // The 420 + ZIP routing-label form, and the HAZMAT over-length form.
+  check('a 420+ZIP concatenated label is not a batch code',
+    !isBatchCode('420329359200190394480319710850'));
+  check('an over-length HAZMAT tracking is not a batch code',
+    !isBatchCode('4208914992362903942203000007067'));
+
+  // Slot codes: 'LOC-' + 10 chars, routed on the same screen by isSlotCode().
+  check('a slot code is not a batch code', !isBatchCode('LOC-A3K9M2QX4B'));
+  check('a batch code does not start with the slot prefix',
+    !generateBatchCode((n) => new Uint8Array(n).fill(7)).startsWith('LOC-'));
+
+  // Junk the scanner produces on a bad read (all seen in scan_log).
+  for (const junk of ['(#S(t', "'!2##R)O", '052000135176', '210868', '', 'SB', 'SB123']) {
+    check(`junk ${JSON.stringify(junk)} is not a batch code`, !isBatchCode(junk));
+  }
+
+  // And the positive case still holds.
+  check('a real batch code IS recognised', isBatchCode('SB7F3K9M2QX4'));
+  check('lowercase must be upper-cased by the caller before the test',
+    !isBatchCode('sb7f3k9m2qx4') && isBatchCode('sb7f3k9m2qx4'.toUpperCase()));
+
+  // The two code spaces are structurally disjoint: batch bodies exclude 0/1/I/L/O/U, and a
+  // tracking is all digits, so no string can satisfy both.
+  const code = 'SB7F3K9M2QX4';
+  check('a batch code is not 22 digits, so it cannot be a tracking',
+    !/^\d{22}$/.test(code));
+}
+
 console.log(`\n${passed} checks passed\n`);

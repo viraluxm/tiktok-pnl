@@ -15,11 +15,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isSlotCode, normalizeSlotCode } from '@/lib/mapping/slotCode';
 import { packBlockHeadline } from '@/lib/shipping/refundGuard';
+import { isBatchCode } from '@/lib/shipping/code128';
 
 export interface PackStationEndpoints {
   boxes: string;
   scan: string;
   confirm: string;
+  /**
+   * Where a scanned SINGLES BATCH slip goes. Optional: a surface that never sees singles simply
+   * omits it and such a scan reports that it is not handled here, rather than 404ing into the
+   * box flow.
+   */
+  singles?: string;
   /**
    * Where a lead's override goes. REQUIRED rather than defaulted, because the two logins are
    * confined to different API namespaces and a silent default would work on one and 403 on the
@@ -250,7 +257,7 @@ export default function PackStationOverlay({
   // Transient feedback for a section scan. Toned, because "you are at the wrong shelf" and
   // "this one is already done" call for opposite reactions and a picker reads this in about
   // half a second.
-  const [scanMsg, setScanMsg] = useState<null | { text: string; tone: 'error' | 'info' }>(null);
+  const [scanMsg, setScanMsg] = useState<null | { text: string; tone: 'error' | 'info' | 'ok' }>(null);
   const scanMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A line the picker cannot scan — damaged label, unreachable — awaiting a lead's PIN.
   const [override, setOverride] = useState<null | { line: PickLine }>(null);
@@ -359,7 +366,7 @@ export default function PackStationOverlay({
    * should not have to tap anything to get back to work, and a message that needs dismissing
    * is one that will still be on screen for the next scan.
    */
-  function flashScan(text: string, tone: 'error' | 'info') {
+  function flashScan(text: string, tone: 'error' | 'info' | 'ok') {
     if (scanMsgTimer.current) clearTimeout(scanMsgTimer.current);
     setScanMsg({ text, tone });
     scanMsgTimer.current = setTimeout(() => { setScanMsg(null); scanMsgTimer.current = null; }, 2600);
@@ -403,6 +410,45 @@ export default function PackStationOverlay({
     grab(l, 'scan');
   }
 
+  /**
+   * Credit a finished singles pile from a scanned slip.
+   *
+   * Does NOT disturb the box in progress: a singles slip is a whole-pile credit and has nothing to
+   * do with whatever box is open, so this neither loads nor abandons anything. The result lands in
+   * the same scan banner every other scan uses.
+   */
+  async function creditSingles(code: string) {
+    if (!endpoints.singles) {
+      flashScan('Singles slips are not handled on this screen.', 'error');
+      return;
+    }
+    if (!pickerId) { flashScan("Choose who's picking first.", 'error'); return; }
+    flashScan('Crediting the pile…', 'info');
+    try {
+      const res = await fetch(endpoints.singles, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, picker_employee_id: pickerId }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) { flashScan(j.error ?? 'That slip could not be credited.', 'error'); return; }
+
+      // Say what was actually credited, never the slip's own number: if some of the pile was
+      // already confirmed box-by-box, a headline echoing "135" would disagree with reality.
+      const extra = j.already_counted > 0 ? ` · ${j.already_counted} already counted` : '';
+      const blocked = j.blocked > 0 ? ` · ${j.blocked} refunded — do not ship` : '';
+      flashScan(
+        j.credited > 0
+          ? `+${j.credited} singles credited${extra}${blocked}`
+          : `Already counted — nothing new to credit${blocked}`,
+        j.credited > 0 ? 'ok' : 'info',
+      );
+      if (j.credited > 0) onBoxPicked?.();
+    } catch {
+      flashScan('Could not reach the server — scan again.', 'error');
+    }
+  }
+
   function onScan() {
     const v = value.trim(); setValue('');
     handleScan(v);
@@ -427,6 +473,19 @@ export default function PackStationOverlay({
       flashScan('Still loading the last scan…', 'info');
       return;
     }
+    // A SINGLES BATCH SLIP. Routed here, before the box flow, by the same prefix-test pattern the
+    // slot code uses below — and safe for the same reason: an 'SB' + 10-character code drawn from
+    // a restricted alphabet cannot collide with a 22-digit USPS tracking, so nothing that used to
+    // start a box can now be swallowed as a batch.
+    //
+    // Handled on THIS screen rather than only on the prep page because the packer's instinct is to
+    // scan the slip where they already are — the first real-world attempt did exactly that and got
+    // "No matching order", which reads as a broken barcode rather than a wrong screen.
+    // Upper-cased for the test: the code alphabet is uppercase, but a scanner configured for
+    // lower case would otherwise fall straight through into the box flow and fail as
+    // "No matching order" — the exact confusing failure this branch exists to remove.
+    if (isBatchCode(v.toUpperCase())) { creditSingles(v.toUpperCase()); return; }
+
     // Prefix test, so a section label can never be mistaken for a shipping label and start a
     // new box mid-pick. See lib/mapping/slotCode.
     if (screen === 'pick' && isSlotCode(v)) { confirmBySection(v); return; }
@@ -855,7 +914,9 @@ export default function PackStationOverlay({
                 <div className="absolute inset-0 flex items-center justify-center p-3 pointer-events-none">
                   <div
                     className={`w-full rounded-xl text-center font-extrabold tracking-wide shadow-2xl ${
-                      scanMsg.tone === 'error' ? 'bg-red-700/95 text-red-50' : 'bg-tt-cyan/95 text-black'
+                      scanMsg.tone === 'error' ? 'bg-red-700/95 text-red-50'
+                        : scanMsg.tone === 'ok' ? 'bg-tt-green/95 text-black'
+                          : 'bg-tt-cyan/95 text-black'
                     }`}
                     style={{ padding: '0.5em 0.6em', fontSize: 'clamp(1.05rem, 4.6vh, 2rem)' }}
                   >
