@@ -450,10 +450,11 @@ export default function PackStationOverlay({
       // already confirmed box-by-box, a headline echoing "135" would disagree with reality.
       const extra = j.already_counted > 0 ? ` · ${j.already_counted} already counted` : '';
       const blocked = j.blocked > 0 ? ` · ${j.blocked} refunded — do not ship` : '';
+      const noStore = j.no_store > 0 ? ` · ${j.no_store} unlinked — tell a lead` : '';
       flashScan(
         j.credited > 0
-          ? `+${j.credited} singles credited${extra}${blocked}`
-          : `Already counted — nothing new to credit${blocked}`,
+          ? `+${j.credited} singles credited${extra}${blocked}${noStore}`
+          : `Already counted — nothing new to credit${blocked}${noStore}`,
         j.credited > 0 ? 'ok' : 'info',
       );
       if (j.credited > 0) onBoxPicked?.();

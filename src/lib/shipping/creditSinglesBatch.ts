@@ -24,9 +24,11 @@ export interface CreditSuccess {
   credited: number;
   already_counted: number;
   blocked: number;
+  /** Boxes that could not be credited because the ledger has no store for them. */
+  no_store: number;
 }
 
-interface Label { group_key: string; order_ids: string[] | null }
+interface Label { group_key: string; order_ids: string[] | null; store_id: string | null }
 
 export async function creditSinglesBatch(
   admin: SupabaseClient,
@@ -70,16 +72,21 @@ export async function creditSinglesBatch(
   // runs and there is no single run to look them up by.
   const { data: labelRows, error: labelErr } = await admin
     .from('shipping_label_purchases')
-    .select('group_key, order_ids')
+    // store_id is REQUIRED on a verification row: the enforce_store_id trigger raises 23502 on any
+    // insert without it ("set it explicitly — no user-derived guessing"). Every label carries its
+    // own store, and a singles pile routinely spans several — this one covers 3 — so it is read per
+    // box rather than assumed for the batch.
+    .select('group_key, order_ids, store_id')
     .eq('user_id', ownerId)
     .in('group_key', batch.group_keys);
   if (labelErr) {
     console.error('[singles-credit] label read failed:', labelErr);
     return { ok: false, status: 500, error: 'Could not read that batch.' };
   }
-  const ordersByGroup = new Map<string, string[]>();
-  for (const r of (labelRows ?? []) as Label[]) ordersByGroup.set(String(r.group_key), r.order_ids ?? []);
-  const labels: Label[] = batch.group_keys.map((k) => ({ group_key: k, order_ids: ordersByGroup.get(k) ?? [] }));
+  const byGroup = new Map<string, Label>();
+  for (const r of (labelRows ?? []) as Label[]) byGroup.set(String(r.group_key), r);
+  const labels: Label[] = batch.group_keys.map((k) => byGroup.get(k)
+    ?? { group_key: k, order_ids: [], store_id: null });
 
   // ── Refund guard. ──
   // A refunded or cancelled order must never be packed — TikTok has already paid the buyer back.
@@ -93,7 +100,13 @@ export async function creditSinglesBatch(
   // Read first so the packer can be told the truth. The slip says "148 LABELS"; if 18 were already
   // confirmed at the pack station the honest answer is "credited 130 of 148", not a number that
   // silently disagrees with the paper in their hand.
-  const packableKeys = packable.map((l) => l.group_key);
+  // A box with no store on the ledger cannot be written at all (the trigger rejects it), so it is
+  // separated out and REPORTED rather than allowed to fail the whole pile. All 418 labels across
+  // every batch minted so far carry one; this is a guard, not an expected path.
+  const storeless = packable.filter((l) => !l.store_id);
+  const withStore = packable.filter((l) => l.store_id);
+
+  const packableKeys = withStore.map((l) => l.group_key);
   const { data: existing, error: exErr } = await admin
     .from('shipment_verifications')
     .select('group_key')
@@ -104,12 +117,13 @@ export async function creditSinglesBatch(
     return { ok: false, status: 500, error: 'Could not read that batch.' };
   }
   const already = new Set((existing ?? []).map((r) => String(r.group_key)));
-  const toWrite = packable.filter((l) => !already.has(l.group_key));
+  const toWrite = withStore.filter((l) => !already.has(l.group_key));
 
   if (toWrite.length > 0) {
     const now = new Date().toISOString();
     const rows = toWrite.map((l) => ({
       user_id: ownerId,
+      store_id: l.store_id,
       group_key: l.group_key,
       order_ids: l.order_ids ?? [],
       verified_at: now,
@@ -143,5 +157,6 @@ export async function creditSinglesBatch(
     credited: toWrite.length,
     already_counted: already.size,
     blocked: blockedCount,
+    no_store: storeless.length,
   };
 }
