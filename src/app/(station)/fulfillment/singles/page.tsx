@@ -39,17 +39,34 @@ export default function SinglesStationPage() {
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [todayCredited, setTodayCredited] = useState(0);
+  const [rosterError, setRosterError] = useState<string | null>(null);
+  const [rosterLoaded, setRosterLoaded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // The roster comes from /api/station/employees, which requires app_metadata.role === 'station'.
+  // An owner or member session gets 403 — and reporting that as "no pickers on the roster" sends
+  // someone hunting for a roster problem that does not exist. Say which failure it actually was.
   useEffect(() => {
+    let cancelled = false;
     fetch('/api/station/employees')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setPickers((d?.employees ?? []) as Picker[]))
-      .catch(() => { /* the gate below shows the empty state */ });
+      .then(async (r) => {
+        if (cancelled) return;
+        if (r.status === 401) { setRosterError('Not signed in. Open this on the station device.'); return; }
+        if (r.status === 403) {
+          setRosterError('This screen only works on a station device — the account signed in here is not the station account.');
+          return;
+        }
+        if (!r.ok) { setRosterError(`Could not load the roster (${r.status}).`); return; }
+        const d = await r.json().catch(() => null);
+        setPickers((d?.employees ?? []) as Picker[]);
+      })
+      .catch(() => { if (!cancelled) setRosterError('Could not reach the server.'); })
+      .finally(() => { if (!cancelled) setRosterLoaded(true); });
     try {
       const saved = localStorage.getItem(PICKER_KEY);
       if (saved) setPickerId(saved);
     } catch { /* private mode — the packer just picks again */ }
+    return () => { cancelled = true; };
   }, []);
 
   // Keep focus on the input: a barcode scanner is a keyboard, and a blurred field silently drops
@@ -94,8 +111,16 @@ export default function SinglesStationPage() {
       <Shell>
         <h1 className="text-2xl font-bold text-tt-text mb-1">Singles prep</h1>
         <p className="text-sm text-tt-muted mb-6">Who is packing?</p>
-        {pickers.length === 0 ? (
-          <p className="text-sm text-tt-muted">No pickers on the roster yet.</p>
+        {rosterError ? (
+          <div className="rounded-2xl border border-tt-yellow/40 bg-tt-yellow/10 px-4 py-4">
+            <p className="text-sm text-tt-yellow font-semibold">{rosterError}</p>
+          </div>
+        ) : !rosterLoaded ? (
+          <p className="text-sm text-tt-muted">Loading the roster…</p>
+        ) : pickers.length === 0 ? (
+          <p className="text-sm text-tt-muted">
+            No one on the roster has role <strong>fulfillment</strong> with status active or probation.
+          </p>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
             {pickers.map((p) => (
@@ -115,10 +140,13 @@ export default function SinglesStationPage() {
     <Shell>
       <div className="flex items-baseline justify-between gap-3 mb-1 flex-wrap">
         <h1 className="text-2xl font-bold text-tt-text">Singles prep</h1>
-        <button
-          onClick={() => choosePicker('')}
-          className="text-xs text-tt-muted underline underline-offset-2 cursor-pointer"
-        >{picker?.name ?? 'Change'} · switch</button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => choosePicker('')}
+            className="text-xs text-tt-muted underline underline-offset-2 cursor-pointer"
+          >{picker?.name ?? 'Change'} · switch</button>
+          <a href="/fulfillment" className="text-xs text-tt-muted underline underline-offset-2">← packing</a>
+        </div>
       </div>
       <p className="text-sm text-tt-muted mb-5">
         Scan the slip <strong className="text-tt-text">when the pile is finished</strong>.
