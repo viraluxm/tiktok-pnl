@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
 import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
-import { useExtensionAuth } from '@/hooks/useExtensionAuth';
+import CaptureRelay from '@/components/extension/CaptureRelay';
 import { ChatContextProvider } from '@/lib/chat/context';
 import ChatWidget from '@/components/chat/ChatWidget';
 
@@ -78,9 +78,6 @@ export default function AppLayout({
     return () => subscription.unsubscribe();
   }, [router, queryClient]);
 
-  // Relay Supabase session to Lensed Chrome extension (no-ops if not installed)
-  useExtensionAuth();
-
   if (!checked) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-tt-bg">
@@ -95,6 +92,10 @@ export default function AppLayout({
   return (
     <ChatContextProvider>
       {children}
+      {/* Relays the session to the capture extension (no-op if it isn't installed), gated on the
+          owner check AND this profile's capture binding. Renders a banner only when this machine
+          is bound to a different account — see components/extension/CaptureRelay. */}
+      <CaptureRelay />
       <ChatWidget />
     </ChatContextProvider>
   );

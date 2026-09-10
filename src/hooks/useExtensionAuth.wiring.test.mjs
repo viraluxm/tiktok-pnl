@@ -47,16 +47,39 @@ check(
   /const relay = async \([\s\S]*?sendToExtension\(/.test(code),
 );
 
-// ── the guard, before the token ──
+// ── BOTH guards, before the token ──
+// Eligibility answers "may this user relay at all" (is she a store owner). The binding answers
+// "does THIS profile capture as THIS user" — which eligibility cannot, because the owner and an
+// external seller are both store owners. relay() must consult both, and pass the eligibility
+// verdict INTO the binding decision rather than deciding twice.
 const relayBody = (code.match(/const relay = async \([\s\S]*?\n    \};/) || [])[0] ?? '';
 check('relay() resolves eligibility for the session user', /eligibilityFor\(session\.user\.id\)/.test(relayBody));
-check('relay() returns early when the verdict is not a yes', /if \(!mayRelay\(/.test(relayBody));
+check('relay() runs the binding decision', /decideRelay\(\{/.test(relayBody));
+check(
+  'eligibility feeds the binding decision — one decision, not two',
+  /eligible: mayRelay\(value\)/.test(relayBody),
+);
+check(
+  'the binding is read for THIS decision, not cached across sign-ins',
+  /read: readBinding\(storage\)/.test(relayBody),
+);
+check("relay() returns early on 'withhold'", /decision\.action === 'withhold'/.test(relayBody));
 check(
   'the withheld branch returns BEFORE lastToken is written',
   relayBody.indexOf('return;') < relayBody.indexOf('lastToken.current ='),
-  'an ineligible session must not seed the pull cache',
+  'a withheld session must not seed the pull cache',
 );
 check('withholding is logged as an error, not swallowed', /console\.error\(/.test(relayBody));
+check(
+  'a mismatched machine gets its own message, not the generic one',
+  /bound-to-other/.test(relayBody),
+  'the advice differs: rebind, versus sign in as an owner',
+);
+check(
+  'a fresh trust-on-first-use bind is announced, not silent',
+  /decision\.justBound/.test(relayBody) && /console\.warn\(/.test(relayBody),
+  'an unbound profile has no mismatch to warn about, so this is the only moment a wrong bind shows',
+);
 
 // ── the pull responder ──
 const onMessage = (code.match(/const onMessage = async \([\s\S]*?\n    \};/) || [])[0] ?? '';
@@ -80,6 +103,15 @@ check(
 check(
   'sign-out clears the cached token and the verdict',
   /lastToken\.current = null;[\s\S]{0,200}eligibility\.current = \{ userId: null, value: 'unknown' \}/.test(code),
+);
+check(
+  'only the explicit rebind clears the binding',
+  /const rebind = useCallback\([\s\S]*?clearBinding\(/.test(code),
+  'which account a machine captures as must not change because somebody logged out',
+);
+check(
+  'clearBinding is called exactly once — from rebind and nowhere else',
+  [...code.matchAll(/clearBinding\(/g)].length === 1,
 );
 
 // ── the server side of the question ──

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import {
   afterMint,
@@ -16,6 +16,12 @@ import {
   resolveRelayEligibility,
   type Eligibility,
 } from '@/lib/extension/relayEligibility';
+import {
+  clearBinding,
+  decideRelay,
+  readBinding,
+  type WithholdReason,
+} from '@/lib/extension/captureBinding';
 
 /**
  * Relays the Supabase session to the Lensed Chrome extension via
@@ -31,11 +37,19 @@ import {
  * refresh relay the compat build still provides).
  *
  * ─── Who may be relayed ───
- * ONLY a user who owns a store. The extension writes capture_events under the user_id in the
- * token it holds, so relaying a non-owner's session (an admin partner signing in on a capture
- * machine, most plausibly) makes captures write under the wrong identity — accepted by own-row
- * RLS, invisible to the owner, with no error anywhere. Eligibility is resolved server-side by
- * /api/ext/relay-eligible and fails closed; see @/lib/extension/relayEligibility.
+ * TWO gates, and they answer different questions.
+ *
+ *   1. Eligibility (@/lib/extension/relayEligibility, resolved server-side by
+ *      /api/ext/relay-eligible): may this user hand a session to the extension AT ALL — i.e. do
+ *      they own a store. Fails closed.
+ *   2. Capture binding (@/lib/extension/captureBinding): does THIS browser profile capture as
+ *      THIS user. Gate 1 passes both the owner and an external seller, because both own stores —
+ *      so gate 1 alone cannot stop a seller signing in on a warehouse machine and silently taking
+ *      over capture. Gate 2 is what makes a machine belong to one account. Trust on first use, so
+ *      existing machines bind to whoever is signed in there now and nothing stops mid-show.
+ *
+ * A withheld relay means the extension keeps its own token and drops into a reconnect state:
+ * capture stops VISIBLY instead of continuing under the wrong identity INVISIBLY.
  *
  * Silently no-ops if the extension isn't installed or the ID doesn't match.
  *
@@ -74,6 +88,17 @@ function sendToExtension(accessToken: string) {
  * Call this hook once in the authenticated app layout.
  * It pushes the current session on mount and on every token refresh.
  */
+export interface RelayStatus {
+  /** null until the first decision has been made. */
+  reason: WithholdReason | null;
+  /** Who this profile captures as, when we know. */
+  boundUserId: string | null;
+  /** The signed-in user at the time of the last decision. */
+  signedInUserId: string | null;
+  /** True for a short window after a fresh trust-on-first-use bind, so the UI can announce it. */
+  justBound: boolean;
+}
+
 export function useExtensionAuth() {
   // Rate-limiter state for the pull responder + the token it last handed out. Refs, not state:
   // nothing here should re-render, and the values must survive across message events.
@@ -88,8 +113,20 @@ export function useExtensionAuth() {
   // alarm comes round a minute later — on the owner's own machine, mid-show.
   const pending = useRef<Promise<Eligibility> | null>(null);
 
+  // Surfaced to the UI (see components/extension/CaptureRelay) so a machine bound to someone else
+  // says so on screen, not only in a console nobody has open. State, not a ref: this one renders.
+  const [status, setStatus] = useState<RelayStatus>({
+    reason: null,
+    boundUserId: null,
+    signedInUserId: null,
+    justBound: false,
+  });
+  // Bumped by the Rebind button to force the effect to re-run its decision.
+  const [rebindNonce, setRebindNonce] = useState(0);
+
   useEffect(() => {
     const supabase = createClient();
+    const storage: Storage | null = typeof window === 'undefined' ? null : window.localStorage;
 
     const eligibilityFor = async (userId: string): Promise<Eligibility> => {
       const cached = eligibility.current;
@@ -106,17 +143,52 @@ export function useExtensionAuth() {
     // be undone by the very next pull.
     const relay = async (session: { access_token: string; user: { id: string } }) => {
       const value = await eligibilityFor(session.user.id);
-      if (!mayRelay(value)) {
-        // LOUD on purpose. This is the only visible sign that a capture machine is signed in as
-        // the wrong person — the alternative is captures landing silently under that account.
-        console.error(
-          `[Lensed→extension] relay WITHHELD for user ${session.user.id} (${value}). ` +
-            'Only a store owner may hand a session to the capture extension. If this is a capture ' +
-            "machine, sign out and sign in as the store owner — the extension's own token is " +
-            'untouched, and it will show a reconnect state rather than capture under this account.'
-        );
+      const decision = decideRelay({
+        eligible: mayRelay(value),
+        signedInUserId: session.user.id,
+        read: readBinding(storage),
+        nowMs: Date.now(),
+        storage,
+      });
+
+      if (decision.action === 'withhold') {
+        setStatus({
+          reason: decision.reason,
+          boundUserId: decision.boundUserId,
+          signedInUserId: session.user.id,
+          justBound: false,
+        });
+        // LOUD on purpose, and the two reasons need different advice.
+        if (decision.reason === 'bound-to-other') {
+          console.error(
+            `[Lensed→extension] relay WITHHELD: this browser profile captures as ` +
+              `${decision.boundUserId}, but ${session.user.id} is signed in. The extension keeps ` +
+              'its own token and will show a reconnect state — it will NOT capture under this ' +
+              'account. If this machine really should capture as the signed-in user, press Rebind.'
+          );
+        } else {
+          console.error(
+            `[Lensed→extension] relay WITHHELD for user ${session.user.id} (${value}). ` +
+              'Only a store owner may hand a session to the capture extension.'
+          );
+        }
         return;
       }
+
+      if (decision.justBound) {
+        // A fresh trust-on-first-use bind. Announced rather than silent: an unbound profile has no
+        // mismatch to warn about, so this is the only moment a wrong bind is visible.
+        console.warn(
+          `[Lensed→extension] this browser profile is now bound to capture as ${session.user.id}. ` +
+            'Only that account can relay a session here from now on.'
+        );
+      }
+      setStatus({
+        reason: null,
+        boundUserId: decision.boundUserId,
+        signedInUserId: session.user.id,
+        justBound: decision.justBound,
+      });
       lastToken.current = session.access_token;
       limiter.current = afterPush(limiter.current, Date.now());
       sendToExtension(session.access_token);
@@ -139,6 +211,9 @@ export function useExtensionAuth() {
       // pull after sign-out would answer for an identity that is no longer here.
       lastToken.current = null;
       eligibility.current = { userId: null, value: 'unknown' };
+      // The BINDING deliberately survives sign-out: it says which account this machine captures
+      // as, which does not change because somebody logged out. Only Rebind changes it.
+      setStatus({ reason: null, boundUserId: null, signedInUserId: null, justBound: false });
     });
 
     // Pull responder: the extension (via its content script on this domain) posts
@@ -216,5 +291,15 @@ export function useExtensionAuth() {
       subscription.unsubscribe();
       window.removeEventListener('message', onMessage);
     };
+  }, [rebindNonce]);
+
+  // Deliberate takeover: drop the binding and re-run the decision, which re-binds to whoever is
+  // signed in now (if they are eligible). One click, but never an accident — the banner names the
+  // account it is taking the machine from before offering this.
+  const rebind = useCallback(() => {
+    if (typeof window !== 'undefined') clearBinding(window.localStorage);
+    setRebindNonce((n) => n + 1);
   }, []);
+
+  return { status, rebind };
 }
