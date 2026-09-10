@@ -39,7 +39,12 @@ const serverStub = write('serverStub.mjs',
 const adminStub = write('adminStub.mjs', 'export function createAdminClient(){ return globalThis.__ADMIN; }\n');
 const orgStub = write('orgStub.mjs', 'export async function getOrgId(){ return globalThis.__ORG ?? "org-1"; }\n');
 
+// The scope constant + validator live in @/lib/member/scopes. Transpile the REAL module rather
+// than stubbing it — which scopes are valid is part of these routes' contract.
+const scopesUrl = transpile('../../../../lib/member/scopes.ts', 'memberScopes.mjs');
+
 const rewrites = {
+  "'@/lib/member/scopes'": `'${scopesUrl}'`,
   "'next/server'": `'${nextStub}'`,
   "'@/lib/supabase/server'": `'${serverStub}'`,
   "'@/lib/supabase/admin'": `'${adminStub}'`,

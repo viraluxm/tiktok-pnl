@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
+import { createPublicRealtimeClient } from '@/lib/supabase/publicRealtime';
 import { TRAINER_EVENT, type TrainerEvent } from '@/components/training/trainerEvents';
 import { isValidTrainingSessionId, trainingRealtimeChannel } from '@/lib/training/session';
 
@@ -12,10 +13,16 @@ type Role = 'host' | 'controller';
 // Shared Supabase Realtime Broadcast + Presence hook for the practice session.
 // Both the host screen and the trainer controller join the same channel
 // (`trainer:<sessionId>`). No database, no RLS — pure broadcast.
+// `sessionless` selects the Realtime client. A tokenised host page MUST pass true:
+// the default client is @supabase/ssr's cookie-managing browser client, and creating
+// one on a public page would establish a Supabase auth session — which the capture
+// extension would relay, silently mis-attributing captures (CLAUDE.md). See
+// createPublicRealtimeClient.
 export function useSessionChannel(
   sessionId: string,
   role: Role,
   onEvent?: (event: TrainerEvent) => void,
+  sessionless = false,
 ) {
   const [status, setStatus] = useState<ChannelStatus>('connecting');
   const [peerPresent, setPeerPresent] = useState(false); // is the OTHER role connected?
@@ -34,7 +41,7 @@ export function useSessionChannel(
       channelRef.current = null;
       return;
     }
-    const supabase = createClient();
+    const supabase = sessionless ? createPublicRealtimeClient() : createClient();
     const channel = supabase.channel(trainingRealtimeChannel(sessionId), {
       config: { broadcast: { self: false }, presence: { key: role } },
     });
@@ -67,7 +74,7 @@ export function useSessionChannel(
       void channel.unsubscribe();
       channelRef.current = null;
     };
-  }, [sessionId, role]);
+  }, [sessionId, role, sessionless]);
 
   const send = useCallback((event: TrainerEvent) => {
     const channel = channelRef.current;

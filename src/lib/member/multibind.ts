@@ -66,3 +66,30 @@ export function flagReason(lines: Pick<AuditLine, 'qty' | 'category'>[]): string
   }
   return null;
 }
+
+// ── The dismiss verdict ─────────────────────────────────────────────────────────────────────────
+//
+// Two dismissals mean opposite things and must stay countable apart (migration 141):
+//   keep_multi  the order is legitimate — they really bought two
+//   too_late    it WAS an over-bind, but the units are packed or shipped, so it cannot be corrected
+//
+// ~424 flagged orders are already gone. Filing those as keep_multi would say "not an error" about
+// a real one, and would permanently merge them into the legitimate population — the exact set you
+// would need to count for a COGS-only cleanup later.
+//
+// DERIVED FROM THE DB, NEVER FROM THE CLIENT. The page's row is a snapshot; a box can get packed
+// between render and click. Deriving server-side means the later fact wins. Packing only ever moves
+// forward, so a row shown as too-late can never become fixable — the only possible drift is a
+// "legitimate" claim on a box that has since been packed, and recording too_late there is the more
+// truthful of the two.
+//
+// MIRRORS the `unpacked` expression in migration 140. If that rule changes, change this with it —
+// same standing obligation as flagReason above and the HAVING clause.
+export const SHIPPED_STATUSES = ['IN_TRANSIT', 'DELIVERED', 'COMPLETED'];
+
+export type DismissVerdict = 'keep_multi' | 'too_late';
+
+export function dismissVerdict(facts: { packVerified: boolean; status: string | null }): DismissVerdict {
+  const unpacked = !facts.packVerified && !SHIPPED_STATUSES.includes(facts.status ?? '');
+  return unpacked ? 'keep_multi' : 'too_late';
+}

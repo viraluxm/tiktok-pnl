@@ -63,6 +63,20 @@ export async function offerShift(employee: Employee, instanceId: string): Promis
   });
   if (!plan.ok) throw new ScheduleError(plan.code, DROP_REFUSAL_MESSAGES[plan.code]);
 
+  // A shift in a PENDING TRADE (either side) may not also be offered: the two transfer mechanisms
+  // would otherwise race for the same shift and the trade RPC would refuse at approval time with
+  // a reason the coworker never saw coming. Refuse up front instead. Owner-scoped like every read.
+  const { data: liveTrades, error: tErr } = await admin
+    .from('shift_trades')
+    .select('id')
+    .eq('user_id', employee.user_id)
+    .in('status', ['pending_coworker', 'pending_manager'])
+    .or(`requester_shift_instance_id.eq.${instanceId},target_shift_instance_id.eq.${instanceId}`)
+    .limit(1);
+  // Until migration 136 is applied the table does not exist; there can be no trade to collide with.
+  if (tErr && !(tErr.code === 'PGRST205' || tErr.code === '42P01')) throw new ScheduleError('READ_FAILED', tErr.message);
+  if ((liveTrades ?? []).length > 0) throw new ScheduleError('IN_ACTIVE_TRADE', DROP_REFUSAL_MESSAGES.IN_ACTIVE_TRADE);
+
   // A FRESH generation id every time. Re-offering a shift invalidates every request and approval
   // from the previous cycle by construction — nothing has to remember to clean them up.
   const offerId = randomUUID();

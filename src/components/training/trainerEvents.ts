@@ -24,7 +24,16 @@ export type TrainerEvent =
   | { action: 'startAuction' }
   | { action: 'resetAuction' }
   | { action: 'auctionState'; running: boolean; bid: number; winner: string | null }
-  | { action: 'sessionState'; secondsLeft: number; viewers: number; phase: 'running' | 'complete' };
+  // micMissing is OPTIONAL so an older host tab (or a replayed payload) that omits
+  // it still type-checks and simply reports nothing — the controller treats
+  // undefined as "unknown", never as "audio is fine".
+  | {
+      action: 'sessionState';
+      secondsLeft: number;
+      viewers: number;
+      phase: 'running' | 'complete';
+      micMissing?: boolean;
+    };
 
 export function randomUsername(): string {
   return USERNAMES[Math.floor(Math.random() * USERNAMES.length)];

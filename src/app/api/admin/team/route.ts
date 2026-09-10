@@ -2,6 +2,10 @@ import { NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { getOrgId } from '@/lib/org';
+// One definition, shared with the edit route. These two used to hold their own copies, and the
+// copies drifted (create accepted 2 scopes, edit accepted 5) — see @/lib/member/scopes.
+import { KNOWN_MEMBER_SCOPES, validMemberScopes } from '@/lib/member/scopes';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,20 +33,6 @@ function isListedRole(v: unknown): v is ListedRole {
   return typeof v === 'string' && (LISTED_ROLES as readonly string[]).includes(v);
 }
 
-// The only capability scopes a 'member' may hold. Each maps 1:1 to a /team page + its owner-scoped
-// /api/member/* routes in the middleware allowlist — adding a scope means adding it BOTH places.
-export const KNOWN_MEMBER_SCOPES = ['binding', 'inventory'] as const;
-
-// A non-empty, de-duplicated subset of KNOWN_MEMBER_SCOPES, or null if invalid. Fail closed: an
-// unknown scope would confine the member to nothing, so we reject it at write time.
-function validMemberScopes(raw: unknown): string[] | null {
-  if (!Array.isArray(raw)) return null;
-  const set = [...new Set(raw.filter((s): s is string => typeof s === 'string').map((s) => s.trim()))];
-  if (set.length === 0) return null;
-  if (set.some((s) => !(KNOWN_MEMBER_SCOPES as readonly string[]).includes(s))) return null;
-  return set;
-}
-
 // Supabase's User type doesn't surface banned_until in its public typings even
 // though the admin API returns it; narrow just what we read.
 type AdminUser = {
@@ -50,7 +40,7 @@ type AdminUser = {
   email?: string;
   last_sign_in_at?: string | null;
   banned_until?: string | null;
-  app_metadata?: { role?: string; store_id?: string; stores?: string[]; scopes?: string[] } | null;
+  app_metadata?: { role?: string; store_id?: string; stores?: string[]; scopes?: string[]; org_id?: string } | null;
 };
 
 // GET /api/admin/team — list station/member sub-users only.
@@ -84,6 +74,9 @@ export async function GET() {
       store_id: u.app_metadata?.store_id ?? null,
       stores: Array.isArray(u.app_metadata?.stores) ? u.app_metadata!.stores! : null,
       scopes: Array.isArray(u.app_metadata?.scopes) ? u.app_metadata!.scopes! : null,
+      // Surfaced so an unstamped legacy account is visible in the API's own output — it is the
+      // thing that will fail closed once a second organization exists.
+      org_id: u.app_metadata?.org_id ?? null,
       last_sign_in_at: u.last_sign_in_at ?? null,
       banned_until: u.banned_until ?? null,
     }));
@@ -118,6 +111,24 @@ export async function POST(req: Request) {
   }
 
   const admin = createAdminClient();
+
+  // ── The organization this sub-user belongs to ──────────────────────────────────────────────
+  // Stamped explicitly, from the CREATING ADMIN's own org membership. Sub-users own no sales data,
+  // so their routes resolve the store OWNERS and read as them; that resolution is bounded to one
+  // organization, and a stamped app_metadata.org_id is the only unambiguous way to say which.
+  // Everything else is an inference that is safe only while exactly one organization exists.
+  //
+  // Refuse rather than create an unscoped account. An account with no resolvable org works today
+  // (one org, so the inference is correct) and starts failing closed the day a second one exists —
+  // which is exactly when nobody will remember this account was created without one.
+  const orgId = await getOrgId(admin, user.id);
+  if (!orgId) {
+    console.error('[admin/team] refusing to create a sub-user: creator %s has no organization', user.id);
+    return NextResponse.json(
+      { error: 'Your account is not a member of an organization, so a sub-user cannot be scoped to one. No account was created.' },
+      { status: 409 },
+    );
+  }
 
   // The store-assignment shape depends on the role:
   //   station → NONE. A warehouse station handles every store, so it is not
@@ -188,6 +199,9 @@ export async function POST(req: Request) {
     }
   }
 
+  // Role/store/scope shape, plus the org bound. Spread last so a role branch can never omit it.
+  const metadata = { ...appMetadata, org_id: orgId };
+
   // Server-generated password — shown to the admin once, never stored by us.
   const password = randomBytes(18).toString('base64url');
 
@@ -195,7 +209,7 @@ export async function POST(req: Request) {
     email,
     password,
     email_confirm: true,
-    app_metadata: appMetadata,
+    app_metadata: metadata,
   });
   if (createErr) {
     // Duplicate email etc. — surface a 409 for conflicts, 400 otherwise.
@@ -205,7 +219,7 @@ export async function POST(req: Request) {
 
   return NextResponse.json({
     ok: true,
-    user: { id: created.user?.id, email: created.user?.email, ...appMetadata },
+    user: { id: created.user?.id, email: created.user?.email, ...metadata },
     password,
   });
 }

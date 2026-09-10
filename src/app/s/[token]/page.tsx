@@ -1,326 +1,54 @@
 import { notFound } from 'next/navigation';
 import { headers } from 'next/headers';
-import type { ShiftInstance } from '@/types';
 import { resolveEmployeeByToken } from '@/lib/schedule/tokens';
 import { guardPublicReadAllowed } from '@/lib/schedule/publicRoute';
-import {
-  getMyShifts,
-  getBoard,
-  getMyPendingClaims,
-  getCurrentPeriodDrops,
-  isReleasable,
-} from '@/lib/schedule/board';
-import { scheduleIsEmpty } from '@/lib/schedule/eligibility';
-import { DROP_CAP } from '@/lib/schedule/drops';
-import { fmtDateLA, fmtTimeRangeLA, fmtCalendarDate, isOvernight } from '@/lib/schedule/format';
-// ClaimButton only. The legacy ReleaseButton is deliberately no longer rendered: Phase 2's
-// "Drop Shift" is the employee's one drop affordance, and offering a shift the Phase 1 way would
-// null employee_id and strip the worker's responsibility — the exact thing Phase 2 forbids. The
-// /s/[token]/release endpoint and ReleaseButton itself are left in place, unreferenced from this
-// page, so nothing that still points at them breaks.
-import { ClaimButton } from './parts';
-import { ClockControls } from './ClockControls';
-import TimeOffButton from './TimeOffButton';
-import { ScheduleAutoRefresh } from './ScheduleAutoRefresh';
-import MySchedule from './MySchedule';
-import TeamSchedule from './TeamSchedule';
-import ScheduleTabs from './ScheduleTabs';
-import { DropShiftButton, CancelOfferButton } from './phase2Parts';
-import { getWeekSchedule, resolveWeekStart } from '@/lib/schedule/mySchedule';
-import { getTeamSchedule, resolveTeamWeek } from '@/lib/schedule/teamSchedule';
-import { getAvailableShifts, getMyPickupRequests } from '@/lib/schedule/offer';
-import { laTodayISO } from '@/lib/schedule/timezone';
+import { getPortalSnapshot, getPortalWeek } from '@/lib/schedule/portalSnapshot';
+import { mondayOf } from '@/lib/schedule/portalModel';
+import { parseNav } from '@/components/portal/navState';
+import PortalRoot from '@/components/portal/PortalRoot';
 
 export const dynamic = 'force-dynamic';
 
-// PUBLIC employee schedule page. No Supabase auth session is EVER established here (service-role
-// only, scoped by the token's employee_id; middleware excludes /s/*). See CLAUDE.md.
+// PUBLIC employee portal. No Supabase auth session is EVER established here (service-role only,
+// scoped by the token's employee; middleware excludes /s/*). See CLAUDE.md.
 //
-// `?week=YYYY-MM-DD` picks the Mon→Sun week shown in MY SCHEDULE (any date inside it; anything
-// malformed falls back to the current week). Everything else on the page is unaffected by it.
-export default async function SchedulePage({
+// The server resolves the token, builds the first snapshot and the requested week, and renders the
+// client app with them so the first paint is complete. From then on the client fetches
+// /s/[token]/portal/* itself; tab, segment, week and day live in the query string (see nav.ts).
+export default async function EmployeePortalPage({
   params,
   searchParams,
 }: {
   params: Promise<{ token: string }>;
-  searchParams: Promise<{ week?: string | string[]; view?: string | string[] }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { token } = await params;
-  const { week, view } = await searchParams;
-  // Two views on ONE permanent link — never a second token, never a login. `?view=team` is the only
-  // switch; anything else is My Schedule, so a mangled URL degrades to the default rather than 404s.
-  const rawView = Array.isArray(view) ? view[0] : view;
-  const isTeamView = rawView === 'team';
+  const sp = await searchParams;
 
   const ip = (await headers()).get('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
   if (!guardPublicReadAllowed(token, ip)) {
-    return <Shell><p className="text-tt-muted">Too many requests — please wait a moment and refresh.</p></Shell>;
+    return (
+      <main className="mx-auto max-w-md px-4 py-16 text-center text-sm text-tt-muted">
+        Too many requests — please wait a moment and refresh.
+      </main>
+    );
   }
 
   const resolved = await resolveEmployeeByToken(token);
   if (!resolved) notFound();
   const { employee } = resolved;
 
-  // Always resolve every section, THEN decide what to render from what's actually there. The empty
-  // state is a fallback for genuinely-nothing, never a gate on having recurring rules — a no-rules
-  // employee with a one-time assigned shift or a claimable board shift must see it.
-  // One request-time clock for the whole render (server component, evaluated per request).
+  const flat = new URLSearchParams();
+  for (const [k, v] of Object.entries(sp)) {
+    const one = Array.isArray(v) ? v[0] : v;
+    if (typeof one === 'string') flat.set(k, one);
+  }
+  const initialNav = parseNav(flat);
+
   const now = new Date();
-  const nowMs = now.getTime();
-  const todayISO = laTodayISO(now);
-  const weekStart = resolveWeekStart(week, todayISO);
-  const teamWeekStart = resolveTeamWeek(week, todayISO);
-  const [myShifts, board, pendingClaims, { period, drops }, weekSchedule, teamWeek, available, myPickups] =
-    await Promise.all([
-      getMyShifts(employee),
-      getBoard(employee),
-      getMyPendingClaims(employee),
-      getCurrentPeriodDrops(employee),
-      getWeekSchedule(employee, weekStart),
-      getTeamSchedule(employee, teamWeekStart),
-      getAvailableShifts(employee, now),
-      getMyPickupRequests(employee),
-    ]);
-  // Offered shifts are STILL MINE, so they stay in My Schedule and are merely marked. This maps
-  // instance id -> the CURRENT offer_id, which the card needs so Cancel Offer can name the exact
-  // cycle it is closing; a stale tab then fails the CAS instead of cancelling a newer offer.
-  const offeredOfferIdById = new Map(
-    myShifts
-      .map((s) => s as { id: string; offer_state?: string | null; offer_id?: string | null })
-      .filter((s) => s.offer_state === 'offered' && s.offer_id)
-      .map((s) => [s.id, s.offer_id as string]),
-  );
+  const snapshot = await getPortalSnapshot(employee, now);
+  const weekStart = initialNav.week ?? mondayOf(snapshot.todayISO);
+  const week = await getPortalWeek(employee, weekStart);
 
-  const periodEndLabel = fmtCalendarDate(period.end);
-  const atCap = drops.drops >= DROP_CAP;
-
-  const pageHeader = (
-    <header className="mb-6 flex items-start justify-between gap-3">
-      <div>
-        <h1 className="text-xl font-semibold text-tt-text">{employee.name}</h1>
-        <p className="mt-1 text-sm text-tt-muted">Pay period ends {periodEndLabel}</p>
-        <p className={`mt-1 text-sm font-medium ${atCap ? 'text-tt-red' : 'text-tt-muted'}`}>
-          {drops.drops} of {DROP_CAP} drops used
-          {drops.excused > 0 ? ` · ${drops.excused} excused` : ''}
-        </p>
-      </div>
-      <TimeOffButton token={token} />
-    </header>
-  );
-  // MY SCHEDULE always renders — it is the answer to "when do I work", week by week, and a week of
-  // "Off" is a real answer. The action cards below only appear when there is something to act on.
-  const mySchedule = <MySchedule token={token} schedule={weekSchedule} todayISO={todayISO} />;
-  const tabs = <ScheduleTabs token={token} active={isTeamView ? 'team' : 'mine'} availableCount={available.length} />;
-
-  // TEAM SCHEDULE is its own view of the same page and the same token. Clock controls live on My
-  // Schedule, so this branch renders no punch UI at all.
-  if (isTeamView) {
-    return (
-      <Shell>
-        {pageHeader}
-        {tabs}
-        <TeamSchedule token={token} week={teamWeek} available={available} todayISO={todayISO} />
-      </Shell>
-    );
-  }
-
-  // WHICH shift, not just how many. getMyPickupRequests already returns the span, and a worker
-  // who asked for cover needs to see the date to know whether to keep their evening free — a bare
-  // count made them go hunting through Team Schedule to find out what they had asked for.
-  const pickupBanner = myPickups.length > 0 && (
-    <div key="pickups" className="mb-6 rounded-lg border border-tt-cyan/40 bg-tt-cyan/10 px-4 py-3">
-      <p className="text-sm font-semibold text-tt-cyan">
-        Pickup requested{myPickups.length > 1 ? ` · ${myPickups.length}` : ''}
-      </p>
-      <ul className="mt-1 space-y-0.5">
-        {myPickups.map((p) => (
-          <li key={p.claim_id} className="text-xs text-tt-muted">
-            {fmtDateLA(p.starts_at)} · {fmtTimeRangeLA(p.starts_at, p.ends_at)}
-            {isOvernight(p.starts_at, p.ends_at) && <span className="ml-1">🌙 +1d</span>}
-          </li>
-        ))}
-      </ul>
-      <p className="mt-1.5 text-xs text-tt-muted">
-        Waiting for manager approval — not yours until it&rsquo;s approved.
-      </p>
-    </div>
-  );
-
-  // Nothing to act on in any section → just the schedule. (Previously an empty-state sentence;
-  // the week view now says the same thing more usefully.)
-  if (scheduleIsEmpty({ myShifts: myShifts.length, board: board.length, pending: pendingClaims.length })) {
-    return (
-      <Shell>
-        {pageHeader}
-        {tabs}
-        {pickupBanner}
-        {mySchedule}
-        <Empty>Nothing to pick up or approve right now.</Empty>
-      </Shell>
-    );
-  }
-
-  const pending = pendingClaims.length > 0 && (
-    <Section
-      key="pending"
-      title={`Pending approval · ${pendingClaims.length}`}
-      subtitle="Over 40 hours — a manager is reviewing. Not yours yet."
-    >
-      {pendingClaims.map((p) => (
-        <Card key={p.claim_id}>
-          <div className="flex items-center justify-between gap-3">
-            <ShiftFacts inst={p} />
-            <span className="shrink-0 text-xs text-tt-yellow">⏳ Awaiting approval</span>
-          </div>
-        </Card>
-      ))}
-    </Section>
-  );
-
-  // Sections with content appear; empty ones don't (a no-rules employee seeing ONLY the board is a
-  // correct, useful state). At least one of these is non-empty here — the all-empty case returned
-  // the fallback above.
-  const yourShifts = myShifts.length > 0 && (
-    <Section key="yours" title="Your shifts" subtitle="Next 14 days">
-      {myShifts.map((s) => {
-        const releasableNow = s.status === 'scheduled' && isReleasable(s);
-        const within24 = s.status === 'scheduled' && !releasableNow;
-        // ADDITIVE: clock controls for an assigned shift in its clock window [start-45m, end+60m].
-        // Release/within24 above are untouched — a within24 shift shows BOTH "contact a manager"
-        // (for release) and the clock button (the worker can still clock in).
-        const inClockWindow =
-          (s.status === 'scheduled' || s.status === 'claimed') &&
-          nowMs >= new Date(s.starts_at).getTime() - 45 * 60_000 &&
-          nowMs <= new Date(s.ends_at).getTime() + 60 * 60_000;
-        return (
-          <Card key={s.id}>
-            {/* flex-wrap, not a plain row: the OFFERED state puts a badge AND a Cancel Offer
-                button on the right, which together leave only a few pixels of headroom at 375px
-                and overflow at 320px or with a wider time string ("11:00 AM – 11:00 PM").
-                Wrapping costs nothing on desktop (it still fits one line) and drops the controls
-                to their own line when they cannot fit. */}
-            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-              <ShiftFacts inst={s} />
-              <div className="shrink-0">
-                {/* OFFERED IS CHECKED FIRST, before status. A shift may legitimately be
-                    status='claimed' AND offer_state='offered' (claimed via the legacy OT flow, then
-                    offered), and in that state the live offer is what the worker needs to act on —
-                    testing status first would show a dead "Picked up" label with no way to cancel. */}
-                {offeredOfferIdById.has(s.id) ? (
-                  // Offered, and still theirs. Say so plainly — the worker must not think they are
-                  // off the hook — and give them the way back out.
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className="text-xs text-tt-yellow">Offered · still yours</span>
-                    <CancelOfferButton
-                      token={token}
-                      instanceId={s.id}
-                      offerId={offeredOfferIdById.get(s.id) as string}
-                      startsAt={s.starts_at}
-                      endsAt={s.ends_at}
-                    />
-                  </div>
-                ) : s.status === 'released' ? (
-                  <span className="text-xs text-tt-yellow">Released · waiting for pickup</span>
-                ) : s.status === 'claimed' ? (
-                  <span className="text-xs text-tt-green">Picked up</span>
-                ) : releasableNow ? (
-                  <DropShiftButton token={token} instanceId={s.id} startsAt={s.starts_at} endsAt={s.ends_at} />
-                ) : null}
-              </div>
-            </div>
-            {within24 && (
-              // Its own line below the time so it never splits the time row (fix #3).
-              <p className="mt-1.5 text-xs text-tt-muted">Within 24h — contact a manager</p>
-            )}
-            {inClockWindow && (
-              <ClockControls token={token} instanceId={s.id} workerName={employee.name} workerId={employee.id.slice(0, 8)} />
-            )}
-          </Card>
-        );
-      })}
-    </Section>
-  );
-
-  const openShifts = board.length > 0 && (
-    <Section
-      key="open"
-      title={`Open shifts · ${board.length} available`}
-      subtitle="Released by teammates — claim one you can work"
-    >
-      {board.map((b) => (
-        <Card key={b.id}>
-          <div className="flex items-center justify-between gap-3">
-            <ShiftFacts inst={b} releasedBy={b.releaser_name} />
-            <div className="shrink-0">
-              <ClaimButton token={token} instanceId={b.id} />
-            </div>
-          </div>
-        </Card>
-      ))}
-    </Section>
-  );
-
-  return (
-    <Shell>
-      {pageHeader}
-      {tabs}
-      {pickupBanner}
-      {mySchedule}
-
-      {/* An in-flight OT claim leads (the viewer just filed it and wants to see it landed), then:
-          a non-empty board (time-sensitive, usually arrived-from-SMS) leads; an empty board sinks
-          below the actual schedule (fix #1). The action cards keep release/claim/clock-in exactly
-          as before — MY SCHEDULE above is the read-only week view. */}
-      {pending}
-      {board.length > 0 ? [openShifts, yourShifts] : [yourShifts, openShifts]}
-    </Shell>
-  );
-}
-
-// Date + time; overnight shifts get the same 🌙 +1d marker the team-tab calendar uses (fix #2).
-// Role is intentionally NOT shown — every row is the viewer's own role class (fix #4).
-function ShiftFacts({
-  inst,
-  releasedBy,
-}: {
-  inst: Pick<ShiftInstance, 'starts_at' | 'ends_at'>;
-  releasedBy?: string | null;
-}) {
-  const overnight = isOvernight(inst.starts_at, inst.ends_at);
-  return (
-    <div className="min-w-0">
-      <p className="text-sm font-medium text-tt-text">{fmtDateLA(inst.starts_at)}</p>
-      <p className="text-xs text-tt-muted">
-        {fmtTimeRangeLA(inst.starts_at, inst.ends_at)}
-        {overnight && <span className="ml-1.5 text-tt-muted">🌙 +1d</span>}
-      </p>
-      {releasedBy && <p className="mt-0.5 text-[11px] text-tt-muted">Released by {releasedBy}</p>}
-    </div>
-  );
-}
-
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <main className="mx-auto min-h-screen max-w-md bg-tt-bg px-4 py-8 text-tt-text">
-      {/* Always mounted (every render path, incl. the empty + rate-limited states) so a shift added
-          after page load self-surfaces its clock button without a manual reload. See the component. */}
-      <ScheduleAutoRefresh />
-      {children}
-    </main>
-  );
-}
-function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
-  return (
-    <section className="mb-8">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-tt-muted">{title}</h2>
-      {subtitle && <p className="mb-2 text-xs text-tt-muted">{subtitle}</p>}
-      <div className="mt-2 space-y-2">{children}</div>
-    </section>
-  );
-}
-function Card({ children }: { children: React.ReactNode }) {
-  return <div className="rounded-lg border border-tt-border bg-tt-card px-4 py-3">{children}</div>;
-}
-function Empty({ children }: { children: React.ReactNode }) {
-  return <p className="rounded-lg border border-dashed border-tt-border px-4 py-6 text-center text-sm text-tt-muted">{children}</p>;
+  return <PortalRoot token={token} initialSnapshot={snapshot} initialWeek={week} initialNav={initialNav} />;
 }

@@ -2,6 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { createClient } from '@/lib/supabase/client';
+import { removeFromRoster } from '@/lib/rosterRemoval';
 import type { Employee } from '@/types';
 import { useUser } from './useUser';
 
@@ -62,13 +63,16 @@ export function useEmployees() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['employees'] }),
   });
 
-  const deleteEmployee = useMutation({
-    mutationFn: async (id: string) => {
-      const { error } = await supabase.from('employees').delete().eq('id', id);
-      if (error) throw error;
-    },
+  // Taking someone off the roster ARCHIVES them (status -> 'former'); it does not delete the
+  // row. A row delete is impossible for anyone who has hosted a show — the ON DELETE SET NULL
+  // on live_session_host_segments.host_id makes Postgres attempt an UPDATE the append-only
+  // trigger refuses with HOST_SEGMENT_IMMUTABLE — and for everyone else it would cascade away
+  // their shifts, time-clock entries and pay history. See src/lib/rosterRemoval.ts.
+  const archiveEmployee = useMutation({
+    mutationFn: (id: string) => removeFromRoster(supabase, id),
     onSuccess: () => {
-      // Shifts cascade-delete in the DB; drop their cache too.
+      // Shift rows are untouched, but the weekly grid and every assignment picker filter on
+      // status, so their derived views change.
       queryClient.invalidateQueries({ queryKey: ['employees'] });
       queryClient.invalidateQueries({ queryKey: ['shifts'] });
     },
@@ -79,6 +83,6 @@ export function useEmployees() {
     isLoading: query.isLoading,
     addEmployee,
     updateEmployee,
-    deleteEmployee,
+    archiveEmployee,
   };
 }

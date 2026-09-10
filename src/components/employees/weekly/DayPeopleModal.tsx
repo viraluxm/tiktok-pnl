@@ -12,6 +12,7 @@ export default function DayPeopleModal({
   dateLabel,
   onClose,
   onConfirm,
+  onApprovedMinutes,
   onEdit,
   onAddShift,
   onRemoveScheduled,
@@ -20,7 +21,9 @@ export default function DayPeopleModal({
   day: CalendarDay;
   dateLabel: string;
   onClose: () => void;
-  onConfirm: (shiftId: string, confirmed: boolean) => Promise<void>;
+  onConfirm: (shiftId: string, confirmed: boolean, approvedMinutes?: number | null) => Promise<void>;
+  /** Payroll-only correction on an already-confirmed shift (migration 137). Forwarded to the tile. */
+  onApprovedMinutes?: (shiftId: string, approvedMinutes: number | null) => Promise<void>;
   onEdit: (shiftId: string) => void;
   onAddShift: (date: string) => void;
   /** Remove a one-off scheduled shift. Absent → the tiles offer no Remove action. */
@@ -89,6 +92,7 @@ export default function DayPeopleModal({
                 person={p}
                 dateISO={day.date}
                 onConfirm={onConfirm}
+                onApprovedMinutes={onApprovedMinutes}
                 onEdit={onEdit}
                 onRemoveScheduled={
                   onRemoveScheduled ? (instanceId) => { setErr(null); setPending({ instanceId, name: p.name }); } : undefined

@@ -1,7 +1,7 @@
 'use client';
 
 // Shared client signal: how many ClockControls are currently mounted on the /s/[token] page. The
-// page's low-frequency self-heal (ScheduleAutoRefresh) reads this and only refreshes when it is
+// portal's low-frequency self-heal (PortalProvider.useSnapshot's refetchInterval) reads this and only refreshes when it is
 // zero. A ClockControls is mounted for the whole in-window period, and the QR sheet AND the in-flight
 // punch both live INSIDE a mounted control — so "zero mounted" also guarantees no sheet is open and
 // no punch is in flight, which is exactly the guard the refresh needs. Module-level singleton: only

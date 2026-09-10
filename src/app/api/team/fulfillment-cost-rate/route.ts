@@ -98,7 +98,7 @@ export async function GET(req: Request) {
   // each day through shiftFulfillmentDay()'s exact 04:00→04:00 boundary.
   const { data: shiftRows, error: shiftErr } = await supabase
     .from('shifts')
-    .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at')
+    .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, approved_minutes')
     .gte('date', addDaysISO(firstDay, -1))
     .lte('date', addDaysISO(today, 1));
   if (shiftErr) {

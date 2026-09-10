@@ -83,6 +83,31 @@ export function trainingControllerUrl(origin: string, sessionId: string): string
 // to ~39 bytes, so even several hundred sessions stay far under the ~5 MiB
 // origin quota (40 ids ≈ 1.5 KB ≈ 0.03%). Kept pure so they're unit-testable.
 
+// Where the admin training screens return to. Practice Mode is entered from the
+// dashboard's Shows tab, whose selection is URL-backed (?tab=shows) — so this goes
+// back to that exact tab rather than dumping the manager on the default dashboard
+// view. Kept here beside the other training URL helpers so both screens use one
+// definition.
+export const PRACTICE_BACK_HREF = '/dashboard?tab=shows';
+
+// The PUBLIC tokenised host path — what a candidate opens, and what the QR encodes.
+// Distinct from trainingHostPath(), which is the admin route and requires a login.
+export function practiceHostTokenPath(token: string): string {
+  return `/p/${encodeURIComponent(token)}`;
+}
+export function practiceHostTokenUrl(origin: string, token: string): string {
+  return new URL(practiceHostTokenPath(token), origin).toString();
+}
+export const PRACTICE_BACK_LABEL = '\u2190 Back to Shows';
+
+// LEGACY (migration 136): the launcher's session index now lives in the
+// practice_sessions table. parseLauncherSessions is still used, once, to IMPORT
+// whatever a browser's old localStorage array still holds; addLauncherSession and
+// removeLauncherSession below have no production caller any more and are kept only
+// so that import path stays covered. Do not wire them back into the launcher —
+// writing to localStorage again would reintroduce the per-browser index this
+// replaced.
+
 // Parse a raw localStorage value into a clean id list. Tolerates the previously
 // capped arrays, junk entries and malformed JSON; order is preserved.
 export function parseLauncherSessions(raw: string | null): string[] {

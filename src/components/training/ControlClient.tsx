@@ -10,7 +10,12 @@ import {
   type TrainerEvent,
 } from './trainerEvents';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
-import { shortTrainingSessionLabel } from '@/lib/training/session';
+import Link from 'next/link';
+import {
+  shortTrainingSessionLabel,
+  PRACTICE_BACK_HREF,
+  PRACTICE_BACK_LABEL,
+} from '@/lib/training/session';
 import TrainerVideoView from './TrainerVideoView';
 
 // ---- Auto-bid tuning (module-level: stable identity, no per-render churn) ----
@@ -43,6 +48,12 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
   const [sessionSecondsLeft, setSessionSecondsLeft] = useState<number | null>(null);
   const [sessionViewers, setSessionViewers] = useState(0);
   const [sessionPhase, setSessionPhase] = useState<'idle' | 'running' | 'complete'>('idle');
+  // Whether the HOST reports no microphone track. Surfaced next to the session
+  // stats so management learns a session is silent immediately, rather than after
+  // reviewing it. Starts false and is only ever set from a host broadcast, so it
+  // stays quiet until a host is actually connected — and it renders inside the
+  // showSessionStats block, which hides once the host leaves.
+  const [hostMicMissing, setHostMicMissing] = useState(false);
 
   // Auto-bidding is admin-controlled; Manual (false) is the default. The host
   // stays the authority that actually applies bids.
@@ -92,6 +103,7 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
       setSessionSecondsLeft(event.secondsLeft);
       setSessionViewers(event.viewers);
       setSessionPhase(event.phase);
+      setHostMicMissing(event.micMissing === true);
       return;
     }
     if (event.action !== 'auctionState') return;
@@ -239,6 +251,14 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
         </div>
       )}
       <div className="mx-auto w-full max-w-md lg:max-w-4xl">
+        {/* Same stranding problem as the launcher: the controller opens in its own
+            tab and had no way back except the URL bar. */}
+        <Link
+          href={PRACTICE_BACK_HREF}
+          className="mb-3 inline-block text-[13px] text-tt-cyan hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/40"
+        >
+          {PRACTICE_BACK_LABEL}
+        </Link>
         <header className="flex items-center justify-between">
           <div className="flex items-baseline gap-2">
             <h1 className="text-lg font-bold">Practice Controller</h1>
@@ -265,6 +285,9 @@ export default function ControlClient({ sessionId }: { sessionId: string }) {
               Viewers
               <span className="font-semibold tabular-nums text-tt-text">{sessionViewers}</span>
             </span>
+            {hostMicMissing && (
+              <span className="font-semibold text-tt-yellow">· Host has no microphone</span>
+            )}
             {sessionPhase === 'complete' && (
               <span className="font-medium text-tt-muted">· Practice ended</span>
             )}

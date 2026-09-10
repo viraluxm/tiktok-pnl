@@ -42,7 +42,7 @@ export async function GET(request: Request) {
   // re-buckets on clock-in, and we filter the resulting cells back to [from, to].
   const { data: shifts } = await admin
     .from('shifts')
-    .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at')
+    .select('employee_id, date, start_time, end_time, source, source_rule_id, confirmed_at, break_minutes, clock_in_at, clock_out_at, approved_minutes')
     .eq('user_id', user.id)
     .gte('date', shiftDays(from, -1))
     .lte('date', shiftDays(to, 1));

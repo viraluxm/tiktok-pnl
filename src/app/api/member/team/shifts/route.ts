@@ -26,7 +26,7 @@ export async function GET() {
       .in('user_id', ownerIds)
       .order('starts_at', { ascending: true }),
     admin.from('shifts')
-      .select('id, employee_id, date, start_time, end_time, store_id, source, confirmed_at, break_minutes, auto_closed')
+      .select('id, employee_id, date, start_time, end_time, store_id, source, confirmed_at, break_minutes, auto_closed, approved_minutes')
       .in('user_id', ownerIds)
       .order('date', { ascending: false })
       .limit(500),

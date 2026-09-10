@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { KNOWN_MEMBER_SCOPES, validMemberScopes } from '@/lib/member/scopes';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,17 +22,6 @@ const MANAGED_ROLES = ['member', 'station', 'timeclock', 'seller'];
 
 // ~100 years — effectively a permanent disable. 'none' lifts the ban.
 const BAN_FOREVER = '876000h';
-
-// The only capability scopes a 'member' may hold — kept in lockstep with the create route and the
-// middleware allowlist. Fail closed: an unknown scope would confine the member to nothing.
-const KNOWN_MEMBER_SCOPES = ['binding', 'inventory', 'pnl', 'shows', 'team'] as const;
-function validMemberScopes(raw: unknown): string[] | null {
-  if (!Array.isArray(raw)) return null;
-  const set = [...new Set(raw.filter((s): s is string => typeof s === 'string').map((s) => s.trim()))];
-  if (set.length === 0) return null;
-  if (set.some((s) => !(KNOWN_MEMBER_SCOPES as readonly string[]).includes(s))) return null;
-  return set;
-}
 
 // PATCH /api/admin/team/[id] — disable / enable / reset-password a station/member sub-user.
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
