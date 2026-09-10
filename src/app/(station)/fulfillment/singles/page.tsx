@@ -27,6 +27,7 @@ interface Result {
   credited: number;
   already_counted: number;
   blocked: number;
+  no_store: number;
 }
 
 const PICKER_KEY = 'lensed_singles_picker';
@@ -196,6 +197,9 @@ export default function SinglesStationPage() {
               {result.already_counted > 0 && <> · {result.already_counted} already counted</>}
               {result.blocked > 0 && (
                 <> · <span className="text-tt-yellow">{result.blocked} refunded or cancelled — do not ship</span></>
+              )}
+              {result.no_store > 0 && (
+                <> · <span className="text-tt-yellow">{result.no_store} not linked to a shop — tell a lead</span></>
               )}
             </div>
           )}
