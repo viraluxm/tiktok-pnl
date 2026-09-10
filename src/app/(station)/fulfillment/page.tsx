@@ -16,6 +16,14 @@ import PackStationOverlay from '@/components/shipping/PackStationOverlay';
 
 type Mode = 'pick' | 'pack';
 const MODE_COOKIE = 'lensed_station_mode';
+
+// Every station is a PICK station right now, so a device with no saved mode goes straight to
+// picking instead of stopping on a setup screen nobody has a reason to think about.
+//
+// PACK IS NOT DELETED — it is one press-and-hold away on the mode chip, and every line of the
+// pack flow is untouched. This only changes what an UNCONFIGURED device does. Flip this constant
+// (or hold the chip) the day packing comes back.
+const DEFAULT_MODE: Mode = 'pick';
 const MODE_MAX_AGE = 34_560_000; // ~400 days — the browser cap; effectively "remember this device"
 
 function getCookie(name: string): string | null {
@@ -35,11 +43,14 @@ export default function FulfillmentPage() {
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Read the saved device mode once on mount (cookie → avoids SSR hydration mismatch).
+  // Read the saved device mode once on mount (cookie → avoids SSR hydration mismatch). With no
+  // saved mode, fall to DEFAULT_MODE rather than showing the setup screen — but do NOT write the
+  // cookie, so a device that has never been configured keeps following the default if it changes,
+  // while one the operator set by hand keeps their choice.
   useEffect(() => {
     setMounted(true);
     const m = getCookie(MODE_COOKIE);
-    if (m === 'pick' || m === 'pack') setMode(m);
+    setMode(m === 'pick' || m === 'pack' ? m : DEFAULT_MODE);
   }, []);
 
   // The day's count comes from shipment_verifications, not a local tally, so a mid-shift
@@ -66,7 +77,9 @@ export default function FulfillmentPage() {
 
   if (!mounted) return <div className="min-h-screen bg-tt-bg" />;
 
-  // One-time device-mode picker — two large buttons, sets the cookie for this device.
+  // Device-mode picker. No longer reached on first run — only by a deliberate press-and-hold on
+  // the mode chip, which sets mode to null to reopen it. Kept whole so packing can come back with
+  // no rebuild.
   if (!mode) {
     const choose = (m: Mode) => { setCookie(MODE_COOKIE, m); setMode(m); };
     return (
