@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireStationScope } from '@/lib/station/guard';
-import { countBoxesPickedToday } from '@/lib/shipping/pickedToday';
+import { pickedTodayTotals } from '@/lib/shipping/pickedToday';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,6 +14,8 @@ export async function GET(req: Request) {
   if (!scope.ok) return scope.response;
 
   const picker = new URL(req.url).searchParams.get('picker');
-  const count = await countBoxesPickedToday(scope.admin, scope.ownerIds, picker || null);
-  return NextResponse.json({ picked_today: count });
+  const t = await pickedTodayTotals(scope.admin, scope.ownerIds, picker || null);
+  // picked_today stays for compatibility — it is the RAW box count an older client expects. New
+  // clients read `weighted`, which is the number the per-shift target is actually measured on.
+  return NextResponse.json({ picked_today: t.boxes, ...t });
 }

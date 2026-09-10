@@ -1,6 +1,7 @@
 import 'server-only';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { zonedDayKey, zonedDayStartUtcMs } from './pickerPerformance';
+import { weightedBoxes } from './crewBoard';
 
 // How many boxes have been verified today.
 //
@@ -47,4 +48,101 @@ export async function countBoxesPickedToday(
   const { count, error } = await q;
   if (error) return 0;
   return count ?? 0;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The same number the manager board shows
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PickedTodayTotals {
+  /** Typical-box equivalents — the number the per-shift target is measured on. */
+  weighted: number;
+  /** Raw boxes, so the weighted figure is never a black box the picker cannot check. */
+  boxes: number;
+  /** Order lines across those boxes. */
+  items: number;
+  /** Singles credited by batch scan. Counted, never weighted — see crewBoard.ts. */
+  singles: number;
+}
+
+const PAGE = 1000;
+const IN_CHUNK = 300;
+
+/**
+ * A picker's day in the SAME units the manager board uses.
+ *
+ * The device used to show raw boxes while the board showed weighted, so a picker checking their
+ * own progress against a 200 target read a different number from the one they are judged on —
+ * on 2026-09-10 Alex's device would have said 256 while the board said 302. Two numbers for one
+ * shift is worse than either.
+ *
+ * Errors read as zero, everywhere: a counter is never worth failing the pack screen over.
+ */
+export async function pickedTodayTotals(
+  db: SupabaseClient,
+  userIds: string[],
+  pickerEmployeeId?: string | null,
+): Promise<PickedTodayTotals> {
+  const empty: PickedTodayTotals = { weighted: 0, boxes: 0, items: 0, singles: 0 };
+  if (!userIds.length) return empty;
+
+  const sinceISO = new Date(zonedDayStartUtcMs(zonedDayKey(Date.now()))).toISOString();
+
+  let q = db
+    .from('shipment_verifications')
+    .select('group_key, source')
+    .in('user_id', userIds)
+    .gte('verified_at', sinceISO)
+    .order('group_key', { ascending: true });
+  if (pickerEmployeeId) q = q.eq('picker_employee_id', pickerEmployeeId);
+
+  const { data, error } = await q;
+  if (error || !data) return empty;
+
+  // NULL source means 'scan' — every row written before the singles station was instrumented.
+  const singlesRows = data.filter((r) => (r.source as string | null) === 'singles_batch');
+  const boxRows = data.filter((r) => (r.source as string | null) !== 'singles_batch');
+  if (boxRows.length === 0) return { ...empty, singles: singlesRows.length };
+
+  // Line counts for the picked boxes, chunked and paged: a silent truncation here would
+  // understate the picker's own number, which is the one they trust least when it looks wrong.
+  const trackings = [...new Set(
+    boxRows.map((r) => String(r.group_key)).filter((k) => k.startsWith('trk:')).map((k) => k.slice(4)),
+  )];
+  const lines = new Map<string, number>();
+  for (let i = 0; i < trackings.length; i += IN_CHUNK) {
+    const slice = trackings.slice(i, i + IN_CHUNK);
+    for (let from = 0; ; from += PAGE) {
+      const { data: rows, error: err } = await db
+        .from('synced_order_ids')
+        .select('id, tracking_number')
+        .in('user_id', userIds)
+        .in('tracking_number', slice)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (err) return empty;
+      const page = rows ?? [];
+      for (const r of page) {
+        const t = r.tracking_number as string | null;
+        if (t) lines.set(t, (lines.get(t) ?? 0) + 1);
+      }
+      if (page.length < PAGE) break;
+    }
+  }
+
+  // A box whose lines cannot be resolved counts as 1 item, never 0 — an unknown count must not
+  // erase work that demonstrably happened.
+  let items = 0;
+  for (const r of boxRows) {
+    const k = String(r.group_key);
+    items += lines.get(k.startsWith('trk:') ? k.slice(4) : '') ?? 1;
+  }
+
+  return {
+    weighted: Math.round(weightedBoxes(boxRows.length, items)),
+    boxes: boxRows.length,
+    items,
+    singles: singlesRows.length,
+  };
 }

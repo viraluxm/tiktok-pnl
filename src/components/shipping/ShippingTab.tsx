@@ -54,6 +54,9 @@ function clearResume() {
 export default function ShippingTab() {
   const [focus, setFocus] = useState(false);
   const [pickedToday, setPickedToday] = useState(0);
+  const [pickedTotals, setPickedTotals] = useState<
+    { weighted: number; boxes: number; items: number; singles: number } | null
+  >(null);
   const [err, setErr] = useState<string | null>(null);
   // Picker gate: who is packing. Held here (not in the overlay) so the selection persists across
   // enter/exit of the overlay, matching prior behavior.
@@ -65,7 +68,13 @@ export default function ShippingTab() {
     const q = pickerId ? `?picker=${encodeURIComponent(pickerId)}` : '';
     fetch(`/api/shipping/picked-today${q}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d && typeof d.picked_today === 'number') setPickedToday(d.picked_today); })
+      .then((d) => {
+        if (!d) return;
+        if (typeof d.picked_today === 'number') setPickedToday(d.picked_today);
+        if (typeof d.weighted === 'number') {
+          setPickedTotals({ weighted: d.weighted, boxes: d.boxes, items: d.items, singles: d.singles });
+        }
+      })
       .catch(() => { /* a counter is never worth surfacing an error for */ });
   }, [pickerId]);
 
@@ -388,6 +397,7 @@ export default function ShippingTab() {
       pickerId={pickerId}
       onPickerChange={setPickerId}
       pickedCount={pickedToday}
+      pickedTotals={pickedTotals}
       onBoxPicked={() => { setPickedToday((n) => n + 1); refreshPickedToday(); }}
       onBoxChange={handleBoxChange}
       // A deliberate exit ends the session — there is nothing to resume.

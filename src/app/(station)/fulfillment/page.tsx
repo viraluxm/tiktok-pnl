@@ -40,6 +40,9 @@ export default function FulfillmentPage() {
   const [pickers, setPickers] = useState<{ id: string; name: string }[]>([]);
   const [pickerId, setPickerId] = useState('');
   const [pickedCount, setPickedCount] = useState(0);
+  const [pickedTotals, setPickedTotals] = useState<
+    { weighted: number; boxes: number; items: number; singles: number } | null
+  >(null);
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -60,7 +63,13 @@ export default function FulfillmentPage() {
     const q = pickerId ? `?picker=${encodeURIComponent(pickerId)}` : '';
     fetch(`/api/station/picked-today${q}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d && typeof d.picked_today === 'number') setPickedCount(d.picked_today); })
+      .then((d) => {
+        if (!d) return;
+        if (typeof d.picked_today === 'number') setPickedCount(d.picked_today);
+        if (typeof d.weighted === 'number') {
+          setPickedTotals({ weighted: d.weighted, boxes: d.boxes, items: d.items, singles: d.singles });
+        }
+      })
       .catch(() => { /* a counter is never worth surfacing an error for */ });
   }, [pickerId]);
 
@@ -138,6 +147,7 @@ export default function FulfillmentPage() {
         pickerId={pickerId}
         onPickerChange={setPickerId}
         pickedCount={pickedCount}
+        pickedTotals={pickedTotals}
         onBoxPicked={() => { setPickedCount((n) => n + 1); refreshPicked(); }}
         onExit={() => { /* always-on: exit returns to scan-ready in the overlay; nothing to unmount */ }}
       />
