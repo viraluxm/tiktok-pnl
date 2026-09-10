@@ -264,6 +264,13 @@ export default function PackStationOverlay({
   // "this one is already done" call for opposite reactions and a picker reads this in about
   // half a second.
   const [scanMsg, setScanMsg] = useState<null | { text: string; tone: 'error' | 'info' | 'ok' }>(null);
+  // The RAW text of the last scan the app received, shown on the ready screen.
+  //
+  // Without it a scan that does not route produces NOTHING on screen, which is indistinguishable
+  // from the scanner never having read the barcode — and those two have completely different
+  // fixes. This turns "nothing happened" into either "the app saw SBNYRRRAX9XS and did nothing
+  // with it" (an app bug) or "the app saw nothing" (a scanner or barcode problem).
+  const [lastScan, setLastScan] = useState<string | null>(null);
   const scanMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A line the picker cannot scan — damaged label, unreachable — awaiting a lead's PIN.
   const [override, setOverride] = useState<null | { line: PickLine }>(null);
@@ -467,6 +474,9 @@ export default function PackStationOverlay({
    * the window-level listener below.
    */
   function handleScan(v: string) {
+    // Recorded FIRST, before any guard can return — the scans worth diagnosing are exactly the
+    // ones that get rejected somewhere below.
+    if (v) setLastScan(v);
     if (pickerModalOpen) {
       // The gate is a full-screen modal, so it is usually obvious — but say it anyway, because
       // a scan that vanishes with no acknowledgement is indistinguishable from a broken device.
@@ -819,6 +829,17 @@ export default function PackStationOverlay({
                   {/* The raw counts underneath, so the headline is never a number the picker
                       cannot check against what they physically did. Same shape the manager board
                       uses. */}
+                  {/* Last raw scan. Always on, not debug-gated: on the floor "did it even read?"
+                      is the first question when a scan appears to do nothing, and answering it
+                      needs no one to open a console. */}
+                  {lastScan && (
+                    <div
+                      className="mt-3 font-mono text-tt-muted/60 break-all px-4 text-center"
+                      style={{ fontSize: 'clamp(0.55rem, 1.5vh, 0.7rem)' }}
+                    >
+                      last scan: {lastScan}
+                    </div>
+                  )}
                   {t && !singlesOnly && (t.boxes > 0 || t.singles > 0) && (
                     <div
                       className="mt-1.5 tabular-nums text-tt-muted/80"
