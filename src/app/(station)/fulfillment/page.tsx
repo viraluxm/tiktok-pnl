@@ -40,6 +40,9 @@ export default function FulfillmentPage() {
   const [pickers, setPickers] = useState<{ id: string; name: string }[]>([]);
   const [pickerId, setPickerId] = useState('');
   const [pickedCount, setPickedCount] = useState(0);
+  const [pickedTotals, setPickedTotals] = useState<
+    { weighted: number; boxes: number; items: number; singles: number } | null
+  >(null);
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -60,7 +63,13 @@ export default function FulfillmentPage() {
     const q = pickerId ? `?picker=${encodeURIComponent(pickerId)}` : '';
     fetch(`/api/station/picked-today${q}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d && typeof d.picked_today === 'number') setPickedCount(d.picked_today); })
+      .then((d) => {
+        if (!d) return;
+        if (typeof d.picked_today === 'number') setPickedCount(d.picked_today);
+        if (typeof d.weighted === 'number') {
+          setPickedTotals({ weighted: d.weighted, boxes: d.boxes, items: d.items, singles: d.singles });
+        }
+      })
       .catch(() => { /* a counter is never worth surfacing an error for */ });
   }, [pickerId]);
 
@@ -138,6 +147,7 @@ export default function FulfillmentPage() {
         pickerId={pickerId}
         onPickerChange={setPickerId}
         pickedCount={pickedCount}
+        pickedTotals={pickedTotals}
         onBoxPicked={() => { setPickedCount((n) => n + 1); refreshPicked(); }}
         onExit={() => { /* always-on: exit returns to scan-ready in the overlay; nothing to unmount */ }}
       />
@@ -164,21 +174,6 @@ export default function FulfillmentPage() {
           <span className="relative font-bold uppercase tracking-wide text-tt-text">{mode}</span>
           <span className="relative text-[10px] normal-case text-tt-muted">hold to change</span>
         </button>,
-        document.body,
-      )}
-      {/* Singles prep, portalled above the overlay on the opposite side from the mode chip and the
-          overlay's top-right hold-to-exit. A plain link, not a mode: the prep bench credits a whole
-          finished pile from one slip scan and shares none of the overlay's box machinery, so
-          folding it in would have meant a second scan grammar inside the live packing path. This
-          keeps it one tap away on the same device without touching that path. */}
-      {typeof document !== 'undefined' && createPortal(
-        <a
-          href="/fulfillment/singles"
-          className="fixed z-[205] rounded-lg border border-tt-border bg-tt-card/90 px-3 py-1.5 text-xs text-tt-muted backdrop-blur hover:text-tt-text transition-colors"
-          style={{ bottom: 'calc(env(safe-area-inset-bottom) + 0.75rem)', left: 'calc(env(safe-area-inset-left) + 0.75rem)' }}
-        >
-          Singles prep →
-        </a>,
         document.body,
       )}
     </>

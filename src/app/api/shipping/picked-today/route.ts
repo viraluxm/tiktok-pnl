@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { countBoxesPickedToday } from '@/lib/shipping/pickedToday';
+import { pickedTodayTotals } from '@/lib/shipping/pickedToday';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +15,7 @@ export async function GET(req: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const picker = new URL(req.url).searchParams.get('picker');
-  const count = await countBoxesPickedToday(supabase, [user.id], picker || null);
-  return NextResponse.json({ picked_today: count });
+  const t = await pickedTodayTotals(supabase, [user.id], picker || null);
+  // picked_today stays for compatibility (RAW boxes); `weighted` is what the target uses.
+  return NextResponse.json({ picked_today: t.boxes, ...t });
 }

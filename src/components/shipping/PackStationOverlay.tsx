@@ -219,6 +219,11 @@ export interface PackStationOverlayProps {
   pickerId: string;
   onPickerChange: (id: string) => void;
   pickedCount: number;
+  /**
+   * The picker's day in the SAME units the manager board and the target use. Optional: a caller
+   * that has not been updated simply omits it and the raw pickedCount shows, as before.
+   */
+  pickedTotals?: { weighted: number; boxes: number; items: number; singles: number } | null;
   onBoxPicked: () => void;
   onExit: () => void;
   // OPTIONAL, purely observational: fires whenever the loaded box changes (null on scan-ready).
@@ -238,6 +243,7 @@ export default function PackStationOverlay({
   pickerId,
   onPickerChange,
   pickedCount,
+  pickedTotals,
   onBoxPicked,
   onExit,
   onBoxChange,
@@ -746,7 +752,15 @@ export default function PackStationOverlay({
               <span className="text-tt-cyan text-6xl">⤢</span>
             </div>
             <div className="mt-8 text-3xl font-bold break-words">Ready to scan</div>
-            <div className="mt-2 text-base text-tt-muted break-words">Scan a shipping label to load the box</div>
+            {/* Names BOTH things this screen accepts. A singles slip is credited right here (see
+                handleScan), so the capability needs teaching, not a separate control — the first
+                real attempt scanned the slip on this screen by instinct, which is the behaviour to
+                confirm rather than redirect. Only mentioned where singles are actually handled. */}
+            <div className="mt-2 text-base text-tt-muted break-words">
+              {endpoints.singles
+                ? 'Scan a shipping label, or a singles batch slip'
+                : 'Scan a shipping label to load the box'}
+            </div>
             {pickerName && (
               <div className="mt-3 text-sm text-tt-muted break-words">
                 Picking as <span className="font-semibold text-tt-text">{pickerName}</span>
@@ -769,20 +783,54 @@ export default function PackStationOverlay({
                 beat right after finishing a box, when the number has just gone up and there is
                 nothing competing for the screen. Putting it over the item mid-pick would fight
                 the thing the picker actually needs to look at. */}
-            <div className="mt-8 flex flex-col items-center">
-              <div
-                className={`font-extrabold leading-none tabular-nums ${pickedCount > 0 ? 'text-tt-green' : 'text-tt-muted'}`}
-                style={{ fontSize: 'clamp(3.5rem, 20vh, 9rem)' }}
-              >
-                {pickedCount}
-              </div>
-              <div
-                className="mt-1 font-bold uppercase tracking-[0.2em] text-tt-muted"
-                style={{ fontSize: 'clamp(0.7rem, 2.4vh, 1.05rem)' }}
-              >
-                {pickedCount === 1 ? 'box' : 'boxes'} picked today
-              </div>
-            </div>
+            {(() => {
+              // WHICH NUMBER GOES BIG.
+              //
+              // The manager board scores a shift on WEIGHTED boxes (a box is not a fixed unit of
+              // work: ~47.5s per package + ~17.3s per item), so the device must show the same
+              // thing or a picker checking their own progress reads a different number from the
+              // one they are judged on — on 2026-09-10 Alex's device said 256 while the board
+              // said 302 against a 200 target.
+              //
+              // EXCEPT for a singles-only packer. Singles are deliberately never weighted, so
+              // their weighted score is 0 — and a giant green 0 after crediting 135 packages
+              // would read as the scan having failed. They get their own count, with its own
+              // label, so the unit on screen is never ambiguous.
+              const t = pickedTotals;
+              const singlesOnly = !!t && t.singles > 0 && t.boxes === 0;
+              const headline = !t ? pickedCount : singlesOnly ? t.singles : t.weighted;
+              const label = singlesOnly
+                ? (t.singles === 1 ? 'single packed today' : 'singles packed today')
+                : (headline === 1 ? 'box picked today' : 'boxes picked today');
+              return (
+                <div className="mt-8 flex flex-col items-center">
+                  <div
+                    className={`font-extrabold leading-none tabular-nums ${headline > 0 ? 'text-tt-green' : 'text-tt-muted'}`}
+                    style={{ fontSize: 'clamp(3.5rem, 20vh, 9rem)' }}
+                  >
+                    {headline}
+                  </div>
+                  <div
+                    className="mt-1 font-bold uppercase tracking-[0.2em] text-tt-muted"
+                    style={{ fontSize: 'clamp(0.7rem, 2.4vh, 1.05rem)' }}
+                  >
+                    {label}
+                  </div>
+                  {/* The raw counts underneath, so the headline is never a number the picker
+                      cannot check against what they physically did. Same shape the manager board
+                      uses. */}
+                  {t && !singlesOnly && (t.boxes > 0 || t.singles > 0) && (
+                    <div
+                      className="mt-1.5 tabular-nums text-tt-muted/80"
+                      style={{ fontSize: 'clamp(0.6rem, 1.8vh, 0.8rem)' }}
+                    >
+                      {t.boxes} {t.boxes === 1 ? 'box' : 'boxes'} · {t.items.toLocaleString()} items
+                      {t.singles > 0 && <span className="text-tt-cyan"> · {t.singles} singles</span>}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
 
