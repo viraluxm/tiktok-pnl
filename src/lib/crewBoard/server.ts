@@ -99,14 +99,28 @@ export async function loadCrewBoard(
   // either date depending on when the punch was written — accept both.
   const dates = tok.crew === 'pm' ? [day, addDaysISO(day, 1)] : [day];
 
-  const [boxes, punchRes, empRes] = await Promise.all([
+  const [boxes, punchRes, openRes, empRes] = await Promise.all([
     readBoxesPaged(tok.ownerId, startISO, endISO),
+    // CLOSED punches. A `shifts` row is only materialized at clock-OUT, so this table has never
+    // once held an open punch (verified: 0 rows ever with clock_in_at set and clock_out_at null).
     admin
       .from('shifts')
       .select('employee_id, clock_in_at, clock_out_at')
       .eq('user_id', tok.ownerId)                       // explicit owner scope
       .in('date', dates)
       .not('clock_in_at', 'is', null),
+    // OPEN punches — the LIVE ones, and the whole point of a board a manager watches mid-shift.
+    // While someone is on the clock their punch exists ONLY here (status 'open', clocked_out_at
+    // null, shift_id null); it moves to `shifts` when they clock out. Without this the board
+    // shows "—" for every picker's hours all shift and, worse, cannot show anyone who is clocked
+    // in but not picking — the exact roster the "No picks this shift" section depends on.
+    // No overlap with the query above: these rows have no clock-out, those all do.
+    admin
+      .from('employee_time_entries')
+      .select('employee_id, clocked_in_at')
+      .eq('user_id', tok.ownerId)                       // explicit owner scope
+      .is('clocked_out_at', null)
+      .lt('clocked_in_at', endISO),
     // Name-only employee read. hourly_rate / pay is NEVER selected on this route — a shift
     // manager's link must not quietly become a payroll surface.
     admin
@@ -116,6 +130,7 @@ export async function loadCrewBoard(
   ]);
 
   if (punchRes.error) throw new Error(`crew board: punches query failed: ${punchRes.error.message}`);
+  if (openRes.error) throw new Error(`crew board: open punches query failed: ${openRes.error.message}`);
   if (empRes.error) throw new Error(`crew board: employees query failed: ${empRes.error.message}`);
 
   const nameById: Record<string, string> = {};
@@ -127,13 +142,26 @@ export async function loadCrewBoard(
 
   // Keep only fulfillment punches that actually overlap this crew's window. Hosts clock in on the
   // same dates (29 of them) and must never appear on a picker board.
-  const punches: CrewPunch[] = (punchRes.data ?? [])
-    .filter((p) => isFulfillment.has(p.employee_id as string))
-    .map((p) => ({
+  const rawPunches: { employee_id: string; clock_in_at: string; clock_out_at: string | null }[] = [
+    ...(punchRes.data ?? []).map((p) => ({
       employee_id: p.employee_id as string,
-      name: nameById[p.employee_id as string] ?? 'Unknown',
       clock_in_at: String(p.clock_in_at),
       clock_out_at: (p.clock_out_at as string | null) ?? null,
+    })),
+    ...(openRes.data ?? []).map((t) => ({
+      employee_id: t.employee_id as string,
+      clock_in_at: String(t.clocked_in_at),
+      clock_out_at: null,                               // still on the clock — accrues to now
+    })),
+  ];
+
+  const punches: CrewPunch[] = rawPunches
+    .filter((p) => isFulfillment.has(p.employee_id))
+    .map((p) => ({
+      employee_id: p.employee_id,
+      name: nameById[p.employee_id] ?? 'Unknown',
+      clock_in_at: p.clock_in_at,
+      clock_out_at: p.clock_out_at,
     }))
     .filter((p) => {
       const inMs = Date.parse(p.clock_in_at);
