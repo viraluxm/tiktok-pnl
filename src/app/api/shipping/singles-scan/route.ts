@@ -69,22 +69,29 @@ export async function POST(req: Request) {
 
   const admin = createAdminClient();
 
-  // The pile's labels. Never stored on the batch — always read back from the ledger, so a batch
-  // can never disagree with what was actually printed.
+  // The pile's boxes are stored ON the batch: the slip fronts exactly these labels, whichever runs
+  // they were bought in. Labels are printed combined across shops, so a pile routinely spans a
+  // dozen runs and there is no single run to look them up by.
+  const groupKeys = batch.group_keys;
+  if (groupKeys.length === 0) {
+    return NextResponse.json({ error: 'That batch has no labels.' }, { status: 409 });
+  }
+
+  // Order ids per box, for the refund guard.
   const { data: labelRows, error: labelErr } = await admin
     .from('shipping_label_purchases')
     .select('group_key, order_ids')
     .eq('user_id', user.id)                      // explicit owner scope; service-role bypasses RLS
-    .eq('run_id', batch.run_id)
-    .eq('slip_caption', batch.slip_caption);
+    .in('group_key', groupKeys);
   if (labelErr) {
     console.error('[singles-scan] label read failed:', labelErr);
     return NextResponse.json({ error: 'Could not read that batch.' }, { status: 500 });
   }
-  const labels = (labelRows ?? []) as Label[];
-  if (labels.length === 0) {
-    return NextResponse.json({ error: 'That batch has no labels.' }, { status: 409 });
+  const ordersByGroup = new Map<string, string[]>();
+  for (const r of (labelRows ?? []) as Label[]) {
+    ordersByGroup.set(String(r.group_key), r.order_ids ?? []);
   }
+  const labels: Label[] = groupKeys.map((k) => ({ group_key: k, order_ids: ordersByGroup.get(k) ?? [] }));
 
   // ── Refund guard. ──
   // A refunded or cancelled order must never be packed — TikTok has already paid the buyer back.
@@ -98,12 +105,12 @@ export async function POST(req: Request) {
   // Read first so the response can tell the packer the truth. The slip says "148 LABELS"; if 18
   // were already confirmed at the pack station the honest answer is "credited 130 of 148", not a
   // number that silently disagrees with the paper in their hand.
-  const groupKeys = packable.map((l) => l.group_key);
+  const packableKeys = packable.map((l) => l.group_key);
   const { data: existing, error: exErr } = await admin
     .from('shipment_verifications')
     .select('group_key')
     .eq('user_id', user.id)
-    .in('group_key', groupKeys);
+    .in('group_key', packableKeys);
   if (exErr) {
     console.error('[singles-scan] existing read failed:', exErr);
     return NextResponse.json({ error: 'Could not read that batch.' }, { status: 500 });

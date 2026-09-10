@@ -6,95 +6,83 @@ import { generateBatchCode } from '@/lib/shipping/code128';
 // Mint and resolve SINGLES BATCHES — the piles a packer is credited for by scanning the header
 // slip when they finish it.
 //
-// A pile is (run_id, slip_caption): exactly the stack one header sits in front of. Member labels
-// are never copied here; they are always
-// `shipping_label_purchases where run_id = ? and slip_caption = ?`. One source of truth.
+// A BATCH IS THE SET OF LABELS ONE SLIP FRONTS. Not a run, and not a (run, SKU) pair. Labels are
+// bought per shop and printed COMBINED, so one pile routinely draws from a dozen runs: over the
+// 4 days to 2026-09-09, '#428 CRUNCHY SOAP BAR ORIGINAL' spanned 12 runs and 148 labels. Keying a
+// batch to a run would have meant no honest code on essentially every real print.
+//
+// Storing the member group_keys makes merged and single-run prints the same case, with no special
+// path to get wrong, and makes crediting a direct insert with no lookup.
 
 export interface SinglesBatch {
   id: string;
   code: string;
-  run_id: string;
   slip_caption: string;
   label_count: number;
+  group_keys: string[];
+}
+
+export interface PileToMint {
+  caption: string;
+  groupKeys: string[];
 }
 
 /**
- * Get or create the batch for each (run_id, slip_caption) in a print, returning caption -> code.
+ * Mint a batch per pile in one print, returning caption -> code.
  *
- * IDEMPOTENT BY (run_id, slip_caption): re-printing a run must resolve to the SAME code, because
- * the physical pile is the same pile. A second code for one stack would let the same work be
- * credited twice.
- *
- * MERGED PRINTS ARE DELIBERATELY NOT CODED. When several runs are printed as one stack the same
- * caption spans multiple run_ids, so a single slip would front labels from several batches and one
- * code could not honestly cover them. Rather than credit a pile only partially — silently, with no
- * way for the packer to tell — those slips print with no barcode, exactly as they do today, and
- * the caller says so. Closing this properly needs the batch to carry a set of run_ids, which is a
- * schema change; a half-fix here would mis-credit real work.
+ * A NEW BATCH PER PRINT, deliberately. Re-printing a stack mints fresh codes rather than reusing
+ * an old one, because the contents may differ: buy more labels, print again, and '#428' now fronts
+ * 190 boxes where it fronted 148. A code reused across prints whose contents changed would be a
+ * code that lies about what it covers. Both codes resolve to real boxes, and
+ * UNIQUE (user_id, group_key) on shipment_verifications still makes the second scan a no-op, so
+ * nothing is ever double-credited.
  */
 export async function mintSinglesBatches(
   ownerId: string,
-  runId: string,
   storeId: string | null,
-  piles: { caption: string; count: number }[],
+  runIds: string[],
+  piles: PileToMint[],
 ): Promise<Map<string, string>> {
-  const admin = createAdminClient();
   const byCaption = new Map<string, string>();
-  if (piles.length === 0) return byCaption;
+  const usable = piles.filter((p) => p.groupKeys.length > 0);
+  if (usable.length === 0) return byCaption;
 
-  const captions = piles.map((p) => p.caption);
-
-  // Existing batches for this run first — a re-print must not mint anything.
-  const { data: existing, error: readErr } = await admin
-    .from('singles_batches')
-    .select('code, slip_caption')
-    .eq('user_id', ownerId)            // explicit owner scope; service-role bypasses RLS
-    .eq('run_id', runId)
-    .in('slip_caption', captions);
-  if (readErr) throw new Error(`singles batches: read failed: ${readErr.message}`);
-  for (const r of existing ?? []) byCaption.set(String(r.slip_caption), String(r.code));
-
-  const missing = piles.filter((p) => !byCaption.has(p.caption));
-  if (missing.length === 0) return byCaption;
-
-  const rows = missing.map((p) => ({
+  const admin = createAdminClient();
+  const rows = usable.map((p) => ({
     user_id: ownerId,
     store_id: storeId,
-    run_id: runId,
     slip_caption: p.caption,
     code: generateBatchCode((n) => new Uint8Array(randomBytes(n))),
-    label_count: p.count,
+    label_count: p.groupKeys.length,
+    group_keys: p.groupKeys,
+    run_ids: runIds,            // provenance only — nothing resolves a scan through this
   }));
 
-  // ON CONFLICT (run_id, slip_caption) DO NOTHING: two people hitting print at the same moment
-  // must end up with one batch, not two codes for one pile. The read-back below is what the caller
-  // gets, so a losing insert still returns the winner's code.
-  const { error: insErr } = await admin
+  const { data, error } = await admin
     .from('singles_batches')
-    .upsert(rows, { onConflict: 'run_id,slip_caption', ignoreDuplicates: true });
-  if (insErr) throw new Error(`singles batches: mint failed: ${insErr.message}`);
+    .insert(rows)
+    .select('code, slip_caption');
+  if (error) throw new Error(`singles batches: mint failed: ${error.message}`);
 
-  const { data: after, error: reErr } = await admin
-    .from('singles_batches')
-    .select('code, slip_caption')
-    .eq('user_id', ownerId)
-    .eq('run_id', runId)
-    .in('slip_caption', captions);
-  if (reErr) throw new Error(`singles batches: read-back failed: ${reErr.message}`);
-  for (const r of after ?? []) byCaption.set(String(r.slip_caption), String(r.code));
-
+  for (const r of data ?? []) byCaption.set(String(r.slip_caption), String(r.code));
   return byCaption;
 }
 
-/** Resolve a scanned code to its batch. Null for anything unknown — the caller 404s without detail. */
+/** Resolve a scanned code. Null for anything unknown — the caller 404s without leaking detail. */
 export async function resolveBatchByCode(ownerId: string, code: string): Promise<SinglesBatch | null> {
   const admin = createAdminClient();
   const { data, error } = await admin
     .from('singles_batches')
-    .select('id, code, run_id, slip_caption, label_count')
-    .eq('user_id', ownerId)            // explicit owner scope
+    .select('id, code, slip_caption, label_count, group_keys')
+    .eq('user_id', ownerId)            // explicit owner scope; service-role bypasses RLS
     .eq('code', code)
     .maybeSingle();
   if (error || !data) return null;
-  return data as SinglesBatch;
+  return {
+    id: String(data.id),
+    code: String(data.code),
+    slip_caption: String(data.slip_caption),
+    label_count: Number(data.label_count),
+    group_keys: (data.group_keys as string[] | null) ?? [],
+  };
 }

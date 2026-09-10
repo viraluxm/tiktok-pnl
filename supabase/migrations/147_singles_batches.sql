@@ -29,10 +29,11 @@ create extension if not exists "uuid-ossp";
 -- ---------------------------------------------------------------------------
 -- 1. singles_batches — one row per printed singles header slip.
 --
---    A pile is (run_id, slip_caption) inside a label run: exactly the stack the header sits in
---    front of. `code` is what the slip's barcode encodes — opaque, unique, NEVER REUSED — so a
---    scan resolves to exactly one pile, and re-printing a run resolves to the SAME pile rather
---    than minting a second identity for the same physical stack.
+--    ⚠️ SUPERSEDED BY 148: this file keys a pile on (run_id, slip_caption). That is wrong for how
+--    labels are printed here — bought per shop, printed COMBINED, so one pile spans a dozen runs.
+--    148 replaces the key with the pile's actual member boxes (group_keys). Apply BOTH, in order.
+--
+--    `code` is what the slip's barcode encodes — opaque, unique, never reused.
 --
 --    Deliberately a NEW table rather than a column on shipping_label_purchases: that table has one
 --    row per LABEL and this is one row per PILE. It also keeps the ALTER footprint on a hot,

@@ -330,23 +330,36 @@ export async function GET(req: Request) {
 
   // ── Singles batch codes. ──
   //
-  // Every 'slip' page is a singles pile (sequence() emits per-SKU slips for singles only), so each
-  // one gets a barcode the packer scans as they FINISH it, crediting its labels to them. Today
-  // that work is credited to nobody at all: runs of 521 / 323 / 304 labels under the singles
-  // banner had zero rows in shipment_verifications.
+  // Every 'slip' page is a singles pile (sequence() emits per-SKU slips for singles only). Each
+  // gets a barcode the packer scans as they FINISH the pile, crediting its labels to them. Today
+  // that work is credited to nobody: runs of 521 / 323 / 304 labels under the singles banner had
+  // zero rows in shipment_verifications.
   //
-  // MERGED PRINTS GET NO CODES. With several runs in one stack a caption spans multiple run_ids,
-  // and one code cannot honestly front labels from several batches. Those slips print exactly as
-  // they do today rather than crediting a pile only partially. A mint failure is likewise NEVER
-  // fatal — the labels are bought and the stack must print; the pile just goes uncredited, which
-  // is the status quo, not a regression.
-  const slipPiles = seq.pages
-    .filter((p): p is Extract<typeof p, { kind: 'slip' }> => p.kind === 'slip')
-    .map((p) => ({ caption: p.caption, count: p.count }));
+  // The pile's members are the label pages that FOLLOW its slip, up to the next slip or banner —
+  // exactly the stack the slip sits in front of. Collecting them here means merged prints need no
+  // special handling: labels are bought per shop and printed combined, so a pile routinely spans a
+  // dozen runs ('#428' spanned 12 runs / 148 labels over the 4 days to 2026-09-09), and a batch
+  // keyed to a run could not have covered one honestly.
+  //
+  // A mint failure is NEVER fatal: the labels are bought and the stack must print. The pile just
+  // goes uncredited, which is the status quo rather than a regression.
+  const piles: { caption: string; groupKeys: string[] }[] = [];
+  let currentPile: { caption: string; groupKeys: string[] } | null = null;
+  for (const page of seq.pages) {
+    if (page.kind === 'slip') {
+      currentPile = { caption: page.caption, groupKeys: [] };
+      piles.push(currentPile);
+    } else if (page.kind === 'banner') {
+      currentPile = null;                       // a banner ends the pile above it
+    } else if (currentPile) {
+      currentPile.groupKeys.push(page.group_key);
+    }
+  }
+
   let codeByCaption = new Map<string, string>();
-  if (!merge && runIds.length === 1 && slipPiles.length > 0) {
+  if (piles.length > 0) {
     try {
-      codeByCaption = await mintSinglesBatches(user.id, runIds[0], storeId, slipPiles);
+      codeByCaption = await mintSinglesBatches(user.id, storeId, runIds, piles);
     } catch (e) {
       console.error('[labels/pdf] singles batch mint failed — printing without codes:', e);
     }

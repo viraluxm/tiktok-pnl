@@ -39,7 +39,7 @@ export interface SlipContent {
    * start, is deliberate — a scan at the start would credit work that has not happened yet, and
    * anyone pulled away mid-pile would keep the full count.
    *
-   * Absent on ordinary SKU slips and on banners, which mark piles nobody is credited for.
+   * Absent on banners, which divide the stack rather than fronting a creditable pile.
    */
   batchCode?: string;
   /**
