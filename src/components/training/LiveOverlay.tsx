@@ -23,6 +23,12 @@ interface LiveOverlayProps {
   showBidBump: boolean;
   // When set (final seconds of the session), show the ending-soon countdown.
   endingInSeconds?: number | null;
+  // REPLAY MODE. The same overlay renders over recorded footage, where nothing is
+  // interactive: there is no auction to start and no comment to moderate, because
+  // it already happened. Reusing this component rather than writing a second
+  // overlay is what guarantees a replay LOOKS like what the host saw — a separate
+  // implementation would drift the moment either changed.
+  readOnly?: boolean;
 }
 
 const RED = '#FE2C55';
@@ -151,7 +157,15 @@ function DecoIcon({ children }: { children: React.ReactNode }) {
   );
 }
 
-function AuctionCard({ auction, onStartAuction }: { auction: AuctionView; onStartAuction: () => void }) {
+function AuctionCard({
+  auction,
+  onStartAuction,
+  readOnly = false,
+}: {
+  auction: AuctionView;
+  onStartAuction: () => void;
+  readOnly?: boolean;
+}) {
   const { phase, bid, seconds, winner, soldAt } = auction;
   return (
     <div className="flex min-h-[68px] w-full items-center rounded-[18px] bg-white px-3.5 py-3 shadow-xl shadow-black/25">
@@ -161,14 +175,18 @@ function AuctionCard({ auction, onStartAuction }: { auction: AuctionView; onStar
             <div className="text-[14px] font-semibold text-black">Mock auction</div>
             <div className="text-[12px] text-black/50">Ready when you are</div>
           </div>
-          <button
-            type="button"
-            onClick={onStartAuction}
-            className="inline-flex min-h-[44px] cursor-pointer items-center justify-center rounded-xl px-7 text-[15px] font-bold text-white transition-[filter] duration-200 hover:brightness-110 active:brightness-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
-            style={{ backgroundColor: RED }}
-          >
-            Start
-          </button>
+          {/* No Start button in replay: the auction already happened, and a
+              button that looks live but does nothing is worse than its absence. */}
+          {!readOnly && (
+            <button
+              type="button"
+              onClick={onStartAuction}
+              className="inline-flex min-h-[44px] cursor-pointer items-center justify-center rounded-xl px-7 text-[15px] font-bold text-white transition-[filter] duration-200 hover:brightness-110 active:brightness-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+              style={{ backgroundColor: RED }}
+            >
+              Start
+            </button>
+          )}
         </div>
       )}
 
@@ -224,8 +242,12 @@ export default function LiveOverlay({
   toast,
   showBidBump,
   endingInSeconds,
+  readOnly = false,
 }: LiveOverlayProps) {
   const [selected, setSelected] = useState<LiveComment | null>(null);
+  // A comment is a button when it can be moderated and a plain div when it cannot.
+  // Same markup either way, so the replay is visually identical to the live screen.
+  const Tag = readOnly ? 'div' : 'button';
 
   const initials = hostName
     .split(' ')
@@ -287,19 +309,30 @@ export default function LiveOverlay({
         {/* Comment feed (latest few) */}
         <div className="flex max-w-[82%] flex-col items-start gap-1.5">
           {comments.map((c) => (
-            <button
+            // In replay the comment is a plain div: moderation is meaningless after
+            // the fact, and a tappable comment would imply otherwise. Rendering the
+            // same markup either way keeps the two views visually identical.
+            <Tag
               key={c.id}
-              type="button"
-              onClick={() => setSelected(c)}
-              aria-label={`Moderate comment from ${c.username}`}
-              className="flex w-fit max-w-full cursor-pointer items-start gap-2 rounded-2xl text-left transition-opacity duration-150 active:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60 motion-safe:animate-[fadeIn_0.3s_ease]"
+              {...(readOnly
+                ? {}
+                : {
+                    type: 'button' as const,
+                    onClick: () => setSelected(c),
+                    'aria-label': `Moderate comment from ${c.username}`,
+                  })}
+              className={`flex w-fit max-w-full items-start gap-2 rounded-2xl text-left transition-opacity duration-150 motion-safe:animate-[fadeIn_0.3s_ease] ${
+                readOnly
+                  ? ''
+                  : 'cursor-pointer active:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
+              }`}
             >
               <Avatar name={c.username} className="h-6 w-6 text-[11px]" />
               <div className="rounded-2xl bg-black/35 px-2.5 py-1.5 backdrop-blur-sm">
                 <span className="text-[12px] font-semibold text-white/70">{c.username}</span>{' '}
                 <span className="text-[13px] text-white">{c.text}</span>
               </div>
-            </button>
+            </Tag>
           ))}
         </div>
 
@@ -311,7 +344,7 @@ export default function LiveOverlay({
           >
             +7s
           </div>
-          <AuctionCard auction={auction} onStartAuction={onStartAuction} />
+          <AuctionCard auction={auction} onStartAuction={onStartAuction} readOnly={readOnly} />
         </div>
 
         {/* Decorative host control row (inspired by the live UI) */}
@@ -360,7 +393,10 @@ export default function LiveOverlay({
       )}
 
       {/* Comment moderation bottom sheet */}
-      {selected && (
+      {/* Moderation sheet. `selected` can only be set from the button path, so this
+          is unreachable in replay — the explicit guard makes that a guarantee
+          rather than a consequence of another branch. */}
+      {!readOnly && selected && (
         <div className="fixed inset-0 z-30 flex flex-col justify-end">
           <button
             type="button"

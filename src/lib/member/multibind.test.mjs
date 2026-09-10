@@ -19,7 +19,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'multibind-')), 'multibind.mjs');
 writeFileSync(outFile, outputText);
-const { flagReason, boundUnits } = await import(pathToFileURL(outFile).href);
+const { flagReason, boundUnits, dismissVerdict } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -59,5 +59,21 @@ check('untagged SKU is refused — we cannot claim it is a squish', typeof flagR
 check('...and reports it as untagged, not as "null"', flagReason([sq(1), untagged(1)]).includes('untagged'));
 check('an order with no lines is refused', typeof flagReason([]) === 'string');
 check('zero units is refused, not treated as over-bound', typeof flagReason([{ qty: 0, category: 'squish' }]) === 'string');
+
+
+console.log('\ndismissVerdict — the two dismissals must not collapse into one');
+// An unpacked box is genuinely correctable, so a dismissal there IS the "legitimate" claim.
+check('unpacked, awaiting shipment -> keep_multi', dismissVerdict({ packVerified: false, status: 'AWAITING_SHIPMENT' }) === 'keep_multi');
+check('label bought but not packed -> keep_multi', dismissVerdict({ packVerified: false, status: 'AWAITING_COLLECTION' }) === 'keep_multi');
+check('ON_HOLD is pre-shipment -> keep_multi', dismissVerdict({ packVerified: false, status: 'ON_HOLD' }) === 'keep_multi');
+// Once the units are committed the honest verdict is "too late", never "not a mistake".
+check('pack-verified -> too_late', dismissVerdict({ packVerified: true, status: 'AWAITING_COLLECTION' }) === 'too_late');
+check('shipped -> too_late', dismissVerdict({ packVerified: false, status: 'IN_TRANSIT' }) === 'too_late');
+check('delivered -> too_late', dismissVerdict({ packVerified: false, status: 'DELIVERED' }) === 'too_late');
+check('completed -> too_late', dismissVerdict({ packVerified: false, status: 'COMPLETED' }) === 'too_late');
+// Shipped WITHOUT a verification row (the known set-aside gap) must still read as too_late —
+// absence of a verification row is weaker evidence than the platform status.
+check('shipped with no verification row -> too_late', dismissVerdict({ packVerified: false, status: 'COMPLETED' }) === 'too_late');
+check('null status, not verified -> keep_multi (nothing says it moved)', dismissVerdict({ packVerified: false, status: null }) === 'keep_multi');
 
 console.log(`\n${passed} checks passed\n`);

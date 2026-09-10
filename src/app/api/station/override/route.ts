@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
-import { createAdminClient } from '@/lib/supabase/admin';
+import { requireStationScope } from '@/lib/station/guard';
 import { verifyPin } from '@/lib/mapping/pin';
 import { verifySupervisorIsOwner } from '@/lib/kiosk/supervisor';
 
@@ -16,7 +15,10 @@ export const dynamic = 'force-dynamic';
 //
 // Like the rest of /api/station, the caller owns no data: the station's own user_id has no
 // employees, no sections and no orders. Everything resolves to the store OWNERS via
-// store_members, through the service role, and NEVER to the caller.
+// store_members, through the service role, and NEVER to the caller — via the shared
+// requireStationScope, which bounds those owners to the caller's own ORGANIZATION. That bound
+// matters most here: this route authorises an override by matching a PIN against the resolved
+// owners' employees, so an unbounded owner set would accept another tenant's supervisor PIN.
 
 const WINDOW_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 10;
@@ -34,12 +36,11 @@ function rateLimited(key: string): boolean {
 }
 
 export async function POST(req: Request) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  if (user.app_metadata?.role !== 'station') {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  }
+  // An unresolved scope comes back from the guard as a 500, not an empty owner set: a config
+  // problem must not quietly behave like a wrong PIN and get mistaken for a lead mistyping.
+  const scope = await requireStationScope();
+  if (!scope.ok) return scope.response;
+  const { admin, ownerIds, actorId } = scope;
 
   let body: {
     pin?: string;
@@ -57,21 +58,8 @@ export async function POST(req: Request) {
   if (!pin && !ownerPassword) {
     return NextResponse.json({ error: 'A PIN is required.' }, { status: 400 });
   }
-  if (rateLimited(user.id)) {
+  if (rateLimited(actorId)) {
     return NextResponse.json({ error: 'Too many attempts. Wait a few minutes and try again.' }, { status: 429 });
-  }
-
-  const admin = createAdminClient();
-
-  const { data: owners, error: ownersErr } = await admin
-    .from('store_members').select('user_id').eq('role', 'owner');
-  if (ownersErr) return NextResponse.json({ error: ownersErr.message }, { status: 500 });
-  const ownerIds = [...new Set((owners ?? []).map((o) => String(o.user_id)))];
-  // Same fail-loud stance as station/scan: an unresolved scope must not quietly behave like a
-  // wrong PIN, or a config problem gets mistaken for a lead mistyping.
-  if (!ownerIds.length) {
-    console.error('[station/override] station scope unresolved: no store_members(role=owner) rows');
-    return NextResponse.json({ error: 'station scope unresolved' }, { status: 500 });
   }
 
   let authorisedBy: { id: string | null; name: string; ownerId: string } | null = null;

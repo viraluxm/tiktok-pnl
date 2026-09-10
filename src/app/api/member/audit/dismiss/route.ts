@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireMemberScope } from '@/lib/station/guard';
-import { boundUnits } from '@/lib/member/multibind';
+import { boundUnits, dismissVerdict } from '@/lib/member/multibind';
 
 export const dynamic = 'force-dynamic';
 
@@ -65,6 +65,31 @@ export async function POST(req: Request) {
   if (lineErr) return NextResponse.json({ error: lineErr.message }, { status: 500 });
   const units = boundUnits((lineRows ?? []).map((l) => ({ qty: Number(l.qty) || 1 })));
 
+  // ── Which dismissal is this? DERIVED HERE, never taken from the client (migration 141).
+  //    keep_multi = the order is legitimate. too_late = it WAS an over-bind but the units are
+  //    already committed. The page's row is a snapshot and a box can be packed between render and
+  //    click, so the server re-reads the two facts the verdict depends on and the later fact wins.
+  const { data: sv, error: svErr } = await admin
+    .from('shipment_verifications')
+    .select('id')
+    .eq('user_id', ownerUserId)
+    .contains('order_ids', [orderId])
+    .limit(1);
+  if (svErr) return NextResponse.json({ error: svErr.message }, { status: 500 });
+
+  const { data: statusRow, error: statusErr } = await admin
+    .from('synced_order_ids')
+    .select('status')
+    .eq('order_id', orderId)
+    .eq('user_id', ownerUserId)
+    .maybeSingle();
+  if (statusErr) return NextResponse.json({ error: statusErr.message }, { status: 500 });
+
+  const decision = dismissVerdict({
+    packVerified: (sv ?? []).length > 0,
+    status: (statusRow?.status as string | null) ?? null,
+  });
+
   // Idempotent: uq_bind_review_decisions_order_item makes a double-click a no-op, not a 409.
   const { error } = await admin
     .from('bind_review_decisions')
@@ -73,7 +98,7 @@ export async function POST(req: Request) {
       item_id: itemId,
       owner_user_id: ownerUserId,
       actor_user_id: actorId,
-      decision: 'keep_multi',
+      decision,
       units,
       note,
     }, { onConflict: 'order_id,item_id', ignoreDuplicates: true });
@@ -82,5 +107,5 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, order_id: orderId, item_id: itemId, units });
+  return NextResponse.json({ ok: true, order_id: orderId, item_id: itemId, units, decision });
 }

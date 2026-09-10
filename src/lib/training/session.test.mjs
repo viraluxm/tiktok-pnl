@@ -145,13 +145,31 @@ const launcherSrc = readFileSync(
   'utf8',
 );
 check(
-  'QR generation encodes trainingHostUrl(...)',
+  // The QR now encodes the TOKENISED host URL, because that is the link a person
+  // without a Lensed account can actually open — which is the entire point of a QR
+  // aimed at an audition candidate. It falls back to the admin URL for sessions
+  // minted before tokens existed. The invariant being protected is unchanged: the
+  // encoded value comes from a shared helper, never a hand-built string.
+  'QR generation encodes a shared URL helper, preferring the tokenised link',
   /QRCode\.toString\(\s*url/.test(launcherSrc) &&
-    /const url = trainingHostUrl\(window\.location\.origin, sessionId\)/.test(launcherSrc),
+    /practiceHostTokenUrl\(window\.location\.origin, hostToken\)/.test(launcherSrc) &&
+    /trainingHostUrl\(window\.location\.origin, sessionId\)/.test(launcherSrc),
 );
 check(
-  'Copy Host Link copies trainingHostUrl(...)',
-  /copyLink\(`host:\$\{id\}`, trainingHostUrl\(window\.location\.origin, id\)\)/.test(launcherSrc),
+  // The launcher now renders each session through a SessionCard, so the copy call
+  // goes via that card's onCopy prop rather than a local copyLink. The invariant
+  // being protected is unchanged: the copied URL comes from the shared helper, so
+  // it can never disagree with the QR code.
+  'Copy Host Link copies the same shared helper the QR uses',
+  /onCopy\(\s*`host:\$\{id\}`,[\s\S]{0,300}practiceHostTokenUrl\(window\.location\.origin, session\.host_token\)/.test(
+    launcherSrc,
+  ),
+);
+check(
+  'Copy Controller Link copies trainingControllerUrl(...)',
+  /onCopy\(\s*`ctrl:\$\{id\}`,\s*trainingControllerUrl\(window\.location\.origin, id\)/.test(
+    launcherSrc,
+  ),
 );
 check(
   'launcher builds no second/local host URL implementation',

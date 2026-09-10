@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
 import LiveOverlay from './LiveOverlay';
 import { HOST_NAME, type LiveComment } from './simulatorData';
@@ -13,7 +13,11 @@ import {
 import { PRACTICE_VIDEO_CAPTURE } from '@/lib/training/media';
 import { useSessionChannel } from '@/lib/training/useSessionChannel';
 import { useVideoPublish } from '@/lib/training/useVideoPublish';
+import { usePracticeHeartbeat } from '@/lib/training/usePracticeHeartbeat';
+import { usePracticeLog } from '@/lib/training/usePracticeLog';
+import { usePracticeRecording } from '@/lib/training/usePracticeRecording';
 import { shortTrainingSessionLabel } from '@/lib/training/session';
+import { practiceEndpoints, type PracticeTransport } from '@/lib/training/transport';
 
 type SessionState = 'idle' | 'requesting' | 'running' | 'denied' | 'complete';
 type AuctionPhase = 'idle' | 'running' | 'ended';
@@ -48,7 +52,26 @@ function clearTimeoutRef(ref: MutableRefObject<ReturnType<typeof setTimeout> | n
   }
 }
 
-export default function LiveSimulator({ sessionId }: { sessionId: string }) {
+// `transport` decides which API surface this host talks to and which Realtime
+// client it builds. 'admin' is the signed-in staff path; 'token' is an audition
+// candidate on their own phone with no Lensed account, holding only an opaque
+// per-session token. The mode is threaded through rather than sniffed, so there is
+// never any doubt at a call site about which credentials are in play.
+export default function LiveSimulator({
+  sessionId,
+  transport = { mode: 'admin', sessionId },
+}: {
+  sessionId: string;
+  transport?: PracticeTransport;
+}) {
+  // Memoised on the two values it derives from, so the endpoint object is stable
+  // and the hooks below do not re-subscribe on every render.
+  const endpoints = useMemo(
+    () => practiceEndpoints(transport),
+    [transport.mode, transport.token], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  // A tokenised page must never construct the cookie-managing Supabase client.
+  const sessionless = transport.mode === 'token';
   const [sessionState, setSessionState] = useState<SessionState>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -62,6 +85,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const [auctionWinner, setAuctionWinner] = useState<string | null>(null);
   const [auctionSoldAt, setAuctionSoldAt] = useState<number | null>(null);
   const [showBidBump, setShowBidBump] = useState(false); // brief +7s indicator when a bid resets the timer
+  // TRUE when the running session has no microphone track. Practice ran silently
+  // for a long time (an app-wide `microphone=()` header denied every request while
+  // startPractice's catch quietly re-requested video-only), and nothing on either
+  // screen said so. The header is fixed, but a denied prompt or a mic-less device
+  // still lands in the same fallback — so the condition is surfaced rather than
+  // swallowed. It is also a hard precondition for recording: a track-composite
+  // egress needs an audio track to name.
+  const [micMissing, setMicMissing] = useState(false);
 
   // Media
   const streamRef = useRef<MediaStream | null>(null);
@@ -82,6 +113,12 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   const auctionBidRef = useRef(0);
   const auctionSecondsRef = useRef(AUCTION_START_SECONDS);
   const auctionActiveRef = useRef(false);
+  // endAuction fires from the auction tick's closure, so the winner must come from
+  // a ref — reading auctionWinner state there would log a stale (or null) winner.
+  const auctionWinnerRef = useRef<string | null>(null);
+  // Mirrors micMissing for broadcastSessionState, which runs inside the session
+  // tick's closure and would otherwise read a stale value.
+  const micMissingRef = useRef(false);
 
   // Moderation (block/remove) — session-only, in-memory
   const blockedRef = useRef<Set<string>>(new Set());
@@ -92,10 +129,35 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // Realtime: receive trainer commands. Comments/bids are driven by the
   // controller (no automation). Declared early so channelSend is available to
   // the handlers below; handleEvent is hoisted.
-  const { send: channelSend } = useSessionChannel(sessionId, 'host', handleEvent);
+  const { send: channelSend, status: channelStatus } = useSessionChannel(
+    sessionId,
+    'host',
+    handleEvent,
+    sessionless,
+  );
 
   // Best-effort: publish the existing camera track to LiveKit for the trainer preview.
-  const { publish: publishVideo, stop: stopVideo } = useVideoPublish(sessionId);
+  const { publish: publishVideo, stop: stopVideo } = useVideoPublish(sessionId, endpoints);
+
+  // Reports liveness to the shared session registry so every admin's launcher can
+  // see which sessions are actually running. Self-throttling, so it rides the
+  // per-second session tick below rather than adding a timer of its own.
+  const {
+    beat: registryBeat,
+    end: registryEnd,
+    unregistered: sessionUnregistered,
+  } = usePracticeHeartbeat(sessionId, endpoints);
+
+  // Records what this screen actually DID, so a replay can re-render the overlay
+  // over the footage (the overlay is DOM, not part of the video track). The host is
+  // the only party that knows the applied bid total, the winner, and which comments
+  // were suppressed — so the emit points below sit where each outcome is decided,
+  // never where a command arrives.
+  const practiceLog = usePracticeLog(sessionId, endpoints);
+
+  // Server-side recording (LiveKit Cloud track-composite egress). Additive: a
+  // failure never stops the practice, but it IS shown — see the indicator below.
+  const recording = usePracticeRecording(sessionId, endpoints);
 
   function handleEvent(event: TrainerEvent) {
     switch (event.action) {
@@ -130,6 +192,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       secondsLeft: Math.max(0, sessionSecondsRef.current),
       viewers: viewersRef.current,
       phase,
+      // Mirrored so the controller can warn management that this session has no
+      // audio BEFORE they spend 30 minutes on a silent audition. Read from a ref
+      // because this runs inside the session tick's closure.
+      micMissing: micMissingRef.current,
     });
   }
 
@@ -164,6 +230,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // ---- Comments: driven by the trainer controller ----
   function addComment(username: string, text: string) {
     if (blockedRef.current.has(username)) return; // blocked user suppressed
+    // Logged AFTER the suppression check, so the timeline holds only comments the
+    // host really showed. Logging the incoming command instead would make a replay
+    // display a comment that never appeared on screen.
+    practiceLog.event('comment', { username, text });
     commentIdRef.current += 1;
     const next: LiveComment = { id: commentIdRef.current, username, text };
     setComments((prev) => [...prev, next].slice(-4));
@@ -179,6 +249,7 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // the rest of this practice session (reset on restart / reload).
   function blockUser(comment: LiveComment) {
     blockedRef.current.add(comment.username);
+    practiceLog.event('block', { username: comment.username });
     setComments((prev) => prev.filter((c) => c.username !== comment.username));
     showToast('User blocked');
   }
@@ -198,6 +269,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     const minV = elapsed < 240 ? 1 : 200;
     v = Math.min(800, Math.max(minV, v));
     viewersRef.current = v;
+    // Throttled inside the buffer to PRACTICE_VIEWERS_LOG_MS: the ramp samples every
+    // 2.5s, which would be ~720 rows a session for a cosmetic number the replay
+    // step-holds anyway.
+    practiceLog.event('viewers', { count: v });
     setViewers(v);
   }
 
@@ -215,6 +290,8 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     setAuctionSeconds(AUCTION_START_SECONDS);
     setAuctionSoldAt(null);
     setAuctionPhase('running');
+    auctionWinnerRef.current = null;
+    practiceLog.event('auction_start', {});
 
     auctionTickRef.current = setInterval(() => {
       auctionSecondsRef.current -= 1;
@@ -234,9 +311,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     if (!auctionActiveRef.current) return;
     if (auctionSecondsRef.current <= 0) return;
 
-    auctionBidRef.current += bidIncrement(amount);
+    const increment = bidIncrement(amount);
+    auctionBidRef.current += increment;
+    // The outcome, not the command: the resulting TOTAL is what the screen showed,
+    // and is the thing the controller's placeBid message cannot know.
+    practiceLog.event('bid', { username, increment, total: auctionBidRef.current });
     setAuctionBid(auctionBidRef.current);
     setAuctionWinner(username);
+    auctionWinnerRef.current = username;
     auctionSecondsRef.current = AUCTION_BID_RESET_SECONDS;
     setAuctionSeconds(AUCTION_BID_RESET_SECONDS);
 
@@ -253,6 +335,10 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     clearIntervalRef(auctionTickRef);
     setAuctionSoldAt(auctionBidRef.current);
     setAuctionPhase('ended');
+    practiceLog.event('auction_end', {
+      sold_at: auctionBidRef.current,
+      winner: auctionWinnerRef.current,
+    });
     broadcastAuctionState(false, auctionBidRef.current, null);
     // Briefly show the sold state, then reset the card to ready.
     clearTimeoutRef(endedResetRef);
@@ -268,12 +354,14 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
   // Manual reset from the controller: clear the auction back to ready immediately.
   function resetAuction() {
     auctionActiveRef.current = false;
+    practiceLog.event('auction_reset', {});
     stopAuctionTimers();
     auctionBidRef.current = 0;
     auctionSecondsRef.current = AUCTION_START_SECONDS;
     setAuctionPhase('idle');
     setAuctionBid(0);
     setAuctionWinner(null);
+    auctionWinnerRef.current = null;
     setAuctionSoldAt(null);
     setAuctionSeconds(AUCTION_START_SECONDS);
     broadcastAuctionState(false, 0, null);
@@ -300,6 +388,11 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     setAuctionBid(0);
     setAuctionSoldAt(null);
     setAuctionSeconds(AUCTION_START_SECONDS);
+    auctionWinnerRef.current = null;
+
+    // Sets the monotonic epoch EVERY offset is measured from, so it must run before
+    // any other emit below (updateViewers fires immediately after this).
+    practiceLog.start();
 
     sessionTickRef.current = setInterval(() => {
       sessionSecondsRef.current -= 1;
@@ -308,11 +401,18 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
         completePractice();
       } else {
         broadcastSessionState('running');
+        // Registry heartbeat. Called every second but self-throttled to one
+        // request per PRACTICE_HEARTBEAT_MS, so this adds no timer and stops
+        // automatically whenever the session clock stops.
+        registryBeat();
       }
     }, 1000);
 
     viewerTickRef.current = setInterval(updateViewers, 2500);
     updateViewers();
+    // Beat once up front so the launcher shows the session as live immediately
+    // rather than up to one heartbeat interval later.
+    registryBeat();
     // Initial mirror so the controller isn't blank for up to a second.
     broadcastSessionState('running');
   }
@@ -334,6 +434,16 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     // is idempotent (roomRef/streamRef are nulled), so the unmount cleanup and
     // restartPractice() can both call it again safely.
     stopStream();
+    // Close the timeline and ship what is left immediately, rather than waiting up
+    // to one flush interval while the session is already over.
+    practiceLog.finish();
+    // Ask egress to stop. Only the fast path — LiveKit finalises by itself when the
+    // room empties, so a host that closes the tab still gets a file.
+    recording.stop();
+    // Record the clean finish in the registry. Best-effort: an un-ended session
+    // decays from 'live' to 'Disconnected' on its own once heartbeats stop, so a
+    // failure here costs a label, not correctness.
+    registryEnd();
   }
 
   async function startPractice() {
@@ -387,10 +497,20 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
     }
 
     streamRef.current = stream;
+    // One check for both acquisition paths: the audio:false fallback above, and a
+    // first-call success that returned no audio track anyway.
+    const noMic = stream.getAudioTracks().length === 0;
+    micMissingRef.current = noMic;
+    setMicMissing(noMic);
     setSessionState('running');
     startRuntime();
-    // Best-effort publish of the existing camera (+ mic) tracks (no second getUserMedia).
-    void publishVideo(stream);
+    // Publish, then start recording with the SIDs it returns. Sequenced (not
+    // parallel) because a track-composite egress is defined BY those SIDs, so it
+    // cannot be requested until the tracks actually exist in the room.
+    void publishVideo(stream).then((published) => {
+      if (!mountedRef.current) return;
+      void recording.start(published);
+    });
   }
 
   function restartPractice() {
@@ -497,6 +617,73 @@ export default function LiveSimulator({ sessionId }: { sessionId: string }) {
       >
         Session: {shortTrainingSessionLabel(sessionId)}
       </div>
+
+      {/* No-microphone warning. pointer-events-none so it can never swallow a tap
+          on the overlay beneath it; not dismissible, because a silent session is a
+          real defect for the whole run rather than a transient notice. */}
+      {micMissing && (
+        <div
+          role="status"
+          className="pointer-events-none absolute left-3 z-30 max-w-[70%] rounded-md bg-tt-yellow/90 px-2 py-1 text-[10px] font-semibold leading-snug text-black"
+          style={{ top: 'calc(env(safe-area-inset-top) + 2.5rem)' }}
+        >
+          No microphone — this session has no audio. Allow mic access and restart.
+        </div>
+      )}
+
+      {/* This session id is not in the shared registry, so it is invisible in every
+          manager's launcher (a hand-typed or stale link). The practice itself still
+          works, which is exactly why it needs saying. */}
+      {sessionUnregistered && (
+        <div
+          role="status"
+          className="pointer-events-none absolute left-3 z-30 max-w-[70%] rounded-md bg-black/60 px-2 py-1 text-[10px] font-semibold leading-snug text-white/90 backdrop-blur-sm"
+          style={{ top: `calc(env(safe-area-inset-top) + ${micMissing ? '4.6rem' : '2.5rem'})` }}
+        >
+          Not in the session list — created outside Practice Mode.
+        </div>
+      )}
+
+      {/* Recording state. Unlike the live preview, a recording failure must be
+          visible on the host's own screen — a silently unrecorded audition cannot
+          be redone. 'dry-run' appears while PRACTICE_RECORDING_WRITE_ENABLED is
+          unset, so a test run is never mistaken for a real recording. */}
+      {recording.state.kind !== 'idle' && (
+        <div
+          role="status"
+          className="pointer-events-none absolute right-3 z-30 max-w-[62%] rounded-md px-2 py-1 text-[10px] font-semibold leading-snug backdrop-blur-sm"
+          style={{
+            top: 'calc(env(safe-area-inset-top) + 2.75rem)',
+            background:
+              recording.state.kind === 'failed'
+                ? 'rgba(254,44,85,0.92)'
+                : recording.state.kind === 'dry-run'
+                  ? 'rgba(0,0,0,0.6)'
+                  : 'rgba(0,0,0,0.55)',
+            color: '#fff',
+          }}
+        >
+          {recording.state.kind === 'recording'
+            ? '● Recording'
+            : recording.state.kind === 'dry-run'
+              ? 'Recording OFF (dry run) — nothing is being saved'
+              : `Not recording — ${recording.state.reason}`}
+        </div>
+      )}
+
+      {/* Realtime is how comments and bids arrive. If the channel is down the host
+          sees a working camera and an inexplicably silent audience, so say so. This
+          matters most on the tokenised page, whose session-less anon client is a
+          different Realtime path from the signed-in one. */}
+      {channelStatus === 'error' && (
+        <div
+          role="status"
+          className="pointer-events-none absolute left-3 right-3 z-30 rounded-md bg-tt-yellow/90 px-2 py-1 text-center text-[10px] font-semibold leading-snug text-black"
+          style={{ top: 'calc(env(safe-area-inset-top) + 5.2rem)' }}
+        >
+          Trainer channel unavailable — comments and bids will not appear.
+        </div>
+      )}
 
       {sessionState === 'complete' && (
         <div
