@@ -99,7 +99,9 @@ export default async function CrewBoardPage({
       )}
 
       <footer className="mt-6 pt-4 border-t border-tt-border text-[11px] text-tt-muted leading-relaxed">
-        Bar height = boxes finished in that hour. One box = one label.
+        Bar height = boxes finished in that hour. The headline number is <strong>weighted</strong>:
+        a box counts more when it holds more items (measured: ~48s per package + ~17s per item), so
+        bundle-heavy work is not undercounted. A typical box scores about 1.
         {isToday && ' The current hour is still in progress and will look short.'}
       </footer>
     </Shell>
@@ -115,10 +117,10 @@ function Summary({ board }: { board: CrewBoard }) {
     <div className="mb-5">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-2.5">
         <Stat label="Boxes" value={board.totalBoxes.toLocaleString()} />
-        <Stat label="Picking" value={String(board.pickingCount)} />
+        <Stat label="Items" value={board.totalItems.toLocaleString()} />
         {hasTarget
           ? <Stat label="Hit target" value={`${board.hitTarget} / ${board.pickingCount}`} />
-          : <Stat label="On shift" value={String(board.pickingCount + board.noPicks.length)} />}
+          : <Stat label="Picking" value={String(board.pickingCount)} />}
         {hasTarget
           ? <Stat label="Target" value={String(board.targetBoxes)} />
           : <Stat label="No picks" value={String(board.noPicks.length)} />}
@@ -131,7 +133,7 @@ function Summary({ board }: { board: CrewBoard }) {
       {avail != null && (
         <div className="rounded-xl border border-tt-border bg-tt-card px-4 py-2.5">
           <p className="text-xs text-tt-muted">
-            {board.totalBoxes.toLocaleString()} boxes ÷ {board.pickingCount} picking ={' '}
+            {Math.round(board.totalWeighted).toLocaleString()} weighted boxes ÷ {board.pickingCount} picking ={' '}
             <span className="text-tt-text font-semibold tabular-nums">{Math.round(avail)}</span> available each
           </p>
           {board.targetReachable === false && (
@@ -146,7 +148,11 @@ function Summary({ board }: { board: CrewBoard }) {
 }
 
 function PickerCard({ row, target, maxHour }: { row: CrewPickerRow; target: number | null; maxHour: number }) {
-  const diff = target != null ? row.boxes - target : null;
+  // The target is measured on WEIGHTED boxes, not raw ones: a box is not a fixed unit of work
+  // (47.5s per package + 17.3s per item), so 174 bundle-heavy boxes can be more work than 206
+  // light ones. Weighted is calibrated in box units, so an existing 200 target still means 200.
+  const weighted = Math.round(row.weighted);
+  const diff = target != null ? weighted - target : null;
   return (
     <div className="rounded-xl border border-tt-border bg-tt-card px-4 py-3">
       <div className="flex items-baseline justify-between gap-3 mb-2">
@@ -155,14 +161,19 @@ function PickerCard({ row, target, maxHour }: { row: CrewPickerRow; target: numb
           <span className="text-tt-muted font-normal text-xs"> · {formatClocked(row.clocked_ms)}</span>
           {row.on_clock && <span className="text-tt-green text-xs"> ●</span>}
         </div>
-        <div className="shrink-0 text-sm tabular-nums whitespace-nowrap">
-          <span className="font-extrabold text-tt-text">{row.boxes}</span>
+        <div className="shrink-0 text-sm tabular-nums whitespace-nowrap text-right">
+          <span className="font-extrabold text-tt-text">{weighted}</span>
           {target != null && <span className="text-tt-muted"> / {target}</span>}
           {diff != null && (
             <span className={`ml-2 font-bold ${diff >= 0 ? 'text-tt-green' : 'text-tt-muted'}`}>
               {diff >= 0 ? `+${diff}` : diff}
             </span>
           )}
+          {/* The two raw counts the weighted score is built from. Shown always, so the headline
+              number is never a black box a picker cannot check. */}
+          <div className="text-[11px] text-tt-muted font-normal mt-0.5">
+            {row.boxes} boxes · {row.items.toLocaleString()} items
+          </div>
         </div>
       </div>
       <HourBars hours={row.hours} maxHour={maxHour} />

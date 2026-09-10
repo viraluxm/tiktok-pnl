@@ -32,6 +32,7 @@ const {
   CREW_SPLIT_HOUR, SHIFT_DAY_START_HOUR, crewOf, crewRangeUtcMs, fulfillmentDayKey,
   tzOffsetMs, zonedHourUtcMs, addDaysISO,
   buildHourAxis, aggregateCrewBoard, formatHourLabel, formatClocked,
+  workSeconds, weightedBoxes, SECONDS_PER_BOX, SECONDS_PER_ITEM, SECONDS_PER_TYPICAL_BOX,
 } = C;
 
 // The full fulfillment day [04:00, next 04:00) — the span the two crew windows must tile.
@@ -133,7 +134,7 @@ console.log('\nboard aggregation');
   const day = '2026-09-08';
   const { startMs, endMs } = crewRangeUtcMs(day, 'am', TZ);
   const now = pt(2026, 9, 8, 14, 30); // shift over
-  const box = (key, id, atMs) => ({ group_key: key, picker_employee_id: id, picker_name_snapshot: null, verified_at: iso(atMs) });
+  const box = (key, id, atMs, items = 1) => ({ group_key: key, picker_employee_id: id, picker_name_snapshot: null, verified_at: iso(atMs), items });
 
   // carlos: 3 boxes at 06:00 then nothing (the real 2026-09-08 shape, scaled down).
   // ana: 1 box at 06:00, 1 at 12:00 — steady.
@@ -174,15 +175,16 @@ console.log('\nboard aggregation');
     b.picking.every((r) => r.hours.length === b.hourStartsMs.length)
     && b.noPicks.every((r) => r.hours.length === b.hourStartsMs.length));
 
-  // Available-per-picker: 5 boxes over 2 people who actually picked = 2.5 each, target 3.
-  check('availablePerPicker divides by PICKERS, not everyone clocked in',
-    b.availablePerPicker === 2.5, `${b.availablePerPicker}`);
-  check('target 3 is flagged UNREACHABLE when only 2.5 were available each', b.targetReachable === false);
-  check('hitTarget counts only those at/over target', b.hitTarget === 1, `${b.hitTarget}`);
+  // Availability is measured in the SAME units as the target — weighted boxes, not raw ones.
+  // 5 one-item boxes = weightedBoxes(5,5), split between the 2 people who actually picked.
+  check('availablePerPicker is in WEIGHTED units and divides by PICKERS only',
+    Math.abs(b.availablePerPicker - weightedBoxes(5, 5) / 2) < 1e-9, `${b.availablePerPicker.toFixed(3)}`);
+  check('a target above what was available is flagged unreachable', b.targetReachable === false);
 
-  const easy = aggregateCrewBoard(events, punches, day, 'am', startMs, endMs, now, offsetAt, {}, 2);
-  check('target 2 is reachable at 2.5 available each', easy.targetReachable === true);
-  check('both pickers clear a target of 2', easy.hitTarget === 2);
+  const easy = aggregateCrewBoard(events, punches, day, 'am', startMs, endMs, now, offsetAt, {}, 1);
+  check('a target the volume supports is reachable', easy.targetReachable === true);
+  check('hitTarget is measured on weighted work, not raw boxes',
+    easy.hitTarget === easy.picking.filter((r) => r.weighted >= 1).length, `${easy.hitTarget}`);
 
   const noTarget = aggregateCrewBoard(events, punches, day, 'am', startMs, endMs, now, offsetAt, {}, null);
   check('null target -> targetReachable is null, not false', noTarget.targetReachable === null);
@@ -297,6 +299,58 @@ console.log('\ndoubles and straddling punches');
   const past = aggregateCrewBoard([], openOld, day, 'am', am.startMs, am.endMs, pt(2026, 9, 9, 12), offsetAt, {}, null);
   check('an open punch on a past board does not read as on-the-clock',
     past.noPicks[0].on_clock === false);
+}
+
+console.log('\nthe weighted work model');
+{
+  check('a box costs ~47.5s of overhead plus ~17.3s per item',
+    SECONDS_PER_BOX === 47.5 && SECONDS_PER_ITEM === 17.3);
+  check('a 1-item box is ~65s', Math.round(workSeconds(1, 1)) === 65, `${workSeconds(1, 1).toFixed(0)}s`);
+  check('a 9-item box is ~203s', Math.round(workSeconds(1, 9)) === 203, `${workSeconds(1, 9).toFixed(0)}s`);
+  check('a typical box scores 1.00 weighted',
+    Math.abs(weightedBoxes(1, 3.25) - 1) < 1e-9, weightedBoxes(1, 3.25).toFixed(4));
+
+  // The real 2026-09-09 morning crew. Measured work was Alex 444 min vs Chris 356 min (ratio
+  // 1.25). Only the weighted score reproduces that: items-only says 1.59, boxes-only says 0.84.
+  const alex = { boxes: 174, items: 1064 };
+  const chris = { boxes: 206, items: 670 };
+  const wAlex = weightedBoxes(alex.boxes, alex.items);
+  const wChris = weightedBoxes(chris.boxes, chris.items);
+  const trueRatio = workSeconds(alex.boxes, alex.items) / workSeconds(chris.boxes, chris.items);
+
+  check('weighted reproduces the measured work ratio (1.25)',
+    Math.abs(wAlex / wChris - trueRatio) < 1e-9 && Math.abs(trueRatio - 1.25) < 0.01,
+    `${trueRatio.toFixed(3)}`);
+  check('items-only would OVERSTATE that ratio (1.59)',
+    Math.abs(alex.items / chris.items - 1.59) < 0.01, `${(alex.items / chris.items).toFixed(2)}`);
+  check('boxes-only would INVERT it (0.84 — ranks the hardest worker below)',
+    Math.abs(alex.boxes / chris.boxes - 0.84) < 0.01, `${(alex.boxes / chris.boxes).toFixed(2)}`);
+  check('Alex outranks Chris on weighted despite 32 FEWER boxes', wAlex > wChris,
+    `${wAlex.toFixed(0)} vs ${wChris.toFixed(0)}`);
+  check("an average picker's weighted score stays near their raw box count, so a 200 target still means 200",
+    Math.abs(wChris - chris.boxes) / chris.boxes < 0.02, `${wChris.toFixed(0)} vs ${chris.boxes}`);
+
+  // The board must rank on weighted work.
+  const day = '2026-09-08';
+  const { startMs, endMs } = crewRangeUtcMs(day, 'am', TZ);
+  const now = endMs;
+  const mk = (k, id, items) => ({ group_key: k, picker_employee_id: id, picker_name_snapshot: id, verified_at: iso(pt(2026, 9, 8, 9)), items });
+  const ranked = aggregateCrewBoard(
+    [mk('a1', 'bundler', 10), mk('b1', 'singler', 1), mk('b2', 'singler', 1)],
+    [], day, 'am', startMs, endMs, now, offsetAt, {}, null);
+  check('one 10-item box outranks two 1-item boxes', ranked.picking[0].name === 'bundler',
+    `${ranked.picking[0].name} ${ranked.picking[0].weighted.toFixed(2)} vs ${ranked.picking[1].weighted.toFixed(2)}`);
+  check('items are summed per picker', ranked.picking[0].items === 10 && ranked.picking[1].items === 2);
+  check('totals carry both raw counts and the weighted sum',
+    ranked.totalBoxes === 3 && ranked.totalItems === 12
+    && Math.abs(ranked.totalWeighted - weightedBoxes(3, 12)) < 1e-9);
+
+  // A missing/zero item count must never erase a box that demonstrably happened.
+  const bad = aggregateCrewBoard(
+    [{ group_key: 'z', picker_employee_id: 'p', picker_name_snapshot: 'P', verified_at: iso(pt(2026, 9, 8, 9)), items: 0 }],
+    [], day, 'am', startMs, endMs, now, offsetAt, {}, null);
+  check('a zero item count floors to 1, never erasing the box',
+    bad.picking[0].boxes === 1 && bad.picking[0].items === 1 && bad.picking[0].weighted > 0);
 }
 
 console.log('\nhour labels');

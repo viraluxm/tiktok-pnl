@@ -12,6 +12,7 @@ import PendingClaimsPanel from './PendingClaimsPanel';
 import PickupRequestsPanel from './PickupRequestsPanel';
 import TradeRequestsPanel from './TradeRequestsPanel';
 import TeamScheduleLinkButton from './TeamScheduleLinkButton';
+import CrewBoardLinks from './CrewBoardLinks';
 import { Field, daysLabel, inputCls } from './shared';
 import MobileDataCard from '@/components/ui/MobileDataCard';
 
@@ -148,6 +149,10 @@ export default function ShiftsView({
         </button>
         <TeamScheduleLinkButton />
       </div>
+
+      {/* Crew board links — the fulfillment managers' read-only picker-pace boards. Lives here,
+          next to the other link controls, because issuing and revoking a link is access work. */}
+      <CrewBoardLinks />
 
       {/* Pending OT claims awaiting approval — no other surface owns these, so they stay up top. */}
       <PendingClaimsPanel />
