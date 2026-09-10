@@ -55,6 +55,24 @@ export const MEMBER_SCOPE_PATHS: Record<string, string[]> = {
   // the picker saw.
   binding: ['/team/binding', '/team/audit', '/team/oos', '/api/member/unbound', '/api/member/sessions', '/api/member/bind', '/api/member/catalog', '/api/member/stores', '/api/member/audit', '/api/member/oos'],
   inventory: ['/team/inventory', '/api/member/inventory'],
+  // The three scopes below were assignable-but-unreachable: the pages and the owner-scoped APIs
+  // were built and shipped, and the Team UI offered the checkboxes, but no allowlist entry existed
+  // — so a member holding one got a 403, or /team/no-access if it was their only scope.
+  //
+  // Each API prefix covers that page's children through the startsWith match in isPathAllowed:
+  // '/api/member/pnl' covers by-show / show-hourly / by-period; '/api/member/shows' covers
+  // [id]/board, [id]/duration and [id]/coverage; '/api/member/team' covers roster,
+  // host-performance, host-live-hours, shifts and attendance — the five /team/staff calls.
+  //
+  // NO PAY on the team surface, and it holds by construction rather than by convention:
+  // /api/member/team/roster selects an EXPLICIT column list with employees.hourly_rate omitted,
+  // host-performance returns counts only (the RPC never returns the cost figures it computes), and
+  // shifts / attendance / host-live-hours read tables with no pay column at all. Payroll stays an
+  // owner-only surface. '/api/member/stores' is deliberately NOT repeated here: only the binding
+  // and audit pages use the shop switcher.
+  pnl: ['/team/pnl', '/api/member/pnl'],
+  shows: ['/team/shows', '/api/member/shows'],
+  team: ['/team/staff', '/api/member/team'],
 };
 
 /**

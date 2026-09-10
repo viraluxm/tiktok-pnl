@@ -44,6 +44,15 @@ const orgStub = write('orgStub.mjs', `
 export async function getOrgId() { return globalThis.__ORG_ID; }
 `);
 
+// The scope constant + validator now live in @/lib/member/scopes (one definition, shared with the
+// edit route — the two used to hold copies that drifted). Transpile the REAL module rather than
+// stubbing it: which scopes are valid is part of what this route's contract is, and a stub would
+// let the two disagree again without failing here.
+const scopesPath = fileURLToPath(new URL('../../../../lib/member/scopes.ts', import.meta.url));
+const scopesUrl = write('memberScopes.mjs', ts.transpileModule(readFileSync(scopesPath, 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText);
+
 const srcPath = fileURLToPath(new URL('./route.ts', import.meta.url));
 let { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
@@ -53,6 +62,7 @@ for (const [from, to] of Object.entries({
   "'@/lib/supabase/server'": `'${serverStub}'`,
   "'@/lib/supabase/admin'": `'${adminStub}'`,
   "'@/lib/org'": `'${orgStub}'`,
+  "'@/lib/member/scopes'": `'${scopesUrl}'`,
 })) outputText = outputText.split(from).join(to);
 const { POST } = await import(write('route.mjs', outputText));
 
@@ -179,9 +189,19 @@ await t('an unknown store id is still rejected, and nothing is created', async (
 
 await t('a member with an unknown scope is refused', async () => {
   setup();
-  const res = await POST(req({ email: 'm@example.com', role: 'member', scopes: ['pnl'], stores: [STORE_A] }));
+  // 'payroll' is deliberately not a scope and never should be — payroll is owner-only. (This used
+  // to say 'pnl', which WAS unknown at the time; it is a real scope now, so the case had stopped
+  // testing what it says.)
+  const res = await POST(req({ email: 'm@example.com', role: 'member', scopes: ['payroll'], stores: [STORE_A] }));
   assert.equal(res.status, 400);
   assert.equal(globalThis.__CREATED.length, 0);
+});
+
+await t('a member CAN be created with the P&L, Shows and Team scopes', async () => {
+  setup();
+  const res = await POST(req({ email: 'mgr@example.com', role: 'member', scopes: ['shows', 'team'], stores: ['*'] }));
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual(globalThis.__CREATED[0].app_metadata.scopes, ['shows', 'team']);
 });
 
 for (const [status, name, err] of results) {
