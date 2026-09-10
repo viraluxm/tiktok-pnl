@@ -752,7 +752,15 @@ export default function PackStationOverlay({
               <span className="text-tt-cyan text-6xl">⤢</span>
             </div>
             <div className="mt-8 text-3xl font-bold break-words">Ready to scan</div>
-            <div className="mt-2 text-base text-tt-muted break-words">Scan a shipping label to load the box</div>
+            {/* Names BOTH things this screen accepts. A singles slip is credited right here (see
+                handleScan), so the capability needs teaching, not a separate control — the first
+                real attempt scanned the slip on this screen by instinct, which is the behaviour to
+                confirm rather than redirect. Only mentioned where singles are actually handled. */}
+            <div className="mt-2 text-base text-tt-muted break-words">
+              {endpoints.singles
+                ? 'Scan a shipping label, or a singles batch slip'
+                : 'Scan a shipping label to load the box'}
+            </div>
             {pickerName && (
               <div className="mt-3 text-sm text-tt-muted break-words">
                 Picking as <span className="font-semibold text-tt-text">{pickerName}</span>

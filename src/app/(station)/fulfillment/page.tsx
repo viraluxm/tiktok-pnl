@@ -176,21 +176,6 @@ export default function FulfillmentPage() {
         </button>,
         document.body,
       )}
-      {/* Singles prep, portalled above the overlay on the opposite side from the mode chip and the
-          overlay's top-right hold-to-exit. A plain link, not a mode: the prep bench credits a whole
-          finished pile from one slip scan and shares none of the overlay's box machinery, so
-          folding it in would have meant a second scan grammar inside the live packing path. This
-          keeps it one tap away on the same device without touching that path. */}
-      {typeof document !== 'undefined' && createPortal(
-        <a
-          href="/fulfillment/singles"
-          className="fixed z-[205] rounded-lg border border-tt-border bg-tt-card/90 px-3 py-1.5 text-xs text-tt-muted backdrop-blur hover:text-tt-text transition-colors"
-          style={{ bottom: 'calc(env(safe-area-inset-bottom) + 0.75rem)', left: 'calc(env(safe-area-inset-left) + 0.75rem)' }}
-        >
-          Singles prep →
-        </a>,
-        document.body,
-      )}
     </>
   );
 }
