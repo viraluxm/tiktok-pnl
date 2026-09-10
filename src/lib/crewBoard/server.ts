@@ -72,11 +72,63 @@ async function readBoxesPaged(
         picker_employee_id: (r.picker_employee_id as string | null) ?? null,
         picker_name_snapshot: (r.picker_name_snapshot as string | null) ?? null,
         verified_at: String(r.verified_at),
+        items: 1, // filled in by countItemsPerBox below; 1 is the floor, never 0
       });
     }
     if (page.length < PAGE) break;
   }
   return rows;
+}
+
+/**
+ * Count ORDER LINES per box. A box's identity is its tracking, and `synced_order_ids` carries
+ * tracking_number with one row per line, so the lines for a box are just its tracking's rows —
+ * no need to explode shipment_verifications.order_ids.
+ *
+ * Chunked AND paged: a busy morning is ~1,400 boxes and ~4,500 lines, well past both PostgREST's
+ * 1000-row response cap and a sane `.in()` list length. A silently truncated count here would
+ * quietly understate a picker's weighted score, so both limits are handled.
+ *
+ * A box whose lines cannot be found keeps the floor of 1 rather than dropping to 0 — an unknown
+ * line count must never erase work that demonstrably happened.
+ */
+async function countItemsPerBox(ownerId: string, groupKeys: string[]): Promise<Map<string, number>> {
+  const admin = createAdminClient();
+  const trackings = [...new Set(
+    groupKeys.filter((k) => k.startsWith('trk:')).map((k) => k.slice(4)).filter(Boolean),
+  )];
+  const byTracking = new Map<string, number>();
+
+  // Chunk the `.in()` list AND page each chunk. Deliberately a local loop rather than the repo's
+  // inChunksPaged: that paged helper lives only on an unmerged branch (main has the unpaged
+  // `inChunks`), and this board is kept independent of unmerged work.
+  const IN_CHUNK = 300;
+  for (let i = 0; i < trackings.length; i += IN_CHUNK) {
+    const slice = trackings.slice(i, i + IN_CHUNK);
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await admin
+        .from('synced_order_ids')
+        .select('id, tracking_number')
+        .eq('user_id', ownerId)                       // explicit owner scope
+        .in('tracking_number', slice)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(`crew board: item-count query failed: ${error.message}`);
+      const page = data ?? [];
+      for (const r of page) {
+        const t = r.tracking_number as string | null;
+        if (t) byTracking.set(t, (byTracking.get(t) ?? 0) + 1);
+      }
+      if (page.length < PAGE) break;
+    }
+  }
+
+  const byGroupKey = new Map<string, number>();
+  for (const k of groupKeys) {
+    const t = k.startsWith('trk:') ? k.slice(4) : '';
+    byGroupKey.set(k, byTracking.get(t) ?? 1);
+  }
+  return byGroupKey;
 }
 
 /**
@@ -168,6 +220,10 @@ export async function loadCrewBoard(
       const outMs = p.clock_out_at ? Date.parse(p.clock_out_at) : nowMs;
       return Number.isFinite(inMs) && inMs < endMs && outMs > startMs;
     });
+
+  // Attach the per-box line count that the weighted score is built on.
+  const itemsByBox = await countItemsPerBox(tok.ownerId, boxes.map((b) => b.group_key));
+  for (const b of boxes) b.items = itemsByBox.get(b.group_key) ?? 1;
 
   return aggregateCrewBoard(
     boxes, punches, day, tok.crew, startMs, endMs, nowMs,

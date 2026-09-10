@@ -48,6 +48,48 @@ export const CREW_SPLIT_HOUR = 15;
 export type Crew = 'am' | 'pm';
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The work model: what a box actually costs
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Boxes alone and items alone are BOTH unfair, because a box is not a fixed unit of work.
+// Measured over 8,677 completed boxes (2026-09-02 -> 09-09), using the gap between consecutive
+// completions by the same picker — the one timing signal that is trustworthy here, since
+// verified_at -> verified_at telescopes correctly and never touches the broken pick_started_at:
+//
+//     items in box:  1    2    3    4    5    6    7    8    9
+//     seconds:      64   84   99  116  133  152  158  184  217
+//
+// A weighted least-squares fit (weighted by boxes observed) gives:
+//
+//     seconds ≈ 47.5 per BOX + 17.3 per ITEM
+//
+// Both halves are real: there is genuine fixed overhead per package (fetch, scan, seal, set
+// aside) AND genuine per-item work. A 1-item box costs ~65s; a 9-item box ~203s.
+//
+// Why not items only: on 2026-09-09 Alex did 1,064 items in 174 boxes and Chris 670 in 206.
+// Measured work was 444 vs 356 minutes — a ratio of 1.25. The weighted score reproduces that
+// (257 vs 206 = 1.25); items-only says 1.59, overstating heavy bundling by ~27%; boxes-only says
+// 0.84, ranking the hardest worker on the floor third.
+export const SECONDS_PER_BOX = 47.5;
+export const SECONDS_PER_ITEM = 17.3;
+
+// Items in a typical box, used to express the weighted score back in BOX units so an existing
+// per-shift box target still means what it meant. A picker with an average mix scores about
+// their raw box count (Chris: 206 boxes -> 206 weighted), so a 200 target transfers unchanged.
+export const TYPICAL_ITEMS_PER_BOX = 3.25;
+export const SECONDS_PER_TYPICAL_BOX = SECONDS_PER_BOX + SECONDS_PER_ITEM * TYPICAL_ITEMS_PER_BOX;
+
+// Expected seconds of work for `boxes` packages containing `items` lines in total.
+export function workSeconds(boxes: number, items: number): number {
+  return SECONDS_PER_BOX * boxes + SECONDS_PER_ITEM * items;
+}
+
+// The same work expressed in typical-box equivalents — the number the target is compared against.
+export function weightedBoxes(boxes: number, items: number): number {
+  return workSeconds(boxes, items) / SECONDS_PER_TYPICAL_BOX;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Timezone / calendar helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -136,6 +178,7 @@ export interface CrewBoxEvent {
   picker_employee_id: string | null;
   picker_name_snapshot: string | null;
   verified_at: string;                 // ISO instant of successful completion
+  items: number;                       // order LINES in this box (>=1); drives the weighted score
 }
 
 // One time-clock punch for a fulfillment employee on the board's day.
@@ -157,6 +200,8 @@ export interface CrewPickerRow {
   employee_id: string | null;
   name: string;
   boxes: number;
+  items: number;                       // order lines across this picker's boxes
+  weighted: number;                    // typical-box equivalents — what the target is measured on
   clocked_ms: number | null;           // null when the person has no punch (picked off the clock)
   on_clock: boolean;                   // still punched in right now
   hours: HourBucket[];                 // one entry per elapsed hour of the crew window
@@ -170,6 +215,8 @@ export interface CrewBoard {
   picking: CrewPickerRow[];            // >= 1 box — measured against the target
   noPicks: CrewPickerRow[];            // clocked in, ZERO boxes — listed, never judged
   totalBoxes: number;
+  totalItems: number;
+  totalWeighted: number;
   pickingCount: number;                // denominator for available-per-picker
   availablePerPicker: number | null;   // totalBoxes / pickingCount; null when nobody picked
   targetBoxes: number | null;
@@ -229,25 +276,29 @@ export function aggregateCrewBoard(
   const byBox = new Map<string, CrewBoxEvent>();
   for (const e of events) if (!byBox.has(e.group_key)) byBox.set(e.group_key, e);
 
-  interface Acc { id: string | null; snapshot: string | null; boxes: number; hours: number[] }
+  interface Acc { id: string | null; snapshot: string | null; boxes: number; items: number; hours: number[] }
   const accs = new Map<string, Acc>();
   const blankHours = (): number[] => new Array(hourStartsMs.length).fill(0);
 
   const accFor = (id: string | null, snap: string | null): Acc => {
     const key = id ? `id:${id}` : `name:${snap ?? ''}`;
     let a = accs.get(key);
-    if (!a) { a = { id, snapshot: snap, boxes: 0, hours: blankHours() }; accs.set(key, a); }
+    if (!a) { a = { id, snapshot: snap, boxes: 0, items: 0, hours: blankHours() }; accs.set(key, a); }
     return a;
   };
 
   let totalBoxes = 0;
+  let totalItems = 0;
   for (const b of byBox.values()) {
     const id = b.picker_employee_id ?? null;
     const snap = (b.picker_name_snapshot ?? '').trim() || null;
     if (!id && !snap) continue;          // untracked history — not a person, not on a manager board
     const a = accFor(id, snap);
+    const items = Number.isFinite(b.items) && b.items > 0 ? b.items : 1; // never let a bad count zero a box
     a.boxes += 1;
+    a.items += items;
     totalBoxes += 1;
+    totalItems += items;
     const ms = Date.parse(b.verified_at);
     if (Number.isFinite(ms)) {
       const idx = Math.floor((ms - windowStartMs) / HOUR);
@@ -295,6 +346,8 @@ export function aggregateCrewBoard(
       employee_id: a.id,
       name: (a.id && nameById[a.id]) || a.snapshot || punch?.name || 'Unknown picker',
       boxes: a.boxes,
+      items: a.items,
+      weighted: weightedBoxes(a.boxes, a.items),
       clocked_ms: punch ? punch.ms : null,
       on_clock: punch?.open ?? false,
       hours: a.hours.map((boxes, i) => ({
@@ -303,8 +356,10 @@ export function aggregateCrewBoard(
     };
   };
 
+  // Ranked by WEIGHTED work, not raw boxes — on 2026-09-09 that is the difference between Alex
+  // (174 boxes, 1,064 items) ranking third and ranking first, which is what the clock says.
   const picking = [...accs.values()].map(toRow)
-    .sort((x, y) => y.boxes - x.boxes || x.name.localeCompare(y.name));
+    .sort((x, y) => y.weighted - x.weighted || y.boxes - x.boxes || x.name.localeCompare(y.name));
 
   // Clocked in, zero boxes. Listed with hours only — NO target, NO shortfall. Nothing in the data
   // distinguishes assigned non-picking work (boxing, restocking, set-aside) from idleness:
@@ -317,6 +372,8 @@ export function aggregateCrewBoard(
       employee_id: id,
       name: nameById[id] || p.name,
       boxes: 0,
+      items: 0,
+      weighted: 0,
       clocked_ms: p.ms,
       on_clock: p.open,
       hours: hourStartsMs.map((h, i) => ({
@@ -333,15 +390,18 @@ export function aggregateCrewBoard(
   // rather than effort: on 16 of the 17 morning shifts before 2026-09-08 there were not enough
   // boxes in the building for everyone on shift to reach 200.
   const pickingCount = picking.length;
-  const availablePerPicker = pickingCount > 0 ? totalBoxes / pickingCount : null;
+  const totalWeighted = weightedBoxes(totalBoxes, totalItems);
+  // Availability is compared in the SAME units as the target, so a bundle-heavy shift is not
+  // reported as "not enough work" when the work was there, just packed into fewer boxes.
+  const availablePerPicker = pickingCount > 0 ? totalWeighted / pickingCount : null;
   const targetReachable = targetBoxes == null || availablePerPicker == null
     ? null
     : availablePerPicker >= targetBoxes;
 
   return {
-    day, crew, hourStartsMs, hourLabels, picking, noPicks, totalBoxes, pickingCount,
-    availablePerPicker, targetBoxes, targetReachable,
-    hitTarget: targetBoxes == null ? 0 : picking.filter((r) => r.boxes >= targetBoxes).length,
+    day, crew, hourStartsMs, hourLabels, picking, noPicks, totalBoxes, totalItems, totalWeighted,
+    pickingCount, availablePerPicker, targetBoxes, targetReachable,
+    hitTarget: targetBoxes == null ? 0 : picking.filter((r) => r.weighted >= targetBoxes).length,
   };
 }
 
