@@ -6,7 +6,19 @@ import { KNOWN_MEMBER_SCOPES, validMemberScopes } from '@/lib/member/scopes';
 
 export const dynamic = 'force-dynamic';
 
-const MANAGED_ROLES = ['member', 'station'];
+// Roles whose ACCOUNT LIFECYCLE this route may act on: disable, enable, reset password.
+//
+// 'timeclock' was missing, which was a live bug: /api/admin/team CREATES kiosk accounts and lists
+// them, so the Team table rendered a kiosk row with a Disable button that 403'd. Same class of
+// mismatch as the one below — a UI offering an action the API refuses.
+//
+// 'seller' is here so an external seller can be disabled in one click. That is the revoke path:
+// banning the account revokes its refresh tokens and blocks sign-in, so they lose the seller UI,
+// the shared-catalog read and their label buying immediately. Their own shop connection and their
+// own order history are untouched — those are theirs, and this is about OUR access, not their data.
+//
+// Still refused here: an admin or a role-less user. This endpoint must never disable an owner.
+const MANAGED_ROLES = ['member', 'station', 'timeclock', 'seller'];
 
 // ~100 years — effectively a permanent disable. 'none' lifts the ban.
 const BAN_FOREVER = '876000h';
@@ -33,9 +45,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
   const admin = createAdminClient();
 
-  // Confirm the target is actually a managed (station/member) sub-user. Refuse to
-  // touch an admin or a role-less user — this endpoint must never disable an
-  // owner/admin account.
+  // Confirm the target is a role this route may act on (see MANAGED_ROLES). Refuse to touch an
+  // admin or a role-less user — this endpoint must never disable an owner/admin account.
   const { data: target, error: getErr } = await admin.auth.admin.getUserById(id);
   if (getErr) return NextResponse.json({ error: getErr.message }, { status: 500 });
   if (!target?.user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
@@ -43,7 +54,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const targetRole = target.user.app_metadata?.role;
   if (!targetRole || !MANAGED_ROLES.includes(targetRole)) {
     return NextResponse.json(
-      { error: 'Only station/member users can be managed here' },
+      { error: 'Only sub-user and seller accounts can be managed here' },
       { status: 403 },
     );
   }

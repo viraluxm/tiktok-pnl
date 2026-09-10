@@ -35,6 +35,7 @@ const {
   roleHomeFor,
   STATION_CONFINEMENT,
   TIMECLOCK_CONFINEMENT,
+  SELLER_CONFINEMENT,
 } = await import(pathToFileURL(outFile).href);
 
 // A realistic Supabase access-token claim set for each account shape.
@@ -43,6 +44,7 @@ const adminClaims = { role: 'authenticated', sub: 'u-admin', exp: 9e9, app_metad
 const stationClaims = { role: 'authenticated', sub: 'u-stn', exp: 9e9, app_metadata: { role: 'station' } };
 const timeclockClaims = { role: 'authenticated', sub: 'u-tc', exp: 9e9, app_metadata: { role: 'timeclock' } };
 const memberClaims = (scopes) => ({ role: 'authenticated', sub: 'u-mem', exp: 9e9, app_metadata: { role: 'member', scopes } });
+const sellerClaims = { role: 'authenticated', sub: 'u-seller', exp: 9e9, app_metadata: { role: 'seller' } };
 
 // ── THE LOCKOUT GUARD ────────────────────────────────────────────────────────────────────────
 // If anyone ever wires claims.role instead of claims.app_metadata.role, these fail.
@@ -203,4 +205,104 @@ test('an EXPIRED-but-authentic station token still yields the station role (no f
   assert.equal(isExpired(expiredStation, Date.now()), true, 'stale…');
   assert.equal(appRoleFromClaims(expiredStation), 'station', '…but still confined');
   assert.equal(isPathAllowed('/dashboard', confinementFor('station', undefined)), false);
+});
+
+// ── seller ──────────────────────────────────────────────────────────────────────────────────
+// An external seller: their own shop and their own data, reached through a short allowlist of
+// routes that are already scoped to the CALLER. The negative assertions are the point.
+
+test('seller is CONFINED, and lands on /seller', () => {
+  assert.equal(appRoleFromClaims(sellerClaims), 'seller');
+  const c = confinementFor('seller', undefined);
+  assert.deepEqual(c, SELLER_CONFINEMENT);
+  assert.equal(c.home, '/seller');
+  assert.equal(roleHomeFor('seller', undefined), '/seller');
+});
+
+test('seller reaches their own shop pages, shared inventory and label buying', () => {
+  const c = confinementFor('seller', undefined);
+  for (const p of [
+    '/seller',
+    '/seller/inventory',
+    '/seller/labels',
+    '/api/seller/inventory',
+    '/api/stores',
+    '/api/stores/active',
+    '/api/tiktok/auth',
+    '/api/tiktok/status',
+    '/api/tiktok/sync',
+    '/api/shipping/labels/scopes',
+    '/api/shipping/labels/dry-run',
+    '/api/shipping/labels/authorize',
+    '/api/shipping/labels/purchase',
+    '/api/shipping/labels/pdf',
+  ]) assert.equal(isPathAllowed(p, c), true, p);
+});
+
+test('seller can finish the OAuth handshake for their own shop', () => {
+  const c = confinementFor('seller', undefined);
+  // The confinement check runs BEFORE the OAuth-callback allowance in the middleware, so without
+  // this entry a seller could never connect a shop at all.
+  assert.equal(isPathAllowed('/auth/tiktok/callback', c), true);
+});
+
+test('seller NEVER reaches our dashboard, payroll, admin, assistant or owner-scoped routes', () => {
+  const c = confinementFor('seller', undefined);
+  for (const p of [
+    '/dashboard',
+    '/dashboard/time-clock',
+    '/entries',
+    '/products',
+    '/account',
+    '/admin/team',
+    '/admin/channels',
+    '/fulfillment',
+    '/kiosk',
+    '/team/binding',
+    '/api/chat',
+    '/api/labor',
+    '/api/team/fulfillment-performance',
+    '/api/admin/team',
+    '/api/admin/reports',
+    '/api/member/inventory',
+    '/api/station/scan',
+    '/api/kiosk/scan',
+    '/api/pnl/by-show',
+    '/api/employees',
+    '/api/shows',
+  ]) assert.equal(isPathAllowed(p, c), false, p);
+});
+
+test('seller cannot WRITE our shared catalog, and cannot delete their order history', () => {
+  const c = confinementFor('seller', undefined);
+  // /api/inventory/* is org-scoped AND writable — a seller editing our catalog is a write we
+  // never want. They read the catalog through /api/seller/inventory instead.
+  assert.equal(isPathAllowed('/api/inventory/skus', c), false);
+  assert.equal(isPathAllowed('/api/inventory/skus/abc/batches', c), false);
+  // Disconnect DELETES that store's synced orders — the record of what they sold from our stock.
+  assert.equal(isPathAllowed('/api/tiktok/disconnect', c), false);
+});
+
+test('seller prefix matching does not leak to sibling paths', () => {
+  const c = confinementFor('seller', undefined);
+  // '/seller' must not match '/sellership…', and '/api/stores' must not match '/api/storesX'.
+  assert.equal(isPathAllowed('/sellership', c), false);
+  assert.equal(isPathAllowed('/seller-admin', c), false);
+  assert.equal(isPathAllowed('/api/storesecret', c), false);
+  assert.equal(isPathAllowed('/api/sellerx', c), false);
+});
+
+test('an EXPIRED-but-authentic seller token still yields the seller role (no fail-open)', () => {
+  const stale = { ...sellerClaims, exp: 1 };
+  assert.equal(isExpired(stale, Date.now()), true);
+  assert.equal(appRoleFromClaims(stale), 'seller');
+  assert.equal(confinementFor(appRoleFromClaims(stale), undefined).home, '/seller');
+});
+
+test('seller does not widen the other roles', () => {
+  // A regression guard: adding a role must not add reach anywhere else.
+  assert.equal(isPathAllowed('/seller', STATION_CONFINEMENT), false);
+  assert.equal(isPathAllowed('/seller', TIMECLOCK_CONFINEMENT), false);
+  assert.equal(isPathAllowed('/seller', memberConfinement(['binding', 'inventory'])), false);
+  assert.equal(isPathAllowed('/api/seller/inventory', memberConfinement(['inventory'])), false);
 });
