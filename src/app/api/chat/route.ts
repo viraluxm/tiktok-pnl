@@ -3,6 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { resolveOwnerIds } from '@/lib/station/guard';
+import { resolveScopeOrgId } from '@/lib/org/scope';
 import { chatLimiter } from '@/lib/rate-limit';
 import { ANTHROPIC_API_KEY } from '@/lib/env';
 import { toolsFor, runTool, type ToolCtx, type ToolAccess } from '@/lib/chat/tools';
@@ -23,7 +24,8 @@ export const maxDuration = 60;
 // ── Scope: the OWNER's data, not the caller's ────────────────────────────────
 // An admin teammate is a different auth user from the owner who owns the rows. Scoping to
 // `user.id` would hand that admin a confident, articulate, EMPTY answer. resolveOwnerIds()
-// is the same primitive the station/member routes use.
+// is the same primitive the station/member routes use, bounded to the caller's own organization
+// (resolveScopeOrgId) so a second tenant's data can never enter an answer.
 
 const MODEL = 'claude-opus-5';
 const MAX_TOOL_TURNS = 6;      // bounds cost + latency; 2 tools rarely need more than 2-3
@@ -141,7 +143,15 @@ export async function POST(request: Request) {
   }
 
   const admin = createAdminClient();
-  const resolved = await resolveOwnerIds(admin);
+  // Org-bounded: the assistant answers for the caller's OWN organization's owners. Without this
+  // bound it read every store owner in the database, so a second tenant's revenue and payroll
+  // would silently enter the answers of anyone who could open the chat.
+  const org = await resolveScopeOrgId(admin, user);
+  if (!org.ok) {
+    console.error('[chat] owner scope unresolved: %s', org.error);
+    return NextResponse.json({ error: 'owner scope unresolved' }, { status: 500 });
+  }
+  const resolved = await resolveOwnerIds(admin, org.orgId);
   if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: 500 });
   if (!resolved.ownerIds.length) {
     // Fail loudly rather than answering "no data" to every question, which would look

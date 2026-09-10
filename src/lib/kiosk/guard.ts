@@ -4,6 +4,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { resolveOwnerIds } from '@/lib/station/guard';
+import { resolveScopeOrgId } from '@/lib/org/scope';
 
 // ── kiosk (badge time clock) ─────────────────────────────────────────────────
 // Shared gate for every /api/kiosk/* route. The kiosk runs as a dedicated 'timeclock' login account
@@ -35,7 +36,14 @@ export async function requireTimeclockScope(): Promise<TimeclockScope> {
   }
 
   const admin = createAdminClient();
-  const resolved = await resolveOwnerIds(admin, { storeIds: declared });
+  const org = await resolveScopeOrgId(admin, user);
+  if (!org.ok) {
+    console.error('[kiosk] kiosk scope unresolved: %s', org.error);
+    return { ok: false, response: NextResponse.json({ error: 'kiosk scope unresolved' }, { status: 500 }) };
+  }
+  // Store-scoped AND org-bounded: a declared store outside this org resolves nothing, so the
+  // "exactly one owner" assertion below turns a misconfigured kiosk into a 500, not a foreign read.
+  const resolved = await resolveOwnerIds(admin, org.orgId, { storeIds: declared });
   if (!resolved.ok) return { ok: false, response: NextResponse.json({ error: resolved.error }, { status: 500 }) };
   if (resolved.ownerIds.length !== 1) {
     console.error('[kiosk] expected exactly one owner for stores %o, got %d', declared, resolved.ownerIds.length);
