@@ -179,6 +179,17 @@ export interface CrewBoxEvent {
   picker_name_snapshot: string | null;
   verified_at: string;                 // ISO instant of successful completion
   items: number;                       // order LINES in this box (>=1); drives the weighted score
+  /**
+   * Credited by scanning a finished singles batch rather than a pack confirm
+   * (shipment_verifications.source = 'singles_batch').
+   *
+   * Kept OUT of boxes / items / weighted entirely. The work model (~47.5s per box + ~17.3s per
+   * item) was fitted on rack picking; the singles station is batch assembly from one carton and
+   * is far faster per package. 500 singles x 65s would be 9 hours — longer than the shift — so
+   * folding them in would over-credit roughly 2-3x. They get their own count until there is
+   * enough scan data to measure seconds-per-single honestly.
+   */
+  isSingles?: boolean;
 }
 
 // One time-clock punch for a fulfillment employee on the board's day.
@@ -200,8 +211,9 @@ export interface CrewPickerRow {
   employee_id: string | null;
   name: string;
   boxes: number;
-  items: number;                       // order lines across this picker's boxes
+  items: number;                       // order lines across this picker's boxes (excludes singles)
   weighted: number;                    // typical-box equivalents — what the target is measured on
+  singles: number;                     // singles credited by batch scan; NOT in boxes/items/weighted
   clocked_ms: number | null;           // null when the person has no punch (picked off the clock)
   on_clock: boolean;                   // still punched in right now
   hours: HourBucket[];                 // one entry per elapsed hour of the crew window
@@ -217,6 +229,7 @@ export interface CrewBoard {
   totalBoxes: number;
   totalItems: number;
   totalWeighted: number;
+  totalSingles: number;
   pickingCount: number;                // denominator for available-per-picker
   availablePerPicker: number | null;   // totalBoxes / pickingCount; null when nobody picked
   targetBoxes: number | null;
@@ -276,24 +289,41 @@ export function aggregateCrewBoard(
   const byBox = new Map<string, CrewBoxEvent>();
   for (const e of events) if (!byBox.has(e.group_key)) byBox.set(e.group_key, e);
 
-  interface Acc { id: string | null; snapshot: string | null; boxes: number; items: number; hours: number[] }
+  interface Acc { id: string | null; snapshot: string | null; boxes: number; items: number; singles: number; hours: number[] }
   const accs = new Map<string, Acc>();
   const blankHours = (): number[] => new Array(hourStartsMs.length).fill(0);
 
   const accFor = (id: string | null, snap: string | null): Acc => {
     const key = id ? `id:${id}` : `name:${snap ?? ''}`;
     let a = accs.get(key);
-    if (!a) { a = { id, snapshot: snap, boxes: 0, items: 0, hours: blankHours() }; accs.set(key, a); }
+    if (!a) { a = { id, snapshot: snap, boxes: 0, items: 0, singles: 0, hours: blankHours() }; accs.set(key, a); }
     return a;
   };
 
   let totalBoxes = 0;
   let totalItems = 0;
+  let totalSingles = 0;
   for (const b of byBox.values()) {
     const id = b.picker_employee_id ?? null;
     const snap = (b.picker_name_snapshot ?? '').trim() || null;
     if (!id && !snap) continue;          // untracked history — not a person, not on a manager board
     const a = accFor(id, snap);
+
+    // Singles are counted, shown, and deliberately kept out of the weighted score.
+    if (b.isSingles) {
+      a.singles += 1;
+      totalSingles += 1;
+      // Still bucketed into the hour so the pace bars show when the pile was finished. A batch
+      // scan lands all of its boxes on ONE instant, so a finished pile appears as a single tall
+      // bar rather than a spread — which is the truth: that is when it was credited.
+      const t = Date.parse(b.verified_at);
+      if (Number.isFinite(t)) {
+        const i = Math.floor((t - windowStartMs) / HOUR);
+        if (i >= 0 && i < a.hours.length) a.hours[i] += 1;
+      }
+      continue;
+    }
+
     const items = Number.isFinite(b.items) && b.items > 0 ? b.items : 1; // never let a bad count zero a box
     a.boxes += 1;
     a.items += items;
@@ -348,6 +378,7 @@ export function aggregateCrewBoard(
       boxes: a.boxes,
       items: a.items,
       weighted: weightedBoxes(a.boxes, a.items),
+      singles: a.singles,
       clocked_ms: punch ? punch.ms : null,
       on_clock: punch?.open ?? false,
       hours: a.hours.map((boxes, i) => ({
@@ -358,8 +389,10 @@ export function aggregateCrewBoard(
 
   // Ranked by WEIGHTED work, not raw boxes — on 2026-09-09 that is the difference between Alex
   // (174 boxes, 1,064 items) ranking third and ranking first, which is what the clock says.
+  // A person who ONLY ran singles has weighted 0 but is emphatically not idle, so they belong in
+  // the worked list, ranked after everyone with weighted output.
   const picking = [...accs.values()].map(toRow)
-    .sort((x, y) => y.weighted - x.weighted || y.boxes - x.boxes || x.name.localeCompare(y.name));
+    .sort((x, y) => y.weighted - x.weighted || y.singles - x.singles || x.name.localeCompare(y.name));
 
   // Clocked in, zero boxes. Listed with hours only — NO target, NO shortfall. Nothing in the data
   // distinguishes assigned non-picking work (boxing, restocking, set-aside) from idleness:
@@ -374,6 +407,7 @@ export function aggregateCrewBoard(
       boxes: 0,
       items: 0,
       weighted: 0,
+      singles: 0,
       clocked_ms: p.ms,
       on_clock: p.open,
       hours: hourStartsMs.map((h, i) => ({
@@ -400,7 +434,7 @@ export function aggregateCrewBoard(
 
   return {
     day, crew, hourStartsMs, hourLabels, picking, noPicks, totalBoxes, totalItems, totalWeighted,
-    pickingCount, availablePerPicker, targetBoxes, targetReachable,
+    totalSingles, pickingCount, availablePerPicker, targetBoxes, targetReachable,
     hitTarget: targetBoxes == null ? 0 : picking.filter((r) => r.weighted >= targetBoxes).length,
   };
 }

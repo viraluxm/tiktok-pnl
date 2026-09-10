@@ -19,6 +19,7 @@
 
 import { type PDFDocument, type PDFFont, rgb } from 'pdf-lib';
 import { fitText, splitCaption, type Measure } from '@/lib/shipping/slipLayout';
+import { encodeCode128B, layoutBars } from '@/lib/shipping/code128';
 
 /** Fallback page size: 4x6 inches at 72pt/inch, used when no label is available to match. */
 export const DEFAULT_SLIP_SIZE = { width: 288, height: 432 };
@@ -32,6 +33,15 @@ const TITLE_SIZES = [40, 34, 29, 25, 21, 18, 15, 12, 10];
 export interface SlipContent {
   caption: string;
   count: number;
+  /**
+   * Singles-batch code. When present the slip carries a Code 128 barcode: the packer scans it as
+   * they FINISH the pile and every label in it is credited to them. Scanning on finish, not on
+   * start, is deliberate — a scan at the start would credit work that has not happened yet, and
+   * anyone pulled away mid-pile would keep the full count.
+   *
+   * Absent on ordinary SKU slips and on banners, which mark piles nobody is credited for.
+   */
+  batchCode?: string;
   /**
    * A PILE divider rather than a SKU header. Drawn heavier, with a filled bar, because it is
    * what someone finds while splitting a stack by hand — often at arm's length and without
@@ -105,19 +115,69 @@ export function addSlipPage(
     }
   }
 
-  // The count, anchored to the bottom rather than following the title, so its position is
-  // constant across slips and the eye learns where to find it.
+  // The barcode sits at the BOTTOM, below the count, and the count moves up to make room. Bottom
+  // because that is the edge nearest the packer when the slip is face-up on the bench, and because
+  // it keeps the number and title block — the things read at arm's length — in the same place they
+  // have always been.
+  const hasCode = typeof slip.batchCode === 'string' && slip.batchCode.length > 0;
+  const barcodeBlock = hasCode ? BARCODE_HEIGHT + BARCODE_TEXT_SIZE + 14 : 0;
+
   const countText = `${slip.count} ${slip.count === 1 ? 'LABEL' : 'LABELS'}`;
   const countSize = 26;
+  const countY = MARGIN + BORDER + 18 + barcodeBlock;
   page.drawText(countText, {
-    x: centred(countText, countSize), y: MARGIN + BORDER + 18, size: countSize, font, color: black,
+    x: centred(countText, countSize), y: countY, size: countSize, font, color: black,
   });
 
   // A hairline above the count separates it from the title block without another heavy rule.
   page.drawLine({
-    start: { x: pad, y: MARGIN + BORDER + 18 + countSize + 6 },
-    end: { x: size.width - pad, y: MARGIN + BORDER + 18 + countSize + 6 },
+    start: { x: pad, y: countY + countSize + 6 },
+    end: { x: size.width - pad, y: countY + countSize + 6 },
     thickness: 1.5, color: black,
   });
 
+  if (hasCode) drawBatchBarcode(page, font, size, slip.batchCode as string, pad);
+}
+
+// Tall enough to stay readable if the slip is scanned at an angle, short enough not to crowd the
+// title block on a 4x6.
+const BARCODE_HEIGHT = 54;
+const BARCODE_TEXT_SIZE = 11;
+
+/**
+ * Draw the batch barcode plus its human-readable code.
+ *
+ * The code is printed underneath in plain text ON PURPOSE: scanners fail, and a packer who can
+ * read '"SB7F3K9M2QX4"' to a manager can still get the pile credited. That is also why the code
+ * alphabet excludes I, L, O, U, 0 and 1.
+ *
+ * Bars are drawn as filled rectangles at sub-point positions — never rounded to whole points,
+ * because a scanner measures the RATIO between wide and narrow bars and rounding distorts it.
+ */
+function drawBatchBarcode(
+  page: ReturnType<PDFDocument['addPage']>,
+  font: PDFFont,
+  size: { width: number; height: number },
+  code: string,
+  pad: number,
+): void {
+  const black = rgb(0, 0, 0);
+  const targetWidth = size.width - pad * 2;
+  const baseline = MARGIN + BORDER + 6;
+  const barsY = baseline + BARCODE_TEXT_SIZE + 6;
+
+  // A white plate behind the symbol guarantees the quiet zones are actually quiet even if the
+  // slip is printed over a tinted stock.
+  page.drawRectangle({
+    x: pad, y: barsY - 3, width: targetWidth, height: BARCODE_HEIGHT + 6, color: rgb(1, 1, 1),
+  });
+
+  for (const bar of layoutBars(encodeCode128B(code), pad, targetWidth)) {
+    page.drawRectangle({ x: bar.x, y: barsY, width: bar.width, height: BARCODE_HEIGHT, color: black });
+  }
+
+  const textWidth = font.widthOfTextAtSize(code, BARCODE_TEXT_SIZE);
+  page.drawText(code, {
+    x: (size.width - textWidth) / 2, y: baseline, size: BARCODE_TEXT_SIZE, font, color: black,
+  });
 }

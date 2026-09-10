@@ -99,6 +99,13 @@ export default async function CrewBoardPage({
       )}
 
       <footer className="mt-6 pt-4 border-t border-tt-border text-[11px] text-tt-muted leading-relaxed">
+        {board.totalSingles > 0 && (
+          <>
+            <strong>Singles</strong> are counted separately and are not in the weighted number —
+            batch assembly is much faster per package than picking, so scoring them the same way
+            would overstate them.{' '}
+          </>
+        )}
         Bar height = boxes finished in that hour. The headline number is <strong>weighted</strong>:
         a box counts more when it holds more items (measured: ~48s per package + ~17s per item), so
         bundle-heavy work is not undercounted. A typical box scores about 1.
@@ -117,7 +124,9 @@ function Summary({ board }: { board: CrewBoard }) {
     <div className="mb-5">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-2.5">
         <Stat label="Boxes" value={board.totalBoxes.toLocaleString()} />
-        <Stat label="Items" value={board.totalItems.toLocaleString()} />
+        {board.totalSingles > 0
+          ? <Stat label="Singles" value={board.totalSingles.toLocaleString()} />
+          : <Stat label="Items" value={board.totalItems.toLocaleString()} />}
         {hasTarget
           ? <Stat label="Hit target" value={`${board.hitTarget} / ${board.pickingCount}`} />
           : <Stat label="Picking" value={String(board.pickingCount)} />}
@@ -173,6 +182,11 @@ function PickerCard({ row, target, maxHour }: { row: CrewPickerRow; target: numb
               number is never a black box a picker cannot check. */}
           <div className="text-[11px] text-tt-muted font-normal mt-0.5">
             {row.boxes} boxes · {row.items.toLocaleString()} items
+            {/* Singles are shown but never folded into the weighted score — the work model was
+                measured on rack picking, not on batch assembly. */}
+            {row.singles > 0 && (
+              <span className="text-tt-cyan"> · {row.singles.toLocaleString()} singles</span>
+            )}
           </div>
         </div>
       </div>

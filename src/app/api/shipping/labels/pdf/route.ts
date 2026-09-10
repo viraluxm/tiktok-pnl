@@ -10,6 +10,7 @@ import {
 } from '@/lib/shipping/assemblyPlan';
 import { BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION } from '@/lib/shipping/labelPlan';
 import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
+import { mintSinglesBatches } from '@/lib/shipping/singlesBatches';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -327,6 +328,30 @@ export async function GET(req: Request) {
     );
   }
 
+  // ── Singles batch codes. ──
+  //
+  // Every 'slip' page is a singles pile (sequence() emits per-SKU slips for singles only), so each
+  // one gets a barcode the packer scans as they FINISH it, crediting its labels to them. Today
+  // that work is credited to nobody at all: runs of 521 / 323 / 304 labels under the singles
+  // banner had zero rows in shipment_verifications.
+  //
+  // MERGED PRINTS GET NO CODES. With several runs in one stack a caption spans multiple run_ids,
+  // and one code cannot honestly front labels from several batches. Those slips print exactly as
+  // they do today rather than crediting a pile only partially. A mint failure is likewise NEVER
+  // fatal — the labels are bought and the stack must print; the pile just goes uncredited, which
+  // is the status quo, not a regression.
+  const slipPiles = seq.pages
+    .filter((p): p is Extract<typeof p, { kind: 'slip' }> => p.kind === 'slip')
+    .map((p) => ({ caption: p.caption, count: p.count }));
+  let codeByCaption = new Map<string, string>();
+  if (!merge && runIds.length === 1 && slipPiles.length > 0) {
+    try {
+      codeByCaption = await mintSinglesBatches(user.id, runIds[0], storeId, slipPiles);
+    } catch (e) {
+      console.error('[labels/pdf] singles batch mint failed — printing without codes:', e);
+    }
+  }
+
   // ── Assemble. ──
   const out = await PDFDocument.create();
   const font = await out.embedFont(StandardFonts.HelveticaBold);
@@ -348,7 +373,10 @@ export async function GET(req: Request) {
       // A banner is drawn heavier than a slip: it is the divider someone finds while splitting
       // the stack by hand, often without reading it closely.
       addSlipPage(out, font, pageSize, {
-        caption: page.caption, count: page.count, banner: page.kind === 'banner',
+        caption: page.caption,
+        count: page.count,
+        banner: page.kind === 'banner',
+        batchCode: page.kind === 'slip' ? codeByCaption.get(page.caption) : undefined,
       });
       continue;
     }
