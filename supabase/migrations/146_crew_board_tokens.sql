@@ -1,4 +1,13 @@
--- 137_crew_board_tokens.sql
+-- 146_crew_board_tokens.sql
+--
+-- ⚠️ RENAMED FROM 137_crew_board_tokens.sql. It was written and APPLIED TO PRODUCTION on
+--    2026-09-09 under the name `137_`, before `137_squish_multibind_onhold_and_order.sql` was
+--    seen — that file landed on main first (PR #243) and keeps the 137 prefix. Both had already
+--    run in prod (crew_board_tokens exists; squish_multibind_audit_as exists), so nothing was
+--    skipped or double-applied — but two files sharing a prefix is exactly the hazard this repo
+--    has been bitten by, so the LATER one is renumbered to a free prefix.
+--    ➜ THIS FILE IS ALREADY APPLIED. Do not run it again looking for a gap at 146. It is
+--      idempotent (create ... if not exists) so a re-run is harmless, but it is not needed.
 -- Manager crew board — the tokenized link that shows ONE crew's picker output for one
 -- fulfillment day. Read-only surface; this migration adds ONE new table and nothing else.
 --

@@ -10,6 +10,7 @@ import {
 } from '@/lib/shipping/assemblyPlan';
 import { BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION } from '@/lib/shipping/labelPlan';
 import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
+import { mintSinglesBatches } from '@/lib/shipping/singlesBatches';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -327,6 +328,43 @@ export async function GET(req: Request) {
     );
   }
 
+  // ── Singles batch codes. ──
+  //
+  // Every 'slip' page is a singles pile (sequence() emits per-SKU slips for singles only). Each
+  // gets a barcode the packer scans as they FINISH the pile, crediting its labels to them. Today
+  // that work is credited to nobody: runs of 521 / 323 / 304 labels under the singles banner had
+  // zero rows in shipment_verifications.
+  //
+  // The pile's members are the label pages that FOLLOW its slip, up to the next slip or banner —
+  // exactly the stack the slip sits in front of. Collecting them here means merged prints need no
+  // special handling: labels are bought per shop and printed combined, so a pile routinely spans a
+  // dozen runs ('#428' spanned 12 runs / 148 labels over the 4 days to 2026-09-09), and a batch
+  // keyed to a run could not have covered one honestly.
+  //
+  // A mint failure is NEVER fatal: the labels are bought and the stack must print. The pile just
+  // goes uncredited, which is the status quo rather than a regression.
+  const piles: { caption: string; groupKeys: string[] }[] = [];
+  let currentPile: { caption: string; groupKeys: string[] } | null = null;
+  for (const page of seq.pages) {
+    if (page.kind === 'slip') {
+      currentPile = { caption: page.caption, groupKeys: [] };
+      piles.push(currentPile);
+    } else if (page.kind === 'banner') {
+      currentPile = null;                       // a banner ends the pile above it
+    } else if (currentPile) {
+      currentPile.groupKeys.push(page.group_key);
+    }
+  }
+
+  let codeByCaption = new Map<string, string>();
+  if (piles.length > 0) {
+    try {
+      codeByCaption = await mintSinglesBatches(user.id, storeId, runIds, piles);
+    } catch (e) {
+      console.error('[labels/pdf] singles batch mint failed — printing without codes:', e);
+    }
+  }
+
   // ── Assemble. ──
   const out = await PDFDocument.create();
   const font = await out.embedFont(StandardFonts.HelveticaBold);
@@ -348,7 +386,10 @@ export async function GET(req: Request) {
       // A banner is drawn heavier than a slip: it is the divider someone finds while splitting
       // the stack by hand, often without reading it closely.
       addSlipPage(out, font, pageSize, {
-        caption: page.caption, count: page.count, banner: page.kind === 'banner',
+        caption: page.caption,
+        count: page.count,
+        banner: page.kind === 'banner',
+        batchCode: page.kind === 'slip' ? codeByCaption.get(page.caption) : undefined,
       });
       continue;
     }

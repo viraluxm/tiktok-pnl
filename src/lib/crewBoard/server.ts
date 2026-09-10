@@ -58,7 +58,7 @@ async function readBoxesPaged(
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await admin
       .from('shipment_verifications')
-      .select('id, group_key, picker_employee_id, picker_name_snapshot, verified_at')
+      .select('id, group_key, picker_employee_id, picker_name_snapshot, verified_at, source')
       .eq('user_id', ownerId)                    // explicit owner scope — RLS is bypassed here
       .gte('verified_at', startISO)
       .lt('verified_at', endISO)
@@ -72,6 +72,8 @@ async function readBoxesPaged(
         picker_employee_id: (r.picker_employee_id as string | null) ?? null,
         picker_name_snapshot: (r.picker_name_snapshot as string | null) ?? null,
         verified_at: String(r.verified_at),
+        // NULL means 'scan' — every row written before the singles station was instrumented.
+        isSingles: (r.source as string | null) === 'singles_batch',
         items: 1, // filled in by countItemsPerBox below; 1 is the floor, never 0
       });
     }
@@ -222,8 +224,12 @@ export async function loadCrewBoard(
     });
 
   // Attach the per-box line count that the weighted score is built on.
-  const itemsByBox = await countItemsPerBox(tok.ownerId, boxes.map((b) => b.group_key));
-  for (const b of boxes) b.items = itemsByBox.get(b.group_key) ?? 1;
+  // Singles are excluded from the weighted score, so they need no line count — skip them and keep
+  // the `.in()` list to the boxes the score is actually built from.
+  const itemsByBox = await countItemsPerBox(
+    tok.ownerId, boxes.filter((b) => !b.isSingles).map((b) => b.group_key),
+  );
+  for (const b of boxes) b.items = b.isSingles ? 1 : (itemsByBox.get(b.group_key) ?? 1);
 
   return aggregateCrewBoard(
     boxes, punches, day, tok.crew, startMs, endMs, nowMs,

@@ -232,7 +232,9 @@ export function buildLabelPlan(boxes: PlanBox[]): LabelPlan {
  */
 export type PlanPageOut =
   | { kind: 'banner'; caption: string; count: number }
-  | { kind: 'slip'; caption: string; count: number }
+  // `code`, when the caller has minted one, is the singles-batch barcode printed on the slip.
+  // Only singles slips ever get one — see sequence() below, which emits 'slip' for singles only.
+  | { kind: 'slip'; caption: string; count: number; code?: string }
   | { kind: 'label'; group_key: string };
 
 export function planPageSequence(plan: LabelPlan): PlanPageOut[] {

@@ -353,6 +353,47 @@ console.log('\nthe weighted work model');
     bad.picking[0].boxes === 1 && bad.picking[0].items === 1 && bad.picking[0].weighted > 0);
 }
 
+console.log('\nsingles are counted but never weighted');
+{
+  const day = '2026-09-08';
+  const { startMs, endMs } = crewRangeUtcMs(day, 'am', TZ);
+  const now = endMs;
+  const box = (k, id, items) => ({ group_key: k, picker_employee_id: id, picker_name_snapshot: id, verified_at: iso(pt(2026, 9, 8, 9)), items });
+  const single = (k, id) => ({ group_key: k, picker_employee_id: id, picker_name_snapshot: id, verified_at: iso(pt(2026, 9, 8, 10)), items: 1, isSingles: true });
+
+  const events = [
+    box('p1', 'picker', 4), box('p2', 'picker', 3),
+    ...Array.from({ length: 120 }, (_, i) => single(`s${i}`, 'prepper')),
+  ];
+  const b = aggregateCrewBoard(events, [], day, 'am', startMs, endMs, now, offsetAt, {}, 200);
+  const picker = b.picking.find((r) => r.name === 'picker');
+  const prepper = b.picking.find((r) => r.name === 'prepper');
+
+  check('singles are counted on their own field', prepper.singles === 120, `${prepper.singles}`);
+  check('singles do NOT become boxes', prepper.boxes === 0, `${prepper.boxes}`);
+  check('singles do NOT become items', prepper.items === 0, `${prepper.items}`);
+  check('120 singles score ZERO weighted — the picking model is not applied to them',
+    prepper.weighted === 0, `${prepper.weighted}`);
+  check('a singles-only worker is NOT filed under "no picks"',
+    b.noPicks.length === 0 && !!prepper);
+  check('totals keep singles out of boxes and items',
+    b.totalBoxes === 2 && b.totalItems === 7 && b.totalSingles === 120,
+    `${b.totalBoxes}/${b.totalItems}/${b.totalSingles}`);
+  check('the weighted total covers only the picked boxes',
+    Math.abs(b.totalWeighted - weightedBoxes(2, 7)) < 1e-9);
+  check('availablePerPicker is not inflated by singles',
+    Math.abs(b.availablePerPicker - weightedBoxes(2, 7) / 2) < 1e-9);
+
+  // If singles HAD been weighted like picking, 120 of them would have scored ~75 weighted boxes —
+  // more than a third of a 200 target, for work the model never measured.
+  check('had they been weighted, 120 singles would have wrongly scored ~75',
+    Math.abs(weightedBoxes(120, 120) - 75) < 1.5, weightedBoxes(120, 120).toFixed(1));
+
+  check('a real picker outranks a singles-only worker on weighted', b.picking[0].name === 'picker');
+  check('singles still bucket into their hour so the pace bars show the pile landing',
+    prepper.hours.find((h) => h.labelHour === 10).boxes === 120);
+}
+
 console.log('\nhour labels');
 check('6 -> 6a', formatHourLabel(6) === '6a');
 check('12 -> 12p', formatHourLabel(12) === '12p');
