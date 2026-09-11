@@ -224,8 +224,18 @@ export interface CrewBoard {
   crew: Crew;
   hourStartsMs: number[];              // the shared hour axis every row is bucketed onto
   hourLabels: number[];                // local hour for each axis entry
-  picking: CrewPickerRow[];            // >= 1 box — measured against the target
-  noPicks: CrewPickerRow[];            // clocked in, ZERO boxes — listed, never judged
+  picking: CrewPickerRow[];            // >= 1 picked box — measured against the target
+  /**
+   * Credited ONLY singles today. Their own group, with NO target.
+   *
+   * They cannot be measured against a box target: the target is in weighted boxes and singles are
+   * deliberately never weighted, so a singles packer scored against it reads 0 / 200 (-200) — the
+   * worst row on the board, for a full shift of real work. And there is no honest singles target
+   * to substitute yet, because nothing measured seconds-per-single until the station was
+   * instrumented. So they are listed, counted, and left ungraded until there is data.
+   */
+  singlesPackers: CrewPickerRow[];
+  noPicks: CrewPickerRow[];            // clocked in, nothing credited — listed, never judged
   totalBoxes: number;
   totalItems: number;
   totalWeighted: number;
@@ -389,16 +399,23 @@ export function aggregateCrewBoard(
 
   // Ranked by WEIGHTED work, not raw boxes — on 2026-09-09 that is the difference between Alex
   // (174 boxes, 1,064 items) ranking third and ranking first, which is what the clock says.
-  // A person who ONLY ran singles has weighted 0 but is emphatically not idle, so they belong in
-  // the worked list, ranked after everyone with weighted output.
-  const picking = [...accs.values()].map(toRow)
+  const worked = [...accs.values()].map(toRow);
+
+  // Split on WHAT THE PERSON DID, not on how much. Someone who picked boxes is measured against
+  // the target; someone who only ran singles is not, because the target is in units their work
+  // does not produce. Anyone who did both stays with the pickers and carries their singles along.
+  const picking = worked
+    .filter((r) => r.boxes > 0)
     .sort((x, y) => y.weighted - x.weighted || y.singles - x.singles || x.name.localeCompare(y.name));
+  const singlesPackers = worked
+    .filter((r) => r.boxes === 0 && r.singles > 0)
+    .sort((x, y) => y.singles - x.singles || x.name.localeCompare(y.name));
 
   // Clocked in, zero boxes. Listed with hours only — NO target, NO shortfall. Nothing in the data
   // distinguishes assigned non-picking work (boxing, restocking, set-aside) from idleness:
   // scan_log carries no employee column, and pick_slots/pick_racks carry no employee stamp. The
   // board must not imply a judgement it has no evidence for; the manager knows the assignment.
-  const pickedIds = new Set(picking.map((r) => r.employee_id).filter(Boolean) as string[]);
+  const pickedIds = new Set(worked.map((r) => r.employee_id).filter(Boolean) as string[]);
   const noPicks: CrewPickerRow[] = [...punchByEmp.entries()]
     .filter(([id]) => !pickedIds.has(id))
     .map(([id, p]) => ({
@@ -433,7 +450,8 @@ export function aggregateCrewBoard(
     : availablePerPicker >= targetBoxes;
 
   return {
-    day, crew, hourStartsMs, hourLabels, picking, noPicks, totalBoxes, totalItems, totalWeighted,
+    day, crew, hourStartsMs, hourLabels, picking, singlesPackers, noPicks,
+    totalBoxes, totalItems, totalWeighted,
     totalSingles, pickingCount, availablePerPicker, targetBoxes, targetReachable,
     hitTarget: targetBoxes == null ? 0 : picking.filter((r) => r.weighted >= targetBoxes).length,
   };
