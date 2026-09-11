@@ -203,6 +203,9 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
     payPeriod: {
       start: timecard.period.start,
       end: timecard.period.end,
+      // The SCHEDULED Pay Day for this period (employees.paydayForPeriod, via getTimecard). Lensed
+      // records no evidence that a payment happened, so this is a due date and is labelled as one.
+      payday: timecard.payday,
       workedHours: timecard.period.workedHours,
       pendingHours: timecard.period.pendingHours,
     },

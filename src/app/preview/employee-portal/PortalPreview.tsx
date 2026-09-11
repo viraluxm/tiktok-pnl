@@ -11,7 +11,7 @@ import { fmtShortDate } from '@/lib/schedule/portalModel';
 import { fmtDateLA, fmtTimeRangeLA } from '@/lib/schedule/format';
 import { instanceHours } from '@/lib/schedule/hours';
 import {
-  initialWorld, snapshotFor, weekFor, timecardFor, tradeOptionsFor, act, nameOf, timeOffConflicts,
+  initialWorld, snapshotFor, weekFor, timecardFor, payPeriodsFor, timecardPeriodFor, tradeOptionsFor, act, nameOf, timeOffConflicts,
   CARLOS, JUAN, MADISON, confirmationTiles, type DemoWorld, type Mutation, type PortalClient,
 } from './fixtures';
 
@@ -46,6 +46,8 @@ export default function PortalPreview() {
     getSnapshot: async () => { await wait(); return snapshotFor(worldRef.current); },
     getWeek: async (start) => { await wait(); return weekFor(worldRef.current, start); },
     getTimecard: async () => { await wait(); return timecardFor(worldRef.current); },
+    getPayPeriods: async () => { await wait(); return payPeriodsFor(worldRef.current); },
+    getTimecardPeriod: async (start) => { await wait(); return timecardPeriodFor(worldRef.current, start); },
     getTradeOptions: async (id) => { await wait(); return tradeOptionsFor(worldRef.current, id); },
     offer: (id) => apply(act.offer(id)),
     cancelOffer: (id) => apply(act.cancelOffer(id)),
@@ -166,7 +168,7 @@ export default function PortalPreview() {
         </main>
       ) : (
         <PortalProvider key={world.viewerId} client={client}>
-          <PortalApp initialNav={{ tab: 'home', seg: 'mine', week: null, day: null }} />
+          <PortalApp initialNav={{ tab: 'home', seg: 'mine', week: null, day: null, period: null }} />
         </PortalProvider>
       )}
       <span className="sr-only">Viewing as {viewer}</span>

@@ -257,11 +257,21 @@ console.log('\n8. THE EMPLOYEE TIMECARD — clocked and approved side by side, r
   eq('…is flagged awaiting confirmation', pending.state, 'awaiting_confirmation');
   eq('…and carries no approved minutes', pending.approved_minutes, null);
   const scr = read('../components/portal/TimecardScreen.tsx');
-  check('the screen prints "Awaiting approval" instead of a number when not payable',
-    /Awaiting approval/.test(scr) && /e\.payable\s*\n?\s*\?\s*fmtDuration\(e\.hours\)/.test(scr.replace(/\s+/g, ' ').replace(/ \? /g, ' ? ')) === false || /Awaiting approval/.test(scr));
+  // The employee-facing words for "not approved yet" are "Waiting for approval" — never a 0, which
+  // would read as a shift that vanished.
+  check('the screen prints "Waiting for approval" instead of a number when not payable',
+    /Waiting for approval/.test(scr) && !/Awaiting approval/.test(scr));
   check('the screen labels both figures', /label="Clocked"/.test(scr) && /label="Approved"/.test(scr));
-  check('the screen explains what approved hours are', /About approved hours/.test(scr));
+  check('the screen explains what approved hours are', /What are approved hours\?/.test(scr));
   check('the live-host sentence is present and conditional', /Based on confirmed Live Host working time/.test(scr) && /showLiveNote/.test(scr));
+  check('the approved-hours explanation names the Live Host rule only for a live host',
+    /Live Host approved hours are normally based on confirmed live-working time/.test(scr) && /isHost && \(/.test(scr));
+  // NO MONEY, anywhere on the employee's hours screen.
+  check('the screen never renders a rate, a gross or a dollar sign',
+    !/hourly_rate|grossPay|estimated|\$\{?\s*[a-zA-Z_]*[Pp]ay\b/.test(scr) && !/>\s*\$/.test(scr));
+  // "Pay Day" is a SCHEDULED date. Lensed stores no proof a payment happened, so nothing may claim one.
+  check('the screen says "Pay Day" and never claims the period was paid',
+    /Pay Day/.test(scr) && !/\bPaid\b/.test(strip(scr)));
 
   // Window totals come from the canonical payable path, and the approved figure is what sums.
   const week = { start: '2026-09-07', end: '2026-09-13' };
@@ -343,6 +353,31 @@ console.log('\n10. SCHEDULED HOURS STAY SCHEDULED — shift_instances only, neve
     /Approved <ChevronRight/.test(home) && /Payroll hours/.test(home));
   check('Home reads scheduledHours for one and workedHours for the other',
     /fmtHours\(snap\.thisWeek\.scheduledHours\)/.test(home) && /fmtHours\(snap\.thisWeek\.workedHours\)/.test(home));
+
+  // PAY PERIOD + PAY DAY, and the no-money rule on the surfaces that show them.
+  const scr2 = read('../components/portal/TimecardScreen.tsx');
+  check('Home shows the pay period, its two hour figures and the Pay Day',
+    /snap\.payPeriod/.test(home) && /fmtPeriodRange/.test(home) && /fmtPayday/.test(home));
+  check('the waiting line is rendered ONLY when something is actually waiting',
+    /pp\.pendingHours > 0 &&/.test(home) && /summary\.pendingHours > 0 &&/.test(scr2));
+  check('neither surface ever says "Paid" — only "Pay Day"',
+    !/>\s*Paid\b|Paid on|Paid ·/.test(home + scr2) && /Pay Day/.test(home) && /Pay Day/.test(scr2));
+  // Comments STRIPPED: this file's own "NO MONEY" note must not be what satisfies or fails the
+  // guard. The check is about rendered code, not prose.
+  check('no rate, gross, estimate or currency symbol on either surface',
+    !/hourly_rate|gross|net_?pay|estimate|\$\{?\d|USD/i.test(strip(home) + strip(scr2)));
+
+  // ZERO STATES. A 32px "0 hrs approved" reads as "your hours were zeroed"; the honest reading is
+  // that nothing is confirmed yet. Both surfaces must say it in words and show no figure.
+  check('a period with no approved hours says so in words, not as a 0, on Home',
+    /No hours approved yet/.test(home) && /pp\.workedHours > 0 \?/.test(home));
+  check('…and on the Hours screen', /No hours approved yet/.test(scr2) && /summary\.workedHours > 0 \?/.test(scr2));
+  check('…and a worked-nothing history row says "No approved hours" rather than 0',
+    /No approved hours/.test(scr2) && /p\.workedHours > 0/.test(scr2));
+  check('an unconfirmed entry says "Waiting for approval" instead of a fake 0',
+    /Waiting for approval/.test(scr2));
+  check('the approved-hours explainer is present, with the Live Host sentence gated on the role',
+    /What are approved hours\?/.test(scr2) && /isHost && \(/.test(scr2));
 }
 
 console.log('\n11. THE DATABASE IS THE BOUNDARY — approved_minutes is server-only');

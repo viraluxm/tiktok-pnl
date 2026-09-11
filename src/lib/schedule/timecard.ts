@@ -4,8 +4,11 @@ import { payPeriodContaining } from '@/lib/employees';
 import type { Employee } from '@/types';
 import { laTodayISO } from './timezone';
 import { weekBoundsMonSun } from './hours';
-import { buildTimecard, timecardReadRange, type OpenEntryRow, type TimecardShiftRow } from './timecardModel';
-import type { ClockState, TimecardPayload } from './portalTypes';
+import {
+  buildPayPeriods, buildTimecard, buildTimecardPeriod, previousPayPeriods, spanReadRange, timecardReadRange,
+  type OpenEntryRow, type TimecardShiftRow,
+} from './timecardModel';
+import type { ClockState, PayPeriodSummary, TimecardPayload, TimecardPeriodPayload } from './portalTypes';
 
 // The employee's own timecard for /s/[token] — READ-ONLY.
 //
@@ -75,4 +78,58 @@ export async function getTimecard(employee: Employee, now: Date = new Date()): P
   if (error) throw new Error(`getTimecard: ${error.message}`);
 
   return buildTimecard({ shifts: (rows ?? []) as TimecardShiftRow[], open, todayISO, week, period });
+}
+
+/**
+ * The employee's recent CLOSED pay periods — bounded, newest first.
+ *
+ * WHY THIS IS NOT PART OF getTimecard. The snapshot calls getTimecard on every load and on a
+ * two-minute refresh; six periods is ~84 extra days of `shifts` per call. This read happens only
+ * when the employee opens Hours, and it is ONE query over the whole span rather than six.
+ *
+ * SECURITY is identical to getTimecard: same allow-list of columns, same `user_id` + `employee_id`
+ * pair on the query. Nothing about the period list depends on anything the client sent.
+ */
+export async function getPayPeriodHistory(employee: Employee, now: Date = new Date()): Promise<PayPeriodSummary[]> {
+  const admin = createAdminClient();
+  const todayISO = laTodayISO(now);
+  const periods = previousPayPeriods(payPeriodContaining(todayISO).start);
+  const range = spanReadRange(periods);
+
+  const { data: rows, error } = await admin
+    .from('shifts')
+    .select(SHIFT_COLS)
+    .eq('user_id', employee.user_id)
+    .eq('employee_id', employee.id)
+    .gte('date', range.from)
+    .lte('date', range.to)
+    .order('date', { ascending: false });
+  if (error) throw new Error(`getPayPeriodHistory: ${error.message}`);
+
+  return buildPayPeriods({ shifts: (rows ?? []) as TimecardShiftRow[], periods });
+}
+
+/**
+ * ONE pay period in full — the day-by-day detail behind a row in Previous Pay Periods.
+ *
+ * `period` is already validated by resolvePeriodStart at the route: a real boundary of the
+ * canonical cycle, never in the future. It selects a WINDOW only; whose rows are read is still
+ * decided entirely by the token-resolved employee.
+ */
+export async function getTimecardPeriod(employee: Employee, period: { start: string; end: string }, now: Date = new Date()): Promise<TimecardPeriodPayload> {
+  const admin = createAdminClient();
+  const todayISO = laTodayISO(now);
+  const range = spanReadRange([period]);
+
+  const { data: rows, error } = await admin
+    .from('shifts')
+    .select(SHIFT_COLS)
+    .eq('user_id', employee.user_id)
+    .eq('employee_id', employee.id)
+    .gte('date', range.from)
+    .lte('date', range.to)
+    .order('date', { ascending: false });
+  if (error) throw new Error(`getTimecardPeriod: ${error.message}`);
+
+  return buildTimecardPeriod({ shifts: (rows ?? []) as TimecardShiftRow[], todayISO, period });
 }

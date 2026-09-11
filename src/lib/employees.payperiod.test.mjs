@@ -19,7 +19,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 const outFile = join(mkdtempSync(join(tmpdir(), 'pp-')), 'employees.mjs');
 writeFileSync(outFile, outputText);
 const {
-  PAY_ANCHOR, nextPayday, paydayAtOffset, payPeriodFor,
+  PAY_ANCHOR, nextPayday, paydayAtOffset, payPeriodFor, paydayForPeriod,
   payPeriodContaining, payPeriodStartFor,
   generateRecurringShifts, computePay,
 } = await import(pathToFileURL(outFile).href);
@@ -137,6 +137,46 @@ console.log('\npayPeriodContaining: containment across boundaries');
   // Window-boundary dates (Sunday end, Monday start) resolve to the right side.
   check("period end (Sun Jul 26) stays in {Jul 13, Jul 26}", payPeriodStartFor('2026-07-26') === '2026-07-13');
   check("next start (Mon Jul 27) moves to {Jul 27, Aug 09}", payPeriodStartFor('2026-07-27') === '2026-07-27');
+}
+
+// ── paydayForPeriod: the inverse of payPeriodFor ─────────────────────────────────────────────
+//
+// THE RULE: a period CLOSES the Sunday before its payday, so payday = end + 5. This is the only
+// place the portal turns a window into a date, and it must invert payPeriodFor EXACTLY — if the
+// two ever disagree, an employee is shown a Pay Day the manager's Pay tab does not pay on.
+console.log('\nPAY DAY (paydayForPeriod)');
+{
+  check("paydayForPeriod({Jun 29, Jul 12}) = 2026-07-17 (the anchor)",
+    paydayForPeriod({ start: '2026-06-29', end: '2026-07-12' }) === '2026-07-17');
+  check('the payday is a Friday', new Date('2026-07-17T00:00:00Z').getUTCDay() === 5);
+
+  // Round-trip over five years of cycles, forward and back through the anchor.
+  let roundTrips = 0; let firstFail = '';
+  for (let k = -65; k <= 65; k++) {
+    const payday = paydayAtOffset(k, d(2026, 7, 17));
+    const period = payPeriodFor(payday);
+    const back = paydayForPeriod(period);
+    if (back !== payday) { firstFail ||= `${payday} → ${period.start}..${period.end} → ${back}`; break; }
+    // …and the window really is the one the date falls in.
+    if (payPeriodContaining(period.end).start !== period.start) { firstFail ||= `end ${period.end} not in its own window`; break; }
+    roundTrips++;
+  }
+  check('paydayForPeriod(payPeriodFor(P)) === P across 131 cycles', roundTrips === 131, firstFail || `${roundTrips}`);
+
+  // And from the other direction: the period containing a day, then its payday, is a payday of the
+  // real global cycle (PAY_ANCHOR ± 14n) — never an invented Friday.
+  const anchorMs = Date.parse('2026-07-17T00:00:00Z');
+  let allOnCycle = true; let offFail = '';
+  for (const day of ['2026-01-05', '2026-07-13', '2026-07-17', '2026-09-08', '2027-02-28', '2025-11-30']) {
+    const pd = paydayForPeriod(payPeriodContaining(day));
+    const diffDays = (Date.parse(`${pd}T00:00:00Z`) - anchorMs) / 86400000;
+    if (diffDays % 14 !== 0) { allOnCycle = false; offFail = `${day} → ${pd} is ${diffDays}d off anchor`; break; }
+  }
+  check('every derived Pay Day sits on the PAY_ANCHOR ± 14n cycle', allOnCycle, offFail);
+
+  // The period you are working in now is paid AFTER it closes — never before.
+  const cur = payPeriodContaining('2026-09-08');
+  check('the Pay Day falls after the period closes', paydayForPeriod(cur) > cur.end, `${cur.end} → ${paydayForPeriod(cur)}`);
 }
 
 console.log(`\nALL PASSED (${passed} assertions)`);

@@ -7,12 +7,16 @@
 // Fulfillment — Madison is the third viewer, so Team can be reviewed from the other team's side.
 
 import type {
-  AvailableItem, PortalClient as _PC, PortalShift, PortalSnapshot, PortalTeamShift, PortalWeek, TimecardPayload, TradeOptionsPayload, TradeView, TimeOffView, PickupRequestView,
+  AvailableItem, PayPeriodsPayload, PortalClient as _PC, PortalShift, PortalSnapshot, PortalTeamShift, PortalWeek,
+  TimecardPayload, TimecardPeriodPayload, TradeOptionsPayload, TradeView, TimeOffView, PickupRequestView,
 } from './types';
 import { addDaysISO } from '@/lib/schedule/timezone';
 import { weekBoundsMonSun, instanceHours } from '@/lib/schedule/hours';
-import { payPeriodContaining } from '@/lib/employees';
-import { buildTimecard, type TimecardShiftRow } from '@/lib/schedule/timecardModel';
+import { payPeriodContaining, paydayForPeriod } from '@/lib/employees';
+import {
+  buildPayPeriods, buildTimecard, buildTimecardPeriod, previousPayPeriods, resolvePeriodStart,
+  type TimecardShiftRow,
+} from '@/lib/schedule/timecardModel';
 import { buildCalendarDays, type DayPerson } from '@/lib/schedule/calendarModel';
 import { buildTradeOptions, planTradeRequest, otherDates, TRADE_REFUSAL_MESSAGES, type TradeableInstance } from '@/lib/schedule/tradePlan';
 import { laTodayISO } from '@/lib/schedule/timezone';
@@ -100,9 +104,26 @@ export function initialWorld(): DemoWorld {
     ...[2, 3, 4, 6].map((n) => fulDay(`n-${n}`, ANA, dow(n))),
     fulDay('n-5', ANA, dow(5), { offer_state: 'offered', offer_id: 'offer-n-5' }),
   ];
-  // Filter out Carlos's "today" shift if today is one of the dow() days already used to avoid UNIQUE(employee, date) clashes.
-  const seen = new Set<string>();
-  const unique = instances.filter((i) => { const k = `${i.employee_id}|${i.shift_date}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  // UNIQUE(employee, date), the same constraint the real table has: two fixture rows can land on
+  // one day whenever `today` happens to BE one of the dow() days — Carlos's "today" evening and his
+  // dow(3) Thursday evening are literally the same shift when today is a Thursday.
+  //
+  // Dropping the duplicate is not enough on its own. A dropped id may still be NAMED by a trade or
+  // a pickup, and those lookups are non-optional (`find(...)!`), so an orphaned reference crashes
+  // the whole preview on exactly one weekday — which is how this was found. The survivor therefore
+  // ADOPTS the dropped row's id, and every reference is rewritten through `alias`, so both the
+  // "today" shift and the trade that points at Thursday keep working on all seven days.
+  const seen = new Map<string, string>();   // employee|date -> surviving instance id
+  const alias = new Map<string, string>();  // dropped id    -> surviving id
+  const unique: DemoInstance[] = [];
+  for (const i of instances) {
+    const k = `${i.employee_id}|${i.shift_date}`;
+    const survivor = seen.get(k);
+    if (survivor) { alias.set(i.id, survivor); continue; }
+    seen.set(k, i.id);
+    unique.push(i);
+  }
+  const ref = (id: string) => alias.get(id) ?? id;
 
   // APPROVED HOURS (migration 137). The viewer is a LIVE HOST, so their approved duration is the
   // verified live time — deliberately SHORTER than the clocked span, which is the case the portal
@@ -157,11 +178,11 @@ export function initialWorld(): DemoWorld {
     instances: unique,
     pickups: [
       // a pickup Carlos got last week (history)
-      { claim_id: 'pk-hist', shift_instance_id: 'a-mon', claimed_by: CARLOS, offer_id: 'old', status: 'approved', requested_at: addDaysISO(today, -9) + 'T18:00:00Z', decided_at: addDaysISO(today, -8) + 'T09:00:00Z' },
+      { claim_id: 'pk-hist', shift_instance_id: ref('a-mon'), claimed_by: CARLOS, offer_id: 'old', status: 'approved', requested_at: addDaysISO(today, -9) + 'T18:00:00Z', decided_at: addDaysISO(today, -8) + 'T09:00:00Z' },
     ],
     trades: [
       // Juan proposes: his Friday morning for Carlos's Thursday evening → NEEDS CARLOS'S ACTION
-      { id: 'tr-in', requester_employee_id: JUAN, requester_shift_instance_id: 'j-fri', target_employee_id: CARLOS, target_shift_instance_id: 'c-thu', status: 'pending_coworker', coworker_response: null, coworker_responded_at: null, decided_at: null, decision_note: null, cancelled_at: null, created_at: now },
+      { id: 'tr-in', requester_employee_id: JUAN, requester_shift_instance_id: ref('j-fri'), target_employee_id: CARLOS, target_shift_instance_id: ref('c-thu'), status: 'pending_coworker', coworker_response: null, coworker_responded_at: null, decided_at: null, decision_note: null, cancelled_at: null, created_at: now },
     ],
     timeOff: [
       { id: 'to-pending', employee_id: CARLOS, start_date: d(17), end_date: d(19), reason: 'Family trip', status: 'pending', decision_note: null, created_at: addDaysISO(today, -2) + 'T15:00:00Z', decided_at: null },
@@ -242,7 +263,7 @@ export function snapshotFor(w: DemoWorld): PortalSnapshot {
     upcoming: mine.filter((s) => s.shift_date >= today),
     releasedByMe: [],
     thisWeek: { start: week.start, end: week.end, scheduledHours: mine.filter((s) => s.shift_date <= week.end).reduce((s, x) => s + x.hours, 0), workedHours: tc.week.workedHours, pendingHours: tc.week.pendingHours },
-    payPeriod: { start: tc.period.start, end: tc.period.end, workedHours: tc.period.workedHours, pendingHours: tc.period.pendingHours },
+    payPeriod: { start: tc.period.start, end: tc.period.end, payday: tc.payday, workedHours: tc.period.workedHours, pendingHours: tc.period.pendingHours },
     clock: w.clockedInAt && meId === CARLOS ? { state: 'working', clockedInAt: w.clockedInAt } : { state: 'clocked_out', clockedInAt: null },
     available: available(w, meId),
     pickups: w.pickups.filter((p) => p.claimed_by === meId).map((p): PickupRequestView => { const i = w.instances.find((x) => x.id === p.shift_instance_id)!; return { claim_id: p.claim_id, shift_instance_id: i.id, shift_date: i.shift_date, starts_at: i.starts_at, ends_at: i.ends_at, status: p.status, requested_at: p.requested_at, decided_at: p.decided_at }; }),
@@ -290,6 +311,51 @@ export function timecardFor(w: DemoWorld): TimecardPayload {
     todayISO: today, week, period: payPeriodContaining(today),
   });
 }
+
+// ── Previous pay periods ─────────────────────────────────────────────────────────────────────
+//
+// The history is not a table of made-up totals: it is REAL punch rows run through the SAME
+// buildPayPeriods / buildTimecardPeriod the server uses, so a number in the preview is a number
+// the production code produced. Each closed period gets five evening host punches (Mon–Fri of its
+// first week), one of them left unapproved so "waiting for approval" is reviewable in history too.
+function historyPunches(employeeId: string): TimecardShiftRow[] {
+  const rows: TimecardShiftRow[] = [];
+  previousPayPeriods(payPeriodContaining(today).start).forEach((p, pi) => {
+    for (let n = 0; n < 5; n++) {
+      const date = addDaysISO(p.start, n);
+      const unapproved = pi === 0 && n === 4; // the most recent period still has one punch pending
+      rows.push({
+        id: `h-${pi}-${n}`, employee_id: employeeId, date,
+        start_time: '18:02:00', end_time: '02:07:00',
+        source: 'time_clock', source_rule_id: null,
+        confirmed_at: unapproved ? null : '2026-01-01T00:00:00Z',
+        break_minutes: 0,
+        clock_in_at: at(date, 18, 2), clock_out_at: at(addDaysISO(date, 1), 2, 7),
+        auto_closed: false,
+        approved_minutes: unapproved ? null : 478,
+      });
+    }
+  });
+  return rows;
+}
+
+function punchesFor(w: DemoWorld): TimecardShiftRow[] {
+  return w.viewerId === CARLOS || w.viewerId === MADISON ? historyPunches(w.viewerId) : [];
+}
+
+export function payPeriodsFor(w: DemoWorld): PayPeriodsPayload {
+  return { periods: buildPayPeriods({ shifts: punchesFor(w), periods: previousPayPeriods(payPeriodContaining(today).start) }) };
+}
+
+export function timecardPeriodFor(w: DemoWorld, start: string): TimecardPeriodPayload {
+  // The same refusal the route applies, so an impossible period is impossible here too.
+  const period = resolvePeriodStart(start, today);
+  if (!period) throw new Error('That pay period does not exist.');
+  return buildTimecardPeriod({ shifts: punchesFor(w), todayISO: today, period });
+}
+
+/** The scheduled Pay Day for the CURRENT period — the same derivation the server ships. */
+export const previewPayday = paydayForPeriod(payPeriodContaining(today));
 
 function tradeable(i: DemoInstance): TradeableInstance {
   return { id: i.id, user_id: 'owner', employee_id: i.employee_id, shift_date: i.shift_date, starts_at: i.starts_at, ends_at: i.ends_at, status: i.status, released_at: null, role: i.role, offer_state: i.offer_state };

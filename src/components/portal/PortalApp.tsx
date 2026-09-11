@@ -87,16 +87,8 @@ export function PortalApp({ initialNav }: { initialNav: NavState }) {
     return snap.data.upcoming.find((s) => s.id === openShift.id) ?? openShift;
   }, [openShift, snap.data]);
 
-  useEffect(() => { window.scrollTo({ top: 0 }); }, [nav.tab, nav.seg]);
+  useEffect(() => { window.scrollTo({ top: 0 }); }, [nav.tab, nav.seg, nav.period]);
 
-  if (snap.isLoading && !snap.data) {
-    return (
-      <div className="mx-auto max-w-md px-4 pt-8">
-        <Skeleton className="h-4 w-32" /><Skeleton className="mt-2 h-8 w-64" />
-        <Skeleton className="mt-8 h-40" /><Skeleton className="mt-6 h-16" /><Skeleton className="mt-8 h-20" />
-      </div>
-    );
-  }
   if (snap.error && !snap.data) {
     return (
       <div className="mx-auto max-w-md px-4 pt-16">
@@ -104,7 +96,22 @@ export function PortalApp({ initialNav }: { initialNav: NavState }) {
       </div>
     );
   }
-  const data = snap.data!;
+  // NO DATA YET — for ANY reason, not only `isLoading`. React Query also reports fetchStatus
+  // 'paused' (isLoading false, data undefined) when it decides it cannot fetch right now, and the
+  // old `isLoading && !snap.data` guard fell straight through that into `snap.data!` and crashed
+  // the whole app. Production seeds initialSnapshot from the server so it never saw this; the
+  // preview route, which has no seed, crashed on load. The skeleton is the honest answer to
+  // "nothing to show yet", whatever the reason — and `data` below is now non-null by narrowing,
+  // not by assertion.
+  if (!snap.data) {
+    return (
+      <div className="mx-auto max-w-md px-4 pt-8">
+        <Skeleton className="h-4 w-32" /><Skeleton className="mt-2 h-8 w-64" />
+        <Skeleton className="mt-8 h-40" /><Skeleton className="mt-6 h-16" /><Skeleton className="mt-8 h-20" />
+      </div>
+    );
+  }
+  const data = snap.data;
   const badge = actionCount(data);
   const goAvailable = () => go({ tab: 'schedule', seg: 'open' });
 
@@ -128,7 +135,7 @@ export function PortalApp({ initialNav }: { initialNav: NavState }) {
             <ScheduleScreen snap={data} nav={nav} go={go} nowMs={nowMs} onOpenShift={setOpenShift} onPick={setPick} onCoworker={(s, a) => setCoworker({ s, a })} />
           )}
           {nav.tab === 'requests' && <RequestsScreen snap={data} />}
-          {nav.tab === 'hours' && <TimecardScreen snap={data} onBack={() => go({ tab: 'home' })} />}
+          {nav.tab === 'hours' && <TimecardScreen snap={data} nav={nav} go={go} onBack={() => go({ tab: 'home' })} />}
         </main>
         {snap.isError && snap.data && (
           <p role="status" className="mt-6 text-center text-[12px] text-tt-muted">Showing the last loaded schedule — could not refresh.</p>

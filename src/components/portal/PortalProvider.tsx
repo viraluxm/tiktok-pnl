@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { PortalSnapshot, PortalWeek, TimecardPayload, TradeOptionsPayload } from '@/lib/schedule/portalTypes';
+import type { PayPeriodsPayload, PortalSnapshot, PortalWeek, TimecardPayload, TimecardPeriodPayload, TradeOptionsPayload } from '@/lib/schedule/portalTypes';
 import type { PortalClient } from './client';
 import { clockControlsMounted } from '@/app/s/[token]/clockActivity';
 
@@ -74,6 +74,31 @@ export function useTimecard(enabled = true) {
     queryFn: () => client.getTimecard(),
     staleTime: 60_000,
     enabled,
+    retry: 1,
+  });
+}
+
+// PAY PERIODS. Two queries the Hours screen alone mounts, so the snapshot's two-minute refresh
+// never triggers the wider reads behind them. Both are pure history — 5 minutes stale is fine,
+// and a past period's totals cannot change while the employee is looking at them.
+export function usePayPeriods(enabled = true) {
+  const { client } = useCtx();
+  return useQuery<PayPeriodsPayload>({
+    queryKey: portalKey(client.scopeKey, 'pay-periods'),
+    queryFn: () => client.getPayPeriods(),
+    staleTime: 300_000,
+    enabled,
+    retry: 1,
+  });
+}
+
+export function useTimecardPeriod(start: string | null) {
+  const { client } = useCtx();
+  return useQuery<TimecardPeriodPayload>({
+    queryKey: portalKey(client.scopeKey, 'timecard-period', start),
+    queryFn: () => client.getTimecardPeriod(start as string),
+    enabled: !!start,
+    staleTime: 300_000,
     retry: 1,
   });
 }
