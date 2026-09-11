@@ -6,99 +6,249 @@ import {
   formatBreak,
   formatClock12,
   formatDayLabel,
+  payPeriodWeeks,
   payStatementFilename,
-  workedDayGroups,
+  type DayGroup,
   type ExcludedRow,
   type PayStatement,
+  type PeriodWeek,
   type StatementRow,
 } from '@/lib/pay/statement';
 import { formatPeriodRange } from '@/lib/pay/statementPdf';
 import { fmt } from '@/lib/calculations';
 import { fmtHours, titleCase } from './shared';
+import OverlayLayer from './OverlayLayer';
 import PersonAvatar from './weekly/PersonAvatar';
 
-// EVERY WORKED-TIME RECORD BEHIND ONE PERSON'S PAY, grouped by the day it happened on, and the two
-// buttons that put the same thing on paper. This component RENDERS a PayStatement; it does not
-// compute one. Hours, rates, amounts and totals are read off the object, which is the same object
-// the PDF is handed — so "the screen and the PDF agree" is not a thing to keep true, it is a thing
-// that cannot be false.
+// ONE PERSON'S PAY PERIOD, LAID OUT THE WAY THE PRINTED STATEMENT READS IT: Week 1 then Week 2,
+// every calendar day present, so a manager can scan the whole fortnight top to bottom and see the
+// shape of it — including the days nobody worked, which are information, not omissions.
 //
-// IT DOES NOT JUDGE THE RECORDS. There is no anomaly badge, no warning colour and no "needs review"
-// anywhere: the job here is to lay the payroll out clearly enough that a manager can see a bad
-// record for themselves. Rows read left to right as day → in → out → break → hours → pay, and each
-// record keeps its own Edit, because a duplicate is fixed one record at a time.
+// It RENDERS a PayStatement and computes nothing. Hours, rates, amounts, day totals and week
+// subtotals all come from payPeriodWeeks(), the same grouping the PDF reads, so the screen and the
+// document cannot drift apart. There is no arithmetic in this file.
 //
-// PORTALLED TO document.body ON PURPOSE. `position: fixed` resolves against the nearest ancestor
-// carrying a filter/backdrop-filter, and PayView's own card is `backdrop-blur-xl overflow-hidden` —
-// rendered as its descendant this overlay would be laid out inside the panel and clipped by it.
-// Same reasoning, same fix as HoverCard.
+// IT DOES NOT JUDGE THE RECORDS. No anomaly badge, no warning colour, no "needs review". Two
+// records on one day simply sit together under that day, which is what makes a duplicate obvious
+// without anything having to say so.
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'money' }) {
+// Desktop column template, shared by the header and every row so the whole period lines up as one
+// table. Mobile drops to labelled cells inside a per-day card.
+const COLS =
+  'sm:grid-cols-[8.5rem_5.5rem_9.5rem_4rem_4.5rem_4.5rem_5.5rem_auto] sm:items-center';
+const ROW = `grid grid-cols-2 gap-x-3 gap-y-1 ${COLS} sm:gap-y-0`;
+
+function Cell({
+  label,
+  children,
+  right,
+  muted,
+}: {
+  label: string;
+  children: React.ReactNode;
+  right?: boolean;
+  muted?: boolean;
+}) {
   return (
-    <div>
-      <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">{label}</div>
-      <div
-        className={`mt-1 font-bold tabular-nums ${
-          tone === 'money' ? 'text-2xl text-tt-green' : 'text-lg text-tt-text'
-        }`}
-      >
-        {value}
+    <div className={right ? 'sm:text-right' : ''}>
+      <div className="text-[9px] uppercase tracking-wide text-tt-muted sm:hidden">{label}</div>
+      <div className={`text-[12.5px] tabular-nums ${muted ? 'text-tt-muted' : 'text-tt-text'}`}>{children}</div>
+    </div>
+  );
+}
+
+/** '2:00 AM' plus, when the shift ran past midnight, the day it actually ended on — stated, not
+ *  tucked into faint parentheses, because that date is how you tell 9 hours from 33. */
+function EndTime({ row }: { row: StatementRow }) {
+  return (
+    <span>
+      {formatClock12(row.endLabel)}
+      {row.endDateISO && (
+        <span className="block text-[10.5px] font-medium text-tt-cyan/80 sm:inline sm:before:content-['·_']">
+          {formatDayLabel(row.endDateISO)}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function RecordRow({
+  row,
+  dateCell,
+  onEdit,
+  onDelete,
+  deleteBlockedReason,
+}: {
+  row: StatementRow;
+  /** The day label, rendered only on a day's FIRST record so repeats read as one day. */
+  dateCell: React.ReactNode;
+  onEdit?: () => void;
+  onDelete?: () => void;
+  deleteBlockedReason?: string;
+}) {
+  return (
+    <div className={`${ROW} px-3 py-2`}>
+      <div className="col-span-2 sm:col-span-1">
+        {dateCell}
+        <div className="text-[10px] text-tt-muted">{row.sourceLabel}</div>
+      </div>
+      <Cell label="Clock in">{formatClock12(row.startLabel)}</Cell>
+      <Cell label="Clock out"><EndTime row={row} /></Cell>
+      <Cell label="Break" right muted={row.breakMinutes === 0}>{formatBreak(row.breakMinutes)}</Cell>
+      <Cell label="Hours" right>{row.paidHours.toFixed(2)}</Cell>
+      <Cell label="Rate" right muted>{fmt(row.rate)}</Cell>
+      <Cell label="Pay" right>
+        <span className="font-semibold text-tt-green">{fmt(row.amount)}</span>
+      </Cell>
+      <div className="col-span-2 flex gap-1.5 sm:col-span-1 sm:justify-self-end">
+        {onEdit && (
+          <button
+            type="button"
+            onClick={onEdit}
+            className="min-h-[30px] flex-1 rounded-lg border border-tt-border px-2.5 text-[11px] font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/10 sm:flex-none"
+          >
+            Edit
+          </button>
+        )}
+        {onDelete ? (
+          <button
+            type="button"
+            onClick={onDelete}
+            className="min-h-[30px] flex-1 rounded-lg border border-tt-border px-2.5 text-[11px] font-semibold text-tt-red transition-colors hover:bg-tt-red/10 sm:flex-none"
+          >
+            Delete
+          </button>
+        ) : (
+          deleteBlockedReason && (
+            <span
+              title={deleteBlockedReason}
+              className="min-h-[30px] flex-1 cursor-help rounded-lg border border-dashed border-tt-border px-2.5 text-center text-[11px] font-semibold leading-[30px] text-tt-muted/50 sm:flex-none"
+            >
+              Delete
+            </span>
+          )
+        )}
       </div>
     </div>
   );
 }
 
-// One worked-time record. Desktop lays out as columns under a shared header; on a phone each cell
-// labels itself and the record reads as a card — one markup tree, both shapes.
-function Cell({ label, children, right }: { label: string; children: React.ReactNode; right?: boolean }) {
+/** A day nobody worked. Quiet, but present — the gap is the point. */
+function OffRow({ day }: { day: DayGroup }) {
   return (
-    <div className={right ? 'sm:text-right' : ''}>
-      <div className="text-[9px] uppercase tracking-wide text-tt-muted sm:hidden">{label}</div>
-      <div className="text-[12.5px] tabular-nums text-tt-text">{children}</div>
+    <div className={`${ROW} px-3 py-2 opacity-60`}>
+      <div className="col-span-2 sm:col-span-1">
+        <div className="text-[12.5px] font-semibold text-tt-muted">{formatDayLabel(day.dateISO)}</div>
+      </div>
+      <div className="col-span-2 text-[12.5px] text-tt-muted sm:col-span-2">Off</div>
+      <Cell label="Break" right muted>—</Cell>
+      <Cell label="Hours" right muted>0.00</Cell>
+      <Cell label="Rate" right muted>—</Cell>
+      <Cell label="Pay" right muted>{fmt(0)}</Cell>
+      <div className="hidden sm:block" />
     </div>
   );
 }
 
-const GRID =
-  'grid grid-cols-2 gap-x-3 gap-y-1.5 sm:grid-cols-[1.15fr_0.95fr_1.15fr_0.6fr_0.75fr_0.7fr_0.95fr_auto] sm:items-center sm:gap-y-0';
-
-function RecordRow({
-  row,
-  onEdit,
+function Week({
+  week,
+  canEdit,
+  onEditRow,
+  canDelete,
+  onDeleteRow,
+  deleteBlockedReason,
 }: {
-  row: StatementRow;
-  onEdit?: () => void;
+  week: PeriodWeek;
+  canEdit: (id: string) => boolean;
+  onEditRow?: (id: string) => void;
+  canDelete: (row: StatementRow) => boolean;
+  onDeleteRow?: (row: StatementRow) => void;
+  deleteBlockedReason: (row: StatementRow) => string | undefined;
 }) {
   return (
-    <div className={`${GRID} rounded-lg border border-tt-border px-3 py-2.5`}>
-      <Cell label="Source">
-        <span className="text-[11.5px] text-tt-muted">{row.sourceLabel}</span>
-      </Cell>
-      <Cell label="Start">{formatClock12(row.startLabel)}</Cell>
-      <Cell label="End">
-        {formatClock12(row.endLabel)}
-        {row.endDateISO && (
-          <span className="ml-1 text-[10px] text-tt-muted">
-            ({formatDayLabel(row.endDateISO).replace(/^\w+ /, '')})
+    <section className="mb-5">
+      <div className="mb-1.5 flex items-baseline justify-between gap-3">
+        <h4 className="text-[11px] font-bold uppercase tracking-wider text-tt-text">
+          Week {week.index}
+          <span className="ml-2 font-normal normal-case tracking-normal text-tt-muted">
+            {formatPeriodRange(week.start, week.end)}
           </span>
+        </h4>
+      </div>
+
+      <div className={`${ROW} hidden px-3 pb-1 text-[9px] font-bold uppercase tracking-wider text-tt-muted sm:grid`}>
+        <div>Day / Date</div>
+        <div>Clock In</div>
+        <div>Clock Out</div>
+        <div className="text-right">Break</div>
+        <div className="text-right">Hours</div>
+        <div className="text-right">Rate</div>
+        <div className="text-right">Pay</div>
+        <div />
+      </div>
+
+      <div className="space-y-1">
+        {week.days.map((day) =>
+          day.rows.length === 0 ? (
+            <div key={day.dateISO} className="rounded-lg border border-tt-border/50">
+              <OffRow day={day} />
+            </div>
+          ) : (
+            // One block per day. Several records share the block, so a doubled-up day reads as one
+            // day with two lines rather than two unrelated cards.
+            <div key={day.dateISO} className="divide-y divide-tt-border/40 rounded-lg border border-tt-border">
+              {day.rows.map((row, i) => (
+                <RecordRow
+                  key={row.shiftId}
+                  row={row}
+                  dateCell={
+                    i === 0 ? (
+                      <div className="text-[12.5px] font-semibold text-tt-text">
+                        {formatDayLabel(day.dateISO)}
+                        {day.rows.length > 1 && (
+                          <span className="ml-1.5 text-[10px] font-normal text-tt-muted">
+                            {day.rows.length} records
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="hidden text-[12.5px] sm:block" aria-hidden />
+                    )
+                  }
+                  onEdit={onEditRow && canEdit(row.shiftId) ? () => onEditRow(row.shiftId) : undefined}
+                  onDelete={onDeleteRow && canDelete(row) ? () => onDeleteRow(row) : undefined}
+                  deleteBlockedReason={deleteBlockedReason(row)}
+                />
+              ))}
+            </div>
+          ),
         )}
-      </Cell>
-      <Cell label="Break" right>{formatBreak(row.breakMinutes)}</Cell>
-      <Cell label="Paid hours" right>{row.paidHours.toFixed(2)}</Cell>
-      <Cell label="Rate" right>{fmt(row.rate)}</Cell>
-      <Cell label="Amount" right>
-        <span className="font-semibold text-tt-green">{fmt(row.amount)}</span>
-      </Cell>
-      <div className="col-span-2 sm:col-span-1 sm:justify-self-end">
-        {onEdit ? (
-          <button
-            type="button"
-            onClick={onEdit}
-            className="min-h-[32px] w-full rounded-lg border border-tt-border px-2.5 text-[11px] font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/10 sm:w-auto"
-          >
-            Edit
-          </button>
-        ) : null}
+      </div>
+
+      {/* Straight off week.hours / week.amount — never re-added here. */}
+      <div className="mt-1.5 flex items-center justify-between rounded-lg bg-white/[0.03] px-3 py-2">
+        <span className="text-[11.5px] font-bold uppercase tracking-wider text-tt-muted">
+          Week {week.index} Total
+        </span>
+        <span className="flex items-baseline gap-5">
+          <span className="text-[12.5px] font-bold tabular-nums text-tt-text">{week.hours.toFixed(2)} hr</span>
+          <span className="text-[13px] font-bold tabular-nums text-tt-green">{fmt(week.amount)}</span>
+        </span>
+      </div>
+    </section>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'money' }) {
+  return (
+    <div>
+      <div className="text-[9.5px] font-bold uppercase tracking-wider text-tt-muted">{label}</div>
+      <div
+        className={`mt-0.5 font-bold tabular-nums ${
+          tone === 'money' ? 'text-[22px] text-tt-green' : 'text-[15px] text-tt-text'
+        }`}
+      >
+        {value}
       </div>
     </div>
   );
@@ -109,15 +259,26 @@ export default function PayDetailModal({
   onClose,
   onEditRow,
   canEdit,
+  onDeleteRow,
+  canDelete,
+  deleteBlockedReason,
 }: {
   statement: PayStatement;
   onClose: () => void;
-  /** Opens the app's existing shift editor for this record. Undefined = editing unavailable. */
+  /** Opens the app's existing shift editor for this record. */
   onEditRow?: (shiftId: string) => void;
   canEdit: (shiftId: string) => boolean;
+  /** Runs the canonical delete for this record, after the manager confirms. */
+  onDeleteRow?: (shiftId: string) => Promise<void>;
+  canDelete: (row: StatementRow) => boolean;
+  /** Why Delete is unavailable on a record, shown on the disabled control. */
+  deleteBlockedReason: (row: StatementRow) => string | undefined;
 }) {
   const [busy, setBusy] = useState<null | 'download' | 'print'>(null);
   const [docError, setDocError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<StatementRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   // Object URLs are revoked on unmount rather than straight after the click: Safari can still be
   // reading the blob when a synchronous revoke lands, which shows as an empty print window.
@@ -139,8 +300,6 @@ export default function PayDetailModal({
     [],
   );
 
-  // ONE document, two buttons. Print opens the very PDF that Download saves, so there is no HTML
-  // twin to drift out of step with it.
   async function buildBlobUrl(): Promise<string> {
     const { renderPayStatementPdf } = await import('@/lib/pay/statementPdf');
     const bytes = await renderPayStatementPdf(statement);
@@ -182,7 +341,21 @@ export default function PayDetailModal({
     }
   }
 
-  const days = useMemo(() => workedDayGroups(statement), [statement]);
+  async function runDelete() {
+    if (!confirmDelete || !onDeleteRow) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDeleteRow(confirmDelete.shiftId);
+      setConfirmDelete(null);
+    } catch {
+      setDeleteError('Could not delete that record. Try again.');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const weeks = useMemo(() => payPeriodWeeks(statement), [statement]);
 
   if (typeof document === 'undefined') return null;
 
@@ -196,7 +369,7 @@ export default function PayDetailModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-4xl rounded-[16px] border border-tt-border bg-tt-card p-5 shadow-2xl backdrop-blur-xl"
+        className="w-full max-w-5xl rounded-[16px] border border-tt-border bg-tt-card p-5 shadow-2xl backdrop-blur-xl"
       >
         {/* ── Header ─────────────────────────────────────────────────────────── */}
         <div className="mb-4 flex items-start justify-between gap-3">
@@ -204,8 +377,8 @@ export default function PayDetailModal({
             <PersonAvatar name={statement.employee.name} state="confirmed" size="lg" />
             <div>
               <h3 className="text-base font-semibold text-tt-text">{statement.employee.name}</h3>
+              <p className="text-xs text-tt-muted">{titleCase(statement.employee.role || '—')}</p>
               <p className="text-xs text-tt-muted">
-                {titleCase(statement.employee.role || '—')} ·{' '}
                 {formatPeriodRange(statement.period.start, statement.period.end)}
               </p>
             </div>
@@ -221,8 +394,8 @@ export default function PayDetailModal({
           </button>
         </div>
 
-        {/* ── Summary + document actions ─────────────────────────────────────── */}
-        <div className="mb-5 flex flex-wrap items-end justify-between gap-4 rounded-xl border border-tt-border bg-white/[0.02] px-4 py-3.5">
+        {/* ── One compact summary row ────────────────────────────────────────── */}
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-x-8 gap-y-3 border-y border-tt-border py-3">
           <div className="flex flex-wrap gap-x-8 gap-y-3">
             <Stat label="Total owed" value={fmt(statement.totals.gross)} tone="money" />
             <Stat label="Payable hours" value={fmtHours(statement.totals.paidHours)} />
@@ -234,7 +407,7 @@ export default function PayDetailModal({
               type="button"
               onClick={handlePrint}
               disabled={busy !== null}
-              className="min-h-[36px] rounded-xl border border-tt-border px-3.5 text-xs font-semibold text-tt-text transition-colors hover:bg-tt-card-hover disabled:opacity-50"
+              className="min-h-[34px] rounded-xl border border-tt-border px-3.5 text-xs font-semibold text-tt-text transition-colors hover:bg-tt-card-hover disabled:opacity-50"
             >
               {busy === 'print' ? 'Preparing…' : 'Print'}
             </button>
@@ -242,7 +415,7 @@ export default function PayDetailModal({
               type="button"
               onClick={handleDownload}
               disabled={busy !== null}
-              className="min-h-[36px] rounded-xl bg-tt-cyan px-3.5 text-xs font-semibold text-black transition-colors hover:bg-tt-cyan/90 disabled:opacity-50"
+              className="min-h-[34px] rounded-xl bg-tt-cyan px-3.5 text-xs font-semibold text-black transition-colors hover:bg-tt-cyan/90 disabled:opacity-50"
             >
               {busy === 'download' ? 'Building…' : 'Download PDF'}
             </button>
@@ -250,108 +423,142 @@ export default function PayDetailModal({
         </div>
         {docError && <p className="-mt-3 mb-4 text-xs text-tt-red">{docError}</p>}
 
-        {/* ── Worked time, by day ────────────────────────────────────────────── */}
-        <div className="mb-2 flex items-baseline justify-between">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-tt-muted">Worked time</div>
-          <div className="text-[10px] text-tt-muted">
-            {statement.totals.rowCount === 1 ? '1 record' : `${statement.totals.rowCount} records`}
-            {' · '}
-            {statement.totals.workedDays === 1 ? '1 day' : `${statement.totals.workedDays} days`}
-          </div>
+        {/* ── Week 1, then Week 2 ────────────────────────────────────────────── */}
+        {weeks.map((week) => (
+          <Week
+            key={week.index}
+            week={week}
+            canEdit={canEdit}
+            onEditRow={onEditRow}
+            canDelete={canDelete}
+            onDeleteRow={onDeleteRow ? (row) => { setDeleteError(null); setConfirmDelete(row); } : undefined}
+            deleteBlockedReason={deleteBlockedReason}
+          />
+        ))}
+
+        {/* Period total, read off statement.totals — never re-added from the weeks above. */}
+        <div className="flex items-center justify-between rounded-xl border border-tt-border bg-white/[0.03] px-4 py-3">
+          <span className="text-[13px] font-bold text-tt-text">Total owed</span>
+          <span className="flex items-baseline gap-5">
+            <span className="text-[13px] font-bold tabular-nums text-tt-text">
+              {statement.totals.paidHours.toFixed(2)} hr
+            </span>
+            <span className="text-[15px] font-bold tabular-nums text-tt-green">
+              {fmt(statement.totals.gross)}
+            </span>
+          </span>
         </div>
 
-        {days.length === 0 ? (
-          <div className="rounded-xl border border-tt-border px-4 py-10 text-center text-sm text-tt-muted">
-            No payable worked time in this pay period.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <div
-              className={`${GRID} hidden px-3 text-[9px] font-bold uppercase tracking-wider text-tt-muted sm:grid`}
-            >
-              <div>Source</div>
-              <div>Start</div>
-              <div>End</div>
-              <div className="text-right">Break</div>
-              <div className="text-right">Paid Hours</div>
-              <div className="text-right">Rate</div>
-              <div className="text-right">Amount</div>
-              <div />
-            </div>
-
-            {/* One block per calendar day. A day with several records keeps them side by side under
-                the same heading — never merged, so each stays separately editable. */}
-            {days.map((day) => (
-              <div key={day.dateISO}>
-                <div className="mb-1.5 flex items-baseline justify-between gap-3 border-b border-tt-border pb-1">
-                  <span className="text-[12.5px] font-semibold text-tt-text">
-                    {formatDayLabel(day.dateISO)}
-                    {day.rows.length > 1 && (
-                      <span className="ml-2 text-[10px] font-normal text-tt-muted">
-                        {day.rows.length} records
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-[11px] tabular-nums text-tt-muted">
-                    {day.hours.toFixed(2)} hr · {fmt(day.amount)}
-                  </span>
-                </div>
-                <div className="space-y-1.5">
-                  {day.rows.map((row) => (
-                    <RecordRow
-                      key={row.shiftId}
-                      row={row}
-                      onEdit={onEditRow && canEdit(row.shiftId) ? () => onEditRow(row.shiftId) : undefined}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-
-            {/* Read off statement.totals — never re-added from the rows above, so this can never
-                quietly disagree with the tile that opened the panel. */}
-            <div className="flex items-center justify-between rounded-xl border border-tt-border bg-white/[0.03] px-4 py-3">
-              <span className="text-[13px] font-bold text-tt-text">Total owed</span>
-              <span className="flex items-baseline gap-5">
-                <span className="text-[13px] font-bold tabular-nums text-tt-text">
-                  {statement.totals.paidHours.toFixed(2)} hr
-                </span>
-                <span className="text-[15px] font-bold tabular-nums text-tt-green">
-                  {fmt(statement.totals.gross)}
-                </span>
-              </span>
-            </div>
-          </div>
-        )}
-
-        <p className="mt-5 text-[10.5px] leading-relaxed text-tt-muted">
+        <p className="mt-4 text-[10.5px] leading-relaxed text-tt-muted">
           Hours and pay for this period only — not lifetime, and not a running balance. Amounts are
           gross; no deductions are applied.
         </p>
 
-        {/* ── Not paid, folded away ──────────────────────────────────────────── */}
+        {/* ── Not paid, folded away, last ────────────────────────────────────── */}
         {statement.excluded.length > 0 && <NotPaid rows={statement.excluded} />}
       </div>
+
+      {confirmDelete && (
+        <DeleteConfirm
+          employeeName={statement.employee.name}
+          row={confirmDelete}
+          busy={deleting}
+          error={deleteError}
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={runDelete}
+        />
+      )}
     </div>,
     document.body,
   );
 }
 
-// Records inside the period that carry no money — an unconfirmed punch, an open clock-in, a day
-// that was only ever scheduled. Kept because they are the honest answer to "why is this total
-// lighter than I expected", and folded shut because they are not what anyone opens this panel to
-// read. Closed by default, last on the page, and worded as facts: no count badge, no colour, no
-// suggestion that anything here is a mistake.
-//
-// A native <details> rather than component state — the same disclosure the Shifts drawer already
-// uses, and it stays keyboard- and screen-reader-operable for free.
+// Deleting worked time takes money off someone's cheque, so the dialog restates exactly which
+// record is going and what it is worth before anyone can confirm it.
+function DeleteConfirm({
+  employeeName,
+  row,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  employeeName: string;
+  row: StatementRow;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <OverlayLayer>
+      <div className="fixed inset-0 flex items-end justify-center sm:items-center" onClick={onCancel}>
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+        <div
+          onClick={(e) => e.stopPropagation()}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Delete worked time"
+          className="relative w-full rounded-t-2xl border border-tt-border bg-tt-card p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl sm:mx-4 sm:max-w-md sm:rounded-2xl"
+        >
+          <h3 className="text-base font-semibold text-tt-text">Delete worked time?</h3>
+
+          <dl className="mt-4 space-y-1.5 rounded-xl border border-tt-border bg-white/[0.02] px-3.5 py-3">
+            {[
+              ['Employee', employeeName],
+              ['Date', formatDayLabel(row.dateISO)],
+              ['Start', formatClock12(row.startLabel)],
+              [
+                'End',
+                row.endDateISO
+                  ? `${formatClock12(row.endLabel)} · ${formatDayLabel(row.endDateISO)}`
+                  : formatClock12(row.endLabel),
+              ],
+              ['Paid hours', `${row.paidHours.toFixed(2)} hr`],
+            ].map(([k, v]) => (
+              <div key={k} className="flex items-baseline justify-between gap-4">
+                <dt className="text-[11px] uppercase tracking-wide text-tt-muted">{k}</dt>
+                <dd className="text-[12.5px] tabular-nums text-tt-text">{v}</dd>
+              </div>
+            ))}
+          </dl>
+
+          <p className="mt-3 text-[12px] leading-relaxed text-tt-muted">
+            This removes this worked-time record from payroll for this pay period.
+          </p>
+          {error && <p className="mt-2 text-xs text-tt-red">{error}</p>}
+
+          <div className="flex gap-3 pt-5">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              className="min-h-[44px] flex-1 rounded-xl bg-white/5 py-2.5 text-sm font-semibold text-tt-muted transition-colors hover:bg-white/10 hover:text-tt-text disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={busy}
+              className="min-h-[44px] flex-1 rounded-xl bg-tt-red/15 py-2.5 text-sm font-semibold text-tt-red transition-colors hover:bg-tt-red/25 disabled:opacity-50"
+            >
+              {busy ? 'Deleting…' : 'Delete Worked Time'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </OverlayLayer>
+  );
+}
+
+// Records inside the period that carry no money. Folded shut and last on the page, because they
+// are the answer to "why is this lighter than I expected" and nothing more.
 function NotPaid({ rows }: { rows: ExcludedRow[] }) {
   return (
     <details className="group mt-4 border-t border-tt-border pt-3">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[11.5px] text-tt-muted transition-colors hover:text-tt-text">
-        <span>
-          {rows.length === 1 ? '1 record' : `${rows.length} records`} not included in pay
-        </span>
+        <span>{rows.length === 1 ? '1 record' : `${rows.length} records`} not included in pay</span>
         <span className="shrink-0 font-semibold text-tt-cyan">
           <span className="group-open:hidden">View</span>
           <span className="hidden group-open:inline">Hide</span>
