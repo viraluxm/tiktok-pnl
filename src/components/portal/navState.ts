@@ -17,6 +17,12 @@ export interface NavState {
   week: string | null;
   /** selected day on the strip, or null = default */
   day: string | null;
+  /**
+   * On Hours: the START of a PAST pay period being read, or null = the current one. In the URL so
+   * a back-swipe out of a historical period returns to the list rather than leaving the app.
+   * Validated again on the server — this only decides which window the screen asks for.
+   */
+  period: string | null;
 }
 
 const TABS: Tab[] = ['home', 'schedule', 'requests', 'hours'];
@@ -27,6 +33,7 @@ export function parseNav(params: URLSearchParams): NavState {
   const seg = params.get('seg');
   const week = params.get('week');
   const day = params.get('day');
+  const period = params.get('period');
   // Legacy links: ?view=team from the previous portal still lands on Team.
   const legacyTeam = params.get('view') === 'team';
   return {
@@ -34,6 +41,10 @@ export function parseNav(params: URLSearchParams): NavState {
     seg: (SEGS as string[]).includes(seg ?? '') ? (seg as Segment) : legacyTeam ? 'team' : 'mine',
     week: isValidDateISO(week) ? mondayOf(week) : null,
     day: isValidDateISO(day) ? day : null,
+    // NOT snapped to a Monday: a pay-period start is a specific boundary of the biweekly cycle, and
+    // the server refuses any date that is not one. Keeping it verbatim lets that refusal be the
+    // single rule rather than having the client quietly round to a different period.
+    period: isValidDateISO(period) ? period : null,
   };
 }
 
@@ -43,6 +54,7 @@ export function formatNav(state: NavState): string {
   if (state.tab === 'schedule' && state.seg !== 'mine') p.set('seg', state.seg);
   if (state.week) p.set('week', state.week);
   if (state.day) p.set('day', state.day);
+  if (state.tab === 'hours' && state.period) p.set('period', state.period);
   const s = p.toString();
   return s ? `?${s}` : '';
 }

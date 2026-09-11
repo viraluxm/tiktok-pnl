@@ -193,6 +193,18 @@ export function payPeriodFor(paydayISO: string): PayPeriod {
   return { start: toISODateUTC(start), end: toISODateUTC(end) };
 }
 
+// The PAYDAY that pays for a given period — the exact inverse of payPeriodFor, and the only
+// place the portal is allowed to turn a period into a date.
+//
+//   payPeriodFor(payday).end === payday − 5   ⇒   payday === end + 5
+//
+// It is a SCHEDULED date, not evidence of payment: Lensed stores when a period closes and when it
+// is due to be paid, and nothing anywhere records that money actually moved. Every employee-facing
+// surface therefore says "Pay Day", never "Paid". (Round-trip pinned in employees.payperiod.test.mjs.)
+export function paydayForPeriod(p: PayPeriod): string {
+  return toISODateUTC(addDaysUTC(parseDateUTC(p.end), 5));
+}
+
 // The pay period CONTAINING `dateISO`, as a {start,end} window — and payPeriodStartFor for
 // just the Monday start. COMPOSES the helpers above; it does NOT reimplement the window math.
 //

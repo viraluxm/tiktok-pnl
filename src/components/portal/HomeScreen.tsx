@@ -4,7 +4,8 @@ import { useMemo } from 'react';
 import type { PortalShift, PortalSnapshot } from '@/lib/schedule/portalTypes';
 import {
   greetingFor, laHourOf, fmtLongDate, pickNextShift, nextShiftHint, relativeDayLabel, fmtRangeLA, fmtHours, roleLabel,
-  buildAlerts, inClockWindow, fmtTimeLA, fmtShortDate, crossesMidnightLA, fmtMonthDay, defaultSelectedDay, mondayOf, type Alert,
+  buildAlerts, inClockWindow, fmtTimeLA, fmtShortDate, crossesMidnightLA, fmtMonthDay, defaultSelectedDay, mondayOf,
+  fmtPayday, fmtPeriodRange, type Alert,
 } from '@/lib/schedule/portalModel';
 import { ClockControls } from '@/app/s/[token]/ClockControls';
 import { WeekStrip } from './WeekStrip';
@@ -37,6 +38,44 @@ function StatusLine({ shift }: { shift: PortalShift }) {
   if (shift.offer_state === 'offered') return <p className="mt-2 text-[13px] font-medium text-tt-yellow">Offered · still yours until a manager approves a pickup</p>;
   if (shift.trade) return <p className="mt-2 text-[13px] font-medium text-tt-yellow">In a pending trade with {shift.trade.with_name.split(' ')[0]}</p>;
   return null;
+}
+
+function PayPeriodCard({ pp, onOpen }: { pp: PortalSnapshot['payPeriod']; onOpen: () => void }) {
+  // THE PAY-PERIOD QUESTION, answered in one tap-target: how much is approved so far, what is still
+  // waiting, and when the money is due. No rate and no total — Lensed never sends the employee a
+  // dollar figure — and "Pay Day", never "Paid": the app knows the DATE it pays for this period and
+  // stores nothing about whether a payment actually happened.
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group w-full rounded-2xl border border-tt-border px-4 py-4 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70"
+      aria-label={`This pay period, ${fmtPeriodRange(pp.start, pp.end)} — open your hours`}
+    >
+      <p className="text-[13px] text-tt-muted">{fmtPeriodRange(pp.start, pp.end)}</p>
+      {/* No figure until there IS one — see the note on PeriodSummaryBlock in TimecardScreen. */}
+      {pp.workedHours > 0 ? (
+        <p className="mt-1 text-[clamp(24px,7vw,30px)] font-semibold leading-tight tracking-tight text-tt-text">
+          <span className="tabular-nums">{fmtHours(pp.workedHours)}</span>{' '}
+          <span className="text-[15px] font-medium text-tt-muted">approved</span>
+        </p>
+      ) : (
+        <p className="mt-1 text-[17px] font-semibold leading-snug text-tt-text">No hours approved yet</p>
+      )}
+      {pp.pendingHours > 0 && (
+        <p className="mt-1 text-[13px] font-medium text-tt-yellow">
+          <span className="tabular-nums">{fmtHours(pp.pendingHours)}</span> waiting for approval
+        </p>
+      )}
+      <span className="mt-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 border-t border-tt-border pt-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-tt-muted">Pay Day</span>
+        <span className="text-[15px] font-semibold text-tt-text">{fmtPayday(pp.payday)}</span>
+      </span>
+      <span className="mt-3 inline-flex items-center gap-1 text-[13px] font-semibold text-tt-cyan">
+        View hours <ChevronRight size={14} className="transition-transform group-hover:translate-x-0.5" />
+      </span>
+    </button>
+  );
 }
 
 export function HomeScreen({
@@ -220,6 +259,13 @@ export function HomeScreen({
               </>
             )}
           </div>
+        </section>
+
+        {/* THIS PAY PERIOD — the other half of "how am I doing": the week above answers the shift
+            question, this answers the paycheck one, without ever naming money. */}
+        <section className="mb-8" aria-label="This pay period">
+          <SectionLabel>This pay period</SectionLabel>
+          <PayPeriodCard pp={snap.payPeriod} onOpen={() => go({ tab: 'hours' })} />
         </section>
 
         {updates.length > 0 && (

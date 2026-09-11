@@ -1,7 +1,7 @@
-import { clockedShiftHours, isPayableShift, paidShiftHours } from '@/lib/employees';
+import { clockedShiftHours, isPayableShift, paidShiftHours, payPeriodContaining, paydayForPeriod } from '@/lib/employees';
 import { shiftBusinessDate } from '@/lib/labor';
 import { laWallTimeToUtc, addDaysISO } from './timezone';
-import type { TimecardDay, TimecardEntry, TimecardEntryState, TimecardOpenPunch, TimecardPayload, TimecardWindow } from './portalTypes';
+import type { PayPeriodSummary, TimecardDay, TimecardEntry, TimecardEntryState, TimecardOpenPunch, TimecardPayload, TimecardPeriodPayload, TimecardWindow } from './portalTypes';
 
 // The employee's READ-ONLY timecard, derived from real `shifts` rows the same way payroll reads
 // them. The hours/payability logic is isPayableShift + paidShiftHours + clockedShiftHours reused
@@ -159,7 +159,82 @@ export function buildTimecard(input: {
     todayISO: input.todayISO,
     week: buildWindow(entries, input.week.start, input.week.end),
     period: buildWindow(entries, input.period.start, input.period.end),
+    payday: paydayForPeriod({ start: input.period.start, end: input.period.end }),
     open,
+  };
+}
+
+// ── Pay periods ───────────────────────────────────────────────────────────────────────────────
+
+/** How many CLOSED pay periods the employee's history shows. Six ≈ three months of biweekly pay. */
+export const PAY_PERIOD_HISTORY = 6;
+
+/**
+ * The `count` pay periods immediately BEFORE `currentStart`, newest first.
+ *
+ * COMPOSED, never re-derived: the period before one that starts on M is simply the period
+ * containing the day before M, so the whole walk is payPeriodContaining() applied repeatedly. If
+ * the biweekly cycle ever moves (PAY_ANCHOR), this walk moves with it for free.
+ */
+export function previousPayPeriods(currentStart: string, count: number = PAY_PERIOD_HISTORY): { start: string; end: string }[] {
+  const out: { start: string; end: string }[] = [];
+  let cursor = currentStart;
+  for (let i = 0; i < count; i++) {
+    const prev = payPeriodContaining(addDaysISO(cursor, -1));
+    out.push(prev);
+    cursor = prev.start;
+  }
+  return out;
+}
+
+/** Totals for one period, over entries already built. The hour figures come from buildWindow. */
+export function payPeriodSummary(entries: readonly TimecardEntry[], period: { start: string; end: string }): PayPeriodSummary {
+  const w = buildWindow(entries, period.start, period.end);
+  return {
+    start: w.start,
+    end: w.end,
+    payday: paydayForPeriod({ start: w.start, end: w.end }),
+    workedHours: w.workedHours,
+    pendingHours: w.pendingHours,
+  };
+}
+
+/**
+ * Turn an untrusted `?period=` string into a real pay-period window, or null.
+ *
+ * The parameter names a WINDOW, never a person — identity stays with the token — so the only job
+ * here is to refuse anything that is not one of this employer's actual periods. Three gates:
+ * a literal YYYY-MM-DD, a date that is genuinely a period START under the canonical cycle (so an
+ * arbitrary Monday cannot conjure a 14-day window of its own), and not a period in the future.
+ */
+export function resolvePeriodStart(raw: string | null | undefined, todayISO: string): { start: string; end: string } | null {
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const period = payPeriodContaining(raw);
+  if (period.start !== raw) return null;                                  // not a period boundary
+  if (period.start > payPeriodContaining(todayISO).start) return null;    // not yet begun
+  return period;
+}
+
+/** The history list: one summary per closed period, newest first. */
+export function buildPayPeriods(input: {
+  shifts: readonly TimecardShiftRow[];
+  periods: readonly { start: string; end: string }[];
+}): PayPeriodSummary[] {
+  const entries = input.shifts.map(toTimecardEntry).filter((e): e is TimecardEntry => e !== null);
+  return input.periods.map((p) => payPeriodSummary(entries, p));
+}
+
+/** One past period in full — the same day-by-day window the current period renders. */
+export function buildTimecardPeriod(input: {
+  shifts: readonly TimecardShiftRow[];
+  todayISO: string;
+  period: { start: string; end: string };
+}): TimecardPeriodPayload {
+  const entries = input.shifts.map(toTimecardEntry).filter((e): e is TimecardEntry => e !== null);
+  return {
+    todayISO: input.todayISO,
+    summary: payPeriodSummary(entries, input.period),
+    period: buildWindow(entries, input.period.start, input.period.end),
   };
 }
 
@@ -167,5 +242,12 @@ export function buildTimecard(input: {
 export function timecardReadRange(week: { start: string; end: string }, period: { start: string; end: string }): { from: string; to: string } {
   const from = week.start < period.start ? week.start : period.start;
   const to = week.end > period.end ? week.end : period.end;
+  return { from: addDaysISO(from, -1), to: addDaysISO(to, 1) };
+}
+
+/** The same ±1-day padding over an arbitrary set of windows (the history sweep reads one range). */
+export function spanReadRange(windows: readonly { start: string; end: string }[]): { from: string; to: string } {
+  const from = windows.reduce((a, w) => (w.start < a ? w.start : a), windows[0].start);
+  const to = windows.reduce((a, w) => (w.end > a ? w.end : a), windows[0].end);
   return { from: addDaysISO(from, -1), to: addDaysISO(to, 1) };
 }

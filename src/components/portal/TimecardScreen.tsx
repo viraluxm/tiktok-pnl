@@ -1,16 +1,21 @@
 'use client';
 
-import { useState } from 'react';
-import type { PortalSnapshot, TimecardDay, TimecardEntry } from '@/lib/schedule/portalTypes';
+import type { PayPeriodSummary, PortalSnapshot, TimecardDay, TimecardEntry, TimecardWindow } from '@/lib/schedule/portalTypes';
 import {
-  fmtHours, fmtDuration, fmtTimeLA, fmtMonthDay, dowShort, dowLong, dayNumber, laDateOf, relativeDayLabel, fmtShortDate,
+  fmtHours, fmtDuration, fmtTimeLA, fmtPayday, fmtPeriodRange, fmtMonthDay, dowShort, dowLong, dayNumber,
+  laDateOf, relativeDayLabel, fmtShortDate,
 } from '@/lib/schedule/portalModel';
 import { teamOfRole } from '@/lib/timeclock';
-import { useTimecard } from './PortalProvider';
-import { SectionLabel, Segmented, EmptyState, ErrorState, Skeleton } from './ui';
-import { ChevronLeft, ClockIcon } from './icons';
+import { usePayPeriods, useTimecard, useTimecardPeriod } from './PortalProvider';
+import { SectionLabel, EmptyState, ErrorState, Skeleton } from './ui';
+import { ChevronLeft, ChevronRight, ClockIcon } from './icons';
+import type { NavState } from './nav';
 
-// WORKED HOURS — the employee's own timecard, READ-ONLY (there is no write route for any of it).
+// HOURS — the employee's own record, READ-ONLY (there is no write route for any of it).
+//
+// The screen is organised by PAY PERIOD, because that is the unit the employee is actually asking
+// about: what is approved so far, what is still waiting, and when they get paid for it. The week
+// figure lives on Home, where it sits beside the scheduled week it should be compared against.
 //
 // Three quantities, kept apart on purpose (migration 137):
 //   CLOCK IN / CLOCK OUT  the attendance record, exactly as punched — never edited to move payroll
@@ -18,12 +23,16 @@ import { ChevronLeft, ClockIcon } from './icons';
 //   APPROVED              what payroll pays, as confirmed by a manager
 // For a live host the approved figure is normally the verified live time and therefore SHORTER
 // than clocked. Saying so plainly is the difference between "my hours were cut" and "my live time
-// was approved". Nothing here is final until a manager confirms it, so an unconfirmed punch shows
-// its attendance and says "Awaiting approval" instead of a number.
+// was approved". Nothing is final until a manager confirms it, so an unconfirmed punch shows its
+// attendance and says "Waiting for approval" rather than a 0 that would read as a lost shift.
+//
+// NO MONEY. Nothing on this screen — or in the payload behind it — carries a rate, a gross, an
+// estimate or a net. And nothing says "Paid": Lensed derives the scheduled Pay Day from the period
+// and stores no evidence that a payment happened, so the label stays honest at "Pay Day".
 
 // The extra line under a row. 'awaiting_confirmation' and 'in_progress' are deliberately absent:
-// the Approved and Clock out cells already say "Awaiting approval" and "In progress", and repeating
-// them below was the one thing on this screen that read as filler.
+// the Approved and Clock out cells already say "Waiting for approval" and "In progress", and
+// repeating them below was the one thing on this screen that read as filler.
 function stateWords(e: TimecardEntry): { text: string; tone: string } | null {
   switch (e.state) {
     case 'auto_closed': return { text: 'Auto-closed — check the clock-out time with your manager', tone: 'text-tt-yellow' };
@@ -70,7 +79,7 @@ function Entry({ e, isHost }: { e: TimecardEntry; isHost: boolean }) {
             ? '—'
             : e.payable
               ? fmtDuration(e.hours)
-              : <span className="text-[13px] font-medium text-tt-yellow">Awaiting approval</span>}
+              : <span className="text-[13px] font-medium text-tt-yellow">Waiting for approval</span>}
         </Figure>
       </div>
       {(crosses || e.break_minutes > 0) && (
@@ -103,23 +112,165 @@ function DayBlock({ d, today, isHost }: { d: TimecardDay; today: string; isHost:
   );
 }
 
-export function TimecardScreen({ snap, onBack }: { snap: PortalSnapshot; onBack: () => void }) {
-  const tc = useTimecard();
-  const [range, setRange] = useState<'week' | 'period'>('week');
+/**
+ * The period block: window, the two hour figures, and the Pay Day.
+ *
+ * Laid out so nothing has to shrink on a 320px screen — the totals stack, and the Pay Day row
+ * wraps its value under its label rather than truncating the one date the employee came to read.
+ */
+function PeriodSummaryBlock({ label, summary }: { label: string; summary: PayPeriodSummary }) {
+  return (
+    <div className="rounded-2xl border border-tt-border px-4 py-4">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-tt-cyan">{label}</p>
+      <p className="mt-1 text-[15px] font-medium text-tt-text">{fmtPeriodRange(summary.start, summary.end)}</p>
+      {/* A zero is a NUMBER where this card owes a STATE. "0 hrs approved" in 32px reads to a picker
+          as "your hours were zeroed"; the honest reading is "nothing has been confirmed yet". So the
+          figure appears only when there is a figure, and otherwise the card says so in words and
+          quiets down. (PRODUCT.md: status is stated in words; numbers are stated once.) */}
+      {summary.workedHours > 0 ? (
+        <p className="mt-3 text-[clamp(26px,8vw,32px)] font-semibold leading-tight tracking-tight text-tt-text">
+          <span className="tabular-nums">{fmtHours(summary.workedHours)}</span>{' '}
+          <span className="text-[15px] font-medium text-tt-muted">approved</span>
+        </p>
+      ) : (
+        <p className="mt-3 text-[17px] font-semibold leading-snug text-tt-text">No hours approved yet</p>
+      )}
+      {summary.pendingHours > 0 && (
+        <p className="mt-1 text-[13px] font-medium text-tt-yellow">
+          <span className="tabular-nums">{fmtHours(summary.pendingHours)}</span> waiting for approval
+        </p>
+      )}
+      <div className="mt-3 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 border-t border-tt-border pt-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-tt-muted">Pay Day</span>
+        <span className="text-[15px] font-semibold text-tt-text">{fmtPayday(summary.payday)}</span>
+      </div>
+    </div>
+  );
+}
+
+function DaysList({ win, today, isHost, emptyTitle }: { win: TimecardWindow; today: string; isHost: boolean; emptyTitle: string }) {
+  if (win.days.length === 0) return <EmptyState title={emptyTitle} body="Clock-ins show up here after you clock out." />;
+  return <div className="space-y-4">{win.days.map((d) => <DayBlock key={d.date} d={d} today={today} isHost={isHost} />)}</div>;
+}
+
+/**
+ * WHAT THE NUMBER MEANS. A <details> keeps it one quiet line until someone asks — the alternative
+ * was a permanent paragraph of policy above the hours people came to read. The Live Host sentence
+ * shows only to a live host, so the explanation stays about the reader's own pay.
+ */
+function ApprovedHoursNote({ isHost }: { isHost: boolean }) {
+  return (
+    <details className="mt-8 rounded-xl border border-tt-border bg-white/[0.02] px-4 py-3">
+      <summary className="cursor-pointer list-none text-[13px] font-semibold text-tt-text focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70">
+        What are approved hours?
+      </summary>
+      <p className="mt-2 text-[13px] leading-relaxed text-tt-muted">
+        Approved hours are the hours your manager has confirmed for your pay period. Your clock-in and
+        clock-out times are shown separately.
+      </p>
+      {isHost && (
+        <p className="mt-2 text-[13px] leading-relaxed text-tt-muted">
+          Live Host approved hours are normally based on confirmed live-working time.
+        </p>
+      )}
+    </details>
+  );
+}
+
+/** One row in Previous Pay Periods. Approved hours and the scheduled Pay Day — no dollar figure. */
+function PeriodRow({ p, onOpen }: { p: PayPeriodSummary; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center gap-3 border-b border-white/[0.06] py-3 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70"
+      aria-label={`${fmtPeriodRange(p.start, p.end)} — ${fmtHours(p.workedHours)} approved, Pay Day ${fmtPayday(p.payday)}`}
+    >
+      <span className="min-w-0 flex-1">
+        <span className="block text-[15px] font-medium text-tt-text">{fmtPeriodRange(p.start, p.end)}</span>
+        <span className="mt-0.5 block text-[13px] text-tt-muted">
+          {/* Same rule as the summary block: a closed period the employee did not work says so,
+              rather than repeating "0 hrs approved" down the column. */}
+          {p.workedHours > 0
+            ? <><span className="tabular-nums text-tt-text">{fmtHours(p.workedHours)}</span> approved</>
+            : <span className="text-tt-text">No approved hours</span>}
+          {p.pendingHours > 0 && <span className="text-tt-yellow"> · {fmtHours(p.pendingHours)} waiting</span>}
+        </span>
+        <span className="mt-0.5 block text-[12px] text-tt-muted">Pay Day · {fmtMonthDay(p.payday)}</span>
+      </span>
+      <ChevronRight size={18} className="shrink-0 text-tt-muted" />
+    </button>
+  );
+}
+
+function PreviousPeriods({ onOpen }: { onOpen: (start: string) => void }) {
+  const q = usePayPeriods();
+  return (
+    <section className="mt-8" aria-label="Previous pay periods">
+      <SectionLabel>Previous pay periods</SectionLabel>
+      {q.isLoading && !q.data && <div className="space-y-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div>}
+      {q.error && !q.data && <ErrorState message="Could not load your previous pay periods." onRetry={() => q.refetch()} busy={q.isFetching} />}
+      {q.data && (q.data.periods.length === 0
+        ? <EmptyState title="No previous pay periods yet" />
+        : <div>{q.data.periods.map((p) => <PeriodRow key={p.start} p={p} onOpen={() => onOpen(p.start)} />)}</div>
+      )}
+    </section>
+  );
+}
+
+/** A past pay period, opened from the list: the same block and the same daily records. */
+function PeriodDetail({ start, today, isHost, onBack }: { start: string; today: string; isHost: boolean; onBack: () => void }) {
+  const q = useTimecardPeriod(start);
+  return (
+    <div>
+      <button type="button" onClick={onBack} className="-ml-2 mb-2 inline-flex min-h-9 items-center gap-1 rounded-lg pr-2 text-[13px] font-semibold text-tt-muted hover:text-tt-text focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70">
+        <ChevronLeft size={16} /> Hours
+      </button>
+      {q.isLoading && !q.data && <div className="space-y-3"><Skeleton className="h-8 w-48" /><Skeleton className="h-40" /><Skeleton className="h-24" /></div>}
+      {q.error && !q.data && <ErrorState message="Could not load that pay period." onRetry={() => q.refetch()} busy={q.isFetching} />}
+      {q.data && (
+        <>
+          <h1 className="mb-4 text-[22px] font-semibold tracking-tight text-tt-text">{fmtPeriodRange(q.data.summary.start, q.data.summary.end)}</h1>
+          <PeriodSummaryBlock label="Pay period" summary={q.data.summary} />
+          <div className="mt-6">
+            <SectionLabel>Your days</SectionLabel>
+            <DaysList win={q.data.period} today={today} isHost={isHost} emptyTitle="No worked time in this pay period" />
+          </div>
+          <ApprovedHoursNote isHost={isHost} />
+        </>
+      )}
+    </div>
+  );
+}
+
+export function TimecardScreen({
+  snap, nav, go, onBack,
+}: {
+  snap: PortalSnapshot;
+  nav: NavState;
+  go: (patch: Partial<NavState>, mode?: 'push' | 'replace') => void;
+  onBack: () => void;
+}) {
+  const tc = useTimecard(nav.period === null);
   const today = snap.todayISO;
-  const win = tc.data ? (range === 'week' ? tc.data.week : tc.data.period) : null;
   // teamOfRole is the app's one role normalisation (kiosk picker, Team schedule, PayView).
   const isHost = teamOfRole(snap.employee.role) === 'host';
+
+  // A past period is a screen of its own, reached from the list and left with Back — the URL
+  // carries it (?tab=hours&period=…) so a back-swipe returns to the list, not out of the app.
+  if (nav.period) {
+    return <PeriodDetail start={nav.period} today={today} isHost={isHost} onBack={() => go({ period: null })} />;
+  }
 
   return (
     <div>
       <button type="button" onClick={onBack} className="-ml-2 mb-2 inline-flex min-h-9 items-center gap-1 rounded-lg pr-2 text-[13px] font-semibold text-tt-muted hover:text-tt-text focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70">
         <ChevronLeft size={16} /> Home
       </button>
-      <h1 className="mb-1 text-[22px] font-semibold tracking-tight text-tt-text">Worked hours</h1>
+      <h1 className="mb-1 text-[22px] font-semibold tracking-tight text-tt-text">Hours</h1>
       <p className="mb-5 text-[13px] text-tt-muted">Your attendance record and the hours approved for payroll. Scheduled hours are on Home.</p>
 
-      {tc.isLoading && !tc.data && <div className="space-y-3"><Skeleton className="h-16" /><Skeleton className="h-10" /><Skeleton className="h-24" /></div>}
+      {tc.isLoading && !tc.data && <div className="space-y-3"><Skeleton className="h-16" /><Skeleton className="h-40" /><Skeleton className="h-24" /></div>}
       {tc.error && !tc.data && <ErrorState message="Could not load your hours." onRetry={() => tc.refetch()} busy={tc.isFetching} />}
 
       {tc.data && (
@@ -135,42 +286,25 @@ export function TimecardScreen({ snap, onBack }: { snap: PortalSnapshot; onBack:
             </div>
           )}
 
-          <div className="mb-6 grid grid-cols-2 divide-x divide-white/[0.08]">
-            <div className="pr-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-tt-muted">This week</p>
-              <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-tt-text">{fmtHours(tc.data.week.workedHours)}</p>
-              <p className="mt-0.5 text-[12px] text-tt-muted">approved{tc.data.week.pendingHours > 0 ? ` · ${fmtHours(tc.data.week.pendingHours)} awaiting approval` : ` · ${fmtMonthDay(tc.data.week.start)} – ${fmtMonthDay(tc.data.week.end)}`}</p>
-            </div>
-            <div className="pl-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-tt-muted">This pay period</p>
-              <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-tt-text">{fmtHours(tc.data.period.workedHours)}</p>
-              <p className="mt-0.5 text-[12px] text-tt-muted">approved · {fmtMonthDay(tc.data.period.start)} – {fmtMonthDay(tc.data.period.end)}{tc.data.period.pendingHours > 0 ? ` · +${fmtHours(tc.data.period.pendingHours)} pending` : ''}</p>
-            </div>
+          <PeriodSummaryBlock
+            label="Current pay period"
+            summary={{
+              start: tc.data.period.start,
+              end: tc.data.period.end,
+              payday: tc.data.payday,
+              workedHours: tc.data.period.workedHours,
+              pendingHours: tc.data.period.pendingHours,
+            }}
+          />
+
+          <div className="mt-6">
+            <SectionLabel>Your days this pay period</SectionLabel>
+            <DaysList win={tc.data.period} today={today} isHost={isHost} emptyTitle="No worked time this pay period yet" />
           </div>
 
-          <Segmented<'week' | 'period'> label="Range" value={range} onChange={setRange} options={[{ value: 'week', label: 'This week' }, { value: 'period', label: 'Pay period' }]} />
+          <PreviousPeriods onOpen={(start) => go({ period: start })} />
 
-          <div className="mt-5">
-            <SectionLabel>{range === 'week' ? 'Your days this week' : `Your days ${fmtMonthDay(tc.data.period.start)} – ${fmtMonthDay(tc.data.period.end)}`}</SectionLabel>
-            {win && win.days.length === 0 ? (
-              <EmptyState title={range === 'week' ? 'No worked time this week yet' : 'No worked time this pay period yet'} body="Clock-ins show up here after you clock out." />
-            ) : (
-              <div className="space-y-4">{win?.days.map((d) => <DayBlock key={d.date} d={d} today={today} isHost={isHost} />)}</div>
-            )}
-          </div>
-
-          {/* WHAT THE NUMBER MEANS. A <details> keeps it one quiet line until someone asks — the
-              alternative was a permanent paragraph of policy above the hours people came to read. */}
-          <details className="mt-8 rounded-xl border border-tt-border bg-white/[0.02] px-4 py-3">
-            <summary className="cursor-pointer list-none text-[13px] font-semibold text-tt-text focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70">
-              About approved hours
-            </summary>
-            <p className="mt-2 text-[13px] leading-relaxed text-tt-muted">
-              Approved hours are the hours your manager confirmed for payroll. For Live Hosts they are normally
-              based on verified live-session time, so they can be shorter than the time between your clock-in and
-              clock-out. Your clock-in and clock-out are kept exactly as you punched them, as your attendance record.
-            </p>
-          </details>
+          <ApprovedHoursNote isHost={isHost} />
 
           <p className="mt-4 text-center text-[13px] text-tt-muted">Something look wrong? Contact your manager to request a correction.</p>
         </>

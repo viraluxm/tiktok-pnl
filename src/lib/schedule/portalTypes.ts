@@ -144,6 +144,24 @@ export interface TradeView {
 
 export type ClockState = 'clocked_out' | 'working' | 'on_break';
 
+/**
+ * One pay period as the EMPLOYEE sees it: the window, the day they are due to be paid for it, and
+ * the two hour figures — never a rate, a gross, or a dollar of any kind.
+ *
+ * `payday` is a SCHEDULE, not a receipt. Lensed derives it from the period (paydayForPeriod) and
+ * stores nothing about whether a payment happened, so every label reads "Pay Day" and never "Paid".
+ */
+export interface PayPeriodSummary {
+  start: string; // Monday
+  end: string;   // Sunday
+  /** The scheduled payday for this period — employees.paydayForPeriod, never re-derived here. */
+  payday: string;
+  /** APPROVED hours: isPayableShift + paidShiftHours, i.e. what payroll pays for this period. */
+  workedHours: number;
+  /** Completed punches a manager has not approved yet — counted apart, never inside workedHours. */
+  pendingHours: number;
+}
+
 export interface PortalSnapshot {
   employee: PortalEmployee;
   todayISO: string;
@@ -168,7 +186,7 @@ export interface PortalSnapshot {
     /** completed time-clock hours a manager has not approved yet — excluded from workedHours */
     pendingHours: number;
   };
-  payPeriod: { start: string; end: string; workedHours: number; pendingHours: number };
+  payPeriod: PayPeriodSummary;
   clock: { state: ClockState; clockedInAt: string | null };
   available: AvailableItem[];
   pickups: PickupRequestView[];
@@ -238,7 +256,25 @@ export interface TimecardPayload {
   todayISO: string;
   week: TimecardWindow;
   period: TimecardWindow;
+  /** Scheduled payday for `period`. Derived from the window, never stored. */
+  payday: string;
   open: TimecardOpenPunch | null;
+}
+
+/**
+ * The employee's recent CLOSED pay periods, newest first and BOUNDED (PAY_PERIOD_HISTORY). Its own
+ * payload rather than a field on TimecardPayload because summing six periods costs a wider read,
+ * and the snapshot — which refreshes on a timer — must not pay for a list only the Hours screen shows.
+ */
+export interface PayPeriodsPayload {
+  periods: PayPeriodSummary[];
+}
+
+/** One past pay period in full: the same day-by-day timecard, for the period the employee tapped. */
+export interface TimecardPeriodPayload {
+  todayISO: string;
+  summary: PayPeriodSummary;
+  period: TimecardWindow;
 }
 
 // ── Trade options (step 2 + 3 of Request Trade) ───────────────────────────────────────────────

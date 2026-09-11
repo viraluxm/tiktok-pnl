@@ -1,4 +1,4 @@
-import type { PortalSnapshot, PortalWeek, TimecardPayload, TradeOptionsPayload } from '@/lib/schedule/portalTypes';
+import type { PayPeriodsPayload, PortalSnapshot, PortalWeek, TimecardPayload, TimecardPeriodPayload, TradeOptionsPayload } from '@/lib/schedule/portalTypes';
 
 // The portal's data seam. Production uses createFetchPortalClient(token), which calls ONLY our own
 // /s/[token]/* routes — there is no Supabase client on this page and no auth session (CLAUDE.md).
@@ -26,6 +26,10 @@ export interface PortalClient {
   getSnapshot(): Promise<PortalSnapshot>;
   getWeek(start: string): Promise<PortalWeek>;
   getTimecard(): Promise<TimecardPayload>;
+  /** Recent CLOSED pay periods — its own call, so the snapshot's timer never pays for the sweep. */
+  getPayPeriods(): Promise<PayPeriodsPayload>;
+  /** One past pay period in full. `start` must be a real period start; the server re-checks it. */
+  getTimecardPeriod(start: string): Promise<TimecardPeriodPayload>;
   getTradeOptions(instanceId: string): Promise<TradeOptionsPayload>;
   /** Drop Shift — offers the shift while it stays yours. */
   offer(instanceId: string): Promise<void>;
@@ -71,6 +75,8 @@ export function createFetchPortalClient(token: string): PortalClient {
     getSnapshot: () => getJson<PortalSnapshot>(`${base}/portal`),
     getWeek: (start) => getJson<PortalWeek>(`${base}/portal/week?start=${encodeURIComponent(start)}`),
     getTimecard: () => getJson<TimecardPayload>(`${base}/portal/timecard`),
+    getPayPeriods: () => getJson<PayPeriodsPayload>(`${base}/portal/pay-periods`),
+    getTimecardPeriod: (start) => getJson<TimecardPeriodPayload>(`${base}/portal/timecard?period=${encodeURIComponent(start)}`),
     getTradeOptions: (instanceId) => getJson<TradeOptionsPayload>(`${base}/portal/trade-options?instanceId=${encodeURIComponent(instanceId)}`),
     offer: async (instanceId) => { await postJson(`${base}/offer`, { instanceId }); },
     cancelOffer: async (instanceId, offerId) => { await postJson(`${base}/cancel-offer`, { instanceId, offerId }); },

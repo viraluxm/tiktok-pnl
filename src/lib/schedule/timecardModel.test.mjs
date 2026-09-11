@@ -129,4 +129,86 @@ console.log('\n6. PAY-PERIOD BOUNDARY — a punch on the period\'s first day cou
   eq('no open punch → null', tc.open, null);
 }
 
+console.log('\n7. PAY DAY — derived from the window, never stored, never called "Paid"');
+{
+  const tc = T.buildTimecard({ shifts: [row()], open: null, todayISO: TODAY, week: WEEK, period: PERIOD });
+  eq('the payload carries the scheduled payday for its period', tc.payday, E.paydayForPeriod(PERIOD));
+  eq('…which for {Aug 31, Sep 13} is Fri Sep 18', tc.payday, '2026-09-18');
+  check('the payday is a Friday after the period closes',
+    tc.payday > PERIOD.end && new Date(`${tc.payday}T00:00:00Z`).getUTCDay() === 5);
+}
+
+console.log('\n8. PREVIOUS PAY PERIODS — a bounded walk back, composed from the canonical cycle');
+{
+  const cur = E.payPeriodContaining(TODAY);
+  eq('today (Sep 8) sits in {Sep 7, Sep 20}', [cur.start, cur.end], ['2026-09-07', '2026-09-20']);
+  const prev = T.previousPayPeriods(cur.start);
+  eq('the default history length is six', prev.length, 6);
+  eq('newest first, each one ending the day before the next starts',
+    prev.map((p) => `${p.start}..${p.end}`),
+    ['2026-08-24..2026-09-06', '2026-08-10..2026-08-23', '2026-07-27..2026-08-09',
+     '2026-07-13..2026-07-26', '2026-06-29..2026-07-12', '2026-06-15..2026-06-28']);
+  // Contiguity and length are the two ways a hand-rolled walk goes wrong.
+  let contiguous = true, allFourteen = true;
+  let after = cur.start;
+  for (const p of prev) {
+    if (E.payPeriodContaining(p.start).start !== p.start) contiguous = false;
+    if ((Date.parse(`${after}T00:00:00Z`) - Date.parse(`${p.end}T00:00:00Z`)) !== 86400000) contiguous = false;
+    if ((Date.parse(`${p.end}T00:00:00Z`) - Date.parse(`${p.start}T00:00:00Z`)) !== 13 * 86400000) allFourteen = false;
+    after = p.start;
+  }
+  check('every step is a real period start and butts against the next', contiguous);
+  check('every window is a 14-day Mon→Sun', allFourteen);
+  eq('the walk is bounded by its argument', T.previousPayPeriods(cur.start, 2).length, 2);
+
+  // The history's own first period matches what the current period's payday implies.
+  eq("the newest closed period's Pay Day is two weeks before this one's",
+    E.paydayForPeriod(prev[0]), '2026-09-11');
+}
+
+console.log('\n9. PERIOD SUMMARIES — the SAME payable math as the current period, never a second sum');
+{
+  const OLD = { start: '2026-08-24', end: '2026-09-06' };
+  const rows = [
+    row({ id: 'o1', date: '2026-08-25', clock_in_at: '2026-08-25T06:00:00-07:00', clock_out_at: '2026-08-25T14:00:00-07:00' }),
+    row({ id: 'o2', date: '2026-09-02', clock_in_at: '2026-09-02T06:00:00-07:00', clock_out_at: '2026-09-02T14:30:00-07:00' }),
+    // Unconfirmed: shown, counted as waiting, NEVER inside the approved total.
+    row({ id: 'o3', date: '2026-09-04', confirmed_at: null, clock_in_at: '2026-09-04T06:00:00-07:00', clock_out_at: '2026-09-04T10:00:00-07:00' }),
+    // Outside the window entirely.
+    row({ id: 'o4', date: '2026-09-08', clock_in_at: '2026-09-08T06:00:00-07:00', clock_out_at: '2026-09-08T14:00:00-07:00' }),
+    // A materialized PLAN row is not worked time anywhere, history included.
+    row({ id: 'plan', date: '2026-08-26', source: 'manual', source_rule_id: 'rule-1' }),
+  ];
+  const [sum] = T.buildPayPeriods({ shifts: rows, periods: [OLD] });
+  eq('the window is the one asked for', [sum.start, sum.end], [OLD.start, OLD.end]);
+  eq('approved = the two confirmed punches (8 + 8.5)', sum.workedHours, 16.5);
+  eq('waiting = the unconfirmed 4', sum.pendingHours, 4);
+  eq('the summary carries its own scheduled Pay Day', sum.payday, E.paydayForPeriod(OLD));
+
+  // The detail screen must agree with the row the employee tapped — same entries, same totals.
+  const detail = T.buildTimecardPeriod({ shifts: rows, todayISO: TODAY, period: OLD });
+  eq('detail totals equal the summary', [detail.period.workedHours, detail.period.pendingHours], [16.5, 4]);
+  eq('detail summary is the same object shape', detail.summary, sum);
+  eq('detail days are newest first and exclude the out-of-window punch',
+    detail.period.days.map((d) => d.date), ['2026-09-04', '2026-09-02', '2026-08-25']);
+  eq('the plan row never appears in history either',
+    detail.period.days.some((d) => d.entries.some((e) => e.id === 'plan')), false);
+  eq('one read range covers a whole history sweep ±1 day',
+    T.spanReadRange(T.previousPayPeriods('2026-09-07')), { from: '2026-06-14', to: '2026-09-07' });
+}
+
+console.log('\n10. resolvePeriodStart — an untrusted ?period= selects a WINDOW or nothing at all');
+{
+  eq('a real period start resolves to its window',
+    T.resolvePeriodStart('2026-08-24', TODAY), { start: '2026-08-24', end: '2026-09-06' });
+  eq('the CURRENT period is allowed', T.resolvePeriodStart('2026-09-07', TODAY), { start: '2026-09-07', end: '2026-09-20' });
+  eq('a Monday that is NOT a period start is refused', T.resolvePeriodStart('2026-08-31', TODAY), null);
+  eq('a mid-period day is refused', T.resolvePeriodStart('2026-08-26', TODAY), null);
+  eq('a FUTURE period is refused', T.resolvePeriodStart('2026-09-21', TODAY), null);
+  eq('a rolled-over date is refused', T.resolvePeriodStart('2026-02-31', TODAY), null);
+  for (const bad of [null, undefined, '', 'yesterday', '2026-8-24', '2026-08-24T00:00:00Z', "2026-08-24' OR 1=1", 42, {}]) {
+    eq(`refused: ${JSON.stringify(bad)}`, T.resolvePeriodStart(bad, TODAY), null);
+  }
+}
+
 console.log(`\n${passed} checks passed`);

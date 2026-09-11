@@ -106,6 +106,22 @@ export function fmtDuration(h: number): string {
   return `${hh}h ${String(mm).padStart(2, '0')}m`;
 }
 
+/**
+ * 'Friday, Sep 25' — the scheduled Pay Day, spelled out.
+ *
+ * The weekday is not decoration: biweekly Fridays are easy to be a week wrong about, and the day
+ * name is what an employee actually checks against. Composed from the same two formatters as every
+ * other date on this screen, so it cannot drift from them.
+ */
+export function fmtPayday(dateISO: string): string {
+  return `${dowLong(dateISO)}, ${fmtMonthDay(dateISO)}`;
+}
+
+/** 'Sep 7 – Sep 20' — a pay period's window. One en dash, the same one fmtRangeLA uses. */
+export function fmtPeriodRange(startISO: string, endISO: string): string {
+  return `${fmtMonthDay(startISO)} – ${fmtMonthDay(endISO)}`;
+}
+
 /** 'Today' | 'Tomorrow' | 'Thursday' (the weekday for anything else). */
 export function relativeDayLabel(dateISO: string, todayISO: string): string {
   if (dateISO === todayISO) return 'Today';
