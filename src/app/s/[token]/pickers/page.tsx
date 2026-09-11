@@ -3,7 +3,7 @@ import { headers } from 'next/headers';
 import { guardPublicReadAllowed } from '@/lib/schedule/publicRoute';
 import { resolveCrewToken, loadCrewBoard, currentDay } from '@/lib/crewBoard/server';
 import {
-  formatHourLabel, formatClocked, addDaysISO,
+  formatHourLabel, formatClocked, addDaysISO, SECONDS_PER_BOX, SECONDS_PER_ITEM,
   type CrewBoard, type CrewPickerRow, type HourBucket,
 } from '@/lib/shipping/crewBoard';
 import { AutoRefresh } from './parts';
@@ -63,7 +63,7 @@ export default async function CrewBoardPage({
 
       <Summary board={board} />
 
-      {board.picking.length === 0 && board.noPicks.length === 0 ? (
+      {board.picking.length === 0 && board.singlesPackers.length === 0 && board.noPicks.length === 0 ? (
         <Empty>No one has clocked in or picked yet on this shift.</Empty>
       ) : (
         <>
@@ -71,6 +71,23 @@ export default async function CrewBoardPage({
             <Section title={`Picking (${board.picking.length})`}>
               {board.picking.map((r) => (
                 <PickerCard key={r.employee_id ?? r.name} row={r} target={board.targetBoxes} maxHour={maxHour} />
+              ))}
+            </Section>
+          )}
+
+          {/* SINGLE PACKERS — counted, never graded.
+              The target is in weighted boxes and singles are deliberately never weighted, so a
+              singles packer measured against it reads 0 / 200 (-200): the worst row on the board
+              for a full shift of real work. There is no honest singles target to put in its place
+              yet either, because nothing measured seconds-per-single until the station was
+              instrumented. So they get their own group and no grade until there is data. */}
+          {board.singlesPackers.length > 0 && (
+            <Section
+              title={`Single packers (${board.singlesPackers.length})`}
+              subtitle="No target yet — collecting data on how long a single actually takes."
+            >
+              {board.singlesPackers.map((r) => (
+                <SinglePackerCard key={r.employee_id ?? r.name} row={r} maxHour={maxHour} />
               ))}
             </Section>
           )}
@@ -107,7 +124,7 @@ export default async function CrewBoardPage({
           </>
         )}
         Bar height = boxes finished in that hour. The headline number is <strong>weighted</strong>:
-        a box counts more when it holds more items (measured: ~48s per package + ~17s per item), so
+        a box counts more when it holds more items (measured: ~{SECONDS_PER_BOX}s per package + ~{SECONDS_PER_ITEM}s per item), so
         bundle-heavy work is not undercounted. A typical box scores about 1.
         {isToday && ' The current hour is still in progress and will look short.'}
       </footer>
@@ -195,6 +212,29 @@ function PickerCard({ row, target, maxHour }: { row: CrewPickerRow; target: numb
   );
 }
 
+function SinglePackerCard({ row, maxHour }: { row: CrewPickerRow; maxHour: number }) {
+  return (
+    <div className="rounded-xl border border-tt-border bg-tt-card px-4 py-3">
+      <div className="flex items-baseline justify-between gap-3 mb-2">
+        <div className="min-w-0 truncate font-semibold text-sm text-tt-text" title={row.name}>
+          {row.name}
+          <span className="text-tt-muted font-normal text-xs"> · {formatClocked(row.clocked_ms)}</span>
+          {row.on_clock && <span className="text-tt-green text-xs"> ●</span>}
+          <span className="ml-2 text-[10px] uppercase tracking-wide text-tt-cyan font-bold">Single packer</span>
+        </div>
+        {/* The count, with NO target and NO shortfall beside it. */}
+        <div className="shrink-0 text-sm tabular-nums whitespace-nowrap text-right">
+          <span className="font-extrabold text-tt-cyan">{row.singles.toLocaleString()}</span>
+          <div className="text-[11px] text-tt-muted font-normal mt-0.5">
+            {row.singles === 1 ? 'single' : 'singles'}
+          </div>
+        </div>
+      </div>
+      <HourBars hours={row.hours} maxHour={maxHour} />
+    </div>
+  );
+}
+
 function HourBars({ hours, maxHour }: { hours: HourBucket[]; maxHour: number }) {
   const H = 40;
   return (
@@ -230,7 +270,12 @@ function HourBars({ hours, maxHour }: { hours: HourBucket[]; maxHour: number }) 
 // visually comparable. Floor of 1 keeps the division safe on an empty board.
 function maxHourOf(board: CrewBoard): number {
   let max = 1;
-  for (const r of board.picking) for (const h of r.hours) if (h.boxes > max) max = h.boxes;
+  // Singles packers are included in the scale: a batch scan lands a whole pile on ONE instant, so
+  // their bar is a single tall spike. Leaving it out of the shared scale would draw it past the
+  // top of its row.
+  for (const r of [...board.picking, ...board.singlesPackers]) {
+    for (const h of r.hours) if (h.boxes > max) max = h.boxes;
+  }
   return max;
 }
 

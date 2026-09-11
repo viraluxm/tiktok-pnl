@@ -367,31 +367,52 @@ console.log('\nsingles are counted but never weighted');
   ];
   const b = aggregateCrewBoard(events, [], day, 'am', startMs, endMs, now, offsetAt, {}, 200);
   const picker = b.picking.find((r) => r.name === 'picker');
-  const prepper = b.picking.find((r) => r.name === 'prepper');
+  const prepper = b.singlesPackers.find((r) => r.name === 'prepper');
 
   check('singles are counted on their own field', prepper.singles === 120, `${prepper.singles}`);
   check('singles do NOT become boxes', prepper.boxes === 0, `${prepper.boxes}`);
   check('singles do NOT become items', prepper.items === 0, `${prepper.items}`);
   check('120 singles score ZERO weighted — the picking model is not applied to them',
     prepper.weighted === 0, `${prepper.weighted}`);
-  check('a singles-only worker is NOT filed under "no picks"',
-    b.noPicks.length === 0 && !!prepper);
+  check('a singles-only worker is NOT filed under "no picks"', b.noPicks.length === 0);
   check('totals keep singles out of boxes and items',
     b.totalBoxes === 2 && b.totalItems === 7 && b.totalSingles === 120,
     `${b.totalBoxes}/${b.totalItems}/${b.totalSingles}`);
   check('the weighted total covers only the picked boxes',
     Math.abs(b.totalWeighted - weightedBoxes(2, 7)) < 1e-9);
-  check('availablePerPicker is not inflated by singles',
-    Math.abs(b.availablePerPicker - weightedBoxes(2, 7) / 2) < 1e-9);
+
 
   // If singles HAD been weighted like picking, 120 of them would have scored ~75 weighted boxes —
   // more than a third of a 200 target, for work the model never measured.
   check('had they been weighted, 120 singles would have wrongly scored ~75',
     Math.abs(weightedBoxes(120, 120) - 75) < 1.5, weightedBoxes(120, 120).toFixed(1));
 
-  check('a real picker outranks a singles-only worker on weighted', b.picking[0].name === 'picker');
+  check('a singles-only worker is in singlesPackers, NOT measured against the target',
+    b.singlesPackers.length === 1 && b.picking.length === 1 && b.picking[0].name === 'picker');
+  check('pickingCount excludes them, so the target denominator is only real pickers',
+    b.pickingCount === 1, `${b.pickingCount}`);
+  check('availablePerPicker is not diluted by a singles packer',
+    Math.abs(b.availablePerPicker - weightedBoxes(2, 7) / 1) < 1e-9);
+  check('hitTarget never counts a singles packer', b.hitTarget === 0, `${b.hitTarget}`);
   check('singles still bucket into their hour so the pace bars show the pile landing',
     prepper.hours.find((h) => h.labelHour === 10).boxes === 120);
+}
+
+console.log('\nsomeone who picked AND ran singles stays with the pickers');
+{
+  const day = '2026-09-08';
+  const { startMs, endMs } = crewRangeUtcMs(day, 'am', TZ);
+  const now = endMs;
+  const mk = (k, id, items, sing) => ({ group_key: k, picker_employee_id: id, picker_name_snapshot: id, verified_at: iso(pt(2026, 9, 8, 9)), items, isSingles: !!sing });
+  const b = aggregateCrewBoard(
+    [mk('x1', 'both', 3), mk('x2', 'both', 1, true), mk('x3', 'both', 1, true)],
+    [], day, 'am', startMs, endMs, now, offsetAt, {}, 200);
+  check('a mixed worker is a PICKER, not a single packer',
+    b.picking.length === 1 && b.singlesPackers.length === 0);
+  check('their singles ride along on the row', b.picking[0].singles === 2, `${b.picking[0].singles}`);
+  check('but the singles are still out of their weighted score',
+    Math.abs(b.picking[0].weighted - weightedBoxes(1, 3)) < 1e-9);
+  check('they count toward the target denominator', b.pickingCount === 1);
 }
 
 console.log('\nhour labels');
