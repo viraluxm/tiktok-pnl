@@ -69,6 +69,11 @@ export const PREVIEW_SHIFTS: Shift[] = [
     break_minutes: 2417,
   }),
   manual('e-juan', '2026-08-24', '06:00', '14:00'), // stacked on the punch above
+  // THE SPLIT DAY. Two separate clock sessions on one Monday — 4.00 h each, 8.00 h for the day.
+  // Before the calendarModel fix the second one existed in the database but never reached the
+  // confirm queue, so it could not be paid.
+  punch('e-juan', '2026-08-25', '06:00', '10:00'),
+  punch('e-juan', '2026-08-25', '14:00', '18:00'),
   punch('e-juan', '2026-08-26', '06:06', '14:01', { break_minutes: 27 }),
   manual('e-juan', '2026-08-26', '06:00', '14:00'), // stacked again
   punch('e-juan', '2026-08-27', '06:04', '14:02', { break_minutes: 62 }),
