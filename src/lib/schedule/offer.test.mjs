@@ -80,10 +80,26 @@ const eq = (n, a, b) => check(n, JSON.stringify(a) === JSON.stringify(b), `${JSO
 
 const OWNER = 'owner-1';
 const ME = { id: 'emp-me', user_id: OWNER, name: 'Me', role: 'fulfillment', status: 'active' };
-const NOW = new Date('2026-09-09T18:00:00Z');
+// THE FIXTURE SHIFT MUST BE IN THE FUTURE, AND IT HAS TO STAY THERE.
+//
+// This used to be a hard-coded 2026-09-11T13:00Z, with a `NOW` constant next to it that looked
+// like an injected clock but was not one: offerShift(employee, instanceId) takes no clock and
+// reads `new Date()` itself (offer.ts:47), so nothing here could pin time. The suite therefore
+// passed until real time crossed that instant and then failed for everyone, everywhere, at once —
+// which is exactly what happened on 2026-09-11 at 13:00Z.
+//
+// Dating the shift two days out keeps "this shift has not started" true whenever the suite runs.
+// The PAST cases below stay absolute on purpose: a fixed 2026-09-01 is permanently in the past,
+// so it needs no maintenance.
+const DAY_MS = 86_400_000;
+const FUTURE = new Date(Date.now() + 2 * DAY_MS);
+const FUTURE_DATE = FUTURE.toISOString().slice(0, 10);
+// getAvailableShifts DOES take an injectable clock, and this is it. Kept two days before the
+// fixture shift, exactly the gap the original absolute pair (2026-09-09 → 2026-09-11) expressed.
+const NOW = new Date(FUTURE.getTime() - 2 * DAY_MS);
 const row = (o = {}) => ({
-  id: 'inst-1', user_id: OWNER, employee_id: ME.id, shift_date: '2026-09-11',
-  starts_at: '2026-09-11T13:00:00+00:00', ends_at: '2026-09-11T21:00:00+00:00',
+  id: 'inst-1', user_id: OWNER, employee_id: ME.id, shift_date: FUTURE_DATE,
+  starts_at: `${FUTURE_DATE}T13:00:00+00:00`, ends_at: `${FUTURE_DATE}T21:00:00+00:00`,
   status: 'scheduled', released_at: null, released_by: null, role: 'fulfillment',
   source: 'pattern', offer_state: null, offer_id: null, offered_at: null, ...o,
 });
@@ -92,7 +108,7 @@ console.log('\n1. DROP writes an OFFER and nothing else');
 {
   reset((r) => {
     if (r.table === 'shift_instances' && r.op === 'select') return { data: row(), error: null };
-    if (r.table === 'shift_instances' && r.op === 'update') return { data: { id: 'inst-1', shift_date: '2026-09-11', starts_at: 'S', ends_at: 'E' }, error: null };
+    if (r.table === 'shift_instances' && r.op === 'update') return { data: { id: 'inst-1', shift_date: FUTURE_DATE, starts_at: 'S', ends_at: 'E' }, error: null };
     return { data: null, error: null };
   });
   const res = await O.offerShift(ME, 'inst-1');

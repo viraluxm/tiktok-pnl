@@ -288,12 +288,26 @@ function pickScheduled(rows: CalScheduled[]): CalScheduled | null {
   return rows.find((r) => r.origin === 'instance') ?? rows[0];
 }
 
-/** The punch that counts for a day: an open one wins (it's live), else the earliest. */
-function pickPunch(rows: CalPunch[]): CalPunch | null {
-  if (rows.length === 0) return null;
-  const open = rows.find((r) => r.end_time == null);
-  if (open) return open;
-  return [...rows].sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time))[0];
+/**
+ * EVERY punch a person has on a day, ordered: an open one first (it is live), then by start time.
+ *
+ * This used to be `pickPunch`, which returned ONE — the open punch, else the earliest — and threw
+ * the rest away. A split day is normal here (a 6am-2pm fulfillment shift and a 5pm-1am live shift
+ * are two separate clock sessions), and every clock-out RPC correctly writes a separate `shifts`
+ * row for each, so the second row existed all along. Collapsing here is what hid it: the second
+ * punch never reached the month calendar, the day modal, or — the part that cost money — the
+ * confirm queue, which lists `state === 'pending'` people. A time-clock row is not payable until a
+ * manager confirms it, so a punch that cannot appear in that queue cannot be paid. At the time this
+ * was found, production held 12 unconfirmed later-shifts worth 91.86 hours that no manager could
+ * reach from the calendar.
+ */
+function orderPunches(rows: CalPunch[]): CalPunch[] {
+  return [...rows].sort((a, b) => {
+    const openRank = (r: CalPunch) => (r.end_time == null ? 0 : 1);
+    const o = openRank(a) - openRank(b);
+    if (o !== 0) return o;
+    return toMinutes(a.start_time) - toMinutes(b.start_time);
+  });
 }
 
 function classify(
@@ -383,32 +397,12 @@ export function buildCalendarDays(args: {
     if (!emp || !cell) continue;
     if (!matchesRole(emp.role)) continue;
 
-    const rawPunch = pickPunch(punchBy.get(key) ?? []);
+    const rawPunches = orderPunches(punchBy.get(key) ?? []);
     const rawSched = pickScheduled(schedBy.get(key) ?? []);
 
     // View filter: decided on the RAW pair, before either side is dropped.
-    if (view === 'clocked' && !rawPunch) continue;
+    if (view === 'clocked' && rawPunches.length === 0) continue;
     if (view === 'scheduled' && !rawSched) continue;
-
-    // Confirmation gates ONLY time-clock rows (isPayableShift ignores confirmed_at for manual
-    // rows). Treating a manual row as unconfirmed would paint it yellow and offer a Confirm
-    // button the RPC would refuse — so a manual row reads as already-confirmed and un-confirmable.
-    const isTimeClock = rawPunch?.source === 'time_clock';
-    const punch: DayPunch | null = rawPunch
-      ? {
-          id: rawPunch.id,
-          start_time: rawPunch.start_time,
-          end_time: rawPunch.end_time,
-          hours: punchHours(rawPunch),
-          clockedHours: punchClockedHours(rawPunch),
-          approvedMinutes: rawPunch.approved_minutes ?? null,
-          breakMinutes: rawPunch.break_minutes ?? 0,
-          confirmed: isTimeClock ? rawPunch.confirmed_at != null : true,
-          confirmable: isTimeClock,
-          autoClosed: rawPunch.auto_closed === true,
-          isOpen: rawPunch.end_time == null,
-        }
-      : null;
 
     const sched: DayScheduled | null = rawSched
       ? {
@@ -425,19 +419,64 @@ export function buildCalendarDays(args: {
     // "what are we paying", and a plan number sitting beside it invites reading the wrong one.
     const shownSched = view === 'clocked' ? null : sched;
 
-    // Delta always compares the real pair, even when the schedule is hidden from the cell.
-    const deltaHours = punch && !punch.isOpen && sched ? round2(punch.hours - sched.hours) : null;
+    const toDayPunch = (rawPunch: CalPunch): DayPunch => {
+      // Confirmation gates ONLY time-clock rows (isPayableShift ignores confirmed_at for manual
+      // rows). Treating a manual row as unconfirmed would paint it yellow and offer a Confirm
+      // button the RPC would refuse — so a manual row reads as already-confirmed and un-confirmable.
+      const isTimeClock = rawPunch.source === 'time_clock';
+      return {
+        id: rawPunch.id,
+        start_time: rawPunch.start_time,
+        end_time: rawPunch.end_time,
+        hours: punchHours(rawPunch),
+        clockedHours: punchClockedHours(rawPunch),
+        approvedMinutes: rawPunch.approved_minutes ?? null,
+        breakMinutes: rawPunch.break_minutes ?? 0,
+        confirmed: isTimeClock ? rawPunch.confirmed_at != null : true,
+        confirmable: isTimeClock,
+        autoClosed: rawPunch.auto_closed === true,
+        isOpen: rawPunch.end_time == null,
+      };
+    };
 
-    cell.people.push({
-      employee_id: employeeId,
-      name: emp.name,
-      role: emp.role,
-      scheduled: shownSched,
-      wasScheduled: sched != null,
-      punch,
-      deltaHours,
-      state: classify(punch, sched != null, date < todayISO, view),
-    });
+    // ONE ENTRY PER PUNCH. A person who worked twice appears twice in the day, each entry carrying
+    // its own punch, its own state and therefore its own Confirm/Edit affordances — which is the
+    // whole point: the records are separate in the database and must stay separately actionable.
+    //
+    // The SCHEDULE rides on the FIRST entry only. There is one plan for the day, and repeating it
+    // beside each session would double the scheduled hours a manager reads off the cell and make
+    // every split day look like a no-show against a phantom second plan.
+    if (rawPunches.length === 0) {
+      cell.people.push({
+        employee_id: employeeId,
+        name: emp.name,
+        role: emp.role,
+        scheduled: shownSched,
+        wasScheduled: sched != null,
+        punch: null,
+        deltaHours: null,
+        state: classify(null, sched != null, date < todayISO, view),
+      });
+    } else {
+      rawPunches.forEach((rawPunch, i) => {
+        const punch = toDayPunch(rawPunch);
+        const mySched = i === 0 ? shownSched : null;
+        const myWasScheduled = i === 0 ? sched != null : false;
+        // Delta always compares the real pair, even when the schedule is hidden from the cell.
+        const deltaHours =
+          i === 0 && !punch.isOpen && sched ? round2(punch.hours - sched.hours) : null;
+        cell.people.push({
+          employee_id: employeeId,
+          name: emp.name,
+          role: emp.role,
+          scheduled: mySched,
+          wasScheduled: myWasScheduled,
+          punch,
+          deltaHours,
+          state: classify(punch, myWasScheduled, date < todayISO, view),
+        });
+      });
+    }
   }
 
   for (const cell of byDate.values()) {
@@ -452,7 +491,11 @@ export function buildCalendarDays(args: {
       if (t !== 0) return t;
       return a.name.localeCompare(b.name);
     });
-    cell.headcount = cell.people.length;
+    // HEADCOUNT IS PEOPLE, not entries — someone who worked a split day is one person on the
+    // floor, and a cell reading "2" for one person would misreport staffing. Everything else
+    // counts ENTRIES, because each is a separate record with its own action: two pending sessions
+    // are two things to confirm, and the chip has to say 2 or the second is invisible again.
+    cell.headcount = new Set(cell.people.map((p) => p.employee_id)).size;
     cell.pendingCount = cell.people.filter((p) => p.state === 'pending').length;
     cell.openCount = cell.people.filter((p) => p.state === 'open').length;
     cell.clockedCount = cell.people.filter((p) => p.punch != null).length;
