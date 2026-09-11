@@ -88,6 +88,20 @@ export function addSlipPage(
   const usable = size.width - pad * 2;
   const centred = (text: string, s: number) => (size.width - measure(text, s)) / 2;
 
+  // Reserve the bottom block FIRST, then lay the title out into what is left.
+  //
+  // fitText picks a size by WIDTH alone. Before the barcode existed the count sat at the very
+  // bottom and a 3-line title had room to spare; the barcode lifts the count by ~80pt and a long
+  // title then ran straight through it — '#428 CRUNCHY SOAP BAR ORIGINAL' printed with '27 LABELS'
+  // struck through the word ORIGINAL. Choosing the title size against the REMAINING height stops
+  // the two blocks from ever meeting, whatever the caption.
+  const hasCode = typeof slip.batchCode === 'string' && slip.batchCode.length > 0;
+  const barcodeBlock = hasCode ? BARCODE_HEIGHT + BARCODE_TEXT_SIZE + 14 : 0;
+  const countSize = 26;
+  const countY = MARGIN + BORDER + 18 + barcodeBlock;
+  // The hairline sits just above the count; the title must clear it with a little breathing room.
+  const titleFloor = countY + countSize + 6 + 10;
+
   // Lay out from the top down.
   let y = size.height - pad - (heavy ? 30 : 0);
 
@@ -101,7 +115,19 @@ export function addSlipPage(
   }
 
   if (title) {
-    const fit = fitText(title, measure, usable, 3, TITLE_SIZES);
+    // How many lines fit above the floor at a given size — never more than 3.
+    const linesThatFit = (sz: number) => Math.max(0, Math.min(3, Math.floor((y - titleFloor) / (sz * 1.12))));
+    // Largest size that still shows the whole title without crossing the floor. Falls back to the
+    // smallest size rather than dropping the title, so a very long name shrinks instead of colliding.
+    let chosen = TITLE_SIZES[TITLE_SIZES.length - 1];
+    let maxLines = Math.max(1, linesThatFit(chosen));
+    for (const sz of TITLE_SIZES) {
+      const room = linesThatFit(sz);
+      if (room < 1) continue;
+      const probe = fitText(title, measure, usable, room, [sz]);
+      if (!probe.truncated) { chosen = sz; maxLines = room; break; }
+    }
+    const fit = fitText(title, measure, usable, maxLines, [chosen]);
     for (const line of fit.lines) {
       y -= fit.size * 1.12;
       page.drawText(line, { x: centred(line, fit.size), y, size: fit.size, font, color: black });
@@ -115,16 +141,11 @@ export function addSlipPage(
     }
   }
 
-  // The barcode sits at the BOTTOM, below the count, and the count moves up to make room. Bottom
-  // because that is the edge nearest the packer when the slip is face-up on the bench, and because
-  // it keeps the number and title block — the things read at arm's length — in the same place they
-  // have always been.
-  const hasCode = typeof slip.batchCode === 'string' && slip.batchCode.length > 0;
-  const barcodeBlock = hasCode ? BARCODE_HEIGHT + BARCODE_TEXT_SIZE + 14 : 0;
-
+  // The barcode sits at the BOTTOM, below the count. Bottom because that is the edge nearest the
+  // packer when the slip is face-up on the bench, and because it keeps the number and title block —
+  // the things read at arm's length — where they have always been. Both positions were reserved
+  // before the title was laid out, so the blocks cannot collide.
   const countText = `${slip.count} ${slip.count === 1 ? 'LABEL' : 'LABELS'}`;
-  const countSize = 26;
-  const countY = MARGIN + BORDER + 18 + barcodeBlock;
   page.drawText(countText, {
     x: centred(countText, countSize), y: countY, size: countSize, font, color: black,
   });
