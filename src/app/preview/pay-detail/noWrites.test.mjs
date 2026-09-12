@@ -65,7 +65,6 @@ for (const c of ['PayGrid', 'PayDetailModal', 'ShiftEditorModal']) {
 for (const [label, spec, name] of [
   ['the payroll totals', '@/lib/employees', 'computePay'],
   ['the statement model', '@/lib/pay/statement', 'buildPayStatement'],
-  ['the bonus selector', '@/lib/pay/statement', 'bonusSummaryFor'],
   ['the total-owed rule', '@/lib/pay/statement', 'totalOwedOf'],
   ['the edit patch builder', '@/lib/shifts/punchEdit', 'buildShiftEditPatch'],
 ]) {
@@ -81,13 +80,13 @@ check('the preview does no hours arithmetic of its own',
 //     never work a bonus total out for itself, or the figure approved here would not be the figure
 //     that ships.
 check('the preview feeds its adjustments into the statement build', /adjustments,/.test(view));
-check('...and re-selects them per employee, priced off that employee\'s own payable hours',
-  /bonusSummaryFor\(adjustments, p\.employee\.id, period, p\.hours\)/.test(view));
+check('...and reads each tile\'s bonus off the NORMALIZED STATEMENT, which owns per-day hours',
+  /statementsByEmployee\.get\(p\.employee\.id\)\?\.totals\.bonusTotal/.test(view));
 check('...adding them with the shared rule, never by hand',
-  /totalOwedOf\(p\.pay, bonus\.total\)/.test(view) &&
+  /totalOwedOf\(p\.pay, bonusTotal\)/.test(view) &&
     !/amount_cents\s*\+|bonusItems\.reduce|\/ 100|\* 100/.test(view));
 check('...and NEVER pricing an hourly bonus itself — no rate x hours in the preview',
-  !/rate_cents_per_hour\s*\*|\*\s*p\.hours|\*\s*paidHours/.test(view));
+  !/rate_cents_per_hour\s*\*|\*\s*p\.hours|\*\s*paidHours|paidHoursByDate\[/.test(view));
 check('the preview hands the bonus write path to the real panel', /bonus=\{bonusHandlers\}/.test(view));
 check('the fixtures carry a bonus from ANOTHER pay period, so scoping is visible',
   /period_start: '2026-08-10'/.test(fx) && /period_end: '2026-08-23'/.test(fx));
@@ -101,9 +100,25 @@ check('the fixtures carry FLAT bonuses', /calculation_type: 'flat'/.test(fx));
 check('...and HOURLY ones', /calculation_type: 'hourly'/.test(fx));
 check('...including one for a LIVE HOST, whose payable hours are the approved duration',
   /employee_id: 'e-adriana'[\s\S]{0,220}calculation_type: 'hourly'/.test(fx));
-check('every fixture row sets BOTH money columns, one of them null — the shape the CHECKs require',
+check('every fixture row sets ALL THREE shape columns — the shape the CHECKs require',
   (fx.match(/calculation_type: '(flat|hourly)'/g) || []).length ===
-    (fx.match(/rate_cents_per_hour:/g) || []).length);
+    (fx.match(/rate_cents_per_hour:/g) || []).length &&
+  (fx.match(/calculation_type: '(flat|hourly)'/g) || []).length ===
+    (fx.match(/target_date:/g) || []).length);
+// THE SIMPLIFICATION, pinned on the review surface too.
+check('every HOURLY fixture row names a day', !/calculation_type: 'hourly'[\s\S]{0,140}target_date: null/.test(fx));
+check('every FLAT fixture row has no day', !/calculation_type: 'flat'[\s\S]{0,140}target_date: '/.test(fx));
+check('the fixtures include a ZERO-HOUR target day, so that case is reviewable',
+  /Saturday cover incentive/.test(fx));
+check('...and a multi-shift target day, so the summing case is reviewable', (() => {
+  // Match the CODE, not the comment: two punches on the SAME date that an hourly row targets.
+  const target = /target_date: '(\d{4}-\d{2}-\d{2})'/.exec(fx);
+  if (!target) return false;
+  const onThatDay = (fx.match(new RegExp(`punch\\([^)]*'${target[1]}'`, 'g')) || []).length;
+  return onThatDay >= 2;
+})());
+check('no "entire pay period" hourly option appears anywhere on the review route',
+  !/entire pay period/i.test(all) && !/periodWide|wholePeriod/i.test(all));
 check('NO fixture row stores a calculated hourly total — the whole point of deriving it',
   !/calculated/i.test(fx));
 

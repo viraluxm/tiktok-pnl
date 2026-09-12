@@ -2,7 +2,12 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { fmt } from '@/lib/calculations';
-import { formatBonusBasis, formatPayableDuration, type BonusItem } from '@/lib/pay/statement';
+import {
+  formatBonusBasis,
+  formatDayLabel,
+  formatPayableDuration,
+  type BonusItem,
+} from '@/lib/pay/statement';
 import {
   BONUS_DESCRIPTION_MAX,
   centsToInput,
@@ -39,6 +44,8 @@ export interface BonusDraft {
   amountCents: number | null;
   /** HOURLY only. */
   rateCentsPerHour: number | null;
+  /** HOURLY only — required; the day whose payable hours the rate is paid on. */
+  targetDateISO: string | null;
   description: string | null;
 }
 
@@ -148,7 +155,12 @@ export function BonusSection({
  * person and the pay period are whichever Pay Details is open on, which is what makes this two
  * fields instead of a picker a manager could get wrong.
  *
+ * AN HOURLY BONUS ALWAYS NAMES A DAY. There is no "entire pay period" option and no scope toggle —
+ * picking Hourly reveals a required Day selector, offering only this period's own dates.
+ *
  * THE CALCULATION TYPE IS CHOSEN ONCE, WHEN THE BONUS IS ADDED, AND IS NOT EDITABLE AFTERWARDS.
+ * (The DAY and the rate both are — moving an incentive from Tuesday to Wednesday is a correction;
+ * turning a one-off payment into a per-hour rate is a different bonus.)
  * Both writes are equally safe at the database — the row sets both money columns explicitly either
  * way — so this is a product decision, not a technical limit, and it is the safer of the two:
  * "$2.00" as a flat bonus and "$2.00" as an hourly rate differ by a factor of the period's hours
@@ -158,14 +170,14 @@ export function BonusSection({
  */
 const TYPES: { value: PayAdjustmentCalculationType; label: string; hint: string }[] = [
   { value: 'flat', label: 'Flat amount', hint: 'A fixed sum for this pay period.' },
-  { value: 'hourly', label: 'Hourly bonus', hint: 'Paid per payable hour worked in this pay period.' },
+  { value: 'hourly', label: 'Hourly bonus', hint: 'Paid per payable hour on ONE chosen day.' },
 ];
 
 export function BonusFormModal({
   employeeName,
   periodLabel,
-  /** The payable hours an hourly bonus would be multiplied by — shown, never used to compute. */
-  paidHours,
+  periodDays,
+  paidHoursByDate,
   /** The bonus being edited, or null to add a new one. */
   editing,
   busy,
@@ -175,7 +187,10 @@ export function BonusFormModal({
 }: {
   employeeName: string;
   periodLabel: string;
-  paidHours: number;
+  /** Every date in the pay period, in order — the only days an hourly bonus may name. */
+  periodDays: string[];
+  /** That date's canonical payable hours, so the form can show what a rate will be multiplied by. */
+  paidHoursByDate: Readonly<Record<string, number>>;
   editing: BonusItem | null;
   busy: boolean;
   error: string | null;
@@ -183,6 +198,11 @@ export function BonusFormModal({
   onSubmit: (input: BonusDraft) => void;
 }) {
   const [type, setType] = useState<PayAdjustmentCalculationType>(editing?.calculationType ?? 'flat');
+  // Defaults to the day being edited, else the period's first day — never blank, so "required" can
+  // never be satisfied by accident and the manager always sees which day they are about to pay.
+  const [targetDate, setTargetDate] = useState<string>(
+    editing?.targetDateISO ?? periodDays[0] ?? '',
+  );
   const [value, setValue] = useState(() => {
     if (!editing) return '';
     return centsToInput((editing.calculationType === 'hourly' ? editing.rateCentsPerHour : editing.amountCents) ?? 0);
@@ -210,14 +230,24 @@ export function BonusFormModal({
       setLocalError(parsed.error);
       return;
     }
+    // A DAY IS REQUIRED for an hourly bonus, and it must be one of this period's own days. The
+    // database refuses both mistakes too (migration 151) — this is only so the manager gets a
+    // sentence instead of a Postgres error.
+    if (hourly && !periodDays.includes(targetDate)) {
+      setLocalError('Choose the day this hourly bonus is paid on.');
+      return;
+    }
     setLocalError(null);
     onSubmit({
       calculationType: type,
       amountCents: hourly ? null : parsed.cents,
       rateCentsPerHour: hourly ? parsed.cents : null,
+      targetDateISO: hourly ? targetDate : null,
       description: normalizeBonusDescription(description),
     });
   }
+
+  const dayHours = paidHoursByDate[targetDate] ?? 0;
 
   const shown = localError ?? error;
 
@@ -245,7 +275,7 @@ export function BonusFormModal({
               <span className="font-semibold text-tt-text">{hourly ? 'Hourly bonus' : 'Flat amount'}</span>
               {' — '}
               {hourly
-                ? 'to change it to a flat amount, delete this bonus and add it again.'
+                ? 'the day and rate are editable below; to make it a flat amount instead, delete this bonus and add it again.'
                 : 'to change it to an hourly bonus, delete this bonus and add it again.'}
             </p>
           ) : (
@@ -277,6 +307,31 @@ export function BonusFormModal({
                 ))}
               </div>
             </fieldset>
+          )}
+
+          {/* THE DAY. Required for an hourly bonus, and offered as a closed list of THIS period's
+              own dates — a manager cannot name a day the cheque does not pay, and a free date
+              input could. Each option states the hours it currently carries, so the figure the
+              rate will be multiplied by is visible before saving. */}
+          {hourly && (
+            <label className="mt-3 block">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-tt-muted">Day</span>
+              <select
+                value={targetDate}
+                onChange={(e) => { setTargetDate(e.target.value); setLocalError(null); }}
+                aria-label="Day this hourly bonus is paid on"
+                className="mt-1 min-h-[44px] w-full rounded-xl border border-tt-border bg-tt-card px-3 text-[14px] text-tt-text outline-none"
+              >
+                {periodDays.map((d) => {
+                  const h = paidHoursByDate[d] ?? 0;
+                  return (
+                    <option key={d} value={d}>
+                      {formatDayLabel(d)} — {h > 0 ? `${formatPayableDuration(h)} payable` : 'no payable hours yet'}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
           )}
 
           <label className="mt-3 block">
@@ -317,11 +372,12 @@ export function BonusFormModal({
               <>
                 {/* The SAME duration basis the saved line will show, so the figure a manager sees
                     while choosing a rate is the figure they see afterwards. Stated as a duration
-                    rather than 72.50 hr for the reason formatBonusBasis explains: this number is
+                    rather than a decimal for the reason formatBonusBasis explains: this number is
                     about to be multiplied by the rate above it, and it has to come out right. */}
-                Paid on every payable hour in this pay period — {formatPayableDuration(paidHours)} so
-                far. It is separate from the base hourly rate and changes nothing about it; if worked
-                hours are corrected later, this bonus follows them on its own.
+                Paid on {targetDate ? formatDayLabel(targetDate) : 'the chosen day'}&apos;s payable
+                hours{dayHours > 0 ? <> — {formatPayableDuration(dayHours)} so far</> : <>, which are 0.00 so far, so this is worth $0.00 today</>}.
+                It is separate from the base hourly rate and changes nothing about it; if that
+                day&apos;s hours are corrected later, this bonus follows them on its own.
               </>
             ) : (
               <>A bonus is paid on top of worked time. It adds no hours and changes no shift, rate or clock-in.</>
@@ -388,7 +444,9 @@ export function BonusDeleteConfirm({
               ['Bonus', item.label],
               // An hourly line's worth is DERIVED, so the dialog says what it is derived from and
               // calls the figure what it is — a current value, not a fixed amount.
-              [item.calculationType === 'hourly' ? 'Rate' : 'Type', formatBonusBasis(item)],
+              // For an hourly line this states the DAY, the rate and the hours it is priced off —
+              // the three things that make its "current value" what it is.
+              [item.calculationType === 'hourly' ? 'Day & rate' : 'Type', formatBonusBasis(item)],
               [item.calculationType === 'hourly' ? 'Current value' : 'Amount', fmt(item.amount)],
             ].map(([k, v]) => (
               <div key={k} className="flex items-baseline justify-between gap-4">

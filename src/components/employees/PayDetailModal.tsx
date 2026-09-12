@@ -417,6 +417,9 @@ export default function PayDetailModal({
 
   const weeks = useMemo(() => payPeriodWeeks(statement), [statement]);
   const hasBonus = statement.bonusItems.length > 0;
+  // Every calendar day of the period, in order — taken from the SAME week grouping rendered above,
+  // so the day list a manager picks from is exactly the day list they are looking at.
+  const periodDays = useMemo(() => weeks.flatMap((w) => w.days.map((d) => d.dateISO)), [weeks]);
 
   if (typeof document === 'undefined') return null;
 
@@ -587,9 +590,11 @@ export default function PayDetailModal({
           key={bonusForm === 'add' ? 'add' : bonusForm.id}
           employeeName={statement.employee.name}
           periodLabel={formatPeriodRange(statement.period.start, statement.period.end)}
-          // Shown in the form so a manager choosing an hourly rate can see what it will be
-          // multiplied by. The form never multiplies — buildPayStatement does, on the way back.
-          paidHours={statement.totals.paidHours}
+          // The period's own days, and each day's payable hours — so the form can require a day,
+          // offer only days this cheque pays, and show what the rate will be multiplied by. The
+          // form never multiplies anything: buildPayStatement does, on the way back.
+          periodDays={periodDays}
+          paidHoursByDate={statement.totals.paidHoursByDate}
           editing={bonusForm === 'add' ? null : bonusForm}
           busy={bonusBusy}
           error={bonusError}

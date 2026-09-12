@@ -2,7 +2,7 @@
 // content streams inflated and read back. The three things it has to prove:
 //
 //   1. A bonus of EITHER type is ON the paper: its name, how it was arrived at ('Flat', or
-//      '$2.00/hr x 72h 30m payable'), what it is worth, the subtotal and a TOTAL OWED.
+//      'Tue Aug 25 · $5.00/hr x 8h payable'), what it is worth, the subtotal and a TOTAL OWED.
 //   2. That TOTAL OWED is the SAME NUMBER Pay Details shows — asserted against the model both
 //      surfaces read, and against the modal's own source, not against a second calculation here.
 //   3. WITH NO BONUSES THE DOCUMENT IS THE ONE THAT SHIPPED BEFORE — byte for byte, not "looks
@@ -106,26 +106,27 @@ const row = (id, min, over) => ({
   id, user_id: 'u1', employee_id: 'e-carlos',
   period_start: PERIOD.start, period_end: PERIOD.end,
   kind: 'bonus', calculation_type: 'flat', amount_cents: null, rate_cents_per_hour: null,
-  description: null,
+  target_date: null, description: null,
   created_at: `2026-09-07T18:0${min}:00.000Z`, updated_at: `2026-09-07T18:0${min}:00.000Z`,
   ...over,
 });
 const adj = (id, amount_cents, description, min) =>
   row(id, min, { calculation_type: 'flat', amount_cents, description });
-const hourlyAdj = (id, rate_cents_per_hour, description, min) =>
-  row(id, min, { calculation_type: 'hourly', rate_cents_per_hour, description });
+// An hourly bonus is DAY-SPECIFIC: target_date is required by the database and by this helper.
+const hourlyAdj = (id, rate_cents_per_hour, description, min, target_date = '2026-08-25') =>
+  row(id, min, { calculation_type: 'hourly', rate_cents_per_hour, target_date, description });
 
 const build = (adjustments) =>
   buildPayStatement({ employee: CARLOS, period: PERIOD, shifts: SHIFTS, adjustments, generatedAtISO: GENERATED });
 
 const plain = build(undefined);
 // The reviewed case: two flat bonuses and one hourly incentive.
-//   $100.00 + $50.00 flat, plus $2.00/hr x 72.50 payable hr = $145.00  →  $295.00 of bonus pay
-//   $1,595.00 worked + $295.00 bonus                                   →  $1,890.00 owed
+//   $100.00 + $50.00 flat, plus $5.00/hr on TUESDAY Aug 25 (8.00 payable hr) = $40.00
+//   → $190.00 of bonus pay; $1,595.00 worked + $190.00 bonus → $1,785.00 owed
 const withBonus = build([
   adj('b1', 10000, 'Performance bonus', 1),
   adj('b2', 5000, 'Attendance bonus', 2),
-  hourlyAdj('b3', 200, 'Productivity incentive', 3),
+  hourlyAdj('b3', 500, 'Tuesday incentive', 3, '2026-08-25'),
 ]);
 
 const plainPdf = await renderPayStatementPdf(plain, { loadLogo });
@@ -139,9 +140,10 @@ console.log('\n§1 The fixture is the reviewed one');
   check('72.50 worked hours', plain.totals.paidHours.toFixed(2) === '72.50');
   check('$1,595.00 of worked pay', formatMoney(plain.totals.gross) === '$1,595.00');
   check('$150.00 of flat bonus', formatMoney(withBonus.totals.flatBonusTotal) === '$150.00');
-  check('$145.00 of hourly bonus', formatMoney(withBonus.totals.hourlyBonusTotal) === '$145.00');
-  check('$295.00 of bonus pay', formatMoney(withBonus.totals.bonusTotal) === '$295.00');
-  check('$1,890.00 owed', formatMoney(withBonus.totals.totalOwed) === '$1,890.00');
+  check('Tuesday carries 8.00 payable hours', withBonus.totals.paidHoursByDate['2026-08-25'] === 8);
+  check('$40.00 of hourly bonus, priced off THAT DAY', formatMoney(withBonus.totals.hourlyBonusTotal) === '$40.00');
+  check('$190.00 of bonus pay', formatMoney(withBonus.totals.bonusTotal) === '$190.00');
+  check('$1,785.00 owed', formatMoney(withBonus.totals.totalOwed) === '$1,785.00');
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -186,18 +188,19 @@ console.log('\n§3 WITH BONUSES — name, amount, subtotal, total');
   check('...with its amount', bonusText.includes('$50.00'));
 
   // THE HOURLY LINE — the one the paper has to explain rather than just assert.
-  check('the hourly incentive is named', bonusText.includes('Productivity incentive'));
+  check('the hourly incentive is named', bonusText.includes('Tuesday incentive'));
   check('...it shows its RATE and its ELIGIBLE TIME, so the figure can be checked by hand',
-    bonusText.includes('$2.00/hr') && bonusText.includes('72h 30m payable'));
+    bonusText.includes('$5.00/hr') && bonusText.includes('8h payable'));
+  check('...and it names the DAY it was priced on', bonusText.includes('Tue Aug 25'));
   check('...as a DURATION, never a 2-decimal hour figure that would not multiply out',
     !/\$2\.00\/hr [^\n]*72\.50/.test(bonusText));
   check('...through the SAME formatter the screen uses, character for character',
     bonusText.includes(formatBonusBasis(withBonus.bonusItems[2])),
     formatBonusBasis(withBonus.bonusItems[2]));
-  check('...and prints what it is worth', bonusText.includes('$145.00'));
+  check('...and prints what it is worth', bonusText.includes('$40.00'));
 
-  check('the subtotal is printed', bonusText.includes('Bonus Pay:') && bonusText.includes('$295.00'));
-  check('TOTAL OWED is printed', bonusText.includes('TOTAL OWED:') && bonusText.includes('$1,890.00'));
+  check('the subtotal is printed', bonusText.includes('Bonus Pay:') && bonusText.includes('$190.00'));
+  check('TOTAL OWED is printed', bonusText.includes('TOTAL OWED:') && bonusText.includes('$1,785.00'));
 
   // The worked-pay row is RENAMED, not removed — it is no longer the whole of the gross.
   check('the worked row is labelled "Hourly Pay:" once bonuses exist', bonusText.includes('Hourly Pay:'));
@@ -225,7 +228,7 @@ console.log('\n§4 The paper and the screen show the SAME total owed');
     return modal.includes('fmt(statement.totals.totalOwed)');
   })());
   check('the PDF prints the same bonus subtotal the panel does',
-    bonusText.includes(fmt(withBonus.totals.bonusTotal)) && fmt(withBonus.totals.bonusTotal) === '$295.00');
+    bonusText.includes(fmt(withBonus.totals.bonusTotal)) && fmt(withBonus.totals.bonusTotal) === '$190.00');
   // The hourly line is the one that could be re-derived and get a different answer. Every part of
   // it on paper must be the model's own field, not a recomputation.
   const hourlyItem = withBonus.bonusItems[2];
@@ -233,8 +236,10 @@ console.log('\n§4 The paper and the screen show the SAME total owed');
     bonusText.includes(formatMoney(hourlyItem.rateCentsPerHour / 100)) &&
       bonusText.includes(formatPayableDuration(hourlyItem.eligiblePaidHours)) &&
       bonusText.includes(fmt(hourlyItem.amount)));
-  check('...and that eligible time IS the statement\'s payable hours, unrounded',
-    hourlyItem.eligiblePaidHours === withBonus.totals.paidHours);
+  check('...and that eligible time IS the TARGET DAY\'s payable hours, unrounded',
+    hourlyItem.eligiblePaidHours === withBonus.totals.paidHoursByDate[hourlyItem.targetDateISO]);
+  check('...not the whole period\'s — the pay-period-wide hourly bonus is gone',
+    hourlyItem.eligiblePaidHours !== withBonus.totals.paidHours && withBonus.totals.paidHours > 8);
   check('...while the summary\'s own Total Hours line is UNCHANGED, still 2 decimals',
     bonusText.includes('Total Hours This Pay Period:') && bonusText.includes('72.50'));
 
@@ -262,13 +267,14 @@ console.log('\n§4b THE LIVE-HOST CASE THAT PROMPTED THE PRESENTATION FIX, ON PA
   const hostShift = [{ ...punch('2026-08-24', '06:00', '14:00'), approved_minutes: 1828 }];
   const hostStatement = buildPayStatement({
     employee: host, period: PERIOD, shifts: hostShift,
-    adjustments: [hourlyAdj('bh', 300, 'Live show incentive', 1)], generatedAtISO: GENERATED,
+    adjustments: [hourlyAdj('bh', 300, 'Live show incentive', 1, '2026-08-24')], generatedAtISO: GENERATED,
   });
   const hostText = textOf(await renderPayStatementPdf(hostStatement, { loadLogo }));
 
   check('the host is paid the approved 30.4666… hours', hostStatement.totals.paidHours === 1828 / 60);
   check('...and the incentive is exactly $91.40', hostStatement.totals.bonusCents === 9140);
-  check('the paper states the basis as a duration', hostText.includes('$3.00/hr × 30h 28m payable'),
+  check('the paper states the DAY and the basis as a duration',
+    hostText.includes('Mon Aug 24 · $3.00/hr × 30h 28m payable'),
     formatBonusBasis(hostStatement.bonusItems[0]));
   check('...and 30h 28m x $3.00 reconciles to the $91.40 printed beside it',
     Math.round(300 * (30 + 28 / 60)) === 9140 && hostText.includes('$91.40'));
@@ -315,26 +321,28 @@ console.log('\n§6 Edge cases on paper');
   check('a bonus with no description prints a plain label', anonText.includes('Bonus') && anonText.includes('$25.00'));
   const anonHourly = textOf(await renderPayStatementPdf(build([hourlyAdj('b7', 250, null, 1)]), { loadLogo }));
   check('...and an unnamed hourly one still prints its working',
-    anonHourly.includes('Bonus') && anonHourly.includes('$2.50/hr') && anonHourly.includes('$181.25'));
+    anonHourly.includes('Bonus') && anonHourly.includes('$2.50/hr') && anonHourly.includes('$20.00'));
 
   // A DECIMAL rate, on paper.
-  const decText = textOf(await renderPayStatementPdf(build([hourlyAdj('b6', 250, 'Productivity incentive', 1)]), { loadLogo }));
-  check('$2.50/hr x 72h 30m prints as $181.25',
-    decText.includes('$2.50/hr') && decText.includes('72h 30m payable') && decText.includes('$181.25'));
+  const decText = textOf(await renderPayStatementPdf(build([hourlyAdj('b6', 250, 'Tuesday incentive', 1, '2026-08-25')]), { loadLogo }));
+  check('$2.50/hr on an 8h day prints as $20.00',
+    decText.includes('$2.50/hr') && decText.includes('8h payable') && decText.includes('$20.00'));
 
   // AND THE POINT OF THE WHOLE DESIGN: fewer hours, a smaller incentive, same stored row.
-  const fewerShifts = SHIFTS.slice(0, 8); // drop the last 8.00-hour day → 64.50 payable hours
+  // Shorten TUESDAY itself from 8.00 to 4.00 — the day the incentive is attached to.
+  const fewerShifts = SHIFTS.map((x) =>
+    x.date === '2026-08-25' ? { ...x, end_time: '12:00:00', clock_out_at: laWallTimeToUtc('2026-08-25', '12:00').toISOString() } : x);
   const fewer = buildPayStatement({
     employee: CARLOS, period: PERIOD, shifts: fewerShifts,
-    adjustments: [hourlyAdj('b5', 200, 'Productivity incentive', 1)], generatedAtISO: GENERATED,
+    adjustments: [hourlyAdj('b5', 500, 'Tuesday incentive', 1, '2026-08-25')], generatedAtISO: GENERATED,
   });
   const fewerText = textOf(await renderPayStatementPdf(fewer, { loadLogo }));
-  check('with 64.50 payable hours the SAME $2.00/hr row prints $129.00 on paper',
-    fewer.totals.paidHours.toFixed(2) === '64.50' && fewerText.includes('$129.00') &&
-      fewerText.includes('64h 30m payable'),
+  check('once TUESDAY itself is shortened, the SAME row re-prices on paper',
+    fewer.totals.paidHoursByDate['2026-08-25'] === 4 && fewerText.includes('$20.00') &&
+      fewerText.includes('4h payable'),
     formatMoney(fewer.totals.bonusTotal));
-  check('...and the document differs from the 72.50-hour one, so this is not a vacuous check',
-    !fewerText.includes('$145.00'));
+  check('...and the document differs from the 8-hour one, so this is not a vacuous check',
+    !fewerText.includes('Tue Aug 25 · $5.00/hr × 8h payable'));
 
   // Many bonuses must paginate rather than overflow the page.
   // Fifteen flat and fifteen hourly, so pagination is exercised with both kinds of row.
@@ -346,7 +354,7 @@ console.log('\n§6 Edge cases on paper');
   check('...every spilled page is still Letter', manyBoxes.every(([w, h]) => w === 612 && h === 792));
   const manyText = textOf(manyPdf);
   // Read off the model rather than hard-coded, so the assertion cannot quietly stop matching the
-  // fixture — 15 x $10.00 flat plus 15 x $0.25/hr on 72.50 hr.
+  // fixture — 15 x $10.00 flat plus 15 x $0.25/hr on Tuesday's 8.00 hr.
   check('...the total survives pagination', manyText.includes(formatMoney(manyStatement.totals.totalOwed)),
     formatMoney(manyStatement.totals.totalOwed));
   check('...and both kinds of line made it onto the paper',

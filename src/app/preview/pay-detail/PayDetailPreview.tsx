@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { computePay } from '@/lib/employees';
-import { bonusSummaryFor, buildPayStatement, totalOwedOf } from '@/lib/pay/statement';
+import { buildPayStatement, totalOwedOf, type PayStatement } from '@/lib/pay/statement';
 import { canDeleteRecord, deleteBlockedReasonFor } from '@/lib/pay/deleteEligibility';
 import { buildShiftEditPatch, type EditableShiftRow } from '@/lib/shifts/punchEdit';
 import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
@@ -39,10 +39,11 @@ import {
 // buildPayStatement from that array — so the line items, the bonus subtotal, the tile's total owed
 // and the PDF all come from the shipping model, not from a preview that agrees with itself.
 //
-// THE HOURLY INCENTIVE IS THE THING TO PROD. Nothing stores what it is worth: edit one of Carlos's
-// shifts and watch his $2.00/hr line re-price itself in the same render that moved his hours — on
-// the tile, in the drawer and on the PDF. That is the behaviour this page exists to demonstrate,
-// and it is demonstrated by the shipping model rather than by a mock arranged to agree.
+// THE DAY-SPECIFIC HOURLY INCENTIVE IS THE THING TO PROD. Nothing stores what it is worth: edit one
+// of Carlos's TUESDAY shifts and watch his Tuesday line re-price itself in the same render that
+// moved that day's hours — on the tile, in the drawer and on the PDF. Editing any OTHER day moves
+// his worked pay and leaves the Tuesday incentive alone. That is the behaviour this page exists to
+// demonstrate, and it is demonstrated by the shipping model rather than by a mock arranged to agree.
 //
 // ZERO DATABASE PATH: no Supabase client, no fetch, no RPC, no server action. Pinned by
 // noWrites.test.mjs over this file's source.
@@ -65,21 +66,27 @@ export default function PayDetailPreview() {
     [period, shifts, adjustments],
   );
 
-  // The same two shared functions production's Pay tab calls — bonusSummaryFor to select and sum,
-  // totalOwedOf to add. Nothing here works out a bonus of its own.
+  // Driven off the NORMALIZED STATEMENT, exactly as production's Pay tab now is: a day-specific
+  // hourly bonus needs payable hours PER DAY, which only the statement produces.
+  const statementsByEmployee = useMemo(() => {
+    const m = new Map<string, PayStatement>();
+    for (const e of employees) m.set(e.id, statementFor(e));
+    return m;
+  }, [employees, statementFor]);
+
   const tiles = useMemo<PayTile[]>(
     () =>
       pay.map((p) => {
-        const bonus = bonusSummaryFor(adjustments, p.employee.id, period, p.hours);
+        const bonusTotal = statementsByEmployee.get(p.employee.id)?.totals.bonusTotal ?? 0;
         return {
           employee: p.employee,
           hours: p.hours,
-          bonusTotal: bonus.total,
-          totalOwed: totalOwedOf(p.pay, bonus.total),
+          bonusTotal,
+          totalOwed: totalOwedOf(p.pay, bonusTotal),
           scheduled: 0, // the recurring projection needs a rules query; not part of this review
         };
       }),
-    [pay, adjustments, period],
+    [pay, statementsByEmployee],
   );
 
   const totals = useMemo(
@@ -154,6 +161,7 @@ export default function PayDetailPreview() {
             calculation_type: draft.calculationType,
             amount_cents: draft.amountCents,
             rate_cents_per_hour: draft.rateCentsPerHour,
+            target_date: draft.targetDateISO,
             description: draft.description,
             created_at: now,
             updated_at: now,
@@ -161,7 +169,7 @@ export default function PayDetailPreview() {
         ]);
         setSaved(
           draft.calculationType === 'hourly'
-            ? 'Hourly bonus added — priced from this period\u2019s payable hours.'
+            ? 'Hourly bonus added — priced from that day\u2019s payable hours.'
             : 'Bonus added — total owed rebuilt from the statement.',
         );
       },
@@ -173,6 +181,7 @@ export default function PayDetailPreview() {
                   ...r,
                   amount_cents: draft.amountCents,
                   rate_cents_per_hour: draft.rateCentsPerHour,
+                  target_date: draft.targetDateISO,
                   description: draft.description,
                   updated_at: new Date().toISOString(),
                 }
@@ -209,10 +218,12 @@ export default function PayDetailPreview() {
             running on fixture data shaped after the {period.start} – {period.end} period. Nothing
             here can reach the database. Click a person, then Edit a record and watch the day
             total, the period total and the PDF move together. Then open Carlos Herrera and use
-            <strong className="font-semibold text-tt-text"> + Add Bonus</strong> — 72.50 hr at
-            $22.00 is $1,595.00 of worked pay; two flat bonuses ($100 + $50) and a $2.00/hr
-            incentive worth $145.00 take the total owed to $1,890.00 on the tile, in Pay Details and
-            on the PDF. Then edit one of his shifts and watch the hourly incentive re-price itself.
+            <strong className="font-semibold text-tt-text"> + Add Bonus</strong> — 80.00 hr at
+            $25.00 is $2,000.00 of worked pay, and a $5.00/hr incentive on Tuesday Sep 1 (which
+            carries a 4 hr + 4 hr split shift, 8.00 payable hours) is worth $40.00 — $2,040.00 owed,
+            with his stored rate still $25.00/hr. His Saturday line is an incentive on a day with no
+            hours yet: $0.00 today, and it re-prices itself if a Saturday shift is confirmed. Edit
+            either Tuesday shift and the Tuesday incentive moves; edit any other day and it does not.
           </p>
         </header>
 

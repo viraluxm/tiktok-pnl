@@ -152,20 +152,33 @@ export interface RateLine {
 // PAY PERIOD, and the only thing it does to payroll is get added at the end.
 //
 // TWO CALCULATION TYPES:
-//   FLAT    a fixed sum.                      $100.00                        → $100.00
-//   HOURLY  a rate per CANONICAL PAYABLE HOUR. $2.00/hr x 72.50 payable hr   → $145.00
+//   FLAT    a fixed sum for the period.   $100.00                          → $100.00
+//   HOURLY  a rate for ONE SPECIFIC DAY.  $5.00/hr x Tuesday's 8h payable  → $40.00
 //
-// AN HOURLY BONUS IS DERIVED, NEVER STORED. The row holds the RATE; the dollar figure is worked out
-// here, from the very hours this statement just finished computing. That is the whole reason it is
-// built this way: when a manager fixes a forgotten clock-out and 72.50 payable hours become 74.00,
-// a $2/hr incentive becomes $148.00 by itself, with nobody having to remember to go and edit it. A
-// frozen total would have gone on paying $145.00 and nothing would ever have said so.
+// HOURLY IS ALWAYS DAY-SPECIFIC. There is no pay-period-wide hourly scope and no toggle: an hourly
+// row carries a `target_date` and the database refuses one without it (migration 151). "+$5/hr on
+// Tuesday" is what managers mean, and a fortnight-wide per-hour rate was a second, easily-confused
+// instrument.
 //
-// AND IT IS THE SAME HOURS — not "hours" computed a second way. The multiplicand is `paidHours`,
-// the figure this module already summed from paidShiftHours() over isPayableShift() rows: the
-// clocked span minus unpaid breaks for fulfillment, the approved duration for a live host. There is
-// no second definition of an hour anywhere in this feature. Unpaid break time is not payable, so it
-// earns no incentive; an unconfirmed punch is not payable, so it earns none either.
+// AN HOURLY BONUS IS DERIVED, NEVER STORED. The row holds the RATE and the DAY; the dollar figure
+// is worked out here, from the very hours this statement just finished computing. That is the whole
+// reason it is built this way: when a manager fixes Tuesday's forgotten clock-out and 8.00 payable
+// hours become 7.50, a $5/hr incentive becomes $37.50 by itself, with nobody having to remember to
+// go and edit it. A frozen total would have gone on paying $40.00 and nothing would have said so.
+//
+// AND IT IS THE SAME HOURS, GROUPED THE SAME WAY — not "hours" computed a second time. The
+// multiplicand is `totals.paidHoursByDate[target_date]`, summed from the very StatementRow[] this
+// module already built: paidShiftHours() over isPayableShift() rows, keyed by each row's own
+// `dateISO`. That is the identical grouping workedDayGroups() and payPeriodWeeks() render, so a
+// shift shown under Tuesday is a shift that pays Tuesday's incentive — including the
+// America/Los_Angeles cross-midnight behaviour, which is not re-implemented here because the day
+// key is simply the row's own date. Several shifts on one day sum, because they are several rows
+// under one key. Unpaid break time is not payable, so it earns no incentive; an unconfirmed punch
+// is not payable, so it is not a row at all and earns none either.
+//
+// A DAY WITH NO PAYABLE HOURS IS WORTH $0.00, NOT AN ERROR. A manager may attach an incentive to any
+// date in the period; if that day is empty the line reads $0.00 today and re-prices itself the
+// moment a shift is added or confirmed. Nothing deletes such a bonus.
 //
 // WHY IT LIVES IN THIS FILE. The premise of this module is that one object drives the Pay tile, the
 // Pay Details panel and the PDF, so none of them can disagree. A bonus total computed anywhere else
@@ -190,7 +203,9 @@ export interface BonusItem {
   amountCents: number | null;
   /** HOURLY only — the entered rate, cents per payable hour. NULL on a flat line. */
   rateCentsPerHour: number | null;
-  /** HOURLY only — the canonical payable hours the rate was applied to. NULL on a flat line. */
+  /** HOURLY only — the canonical work date the rate is paid on, 'YYYY-MM-DD'. NULL on a flat line. */
+  targetDateISO: string | null;
+  /** HOURLY only — THAT DAY's canonical payable hours. 0 on a day nobody worked. NULL on a flat line. */
   eligiblePaidHours: number | null;
   /** WHAT THIS LINE IS WORTH, integer cents. The only figure any total ever adds. */
   calculatedBonusCents: number;
@@ -219,13 +234,26 @@ export function hourlyBonusCents(rateCentsPerHour: number, paidHours: number): n
 }
 
 /**
+ * PAYABLE HOURS PER CANONICAL WORK DATE, from the statement's own payable rows.
+ *
+ * This is not a new definition of anything — it is `rows` bucketed by the `dateISO` each row
+ * already carries, which is the same key workedDayGroups() and payPeriodWeeks() group on. A day
+ * with no payable row simply has no entry (callers read it as 0).
+ */
+export function paidHoursByDateOf(rows: ReadonlyArray<StatementRow>): Record<string, number> {
+  const byDate: Record<string, number> = {};
+  for (const r of rows) byDate[r.dateISO] = (byDate[r.dateISO] ?? 0) + r.paidHours;
+  return byDate;
+}
+
+/**
  * The bonus lines belonging to ONE employee in ONE pay period, oldest first, each already worth
  * what it is worth.
  *
- * `paidHours` MUST be the statement's own canonical payable hours for this employee and period —
- * it is what an hourly line is multiplied by. Callers do not get to supply a different number:
- * buildPayStatement passes the figure it just computed, and the Pay tab passes computePay's, which
- * the suite proves is the same number.
+ * `paidHoursByDate` MUST be the statement's own per-day canonical payable hours for this employee
+ * and period — an hourly line is multiplied by the entry for ITS target date, and by nothing else.
+ * Callers do not get to supply a different set: buildPayStatement passes what it just computed, and
+ * the Pay tab passes the same statement's.
  *
  * Filtering happens HERE, on the period's own canonical boundaries, so a caller may safely hand
  * over a wider fetch — the same contract `shifts` has in BuildStatementInput. The match is on the
@@ -237,7 +265,7 @@ export function bonusItemsFor(
   adjustments: ReadonlyArray<PayAdjustment>,
   employeeId: string,
   period: { start: string; end: string },
-  paidHours: number,
+  paidHoursByDate: Readonly<Record<string, number>>,
 ): BonusItem[] {
   return adjustments
     .filter(
@@ -255,8 +283,12 @@ export function bonusItemsFor(
       // silently poison a total.
       const rateCentsPerHour = hourly ? a.rate_cents_per_hour ?? 0 : null;
       const amountCents = hourly ? null : a.amount_cents ?? 0;
+      const targetDateISO = hourly ? a.target_date ?? null : null;
+      // THE DAY'S hours, and only that day's. A date with no payable row reads 0 — a legal, visible
+      // $0.00 line, not an error and not a reason to drop the bonus.
+      const eligiblePaidHours = hourly ? paidHoursByDate[targetDateISO ?? ''] ?? 0 : null;
       const calculatedBonusCents = hourly
-        ? hourlyBonusCents(rateCentsPerHour as number, paidHours)
+        ? hourlyBonusCents(rateCentsPerHour as number, eligiblePaidHours as number)
         : (amountCents as number);
       return {
         id: a.id,
@@ -265,7 +297,8 @@ export function bonusItemsFor(
         label: description ?? BONUS_FALLBACK_LABEL,
         amountCents,
         rateCentsPerHour,
-        eligiblePaidHours: hourly ? paidHours : null,
+        targetDateISO,
+        eligiblePaidHours,
         calculatedBonusCents,
         amount: centsToDollars(calculatedBonusCents),
         createdAtISO: a.created_at,
@@ -305,9 +338,9 @@ export function bonusSummaryFor(
   adjustments: ReadonlyArray<PayAdjustment> | undefined,
   employeeId: string,
   period: { start: string; end: string },
-  paidHours: number,
+  paidHoursByDate: Readonly<Record<string, number>>,
 ): BonusSummary {
-  const items = adjustments ? bonusItemsFor(adjustments, employeeId, period, paidHours) : [];
+  const items = adjustments ? bonusItemsFor(adjustments, employeeId, period, paidHoursByDate) : [];
   let flatCents = 0;
   let hourlyCents = 0;
   for (const b of items) {
@@ -360,7 +393,10 @@ function durationAtUnit(hours: number, unit: 60 | 3600): number {
 }
 
 /**
- * HOW A BONUS LINE SHOWS ITS WORKING: 'Flat', or '$3.00/hr x 30h 28m payable'.
+ * HOW A BONUS LINE SHOWS ITS WORKING: 'Flat', or 'Tue Sep 15 · $5.00/hr x 8h payable'.
+ *
+ * THE DAY LEADS, because for an hourly bonus the day is the thing a manager needs to recognise —
+ * it is the one field that decides which hours were multiplied.
  *
  * Shared by the Pay Details panel, the bonus form, the delete dialog and the PDF, so a manager
  * reading the screen and an employee reading the paper are told the same thing in the same words,
@@ -405,17 +441,25 @@ export function formatBonusBasis(item: BonusItem): string {
   const rateCents = item.rateCentsPerHour ?? 0;
   const rate = formatMoney(centsToDollars(rateCents));
   const hours = item.eligiblePaidHours ?? 0;
+  const day = item.targetDateISO ? `${formatDayLabel(item.targetDateISO)} \u00b7 ` : '';
 
   for (const unit of [60, 3600] as const) {
     if (hourlyBonusCents(rateCents, durationAtUnit(hours, unit)) === item.calculatedBonusCents) {
-      return `${rate}/hr \u00d7 ${formatPayableDuration(hours, unit)} payable`;
+      return `${day}${rate}/hr \u00d7 ${formatPayableDuration(hours, unit)} payable`;
     }
   }
-  return `${rate}/hr \u00d7 ~${formatPayableDuration(hours, 3600)} payable`;
+  return `${day}${rate}/hr \u00d7 ~${formatPayableDuration(hours, 3600)} payable`;
 }
 
 export interface StatementTotals {
   paidHours: number;
+  /**
+   * The same payable hours, bucketed by canonical work date — the key each StatementRow already
+   * carries, so it is the grouping the screen and the PDF render, not a second one. A day with no
+   * payable row is simply absent; read it as 0. This is what a day-specific hourly bonus is
+   * multiplied by.
+   */
+  paidHoursByDate: Record<string, number>;
   /**
    * WORKED PAY — `paidHours * rate`, and NOTHING ELSE. This is the field every existing surface
    * already reads and its meaning is deliberately unchanged by the bonus feature: whatever payroll
@@ -574,11 +618,12 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
   //
   // The selector and the sum are the shared functions above, which is what makes the Pay tile's
   // bonus figure and this one the same number rather than two numbers that agree today.
-  // `paidHours` — computed immediately above, from this statement's own payable rows — is what an
-  // HOURLY line is multiplied by. Passing it in rather than letting the selector find hours of its
-  // own is the mechanism that makes "the incentive uses canonical payable hours" true by
-  // construction instead of by convention.
-  const bonus = bonusSummaryFor(adjustments, employee.id, period, paidHours);
+  // Bucketed from the SAME payable rows, by the SAME date key the day and week groupings use. An
+  // hourly line is multiplied by its own target date's entry — passing this in rather than letting
+  // the selector find hours of its own is the mechanism that makes "the incentive uses canonical
+  // payable hours, grouped the way payroll groups them" true by construction, not by convention.
+  const paidHoursByDate = paidHoursByDateOf(rows);
+  const bonus = bonusSummaryFor(adjustments, employee.id, period, paidHoursByDate);
 
   return {
     employee: { id: employee.id, name: employee.name, role: employee.role },
@@ -597,6 +642,7 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
     bonusItems: bonus.items,
     totals: {
       paidHours,
+      paidHoursByDate,
       gross,
       workedDays,
       rowCount: rows.length,

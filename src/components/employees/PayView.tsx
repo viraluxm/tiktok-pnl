@@ -12,7 +12,6 @@ import {
   fmtMonthDay,
 } from '@/lib/employees';
 import {
-  bonusSummaryFor,
   buildPayStatement,
   totalOwedOf,
   type PayStatement,
@@ -49,6 +48,7 @@ function toBonusFields(draft: BonusDraft): BonusFields {
     calculation_type: draft.calculationType,
     amount_cents: draft.amountCents,
     rate_cents_per_hour: draft.rateCentsPerHour,
+    target_date: draft.targetDateISO,
     description: draft.description,
   };
 }
@@ -209,24 +209,41 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     () => (payRole === 'all' ? pay : pay.filter((p) => p.employee.role?.toLowerCase() === payRole)),
     [pay, payRole],
   );
-  // WORKED PAY COMES FROM computePay AND IS NOT TOUCHED. The bonus is selected and summed by
-  // bonusSummaryFor() and added by totalOwedOf() — the same two functions buildPayStatement calls,
-  // so a tile and that person's Pay Details cannot disagree about either figure.
+  // WORKED PAY COMES FROM computePay AND IS NOT TOUCHED — p.hours and p.pay below are its own
+  // figures, unchanged.
+  //
+  // THE BONUS COMES FROM THE NORMALIZED STATEMENT, not from anything this file works out. A
+  // day-specific hourly bonus needs that employee's payable hours PER DAY, which only the statement
+  // produces, so a tile reads `totals.bonusTotal` off the very object Pay Details renders. Two
+  // surfaces, one calculation — and the suite pins `gross` equal to computePay's `pay`, so the two
+  // halves of a tile cannot drift apart either.
+  const statementsByEmployee = useMemo(() => {
+    const m = new Map<string, PayStatement>();
+    for (const p of filteredPay) {
+      m.set(p.employee.id, buildPayStatement({
+        employee: p.employee,
+        period: { start: period.start, end: period.end, payday },
+        shifts: periodShifts,
+        adjustments,
+        // A tile renders no timestamp; a statement built for its totals alone needs no clock.
+        generatedAtISO: '',
+      }));
+    }
+    return m;
+  }, [filteredPay, period.start, period.end, payday, periodShifts, adjustments]);
+
   const tiles = useMemo<PayTile[]>(
     () => filteredPay.map((p) => {
-      // p.hours IS the statement's paidHours — computePay and buildPayStatement sum the same
-      // per-row function over the same predicate (pinned in statement.test.mjs), which is what lets
-      // an hourly incentive be priced identically here and in the drawer.
-      const bonus = bonusSummaryFor(adjustments, p.employee.id, period, p.hours);
+      const bonusTotal = statementsByEmployee.get(p.employee.id)?.totals.bonusTotal ?? 0;
       return {
         employee: p.employee,
         hours: p.hours,
-        bonusTotal: bonus.total,
-        totalOwed: totalOwedOf(p.pay, bonus.total),
+        bonusTotal,
+        totalOwed: totalOwedOf(p.pay, bonusTotal),
         scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
       };
     }),
-    [filteredPay, plannedHoursByEmployee, adjustments, period],
+    [filteredPay, plannedHoursByEmployee, statementsByEmployee],
   );
   // The roster total is the sum of the tiles, bonuses included — otherwise the headline figure the
   // pay run is built around would be smaller than the tiles under it add up to.
