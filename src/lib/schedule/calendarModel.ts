@@ -15,7 +15,7 @@
  * number payroll would not pay.
  */
 
-import { paidShiftHours, clockedShiftHours, type ShiftLike } from '@/lib/employees';
+import { paidShiftHours, clockedShiftHours, payrollTeamOfRole, type PayrollTeam, type ShiftLike } from '@/lib/employees';
 
 // ── inputs ───────────────────────────────────────────────────────────────────
 
@@ -247,15 +247,19 @@ function round2(n: number): number {
 }
 
 /**
- * PAID hours for a punch — approved minutes when a manager approved a duration (migration 137),
- * else the clocked calculation below.
+ * PAID hours for a punch — for a LIVE HOST, the approved minutes when a manager approved a
+ * duration (migration 137); for every other team, the clocked calculation below.
  *
  * This used to reimplement paidShiftHours and promise in a comment to "mirror" it. It now CALLS
  * it: two copies of the payroll rule is exactly how the manager calendar and Pay would come to
  * disagree about what a shift pays, and the approved-hours override made that risk concrete.
+ *
+ * `team` is the punch's own employee's team. buildCalendarDays already has the roster keyed by id,
+ * so nothing new is looked up — and a fulfillment tile now shows the figure payroll actually pays
+ * even on a row that still carries a legacy override.
  */
-export function punchHours(p: CalPunch): number {
-  return round2(paidShiftHours(toShiftLike(p)));
+export function punchHours(p: CalPunch, team: PayrollTeam): number {
+  return round2(paidShiftHours(toShiftLike(p), team));
 }
 
 /**
@@ -419,6 +423,8 @@ export function buildCalendarDays(args: {
     // "what are we paying", and a plan number sitting beside it invites reading the wrong one.
     const shownSched = view === 'clocked' ? null : sched;
 
+    const punchTeam = payrollTeamOfRole(emp.role);
+
     const toDayPunch = (rawPunch: CalPunch): DayPunch => {
       // Confirmation gates ONLY time-clock rows (isPayableShift ignores confirmed_at for manual
       // rows). Treating a manual row as unconfirmed would paint it yellow and offer a Confirm
@@ -428,7 +434,7 @@ export function buildCalendarDays(args: {
         id: rawPunch.id,
         start_time: rawPunch.start_time,
         end_time: rawPunch.end_time,
-        hours: punchHours(rawPunch),
+        hours: punchHours(rawPunch, punchTeam),
         clockedHours: punchClockedHours(rawPunch),
         approvedMinutes: rawPunch.approved_minutes ?? null,
         breakMinutes: rawPunch.break_minutes ?? 0,

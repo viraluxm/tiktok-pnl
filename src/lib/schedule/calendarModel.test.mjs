@@ -43,10 +43,13 @@ console.log('\nhours');
 check('wall clock 5a–1p = 8h', wallHours('05:00', '13:00') === 8);
 check('overnight 5p–1a = 8h', wallHours('17:00', '01:00') === 8);
 check('open shift = 0h', wallHours('05:00', null) === 0);
-check('break subtracted', punchHours(punch({ break_minutes: 30 })) === 7.5);
+// punchHours takes the punch's own employee's payroll TEAM: a stored approved_minutes pays for a
+// live host and is ignored for everyone else. None of these three rows carries one, so the team is
+// irrelevant to the arithmetic — 'host' is passed to keep them exercising the fallback branch.
+check('break subtracted', punchHours(punch({ break_minutes: 30 }), 'host') === 7.5);
 check('instants beat the wall clock (26h not wrapped to 2h)',
-  punchHours(punch({ start_time: '05:00', end_time: '07:00', clock_in_at: '2026-08-31T12:00:00Z', clock_out_at: '2026-09-01T14:00:00Z' })) === 26);
-check('negative span floors at 0', punchHours(punch({ break_minutes: 600 })) === 0);
+  punchHours(punch({ start_time: '05:00', end_time: '07:00', clock_in_at: '2026-08-31T12:00:00Z', clock_out_at: '2026-09-01T14:00:00Z' }), 'host') === 26);
+check('negative span floors at 0', punchHours(punch({ break_minutes: 600 }), 'host') === 0);
 
 console.log('\nthe Tomas case — one row, not two');
 {
@@ -235,18 +238,41 @@ const owned = ruleDatesOwnedByInstances([inst()]);
 owned.add('r9|2026-01-01');
 check('returns a fresh mutable Set', owned.size === 2 && ruleDatesOwnedByInstances([inst()]).size === 1);
 
-console.log('\nAPPROVED vs CLOCKED (migration 137)');
+console.log('\nAPPROVED vs CLOCKED (migration 137) — and the LIVE-HOST-ONLY rule (149)');
 {
   // punchHours PAYS; punchClockedHours describes the punch. They diverge exactly when a manager
-  // approved a different duration — the live-host case the column exists for.
+  // approved a different duration for a LIVE HOST — the case the column exists for.
   const p = punch({ clock_in_at: '2026-08-31T17:48:00-07:00', clock_out_at: '2026-09-01T02:20:00-07:00' });
-  check('with no approval the two figures agree', punchHours(p) === punchClockedHours(p), `${punchHours(p)}`);
+  check('with no approval the two figures agree', punchHours(p, 'host') === punchClockedHours(p), `${punchHours(p, 'host')}`);
   const approved = { ...p, approved_minutes: 478 };
-  check('approved 478 min pays 7.97h', punchHours(approved) === 7.97, `${punchHours(approved)}`);
+  check('approved 478 min pays 7.97h for a HOST', punchHours(approved, 'host') === 7.97, `${punchHours(approved, 'host')}`);
   check('…while clocked still reads 8.53h', punchClockedHours(approved) === 8.53, `${punchClockedHours(approved)}`);
-  check('an explicit 0 approves zero rather than falling back to the span', punchHours({ ...p, approved_minutes: 0 }) === 0);
+  check('an explicit 0 approves zero rather than falling back to the span', punchHours({ ...p, approved_minutes: 0 }, 'host') === 0);
   check('a break is still subtracted from the clocked figure',
     punchClockedHours({ ...p, break_minutes: 30 }) === 8.03, `${punchClockedHours({ ...p, break_minutes: 30 })}`);
+
+  // FULFILLMENT: the same stored figure has NO effect. The tile shows what payroll pays, so a
+  // legacy override on a fulfillment row must read as the punch, not as the number in the column.
+  check('the same 478 is IGNORED for fulfillment — the punch pays',
+    punchHours(approved, 'fulfillment') === punchClockedHours(approved), `${punchHours(approved, 'fulfillment')}`);
+  check('…and that is genuinely a different number, so the check is not vacuous',
+    punchHours(approved, 'fulfillment') !== punchHours(approved, 'host'));
+  check('an explicit 0 does not zero a fulfillment row either',
+    punchHours({ ...p, approved_minutes: 0 }, 'fulfillment') === 8.53, `${punchHours({ ...p, approved_minutes: 0 }, 'fulfillment')}`);
+  check('an unclassified role is treated like fulfillment, never like a host',
+    punchHours(approved, 'other') === punchClockedHours(approved));
+
+  // END TO END through buildCalendarDays: the ROLE on the roster is what decides, with no extra
+  // input from the caller — this is what makes every calendar surface agree with Pay.
+  const withApproved = { ...punch({ id: 'pk1', clock_in_at: '2026-08-31T17:48:00-07:00', clock_out_at: '2026-09-01T02:20:00-07:00' }), approved_minutes: 478 };
+  const asHost = buildCalendarDays({ employees: [{ id: 'e1', name: 'H', role: 'host' }], punches: [withApproved], scheduled: [], days: DAYS, view: 'all', todayISO: TODAY });
+  const asFul = buildCalendarDays({ employees: [{ id: 'e1', name: 'F', role: 'fulfillment' }], punches: [withApproved], scheduled: [], days: DAYS, view: 'all', todayISO: TODAY });
+  check('a host roster row pays the approved 7.97h', day(asHost).people[0].punch.hours === 7.97, `${day(asHost).people[0].punch.hours}`);
+  check('a fulfillment roster row pays the clocked 8.53h', day(asFul).people[0].punch.hours === 8.53, `${day(asFul).people[0].punch.hours}`);
+  check('both still report the same CLOCKED figure — only the payable one differs',
+    day(asHost).people[0].punch.clockedHours === 8.53 && day(asFul).people[0].punch.clockedHours === 8.53);
+  check('the stored minutes are still carried through for a host tile to label',
+    day(asHost).people[0].punch.approvedMinutes === 478 && day(asFul).people[0].punch.approvedMinutes === 478);
 }
 
 console.log(`\n${passed} checks passed\n`);

@@ -5,6 +5,14 @@
 // for a live host, payable time is the verified live-session duration, and the punch stays as the
 // attendance record rather than being rewritten to move payroll.
 //
+// APPROVED HOURS ARE A LIVE-HOST INSTRUMENT AND NOTHING ELSE. approvedHoursApply() below is the
+// one predicate that says so, and every other rule in this module is derived from it. Fulfillment
+// worked time is fully determined by the punch — clock in, clock out, breaks — so an approval box
+// beside it is not a second opinion, it is a way to type a number over an already-correct one.
+// Production carried 37 such rows within three days of the feature shipping; 33 were the prefilled
+// clocked figure retyped back at itself and one was a fat-finger 23h41m on a 7h40m shift. So for
+// anyone who is not a live host there is no input, no override, and nothing written.
+//
 // No imports: this transpiles standalone for approvedHours.test.mjs, and the numbers it produces
 // go straight into an RPC argument, so every rule about what a manager may type lives here rather
 // than in JSX.
@@ -80,16 +88,58 @@ export function formatApprovedMinutes(minutes: number | null | undefined): strin
 }
 
 /**
+ * The union teamOfRole() in '@/lib/timeclock' returns. Restated here rather than imported so this
+ * module stays dependency-free and transpiles standalone for its test; the two are asserted equal
+ * in src/lib/shifts/approvedHoursLiveHostOnly.test.mjs.
+ */
+export type ApprovedTeam = 'host' | 'fulfillment' | 'other';
+
+/**
+ * DOES THE APPROVED-HOURS CONCEPT EXIST FOR THIS TEAM AT ALL? This is the whole rule, in one
+ * place: only a live host has a payable duration that is not simply their punch.
+ *
+ * Everyone else — fulfillment today, any future role tomorrow — is paid the canonical worked-time
+ * calculation (clock in → clock out − breaks, i.e. clockedShiftHours), which paidShiftHours()
+ * already returns whenever approved_minutes is NULL. So there is nothing to offer, nothing to
+ * validate and nothing to write.
+ *
+ * Stated as `=== 'host'` rather than `!== 'fulfillment'` on purpose: a role that is neither must
+ * fall on the SAFE side (no override), not inherit the host exception by accident.
+ */
+export function approvedHoursApply(team: ApprovedTeam): boolean {
+  return team === 'host';
+}
+
+/**
  * Does this shift REQUIRE an explicit approved duration before it can be confirmed?
  *
  * Live hosts: yes. Their payable time is verified live time; defaulting to the clocked span is the
  * overpayment this whole change exists to prevent, and there is no authoritative shift→live-session
  * link in the schema to read the real figure from. So the manager states it.
  *
- * `team` comes from teamOfRole() in '@/lib/timeclock' — the app's one role normalisation. It is
- * passed in rather than imported so this module stays dependency-free; the SQL side of the same
- * rule (lensed_confirm_time_clock_shift) is asserted against teamOfRole in the tests.
+ * Derived from approvedHoursApply() rather than restating `=== 'host'`, so "who gets the input"
+ * and "who must fill it in" can never drift apart. The SQL side of the same rule
+ * (lensed_confirm_time_clock_shift) is asserted against teamOfRole in the tests.
  */
-export function approvedMinutesRequired(team: 'host' | 'fulfillment' | 'other'): boolean {
-  return team === 'host';
+export function approvedMinutesRequired(team: ApprovedTeam): boolean {
+  return approvedHoursApply(team);
+}
+
+/**
+ * THE WRITE GATE. Every approved-minutes value that leaves this app for the database passes
+ * through here, and for a non-host it becomes NULL — which is exactly the state paidShiftHours()
+ * reads as "pay the canonical worked time".
+ *
+ * This exists because hiding an input is not a rule. The two RPCs that can set the column
+ * (lensed_confirm_time_clock_shift, lensed_set_approved_minutes) are issued from ONE module,
+ * useShifts.ts, and both call this on the way out — so a future surface that renders its own
+ * confirm button, or a caller that forgets the role check, still cannot create a fulfillment
+ * override. The team is a REQUIRED argument on those mutations for the same reason: minutes
+ * cannot travel to the RPC without the team that authorises them.
+ *
+ * NOT retroactive, deliberately. It shapes new writes only; the 37 historical rows that already
+ * carry a value are untouched by this function and keep paying exactly what they pay today.
+ */
+export function approvedMinutesForTeam(team: ApprovedTeam, minutes: number | null): number | null {
+  return approvedHoursApply(team) ? minutes : null;
 }

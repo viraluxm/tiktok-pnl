@@ -123,7 +123,7 @@ console.log('\n§1 A record reads as the span it is actually paid for');
   const dr = build([diverged]).rows[0];
   check('a diverged punch displays its instants, not its stale wall clock',
     dr.startLabel === '06:00' && dr.endLabel === '14:00', `${dr.startLabel}-${dr.endLabel}`);
-  check('...and its hours come from the same basis', near(dr.paidHours, paidShiftHours(diverged)));
+  check('...and its hours come from the same basis', near(dr.paidHours, paidShiftHours(diverged, 'fulfillment')));
 
   // A 47.75h punch: the instants branch has no 24h ceiling, so hours must not wrap.
   const long = punch('2026-08-24', '05:59', '05:44', {
@@ -160,7 +160,7 @@ console.log('\n§2 The statement total IS payroll — computePay parity');
 
   // Every row's hours are paidShiftHours of that row — no second definition anywhere.
   const byId = new Map(shifts.map((x) => [x.id, x]));
-  const wrong = s.rows.filter((r) => r.paidHours !== paidShiftHours(byId.get(r.shiftId)));
+  const wrong = s.rows.filter((r) => r.paidHours !== paidShiftHours(byId.get(r.shiftId), 'fulfillment'));
   check('every row\'s paid hours === paidShiftHours(row)', wrong.length === 0, `${s.rows.length} rows checked`);
 
   // Instants branch specifically: a punch row must NOT be measured off its wall clock.
@@ -227,7 +227,7 @@ console.log('\n§5 Both worked-time sources flow through the one model');
   check('the manual row is labelled Manual Entry', rm.sourceLabel === 'Manual Entry');
   check('a record carries source context and nothing that judges it',
     !('warnings' in rm) && !('spanHours' in rm), Object.keys(rm).join(','));
-  check('both are paid', near(rp.paidHours, paidShiftHours(p)) && near(rm.paidHours, paidShiftHours(m)));
+  check('both are paid', near(rp.paidHours, paidShiftHours(p, 'fulfillment')) && near(rm.paidHours, paidShiftHours(m, 'fulfillment')));
   check('the manual row displays its own wall clock', rm.startLabel === '15:00' && rm.endLabel === '19:00');
   check('the punch row displays the instants as Pacific wall clock',
     rp.startLabel === laWallClockOf(p.clock_in_at).time && rp.endLabel === laWallClockOf(p.clock_out_at).time);
@@ -562,6 +562,52 @@ console.log('\n§13 Manager-facing formatting');
     formatDayLabel('2026-08-24'));
   check('...across a year boundary too', formatDayLabel('2027-01-01') === 'Fri Jan 1',
     formatDayLabel('2027-01-01'));
+}
+
+console.log('\nAPPROVED HOURS ARE A LIVE-HOST INSTRUMENT — the statement obeys the same one rule');
+{
+  // The statement is built for ONE employee, so it resolves the team once from that employee's
+  // role. Pay Details and the PDF both render these rows, so a difference here is a difference on
+  // both surfaces — and there is still exactly one payroll calculation behind them.
+  const withOverride = {
+    id: 'ov', user_id: 'u1', employee_id: 'e1', date: '2026-08-25',
+    start_time: '06:00:00', end_time: '14:00:00', source: 'time_clock', source_rule_id: null,
+    confirmed_at: '2026-08-26T00:00:00Z', confirmed_by: 'u1', break_minutes: 30,
+    clock_in_at: laWallTimeToUtc('2026-08-25', '06:00').toISOString(),
+    clock_out_at: laWallTimeToUtc('2026-08-25', '14:00').toISOString(),
+    auto_closed: false, approved_minutes: 1421, created_at: '', updated_at: '',
+  };
+  const period = { start: '2026-08-24', end: '2026-09-06', payday: '2026-09-11' };
+  const ful = buildPayStatement({ employee: EMP(), period, shifts: [withOverride], generatedAtISO: '2026-09-08T17:00:00Z' });
+  const host = buildPayStatement({ employee: EMP({ role: 'host' }), period, shifts: [withOverride], generatedAtISO: '2026-09-08T17:00:00Z' });
+
+  check('fulfillment: the row pays the canonical 7.50h, not the stored 23h41m',
+    near(ful.rows[0].paidHours, 7.5), `${ful.rows[0].paidHours}`);
+  check('fulfillment: gross is 7.50 x $22 = $165.00', near(ful.totals.gross, 165), `${ful.totals.gross}`);
+  check('live host: the SAME row pays the stored 23.6833h', near(host.rows[0].paidHours, 1421 / 60), `${host.rows[0].paidHours}`);
+  check('...so the two genuinely differ and neither assertion is vacuous',
+    !near(ful.totals.gross, host.totals.gross));
+  check('the row still prints the real punch and break either way',
+    ful.rows[0].breakMinutes === 30 && host.rows[0].breakMinutes === 30
+    && ful.rows[0].startLabel === host.rows[0].startLabel && ful.rows[0].endLabel === host.rows[0].endLabel);
+  check('the statement never recomputes: every row equals paidShiftHours for its own team',
+    near(ful.rows[0].paidHours, paidShiftHours(withOverride, 'fulfillment'))
+    && near(host.rows[0].paidHours, paidShiftHours(withOverride, 'host')));
+  check('...and the Pay tab tile agrees with the statement, for both teams',
+    near(ful.totals.paidHours, computePay([EMP()], [withOverride])[0].hours)
+    && near(host.totals.paidHours, computePay([EMP({ role: 'host' })], [withOverride])[0].hours));
+  // The day and week groupings only ARRANGE those rows, so they follow automatically.
+  check('the day group and the week both carry the fulfillment figure',
+    near(workedDayGroups(ful)[0].hours, 7.5)
+    && near(payPeriodWeeks(ful).reduce((n, w) => n + w.hours, 0), 7.5));
+  // Comments stripped, so the module's own prose about paidShiftHours cannot satisfy this.
+  const stmtCode = src('./statement.ts').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  check('the module reads the team from the employee, exactly once',
+    (stmtCode.match(/const team = payrollTeamOfRole\(employee\.role\);/g) ?? []).length === 1);
+  check('...and calls paidShiftHours exactly once, always with that team',
+    (stmtCode.match(/paidShiftHours\(/g) ?? []).length === 1 && /paidShiftHours\(s, team\)/.test(stmtCode));
+  check('...and still does no hours arithmetic of its own',
+    !/break_minutes\s*\/\s*60/.test(stmtCode));
 }
 
 console.log(`\n${passed} checks passed`);

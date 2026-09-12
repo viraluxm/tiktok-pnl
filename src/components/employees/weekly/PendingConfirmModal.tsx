@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 import { parseYMD } from '@/lib/weeklySchedule';
 import type { CalendarDay, DayPerson } from '@/lib/schedule/calendarModel';
+import type { ApprovedTeam } from '@/lib/shifts/approvedHours';
 import PersonCard from './PersonCard';
 
 // Everything awaiting confirmation across the month, in one place — reached by clicking the
@@ -25,9 +26,9 @@ export default function PendingConfirmModal({
   byDate: Map<string, CalendarDay>;
   monthLabel: string;
   onClose: () => void;
-  onConfirm: (shiftId: string, confirmed: boolean, approvedMinutes?: number | null) => Promise<void>;
+  onConfirm: (shiftId: string, confirmed: boolean, team: ApprovedTeam, approvedMinutes?: number | null) => Promise<void>;
   /** Payroll-only correction on an already-confirmed shift (migration 137). Forwarded to the tile. */
-  onApprovedMinutes?: (shiftId: string, approvedMinutes: number | null) => Promise<void>;
+  onApprovedMinutes?: (shiftId: string, team: ApprovedTeam, approvedMinutes: number | null) => Promise<void>;
   onEdit: (shiftId: string) => void;
 }) {
   // Oldest first: the longest-waiting punch is the one most likely to hold up a pay period.

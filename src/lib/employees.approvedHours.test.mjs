@@ -69,13 +69,13 @@ console.log('\n1. THE PUNCH IS NOT THE PAYROLL FIGURE — and is never rewritten
 {
   near('clocked span is 8h32m', E.clockedShiftHours(CARLOS), 8 + 32 / 60);
   const approved = withApproved(478);
-  near('approved 478 min pays 7h58m', E.paidShiftHours(approved), 478 / 60);
+  near('approved 478 min pays 7h58m', E.paidShiftHours(approved, 'host'), 478 / 60);
   near('…while the clocked figure still reads 8h32m', E.clockedShiftHours(approved), 8 + 32 / 60);
   // The instants are the attendance record: identical objects in, identical instants out.
   eq('clock_in_at is untouched by approval', approved.clock_in_at, CARLOS.clock_in_at);
   eq('clock_out_at is untouched by approval', approved.clock_out_at, CARLOS.clock_out_at);
   check('the two figures genuinely differ (the test would be vacuous otherwise)',
-    Math.abs(E.paidShiftHours(approved) - E.clockedShiftHours(approved)) > 0.5);
+    Math.abs(E.paidShiftHours(approved, 'host') - E.clockedShiftHours(approved)) > 0.5);
 
   // NOTHING in the confirm path writes a clock instant. The RPC is the only writer of the approved
   // column, and its UPDATE names three columns — none of them a punch.
@@ -109,10 +109,10 @@ console.log('\n2. LEGACY SHIFTS ARE UNTOUCHED — approved_minutes NULL keeps th
     ['absent approved_minutes key entirely', (() => { const c = { ...CARLOS }; delete c.approved_minutes; return c; })()],
   ];
   for (const [label, s] of shapes) {
-    near(`${label}: paid === clocked when nothing is approved`, E.paidShiftHours(s), E.clockedShiftHours(s));
+    near(`${label}: paid === clocked when nothing is approved`, E.paidShiftHours(s, 'host'), E.clockedShiftHours(s));
   }
   // The fallback is a NULL check, not a falsy check: 0 approved minutes is a real decision.
-  near('approved 0 pays 0 — it does NOT fall through to the clocked span', E.paidShiftHours(withApproved(0)), 0);
+  near('approved 0 pays 0 — it does NOT fall through to the clocked span', E.paidShiftHours(withApproved(0), 'host'), 0);
   check('…and the clocked span was non-zero, so that assertion means something', E.clockedShiftHours(withApproved(0)) > 8);
 }
 
@@ -135,26 +135,51 @@ console.log('\n3. APPROVED HOURS DO NOT MAKE A SHIFT PAYABLE — isPayableShift 
   eq('an unconfirmed approved shift contributes ZERO to pay', unpaidRows[0].hours, 0);
 }
 
-console.log('\n4. FULFILLMENT DEFAULT — the existing canonical payable duration, breaks and all');
+console.log('\n4. FULFILLMENT HAS NO APPROVED HOURS — the punch is the whole answer');
 {
+  // defaultApprovedMinutes() is GONE. Its only non-null answer was the clocked figure rounded to
+  // whole minutes and stored back as an override of itself, which is what put 37 approved_minutes
+  // rows on fulfillment shifts in three days. See the note where it used to live in employees.ts.
+  eq('defaultApprovedMinutes is no longer exported — there is no fulfillment prefill to restore',
+    typeof E.defaultApprovedMinutes, 'undefined');
+  check('…and nothing in the app re-derives one from the clocked span',
+    !/hoursToMinutes\([^)]*clockedShiftHours/.test(strip(read('./employees.ts'))));
+
   const ful = { ...CARLOS, employee_id: 'emp-madison', break_minutes: 30 };
   near('canonical payable is 8h02m (8h32m span − 30m break)', E.clockedShiftHours(ful), 8 + 2 / 60);
-  eq('default approved minutes = 482 (the canonical figure, not the raw span)', E.defaultApprovedMinutes(ful, false), 482);
-  eq('a clean 8h30m span with a 30m break defaults to 480',
-    E.defaultApprovedMinutes({ ...CARLOS, clock_out_at: '2026-09-09T02:18:00-07:00', break_minutes: 30 }, false), 480);
-  // Confirming with that default must reproduce today's payroll exactly.
-  near('confirming at the default pays what the legacy path paid',
-    E.paidShiftHours({ ...ful, approved_minutes: E.defaultApprovedMinutes(ful, false) }), E.clockedShiftHours(ful));
-  eq('minutes conversion rounds to whole minutes', [E.hoursToMinutes(7.9666666), E.hoursToMinutes(8), E.hoursToMinutes(-1)], [478, 480, 0]);
+  // THE PAYROLL PROOF for removing the input: with the column NULL, paidShiftHours returns the
+  // canonical worked-time figure — the same number the old prefill was a rounded copy of.
+  near('a fulfillment shift with approved_minutes NULL pays its canonical worked time',
+    E.paidShiftHours({ ...ful, approved_minutes: null }, 'fulfillment'), E.clockedShiftHours(ful));
+  // A REAL punch carries SECONDS, and that is where the old prefill lost precision. Production's
+  // 2026-09-10 fulfillment rows are all of this shape: clocked 7.6619h, stored 461, a difference
+  // of a third of a minute that then became a permanent override of the exact figure.
+  const seconds = { ...ful, break_minutes: 0, clock_in_at: '2026-09-10T16:55:12-07:00', clock_out_at: '2026-09-11T00:34:35-07:00' };
+  const exact = E.paidShiftHours({ ...seconds, approved_minutes: null }, 'fulfillment');
+  const rounded = E.hoursToMinutes(E.clockedShiftHours(seconds)) / 60;
+  check('with NULL, payroll keeps the EXACT worked span — the old prefill rounded it away',
+    exact !== rounded && Math.abs(exact - rounded) > 0 && Math.abs(exact - rounded) < 1 / 60,
+    `exact ${exact} vs rounded ${rounded}`);
+  near('…and the exact span is the clock-out minus clock-in, to the second',
+    exact, (Date.parse(seconds.clock_out_at) - Date.parse(seconds.clock_in_at)) / 3_600_000);
+  eq('minutes conversion still rounds to whole minutes (the tile uses it to LABEL the punch)',
+    [E.hoursToMinutes(7.9666666), E.hoursToMinutes(8), E.hoursToMinutes(-1)], [478, 480, 0]);
 }
 
 console.log('\n5. LIVE HOST — no silent default, an explicit figure is required');
 {
-  eq('a live host gets NO default approved duration', E.defaultApprovedMinutes(CARLOS, true), null);
-  check('…and specifically NOT the clocked span (the bug this prevents)',
-    E.defaultApprovedMinutes(CARLOS, true) !== E.hoursToMinutes(E.clockedShiftHours(CARLOS)));
+  // A live host's boxes open BLANK. The tile states this directly: its default is the stored
+  // approval, and when there is none, `mustApprove ? null : …` chooses null for a host.
+  const card = strip(read('../components/employees/weekly/PersonCard.tsx'));
+  check('the host tile offers NO default figure — the boxes open blank',
+    /punch\.approvedMinutes \?\? \(mustApprove \? null :/.test(card), card.match(/const defaultMinutes[\s\S]{0,180}/)?.[0]?.replace(/\s+/g, ' '));
+  check('…so the clocked span can never become a host approval by default',
+    !/mustApprove \? hoursToMinutes/.test(card));
   eq('the requirement keys on the host team', [
     A.approvedMinutesRequired('host'), A.approvedMinutesRequired('fulfillment'), A.approvedMinutesRequired('other'),
+  ], [true, false, false]);
+  eq('…and it is DERIVED from approvedHoursApply, so the two cannot drift apart', [
+    A.approvedHoursApply('host'), A.approvedHoursApply('fulfillment'), A.approvedHoursApply('other'),
   ], [true, false, false]);
 
   // The SQL guard and the TS normalisation must recognise the same host vocabulary, or a host could
@@ -219,9 +244,9 @@ console.log('\n7. ONE PAYROLL RULE — the manager calendar and the employee por
     clock_in_at: CARLOS.clock_in_at, clock_out_at: CARLOS.clock_out_at,
     break_minutes: 0, confirmed_at: CARLOS.confirmed_at, approved_minutes: 478, auto_closed: false,
   };
-  near('calendar punchHours = the approved figure', CM.punchHours(punch), 7.97);
+  near('calendar punchHours = the approved figure', CM.punchHours(punch, 'host'), 7.97);
   near('calendar punchClockedHours = the attendance figure', CM.punchClockedHours(punch), 8.53);
-  near('calendar and payroll agree exactly', CM.punchHours(punch), Math.round(E.paidShiftHours(withApproved(478)) * 100) / 100);
+  near('calendar and payroll agree exactly', CM.punchHours(punch, 'host'), Math.round(E.paidShiftHours(withApproved(478), 'host') * 100) / 100);
   // The old duplicate implementation is gone: calendarModel now calls the canonical module.
   const cm = strip(read('./schedule/calendarModel.ts'));
   check('calendarModel imports the canonical payroll functions', /from '@\/lib\/employees'/.test(cm));
@@ -241,7 +266,7 @@ console.log('\n7. ONE PAYROLL RULE — the manager calendar and the employee por
 console.log('\n8. THE EMPLOYEE TIMECARD — clocked and approved side by side, read-only');
 {
   const row = { ...CARLOS, id: 's1', approved_minutes: 478 };
-  const e = TM.toTimecardEntry(row);
+  const e = TM.toTimecardEntry(row, 'host');
   near('entry.hours is the approved figure', e.hours, 478 / 60);
   near('entry.clocked_hours is the punch span', e.clocked_hours, 8 + 32 / 60);
   eq('entry carries the approved minutes', e.approved_minutes, 478);
@@ -252,7 +277,7 @@ console.log('\n8. THE EMPLOYEE TIMECARD — clocked and approved side by side, r
     new Date(e.clock_out).toISOString() === '2026-09-09T09:20:00.000Z');
 
   // UNCONFIRMED: shown, but never presented as final payroll.
-  const pending = TM.toTimecardEntry({ ...row, confirmed_at: null, approved_minutes: null });
+  const pending = TM.toTimecardEntry({ ...row, confirmed_at: null, approved_minutes: null }, 'host');
   eq('an unconfirmed punch is not payable', pending.payable, false);
   eq('…is flagged awaiting confirmation', pending.state, 'awaiting_confirmation');
   eq('…and carries no approved minutes', pending.approved_minutes, null);
@@ -276,10 +301,10 @@ console.log('\n8. THE EMPLOYEE TIMECARD — clocked and approved side by side, r
   // Window totals come from the canonical payable path, and the approved figure is what sums.
   const week = { start: '2026-09-07', end: '2026-09-13' };
   const period = { start: '2026-08-31', end: '2026-09-13' };
-  const tc = TM.buildTimecard({ shifts: [row], open: null, todayISO: '2026-09-09', week, period });
+  const tc = TM.buildTimecard({ shifts: [row], open: null, todayISO: '2026-09-09', week, period, team: 'host' });
   near('week approved total = 7.97', tc.week.workedHours, 7.97);
   eq('an unconfirmed punch lands in pendingHours, never in the approved total',
-    TM.buildTimecard({ shifts: [{ ...row, confirmed_at: null, approved_minutes: null }], open: null, todayISO: '2026-09-09', week, period }).week.workedHours, 0);
+    TM.buildTimecard({ shifts: [{ ...row, confirmed_at: null, approved_minutes: null }], open: null, todayISO: '2026-09-09', week, period, team: 'host' }).week.workedHours, 0);
 
   // READ-ONLY: no employee-facing route writes any of it.
   const portalDir = fileURLToPath(new URL('../app/s/[token]', import.meta.url));

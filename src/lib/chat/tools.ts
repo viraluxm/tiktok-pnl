@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { isPayableShift, paidShiftHours, computePay, payPeriodFor, nextPayday } from '@/lib/employees';
+import { isPayableShift, paidShiftHours, payrollTeamOfRole, computePay, payPeriodFor, nextPayday, type PayrollTeam } from '@/lib/employees';
 import {
   aggregateFulfillmentDay, zonedDayRangeUtcMs, zonedDayKey, SHOP_TIMEZONE,
   type PickEvent,
@@ -360,16 +360,30 @@ async function getSchedule(
   });
   if (rules.error) throw new Error(`shift_rules read failed: ${String((rules.error as { message?: string }).message ?? rules.error)}`);
 
+  // (d) ROLES, for the payroll team. paid_hours below is team-dependent — a stored
+  // approved_minutes pays for a live host and is ignored for everyone else — so the assistant has
+  // to know whose row it is or it would quote a figure Pay does not agree with. id+role only; no
+  // rate, no name, nothing this tool does not already return elsewhere.
+  const roles = await pageAll<Record<string, unknown>>((f: number, t: number) =>
+    ctx.admin.from('employees').select('id, role')
+      .in('user_id', ctx.ownerIds)
+      .order('id', { ascending: true }).range(f, t));
+  if (roles.error) throw new Error(`employees read failed: ${String((roles.error as { message?: string }).message ?? roles.error)}`);
+  const teamById = new Map<string, PayrollTeam>(
+    roles.rows.map((e) => [String(e.id), payrollTeamOfRole(e.role as string | null)]),
+  );
+
   // Annotate each worked row with the SAME payability verdict the payroll UI uses —
   // imported from lib/employees, never reimplemented here. Two definitions of "payable"
   // that drift is exactly how the assistant would end up contradicting PayView.
   const workedRows = worked.rows.map((r: Record<string, unknown>) => {
     const s = r as Parameters<typeof isPayableShift>[0];
     const payable = isPayableShift(s);
+    const team = teamById.get(String(r.employee_id)) ?? 'other';
     return {
       ...r,
       payable,
-      paid_hours: payable ? Math.round(paidShiftHours(s) * 100) / 100 : 0,
+      paid_hours: payable ? Math.round(paidShiftHours(s, team) * 100) / 100 : 0,
       excluded_reason: payable
         ? null
         : r.end_time == null ? 'open shift (no end time)'

@@ -14,6 +14,7 @@ import {
   type CalPunch, type CalScheduled, type CalendarView, type DayPerson,
 } from '@/lib/schedule/calendarModel';
 import { workedTimePrefill, type WorkedTimePrefill } from '@/lib/shifts/manualWorked';
+import type { ApprovedTeam } from '@/lib/shifts/approvedHours';
 import {
   monthGridDays, monthTitle, addMonthsISO, startOfMonthISO, isInMonth, localTodayISO,
   WEEKDAY_LABELS, parseYMD, indexWeekCards, type RoleFilterValue, type WeekShiftCard,
@@ -180,13 +181,17 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
 
   // Confirmation carries the manager's APPROVED MINUTES (migration 137) in the same call, so a
   // confirmed shift can never be left paying its clocked span for want of a second request.
-  async function handleConfirm(shiftId: string, confirmed: boolean, approvedMinutes?: number | null) {
-    await confirmShift.mutateAsync({ id: shiftId, confirmed, approvedMinutes });
+  //
+  // The TEAM rides along with them. Approved hours are a live-host instrument; useShifts collapses
+  // the figure to NULL for anyone else, and this pass-through is what lets it. The tile supplies
+  // the team because it is the layer that knows the person — this container only has a shift id.
+  async function handleConfirm(shiftId: string, confirmed: boolean, team: ApprovedTeam, approvedMinutes?: number | null) {
+    await confirmShift.mutateAsync({ id: shiftId, confirmed, team, approvedMinutes });
   }
 
   /** Payroll-only correction: change what a confirmed shift PAYS without touching its punch. */
-  async function handleApprovedMinutes(shiftId: string, approvedMinutes: number | null) {
-    await setApprovedMinutes.mutateAsync({ id: shiftId, approvedMinutes });
+  async function handleApprovedMinutes(shiftId: string, team: ApprovedTeam, approvedMinutes: number | null) {
+    await setApprovedMinutes.mutateAsync({ id: shiftId, team, approvedMinutes });
   }
 
   // PLAN. One bulk request for the whole crew through the SAME write path the employee Schedule
