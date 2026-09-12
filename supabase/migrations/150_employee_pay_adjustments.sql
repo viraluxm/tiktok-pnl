@@ -8,9 +8,50 @@
 --    Prefix 150 re-verified free across origin/main, every local and remote branch and every
 --    sibling worktree at the time of the revision.
 --
--- ⛔ NOT APPLIED. As of writing this file has NOT been run against production. This DB has no
---    migration ledger (see CONVENTIONS.md) — the repo file is the only record, so when it IS
---    applied, that fact gets recorded HERE, in this header, the way 138/139/149 record theirs.
+-- ✅ APPLIED TO PRODUCTION 2026-09-12 18:30 UTC. This DB has NO migration ledger — migrations are
+--    applied BY HAND and the repo file is the only record (see CONVENTIONS.md), so this line IS the
+--    record. DO NOT APPLY IT AGAIN. Every statement below is `if not exists` / guarded, so a re-run
+--    is harmless, but it is also pointless: the table, its 9 constraints, its 3 indexes, its policy,
+--    its grants and its trigger all exist in production already.
+--
+--    Applied straight through the Management API, in the approved order, MIGRATION FIRST then code
+--    (the reverse of 149 — see the DEPLOY ORDER note below). Sections 1, 2 and 3 went in as three
+--    separate requests, each wrapped in its own transaction with `set local lock_timeout = '3s'`.
+--
+--    Evidence recorded either side of the apply, per CLAUDE.md's deploy gate:
+--      • 18:30:04 UTC before — latest capture_events write 18:29:48 (16s earlier), 23 events in the
+--        preceding 15 minutes, live_sessions.last_seen_at 18:29:37, 1 session marked live. A show
+--        WAS running; the lock footprint is one new table plus one index build on the 50-row
+--        `employees` roster, and `set local lock_timeout = '3s'` makes contention abort rather than
+--        queue, so it went ahead and is reported here.
+--      • 18:31:23 UTC after — 2 further capture_events had landed inside the apply window and
+--        live_sessions.last_seen_at had advanced to 18:31:07. The capture path never paused.
+--      • DATA UNTOUCHED, by fingerprint, identical before and after: 50 employees, 759 shifts,
+--        67 rows carrying approved_minutes summing to 30997; md5 over every shift's punch instants,
+--        breaks, approved_minutes and confirmed_at = 182567e33c9f69aa7bd371f38eac61f5; md5 over
+--        every employee's hourly_rate = f31528f94ed4087b5165d08477023851.
+--      • FUNCTIONS UNTOUCHED: the combined md5 of all 15 `public` functions referencing `employees`
+--        was b326647c0d12a03caf62a02db34411c7 before and after. This migration creates and replaces
+--        no function at all.
+--
+--    Verified live afterwards, read-only: 12 columns; 11 constraints (the 9 below plus the primary
+--    key and the auth.users FK); idx_epa_owner_period, idx_epa_employee_period and
+--    uq_employees_id_user all present; relrowsecurity = true with the own-row policy carrying BOTH
+--    `qual` and `with_check` of `auth.uid() = user_id`; `authenticated` granted; **`anon` holds no
+--    grant at all**, which is strictly tighter than its sibling tables `shifts` and `employees`
+--    (both of which carry Supabase's default anon grant set); the set_updated_at trigger attached;
+--    and 0 rows — the migration seeds nothing.
+--
+--    Behaviour verified in production by attempting rows that MUST be refused, so nothing could be
+--    written. Each was rejected by the named constraint, and the table was still empty afterwards:
+--      • flat carrying a rate / flat with no amount / flat with amount 0 → flat_shape
+--      • hourly carrying an amount / hourly with rate 0                 → hourly_shape
+--      • rate above the $1,000/hr cap                                   → rate_sane
+--      • an off-cycle pay period                                        → period_canonical
+--      • kind other than 'bonus'                                        → kind_check
+--      • ⭐ a VALID, well-shaped row from a REAL auth user pointing at ANOTHER tenant's REAL
+--        employee                                                       → employee_fk
+--        That last one is the cross-tenant guarantee, proven on live data rather than argued.
 --
 -- 🔢 PREFIX 150 was free across origin/main, every local and remote branch and every sibling
 --    worktree at the time of writing (main's highest is 149_approved_minutes_live_host_only;

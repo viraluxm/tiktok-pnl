@@ -716,9 +716,12 @@ console.log('\n§10 THE GUARANTEES THAT LIVE IN SQL — asserted over the real m
   check('every one of 81 real pay periods satisfies the SQL predicate', ok && walked === 81, `${walked} examined`);
   check('...and an off-cycle window would be refused', daysBetween(anchorStart, isoAdd(anchorStart, 7)) % 14 !== 0);
 
-  // Not applied, and it touches no payroll.
-  check('the file does NOT claim to have been applied to production',
-    /⛔ NOT APPLIED/.test(sql) && !/✅ APPLIED TO PRODUCTION/.test(sql));
+  // APPLIED, and recorded as such — this DB has no migration ledger, so the file header IS the
+  // deployment record and the assertion follows it (exactly as 149's suite does).
+  check('the file records that it HAS been applied to production',
+    /✅ APPLIED TO PRODUCTION/.test(sql) && !/⛔ NOT APPLIED/.test(sql));
+  check('...with a date, and a DO-NOT-APPLY-AGAIN warning',
+    /APPLIED TO PRODUCTION \d{4}-\d{2}-\d{2}/.test(sql) && /DO NOT APPLY IT AGAIN/.test(sql));
   for (const forbidden of ['shifts', 'approved_minutes', 'hourly_rate', 'confirmed_at', 'break_minutes']) {
     check(`the migration never writes ${forbidden}`,
       !new RegExp(`(update|insert into|alter table)[^;]*\\b${forbidden}\\b`, 'i').test(ddl));
