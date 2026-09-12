@@ -20,6 +20,9 @@ import { useUser } from './useUser';
 //   • WHO OWNS IT      `user_id` DEFAULTS to auth.uid() in SQL, so nothing below ever sends an
 //                      owner id. RLS `with check (auth.uid() = user_id)` refuses any other value,
 //                      so even a hand-forged request cannot write into another tenant.
+//   • WHICH DAY        an hourly bonus MUST name a target_date, and it MUST fall inside the bonus's
+//                      own pay period — both CHECK constraints (migration 151). The date picker
+//                      only offers days in the period, but the picker is not what enforces it.
 //   • WHOSE EMPLOYEE   a COMPOSITE foreign key (employee_id, user_id) → employees (id, user_id).
 //                      Postgres itself refuses a bonus that pairs this owner with another tenant's
 //                      employee — RLS alone would not, because RLS only constrains user_id.
@@ -49,6 +52,8 @@ export interface BonusFields {
   amount_cents: number | null;
   /** HOURLY: integer cents per payable hour, > 0. NULL on a flat bonus. */
   rate_cents_per_hour: number | null;
+  /** HOURLY: the ONE canonical work date the rate is paid on. NULL on a flat bonus. */
+  target_date: string | null;
   description: string | null;
 }
 
@@ -76,6 +81,9 @@ export function bonusColumns(fields: BonusFields) {
     calculation_type: fields.calculation_type,
     amount_cents: hourly ? null : fields.amount_cents,
     rate_cents_per_hour: hourly ? fields.rate_cents_per_hour : null,
+    // The DAY is part of the same "exactly one shape" rule: set on hourly, explicitly null on flat.
+    // Migration 151's constraints refuse either mistake, and refuse a date outside the period.
+    target_date: hourly ? fields.target_date : null,
     description: fields.description,
   };
 }
@@ -134,7 +142,7 @@ export function usePayAdjustments(periodStart: string | null, periodEnd: string 
     onSuccess: refetchAll,
   });
 
-  // The FIGURE and the reason only. employee_id, the period and the CALCULATION TYPE are not
+  // The FIGURE, the DAY and the reason. employee_id, the period and the CALCULATION TYPE are not
   // editable: moving a bonus to another person or another pay period is not a correction, it is a
   // different bonus — and so is turning $2.00 from a one-off payment into a per-hour rate worth
   // seventy times as much. Each is delete-and-re-add, which leaves an honest created_at behind
@@ -178,6 +186,9 @@ export function bonusWriteErrorMessage(error: { message?: string; code?: string 
   const raw = error?.message ?? '';
   if (raw.includes('employee_pay_adjustments_flat_shape')) return 'A flat bonus needs an amount of more than $0.00.';
   if (raw.includes('employee_pay_adjustments_hourly_shape')) return 'An hourly bonus needs a per-hour rate of more than $0.00.';
+  if (raw.includes('employee_pay_adjustments_hourly_needs_target_date')) return 'Choose the day this hourly bonus is paid on.';
+  if (raw.includes('employee_pay_adjustments_flat_no_target_date')) return 'A flat bonus is for the whole pay period, not one day.';
+  if (raw.includes('employee_pay_adjustments_target_date_in_period')) return 'That day is outside this pay period.';
   if (raw.includes('employee_pay_adjustments_amount_sane')) return 'That amount is too large to be a bonus.';
   if (raw.includes('employee_pay_adjustments_rate_sane')) return 'That is too large to be a per-hour bonus rate.';
   if (raw.includes('employee_pay_adjustments_calculation_type_check')) return 'A bonus must be either a flat amount or an hourly rate.';

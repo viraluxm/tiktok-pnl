@@ -57,6 +57,7 @@ const punchUrl = transpile('../shifts/punchEdit.ts', 'punchEdit.mjs', {
 const {
   buildPayStatement, bonusItemsFor, bonusSummaryFor, sumBonusCents, centsToDollars, totalOwedOf,
   hourlyBonusCents, formatBonusBasis, formatPayableDuration, formatMoney, payPeriodWeeks,
+  paidHoursByDateOf,
   BONUS_FALLBACK_LABEL,
 } = await import(stmtUrl);
 const { computePay, paidShiftHours, payrollTeamOfRole, PAY_ANCHOR, payPeriodFor } = await import(employeesUrl);
@@ -126,17 +127,24 @@ const row = (employee_id, over) => {
     id: `b${bseq}`, user_id: 'u1', employee_id,
     period_start: PERIOD.start, period_end: PERIOD.end,
     kind: 'bonus', calculation_type: 'flat', amount_cents: null, rate_cents_per_hour: null,
-    description: null,
+    target_date: null, description: null,
     created_at: `2026-09-07T18:0${bseq}:00.000Z`, updated_at: `2026-09-07T18:0${bseq}:00.000Z`,
     ...over,
   };
 };
 /** A FLAT bonus row, shaped as the CHECK constraints require. */
 const flat = (employee_id, amount_cents, description, over = {}) =>
-  row(employee_id, { calculation_type: 'flat', amount_cents, rate_cents_per_hour: null, description, ...over });
-/** An HOURLY bonus row — a RATE, and deliberately no stored total anywhere. */
-const hourly = (employee_id, rate_cents_per_hour, description, over = {}) =>
-  row(employee_id, { calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour, description, ...over });
+  row(employee_id, { calculation_type: 'flat', amount_cents, rate_cents_per_hour: null, target_date: null, description, ...over });
+/**
+ * An HOURLY bonus row — a RATE and a DAY, and deliberately no stored total anywhere.
+ * `target_date` is REQUIRED by the database (migration 151), so it is required here too.
+ */
+const hourly = (employee_id, rate_cents_per_hour, description, target_date, over = {}) => {
+  if (!target_date) throw new Error('hourly() needs a target_date — an hourly bonus is day-specific');
+  return row(employee_id, {
+    calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour, target_date, description, ...over,
+  });
+};
 
 const stmt = (adjustments, employee = CARLOS, period = PERIOD, shifts = SHIFTS) =>
   buildPayStatement({ employee, period, shifts, adjustments, generatedAtISO: '2026-09-08T17:00:00.000Z' });
@@ -159,7 +167,7 @@ console.log('\n§1 The fixture is the reviewed one, and worked pay is untouched 
   const empty = stmt([]);
   check('an empty adjustments list is identical to omitting it',
     JSON.stringify(empty) === JSON.stringify(BASE));
-  const foreign = stmt([flat('e-dana', 50000, 'Dana bonus'), hourly('e-dana', 500, 'Dana incentive')]);
+  const foreign = stmt([flat('e-dana', 50000, 'Dana bonus'), hourly('e-dana', 500, 'Dana incentive', '2026-08-24')]);
   check('another person\'s bonuses leave this statement byte-identical',
     JSON.stringify(foreign) === JSON.stringify(BASE));
 }
@@ -180,257 +188,257 @@ console.log('\n§2 FLAT — a fixed sum, worth what was typed');
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§3 HOURLY — a rate times the CANONICAL payable hours');
+console.log('\n§3 HOURLY IS DAY-SPECIFIC — a rate times ONE DAY\'s canonical payable hours');
 {
-  const s = stmt([hourly('e-carlos', 200, 'Productivity incentive')]);
+  // The product example: base $25/hr, Tuesday carries 8.00 payable hours, +$5/hr on Tuesday = $40.
+  const emp = EMP({ id: 'e-t', hourly_rate: 25 });
+  const shifts = [
+    punch('e-t', '2026-08-24', '08:00', '16:00'),                 // Mon 8.00
+    punch('e-t', '2026-09-01', '08:00', '16:00'),                 // TUE 8.00
+    punch('e-t', '2026-09-02', '08:00', '16:00'),                 // Wed 8.00
+  ];
+  const s = stmt([hourly('e-t', 500, 'Tuesday incentive', '2026-09-01')], emp, PERIOD, shifts);
   const item = s.bonusItems[0];
-  check('the line is hourly', item.calculationType === 'hourly');
-  check('...carrying its entered rate', item.rateCentsPerHour === 200);
+
+  check('the line is hourly and names its day', item.calculationType === 'hourly' && item.targetDateISO === '2026-09-01');
+  check('...carrying its entered rate', item.rateCentsPerHour === 500);
   check('...and NO flat amount', item.amountCents === null);
-  check('the eligible hours ARE the statement\'s payable hours — not a second definition',
-    item.eligiblePaidHours === s.totals.paidHours && item.eligiblePaidHours.toFixed(2) === '72.50');
-  check('72.50 hr x $2.00/hr = $145.00', item.calculatedBonusCents === 14500, formatMoney(item.amount));
-  check('it shows its working as a duration that multiplies out correctly',
-    formatBonusBasis(item) === '$2.00/hr × 72h 30m payable', formatBonusBasis(item));
-  check('bonus pay is $145.00', formatMoney(s.totals.bonusTotal) === '$145.00');
-  check('...all of it hourly', cents(s.totals.hourlyBonusTotal) === 14500 && s.totals.flatBonusTotal === 0);
-  check('TOTAL OWED is $1,740.00', formatMoney(s.totals.totalOwed) === '$1,740.00');
+  check('the eligible hours are TUESDAY\'s 8.00 — not the period\'s 24.00',
+    item.eligiblePaidHours === 8 && s.totals.paidHours === 24);
+  check('8.00 hr x $5.00/hr = $40.00', item.calculatedBonusCents === 4000, formatMoney(item.amount));
+  check('it shows the day, the rate and the hours', formatBonusBasis(item) === 'Tue Sep 1 · $5.00/hr × 8h payable',
+    formatBonusBasis(item));
+  check('worked pay is the period\'s 24.00 x $25.00', cents(s.totals.gross) === 60000);
+  check('TOTAL OWED = worked + the one day\'s incentive', cents(s.totals.totalOwed) === 60000 + 4000);
 
-  // A DECIMAL rate.
-  const dec = stmt([hourly('e-carlos', 250, 'Productivity incentive')]);
-  check('72.50 hr x $2.50/hr = $181.25', dec.bonusItems[0].calculatedBonusCents === 18125,
-    formatMoney(dec.totals.bonusTotal));
-  check('...and reads as $181.25', formatMoney(dec.totals.bonusTotal) === '$181.25');
+  // OTHER DAYS MUST NOT CONTRIBUTE.
+  const wed = stmt([hourly('e-t', 500, 'Wednesday incentive', '2026-09-02')], emp, PERIOD, shifts);
+  check('a WEDNESDAY incentive prices Wednesday, not Tuesday', wed.bonusItems[0].eligiblePaidHours === 8);
+  check('...and moving the day changes nothing about the hours themselves',
+    wed.totals.paidHours === s.totals.paidHours);
+  const longWed = [...shifts.filter((x) => x.date !== '2026-09-02'), punch('e-t', '2026-09-02', '08:00', '20:00')];
+  const tueUnmoved = stmt([hourly('e-t', 500, 'Tuesday incentive', '2026-09-01')], emp, PERIOD, longWed);
+  check('lengthening WEDNESDAY leaves a TUESDAY incentive untouched at $40.00',
+    tueUnmoved.bonusItems[0].calculatedBonusCents === 4000 && tueUnmoved.totals.paidHours === 28);
 
-  // The per-item rounding rule, exercised directly on hours that do not divide cleanly.
-  check('rate x hours rounds to the nearest cent, once', hourlyBonusCents(250, 7.666666666666667) === 1917);
-  check('...and never goes negative', hourlyBonusCents(200, 0) === 0);
-
-  // A period with no payable hours earns no incentive.
-  const none = buildPayStatement({
-    employee: CARLOS, period: PREV_PERIOD, shifts: SHIFTS,
-    adjustments: [hourly('e-carlos', 200, 'Incentive', { period_start: PREV_PERIOD.start, period_end: PREV_PERIOD.end })],
-    generatedAtISO: 'x',
-  });
-  check('an hourly bonus on a period with no payable hours is worth $0.00',
-    none.totals.paidHours === 0 && none.totals.bonusCents === 0);
-  check('...and is still LISTED, so the manager can see it is there', none.bonusItems.length === 1);
+  // paidHoursByDate is the statement's own grouping.
+  check('totals.paidHoursByDate keys the payable rows by their own date',
+    s.totals.paidHoursByDate['2026-09-01'] === 8 && s.totals.paidHoursByDate['2026-08-24'] === 8);
+  check('...and it IS paidHoursByDateOf(rows) — one derivation, not two',
+    JSON.stringify(s.totals.paidHoursByDate) === JSON.stringify(paidHoursByDateOf(s.rows)));
+  check('...summing it gives back the period total',
+    Object.values(s.totals.paidHoursByDate).reduce((a, b) => a + b, 0).toFixed(2) === s.totals.paidHours.toFixed(2));
+  check('...and it groups exactly as the rendered day groups do',
+    payPeriodWeeks(s).flatMap((w) => w.days).filter((d) => d.hours > 0)
+      .every((d) => d.hours === s.totals.paidHoursByDate[d.dateISO]));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§4 WHICH HOURS — the payroll rule, per team, unchanged');
+console.log('\n§4 WHICH HOURS A DAY HAS — the payroll rule, per team, unchanged');
 {
-  // BREAKS: unpaid break time is not payable, so it earns no incentive.
-  const brk = [punch('e-b', '2026-08-24', '08:00', '17:00', { break_minutes: 60 })];
+  // BREAKS: Tuesday 8h raw minus 30m unpaid = 7.50 payable, so $5/hr pays $37.50.
   const bEmp = EMP({ id: 'e-b', hourly_rate: 20 });
-  const bS = stmt([hourly('e-b', 200, 'Incentive')], bEmp, PERIOD, brk);
-  check('a 9-hour punch with a 60-minute break is 8.00 payable hours', bS.totals.paidHours.toFixed(2) === '8.00');
-  check('...so a $2.00/hr incentive pays $16.00, not $18.00', bS.totals.bonusCents === 1600, formatMoney(bS.totals.bonusTotal));
-  check('...the working says 8h, not 9h', formatBonusBasis(bS.bonusItems[0]) === '$2.00/hr × 8h payable',
-    formatBonusBasis(bS.bonusItems[0]));
+  const brk = [punch('e-b', '2026-09-01', '08:00', '16:00', { break_minutes: 30 })];
+  const bS = stmt([hourly('e-b', 500, 'Tuesday incentive', '2026-09-01')], bEmp, PERIOD, brk);
+  check('Tuesday 8h raw minus a 30m unpaid break = 7.50 payable hours', bS.totals.paidHours.toFixed(2) === '7.50');
+  check('...so $5.00/hr pays $37.50, not $40.00', bS.totals.bonusCents === 3750, formatMoney(bS.totals.bonusTotal));
+  check('...and the working says 7h 30m', formatBonusBasis(bS.bonusItems[0]).endsWith('$5.00/hr × 7h 30m payable'));
 
-  // MULTI-SHIFT: two clock sessions on one day are two records and 8 payable hours between them.
-  const split = [punch('e-s', '2026-08-25', '06:00', '10:00'), punch('e-s', '2026-08-25', '14:00', '18:00')];
+  // MULTI-SHIFT on the target day: 4 + 4 = 8, priced once.
   const sEmp = EMP({ id: 'e-s', hourly_rate: 20 });
-  const sS = stmt([hourly('e-s', 200, 'Incentive')], sEmp, PERIOD, split);
-  check('a split day is still TWO payable records', sS.rows.length === 2);
-  check('...4.00 + 4.00 = 8.00 payable hours', sS.totals.paidHours.toFixed(2) === '8.00');
-  check('...and the incentive is $16.00 across the pair, counted once', sS.totals.bonusCents === 1600);
+  const split = [punch('e-s', '2026-09-01', '06:00', '10:00'), punch('e-s', '2026-09-01', '14:00', '18:00')];
+  const sS = stmt([hourly('e-s', 500, 'Tuesday incentive', '2026-09-01')], sEmp, PERIOD, split);
+  check('a split Tuesday is still TWO payable records', sS.rows.length === 2);
+  check('...whose hours SUM to 8.00 for the day', sS.totals.paidHoursByDate['2026-09-01'] === 8);
+  check('...so the incentive is $40.00, counted once across the pair', sS.totals.bonusCents === 4000);
 
-  // FULFILLMENT: a stored approved_minutes is still IGNORED, so the incentive prices the punch.
-  const typo = [punch('e-x', '2026-08-24', '06:06', '13:46', { approved_minutes: 1421 })];
+  // FULFILLMENT: approved_minutes stays inert; the punch prices the day.
+  const typo = [punch('e-x', '2026-09-01', '06:06', '13:46', { approved_minutes: 1421 })];
   const ful = EMP({ id: 'e-x', role: 'fulfillment', hourly_rate: 20 });
-  const fulS = stmt([hourly('e-x', 200, 'Incentive')], ful, PERIOD, typo);
-  check('fulfillment still pays the CLOCKED 7.67 h, not the stored 23.68', fulS.totals.paidHours.toFixed(2) === '7.67');
+  const fulS = stmt([hourly('e-x', 500, 'Tuesday incentive', '2026-09-01')], ful, PERIOD, typo);
+  check('fulfillment still pays the CLOCKED 7.67 h that day, not the stored 23.68',
+    fulS.totals.paidHours.toFixed(2) === '7.67');
   check('...via the real paidShiftHours, unchanged',
     fulS.rows[0].paidHours === paidShiftHours(typo[0], payrollTeamOfRole('fulfillment')));
-  check('...so its incentive prices the CLOCKED hours', fulS.bonusItems[0].eligiblePaidHours === fulS.totals.paidHours);
-  check('...$15.33, not $47.36', fulS.totals.bonusCents === 1533, formatMoney(fulS.totals.bonusTotal));
+  check('...so its incentive prices the CLOCKED day: $38.33', fulS.totals.bonusCents === 3833, formatMoney(fulS.totals.bonusTotal));
 
-  // LIVE HOST: the SAME row still pays its approved duration, and the incentive follows it.
+  // LIVE HOST: the SAME row pays its approved duration, and the incentive follows.
   const host = EMP({ id: 'e-x', role: 'host', hourly_rate: 20 });
-  const hostS = stmt([hourly('e-x', 200, 'Incentive')], host, PERIOD, typo);
-  check('a live host still pays the APPROVED 23.68 h', hostS.totals.paidHours.toFixed(2) === '23.68');
-  check('...so its incentive prices the APPROVED hours', hostS.bonusItems[0].eligiblePaidHours === hostS.totals.paidHours);
-  check('...$47.37, not $15.33', hostS.totals.bonusCents === 4737, formatMoney(hostS.totals.bonusTotal));
-  check('...so the two teams differ, and neither check is vacuous',
-    hostS.totals.bonusCents !== fulS.totals.bonusCents);
+  const hostS = stmt([hourly('e-x', 500, 'Tuesday incentive', '2026-09-01')], host, PERIOD, typo);
+  check('a live host still pays the APPROVED 23.68 h that day', hostS.totals.paidHours.toFixed(2) === '23.68');
+  check('...so its incentive prices the APPROVED day: $118.42', hostS.totals.bonusCents === 11842, formatMoney(hostS.totals.bonusTotal));
+  check('...so the two teams differ, and neither check is vacuous', hostS.totals.bonusCents !== fulS.totals.bonusCents);
 
-  // THE HOURS ARE NOT ROUNDED BEFORE THEY ARE MULTIPLIED, and that is a decision, not an oversight.
-  // A live host on 30.4666 canonical payable hours at $3.00/hr is owed $91.40; the 30.47 shown
-  // beside it multiplies out to $91.41. Rounding the hours first would pay the incentive on time
-  // nobody worked — a second definition of a payable hour, which is the thing this feature is not
-  // allowed to introduce. The same property already governs base pay on the same document.
-  const oddHost = EMP({ id: 'e-odd', role: 'host', hourly_rate: 25 });
-  const oddShift = [punch('e-odd', '2026-08-24', '06:00', '14:00', { approved_minutes: 1828 })];
-  const oddS = stmt([hourly('e-odd', 300, 'Live show incentive')], oddHost, PERIOD, oddShift);
-  check('the fixture really does have hours that are not exact at 2dp',
-    oddS.totals.paidHours.toFixed(2) === '30.47' && oddS.totals.paidHours !== 30.47,
-    String(oddS.totals.paidHours));
-  check('the incentive is priced off the UNROUNDED canonical hours — $91.40',
-    oddS.totals.bonusCents === 9140, formatMoney(oddS.totals.bonusTotal));
-  check('...NOT off the rounded ones, which would have been $91.41',
-    hourlyBonusCents(300, 30.47) === 9141 && oddS.totals.bonusCents !== hourlyBonusCents(300, 30.47));
-  check('...and base pay on the same statement is rounded the same way, as it always has been',
-    cents(oddS.totals.gross) === Math.round(oddS.totals.paidHours * 25 * 100) &&
-      cents(oddS.totals.gross) !== Math.round(30.47 * 25 * 100));
-
-  // The spec's own live-host example: 68.00 approved hours at $3.00/hr.
-  const h68 = [punch('e-h', '2026-08-24', '06:00', '14:00', { approved_minutes: 4080 })];
+  // The spec's live-host example: 6.00 approved hours at $3.00/hr = $18.00.
+  const h6 = [punch('e-h', '2026-09-01', '06:00', '16:00', { approved_minutes: 360 })];
   const hEmp = EMP({ id: 'e-h', role: 'host', hourly_rate: 25 });
-  const h68S = stmt([hourly('e-h', 300, 'Live show incentive')], hEmp, PERIOD, h68);
-  check('68.00 approved hours x $3.00/hr = $204.00', h68S.totals.bonusCents === 20400, formatMoney(h68S.totals.bonusTotal));
+  const h6S = stmt([hourly('e-h', 300, 'Live show incentive', '2026-09-01')], hEmp, PERIOD, h6);
+  check('6.00 approved hours x $3.00/hr = $18.00', h6S.totals.bonusCents === 1800, formatMoney(h6S.totals.bonusTotal));
 
-  // An UNCONFIRMED punch is not payable, so it earns no incentive either.
-  const unconf = [punch('e-u', '2026-08-24', '08:00', '16:00', { confirmed_at: null })];
-  const uS = stmt([hourly('e-u', 200, 'Incentive'), flat('e-u', 10000, 'Flat anyway')], EMP({ id: 'e-u', hourly_rate: 20 }), PERIOD, unconf);
-  check('an unconfirmed punch still pays nothing', uS.totals.paidHours === 0 && uS.totals.gross === 0);
-  check('...so the hourly incentive is worth $0.00', cents(uS.totals.hourlyBonusTotal) === 0);
+  // UNCONFIRMED: not payable, so the day has 0 eligible bonus hours.
+  const unconf = [punch('e-u', '2026-09-01', '08:00', '16:00', { confirmed_at: null })];
+  const uS = stmt([hourly('e-u', 500, 'Tuesday incentive', '2026-09-01'), flat('e-u', 10000, 'Flat anyway')],
+    EMP({ id: 'e-u', hourly_rate: 20 }), PERIOD, unconf);
+  check('an unconfirmed Tuesday punch pays nothing', uS.totals.paidHours === 0);
+  check('...so the day has 0 eligible bonus hours and the incentive is $0.00',
+    uS.bonusItems.find((b) => b.calculationType === 'hourly').eligiblePaidHours === 0 &&
+      cents(uS.totals.hourlyBonusTotal) === 0);
   check('...while the flat bonus is still owed in full', formatMoney(uS.totals.totalOwed) === '$100.00');
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§5 HOURS CAN CHANGE — and the incentive follows, with nobody editing it');
+console.log('\n§5 A ZERO-HOUR DAY IS LEGAL, AND RE-PRICES ITSELF LATER');
 {
-  const incentive = hourly('e-carlos', 200, 'Productivity incentive');
-  // A snapshot of the stored row, taken BEFORE anything reads it. The re-pricing below has to
-  // happen without this object changing in any way — that is what "nobody edits the bonus" means.
-  const storedBefore = JSON.stringify(incentive);
-  const before = stmt([incentive]);
-  check('before: 72.50 hr, incentive $145.00',
-    before.totals.paidHours.toFixed(2) === '72.50' && before.totals.bonusCents === 14500);
+  const emp = EMP({ id: 'e-z', hourly_rate: 20 });
+  const worked = [punch('e-z', '2026-09-01', '08:00', '16:00')];
+  // Saturday Aug 29: nothing worked.
+  const bonusRow = hourly('e-z', 500, 'Saturday cover incentive', '2026-08-29');
+  const before = stmt([bonusRow], emp, PERIOD, worked);
+  check('the bonus EXISTS on a day with no payable hours', before.bonusItems.length === 1);
+  check('...its eligible hours are 0.00', before.bonusItems[0].eligiblePaidHours === 0);
+  check('...it is worth $0.00, not an error', before.bonusItems[0].calculatedBonusCents === 0);
+  check('...and it still states its day', formatBonusBasis(before.bonusItems[0]).startsWith('Sat Aug 29 · $5.00/hr'));
+  check('...leaving total owed equal to worked pay', before.totals.totalOwed === before.totals.gross);
 
-  // A REAL correction, through the REAL patch builder: Thursday's 08:00-16:30 becomes 08:00-18:00.
-  const target = SHIFTS.find((s) => s.date === '2026-08-27');
-  const patch = buildShiftEditPatch(target, { end_time: '18:00' });
-  check('the correction produced a patch', patch !== null && patch !== undefined);
-  check('...and it moved the PUNCH INSTANT, which is what pay reads', patch.clock_out_at !== undefined);
-  const corrected = SHIFTS.map((s) => (s.id === target.id ? { ...s, ...patch } : s));
+  // A Saturday shift is later added and confirmed.
+  const after = stmt([bonusRow], emp, PERIOD, [...worked, punch('e-z', '2026-08-29', '09:00', '15:00')]);
+  check('once a 6.00-hour Saturday shift is confirmed, the SAME row is worth $30.00',
+    after.bonusItems[0].eligiblePaidHours === 6 && after.bonusItems[0].calculatedBonusCents === 3000);
+  check('...with nothing deleted or re-entered', after.bonusItems[0].id === before.bonusItems[0].id);
+}
 
-  const after = stmt([incentive], CARLOS, PERIOD, corrected);
-  check('after: 74.00 payable hours', after.totals.paidHours.toFixed(2) === '74.00', after.totals.paidHours.toFixed(2));
-  check('THE INCENTIVE RE-PRICED ITSELF: $145.00 → $148.00', after.totals.bonusCents === 14800,
+// ════════════════════════════════════════════════════════════════════════════════════════════
+console.log('\n§6 DYNAMIC REPRICING — and the stored row is never rewritten');
+{
+  const emp = EMP({ id: 'e-d', hourly_rate: 25 });
+  const SH = [punch('e-d', '2026-09-01', '08:00', '16:00'), punch('e-d', '2026-09-02', '08:00', '16:00')];
+  const incentive = hourly('e-d', 500, 'Tuesday incentive', '2026-09-01');
+  const frozen = JSON.stringify(incentive);
+  const before = stmt([incentive], emp, PERIOD, SH);
+  check('before: Tuesday 8.00 hr -> $40.00', before.bonusItems[0].calculatedBonusCents === 4000);
+
+  // A REAL correction through the REAL patch builder: Tuesday ends half an hour earlier.
+  const target = SH.find((x) => x.date === '2026-09-01');
+  const patch = buildShiftEditPatch(target, { end_time: '15:30' });
+  check('the correction produced a patch on the punch instant', patch !== null && patch.clock_out_at !== undefined);
+  const after = stmt([incentive], emp, PERIOD, SH.map((x) => (x.id === target.id ? { ...x, ...patch } : x)));
+  check('after: Tuesday 7.50 payable hours', after.totals.paidHoursByDate['2026-09-01'] === 7.5);
+  check('THE INCENTIVE RE-PRICED ITSELF: $40.00 → $37.50', after.bonusItems[0].calculatedBonusCents === 3750,
     formatMoney(after.totals.bonusTotal));
-  check('...WITHOUT the stored row changing by a single byte — nobody edited the bonus',
-    JSON.stringify(incentive) === storedBefore);
-  check('...and the row still holds only a RATE, never a total',
-    incentive.rate_cents_per_hour === 200 && incentive.amount_cents === null &&
-      !Object.keys(incentive).some((k) => /calculated|total/i.test(k)),
-    Object.keys(incentive).join(','));
-  check('...its stated working moved too', formatBonusBasis(after.bonusItems[0]) === '$2.00/hr × 74h payable',
-    formatBonusBasis(after.bonusItems[0]));
-  check('...worked pay moved by the hour and a half as well',
-    cents(after.totals.gross) - cents(before.totals.gross) === cents(1.5 * 22));
-  check('...and total owed moved by both', cents(after.totals.totalOwed) - cents(before.totals.totalOwed) === 3300 + 300);
+  check('...WITHOUT the stored row changing by a single byte', JSON.stringify(incentive) === frozen);
+  check('...and the row still holds only a rate and a day, never a total',
+    incentive.rate_cents_per_hour === 500 && incentive.target_date === '2026-09-01' &&
+      incentive.amount_cents === null && !Object.keys(incentive).some((k) => /calculated|total/i.test(k)));
 
-  // A FLAT bonus, by contrast, must NOT move.
-  const flatBefore = stmt([flat('e-carlos', 10000, 'Performance bonus')]);
-  const flatAfter = stmt([flat('e-carlos', 10000, 'Performance bonus', { id: 'bF' })], CARLOS, PERIOD, corrected);
-  check('a FLAT bonus is unmoved by the same correction — it is not hours at a price',
-    flatBefore.totals.bonusCents === flatAfter.totals.bonusCents && flatAfter.totals.bonusCents === 10000);
+  // MOVING THE DAY re-prices off the new day's hours.
+  const longWed = SH.map((x) => (x.date === '2026-09-02' ? { ...x, end_time: '20:00:00', clock_out_at: null, clock_in_at: null, source: 'manual' } : x));
+  const moved = stmt([{ ...incentive, target_date: '2026-09-02' }], emp, PERIOD, longWed);
+  check('editing the target date to Wednesday prices WEDNESDAY\'s 12.00 hours: $60.00',
+    moved.bonusItems[0].eligiblePaidHours === 12 && moved.bonusItems[0].calculatedBonusCents === 6000,
+    formatMoney(moved.totals.bonusTotal));
+  check('...and its stated day moved with it', formatBonusBasis(moved.bonusItems[0]).startsWith('Wed Sep 2 · '));
+
+  // THE BASE RATE IS NEVER TOUCHED.
+  check('employee.hourly_rate is still exactly $25.00', emp.hourly_rate === 25 && after.rate === 25);
+  check('...and the rate line still prices worked pay at $25.00, not $30.00',
+    after.rateLines.every((l) => l.rate === 25) && cents(after.totals.gross) === cents(after.totals.paidHours * 25));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§6 MULTIPLE — the two types side by side');
+console.log('\n§7 THE PRODUCT EXAMPLE, end to end');
 {
-  const items = [
-    flat('e-carlos', 10000, 'Performance bonus'),
-    flat('e-carlos', 5000, 'Attendance bonus'),
-    hourly('e-carlos', 200, 'Productivity incentive'),
+  // Base $25/hr · 80.00 period hours · $2,000.00 worked · Tuesday 8.00 hr · +$5/hr · $40 · $2,040.
+  const emp = EMP({ id: 'e-p', hourly_rate: 25 });
+  const SH = [
+    punch('e-p','2026-08-24','08:00','16:00'), punch('e-p','2026-08-25','08:00','16:00'),
+    punch('e-p','2026-08-26','08:00','16:00'), punch('e-p','2026-08-27','08:00','16:00'),
+    punch('e-p','2026-08-28','08:00','16:00'), punch('e-p','2026-08-31','08:00','16:00'),
+    punch('e-p','2026-09-01','06:00','10:00'), punch('e-p','2026-09-01','14:00','18:00'),
+    punch('e-p','2026-09-02','08:00','16:00'), punch('e-p','2026-09-03','08:00','16:00'),
+    punch('e-p','2026-09-04','08:00','16:00'),
   ];
-  const s = stmt(items);
-  check('all three are present — none overwrote another', s.bonusItems.length === 3);
-  check('each has its own id', new Set(s.bonusItems.map((b) => b.id)).size === 3);
-  check('$100 + $50 flat = $150.00', cents(s.totals.flatBonusTotal) === 15000);
-  check('$2.00/hr x 72.50 hr = $145.00 hourly', cents(s.totals.hourlyBonusTotal) === 14500);
-  check('bonus pay is $295.00', formatMoney(s.totals.bonusTotal) === '$295.00');
-  check('...and the components add up to it exactly',
-    cents(s.totals.flatBonusTotal) + cents(s.totals.hourlyBonusTotal) === s.totals.bonusCents);
-  check('TOTAL OWED is $1,890.00', formatMoney(s.totals.totalOwed) === '$1,890.00');
-  check('...which is $1,595.00 worked + $295.00 bonus',
-    cents(s.totals.gross) === 159500 && cents(s.totals.totalOwed) === 159500 + 29500);
-  check('they are listed oldest first',
-    s.bonusItems.map((b) => b.label).join(' | ') === 'Performance bonus | Attendance bonus | Productivity incentive');
-
-  // NO BONUS OF EITHER TYPE REACHED A WEEK, A DAY OR AN HOURS COLUMN. This is the assertion that
-  // catches an hourly incentive being mistaken for wages somewhere in the grouping — the week
-  // subtotals the screen and the PDF both read must still reconcile to WORKED pay alone.
-  const weeks = payPeriodWeeks(s);
-  const weekHours = weeks.reduce((a, w) => a + w.hours, 0);
-  const weekPay = weeks.reduce((a, w) => a + w.amount, 0);
-  check('the week subtotals still add up to the worked hours', weekHours.toFixed(2) === '72.50');
-  check('...and to worked pay, NOT to total owed',
-    cents(weekPay) === cents(s.totals.gross) && cents(weekPay) !== cents(s.totals.totalOwed));
-  check('...and the grouping is byte-identical to the no-bonus statement',
-    JSON.stringify(payPeriodWeeks(BASE)) === JSON.stringify(weeks));
-  check('the rate lines are untouched too — an hourly bonus is not a second wage',
-    JSON.stringify(s.rateLines) === JSON.stringify(BASE.rateLines) &&
-      s.rateLines.every((l) => cents(l.amount) === cents(l.hours * l.rate)));
-
-  // Two bonuses saved in the same second still come out in a stable order.
-  const tie = [
-    flat('e-carlos', 100, 'B', { id: 'zzz', created_at: '2026-09-07T18:00:00.000Z' }),
-    hourly('e-carlos', 100, 'A', { id: 'aaa', created_at: '2026-09-07T18:00:00.000Z' }),
-  ];
-  check('a created_at tie breaks on id, deterministically',
-    stmt(tie).bonusItems.map((b) => b.id).join(',') === 'aaa,zzz');
-
-  // A bonus with no reason still has to say something, in either type.
-  check('a flat bonus with no description renders as a plain label',
-    stmt([flat('e-carlos', 2500, null)]).bonusItems[0].label === BONUS_FALLBACK_LABEL);
-  check('...and so does an hourly one',
-    stmt([hourly('e-carlos', 250, '   ')]).bonusItems[0].label === BONUS_FALLBACK_LABEL);
+  const s = stmt([hourly('e-p', 500, 'Tuesday incentive', '2026-09-01')], emp, PERIOD, SH);
+  check('80.00 payable hours', s.totals.paidHours.toFixed(2) === '80.00', s.totals.paidHours.toFixed(2));
+  check('$2,000.00 worked pay', formatMoney(s.totals.gross) === '$2,000.00');
+  check('Tuesday carries 8.00 payable hours (4 + 4)', s.totals.paidHoursByDate['2026-09-01'] === 8);
+  check('Tuesday incentive = $40.00', formatMoney(s.totals.bonusTotal) === '$40.00');
+  check('TOTAL OWED = $2,040.00', formatMoney(s.totals.totalOwed) === '$2,040.00');
+  check('EMPLOYEE BASE RATE IS STILL $25.00/hr — never $30.00', emp.hourly_rate === 25 && s.rate === 25);
+  check('...and nothing in the statement reports a $30 rate',
+    !JSON.stringify(s.rateLines).includes('30') && s.rows.every((r) => r.rate === 25));
 }
-
 // ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('\n§7 CREATE / EDIT / DELETE, and the scoping that keeps money where it was put');
+console.log('\n§7b ADD / EDIT / DELETE, and the scoping that keeps money where it was put');
 {
-  const b100 = flat('e-carlos', 10000, 'Performance bonus');
-  const bHr = hourly('e-carlos', 200, 'Productivity incentive');
+  const emp = EMP({ id: 'e-c', hourly_rate: 25 });
+  const other = EMP({ id: 'e-c2', name: 'Someone Else', hourly_rate: 25 });
+  const SH = [
+    punch('e-c', '2026-09-01', '08:00', '16:00'),   // TUE 8.00
+    punch('e-c', '2026-09-02', '08:00', '16:00'),   // WED 8.00
+    punch('e-c2', '2026-09-01', '08:00', '16:00'),  // the other person's own Tuesday
+  ];
+  const base = stmt([], emp, PERIOD, SH);
+  const f = flat('e-c', 10000, 'Performance');
+  const h = hourly('e-c', 500, 'Tuesday incentive', '2026-09-01');
 
-  // ANOTHER PERIOD must not see either type.
-  for (const [label, r] of [['flat', b100], ['hourly', bHr]]) {
-    const prev = stmt([r], CARLOS, PREV_PERIOD);
-    const next = stmt([r], CARLOS, { start: '2026-09-07', end: '2026-09-20', payday: '2026-09-25' });
-    check(`a ${label} bonus is invisible in the previous period`, prev.bonusItems.length === 0);
-    check(`...and in the next one`, next.bonusItems.length === 0);
-  }
-  check('another employee sees neither', stmt([b100, bHr], OTHER).bonusItems.length === 0);
-  check('...and still gets paid their own worked time', cents(stmt([b100, bHr], OTHER).totals.gross) === cents(8 * 22));
-  check('a row with the right start and the wrong end is NOT selected',
-    stmt([flat('e-carlos', 10000, 'Wrong end', { period_end: '2026-09-05' })]).bonusItems.length === 0);
+  // ADD
+  check('ADD FLAT $100.00 -> total +$100.00',
+    cents(stmt([f], emp, PERIOD, SH).totals.totalOwed) - cents(base.totals.totalOwed) === 10000);
+  check('ADD HOURLY $5.00/hr on an 8.00-hour Tuesday -> total +$40.00',
+    cents(stmt([h], emp, PERIOD, SH).totals.totalOwed) - cents(base.totals.totalOwed) === 4000);
 
-  // EDIT a flat: $100 → $125.
-  const before = stmt([b100, bHr]);
-  const editedFlat = stmt([{ ...b100, amount_cents: 12500, description: 'Performance bonus (revised)' }, bHr]);
-  check('editing a flat $100 → $125 moves TOTAL OWED by exactly $25.00',
-    cents(editedFlat.totals.totalOwed) - cents(before.totals.totalOwed) === 2500);
-  check('...the new description is what renders', editedFlat.bonusItems[0].label === 'Performance bonus (revised)');
-  check('...and the hourly line beside it did not move', editedFlat.totals.hourlyBonusTotal === before.totals.hourlyBonusTotal);
-
-  // EDIT an hourly: $2.00/hr → $2.50/hr.
-  const editedRate = stmt([b100, { ...bHr, rate_cents_per_hour: 250 }]);
-  check('editing a rate $2.00 → $2.50/hr re-prices the line to $181.25',
-    cents(editedRate.totals.hourlyBonusTotal) === 18125);
-  check('...moving TOTAL OWED by exactly $36.25',
-    cents(editedRate.totals.totalOwed) - cents(before.totals.totalOwed) === 3625);
-  check('...and the flat line beside it did not move', editedRate.totals.flatBonusTotal === before.totals.flatBonusTotal);
+  // EDIT
+  check('EDIT FLAT $100 -> $125 changes total by +$25.00',
+    cents(stmt([{ ...f, amount_cents: 12500 }], emp, PERIOD, SH).totals.totalOwed)
+      - cents(stmt([f], emp, PERIOD, SH).totals.totalOwed) === 2500);
+  check('EDIT RATE $5.00 -> $7.50/hr re-prices off the SAME day: $60.00',
+    stmt([{ ...h, rate_cents_per_hour: 750 }], emp, PERIOD, SH).totals.bonusCents === 6000);
+  check('EDIT DAY Tuesday -> Wednesday prices WEDNESDAY\'s hours',
+    stmt([{ ...h, target_date: '2026-09-02' }], emp, PERIOD, SH).bonusItems[0].targetDateISO === '2026-09-02');
 
   // Neither edit touched worked time.
-  for (const [label, s] of [['flat edit', editedFlat], ['rate edit', editedRate]]) {
-    check(`a ${label} left the payable rows byte-identical`, JSON.stringify(s.rows) === JSON.stringify(BASE.rows));
-    check(`...and worked pay untouched`, s.totals.gross === BASE.totals.gross);
+  for (const [label, rows] of [['flat edit', [{ ...f, amount_cents: 12500 }]], ['rate edit', [{ ...h, rate_cents_per_hour: 750 }]],
+                               ['day edit', [{ ...h, target_date: '2026-09-02' }]]]) {
+    const e2 = stmt(rows, emp, PERIOD, SH);
+    check(`a ${label} left the payable rows byte-identical`, JSON.stringify(e2.rows) === JSON.stringify(base.rows));
+    check(`...and worked pay untouched`, e2.totals.gross === base.totals.gross);
   }
 
-  // DELETE.
-  const deleted = stmt([bHr]);
-  check('deleting the flat bonus drops TOTAL OWED by exactly $100.00',
-    cents(before.totals.totalOwed) - cents(deleted.totals.totalOwed) === 10000);
-  check('...the deleted line is gone', !deleted.bonusItems.some((i) => i.id === b100.id));
-  check('...the hourly line survives, still worth $145.00', cents(deleted.totals.hourlyBonusTotal) === 14500);
-  check('...and worked hours are untouched', deleted.totals.paidHours === BASE.totals.paidHours);
+  // DELETE
+  const both = stmt([f, h], emp, PERIOD, SH);
+  const deleted = stmt([h], emp, PERIOD, SH);
+  check('DELETE the flat bonus drops total by exactly $100.00',
+    cents(both.totals.totalOwed) - cents(deleted.totals.totalOwed) === 10000);
+  check('...the hourly line survives, still worth $40.00', deleted.totals.bonusCents === 4000);
+  check('...and worked hours are untouched', deleted.totals.paidHours === base.totals.paidHours);
   check('deleting every bonus restores the original statement, byte for byte',
-    JSON.stringify(stmt([])) === JSON.stringify(BASE));
+    JSON.stringify(stmt([], emp, PERIOD, SH)) === JSON.stringify(base));
+
+  // MULTI-EMPLOYEE ISOLATION.
+  const otherS = stmt([f, h], other, PERIOD, SH);
+  check('another employee sees neither bonus', otherS.bonusItems.length === 0 && otherS.totals.bonusCents === 0);
+  check('...even though they worked the SAME Tuesday', otherS.totals.paidHoursByDate['2026-09-01'] === 8);
+  check('...and they still get paid their own worked time', cents(otherS.totals.gross) === cents(8 * 25));
+
+  // PAY PERIOD ISOLATION — prior, next and off-cycle, via the canonical helpers.
+  for (const [label, per] of [['PREVIOUS period', PREV_PERIOD],
+                              ['NEXT period', { start: '2026-09-07', end: '2026-09-20' }]]) {
+    check(`a bonus is invisible in the ${label}`, stmt([f, h], emp, { ...per, payday: '' }, SH).bonusItems.length === 0);
+  }
+  check('a bonus is invisible in an OFF-CYCLE window',
+    stmt([f, h], emp, { start: '2026-08-25', end: '2026-09-07', payday: '' }, SH).bonusItems.length === 0);
+
+  // NO DESCRIPTION still renders as something, in either type.
+  check('a flat bonus with no reason renders a plain label',
+    stmt([flat('e-c', 2500, null)], emp, PERIOD, SH).bonusItems[0].label === BONUS_FALLBACK_LABEL);
+  check('...and so does an hourly one, which still states its day',
+    stmt([hourly('e-c', 500, '   ', '2026-09-01')], emp, PERIOD, SH).bonusItems[0].label === BONUS_FALLBACK_LABEL);
+
+  // bonusSummaryFor is still the one shared selector buildPayStatement uses.
+  const viaSelector = bonusSummaryFor([f, h], 'e-c', PERIOD, base.totals.paidHoursByDate);
+  check('bonusSummaryFor over the statement\'s own per-day hours gives the statement\'s own total',
+    viaSelector.cents === both.totals.bonusCents, formatMoney(viaSelector.total));
+  check('...split correctly into flat and hourly', viaSelector.flatCents === 10000 && viaSelector.hourlyCents === 4000);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -480,37 +488,38 @@ console.log('\n§8 MONEY — cents, never floats');
 // ════════════════════════════════════════════════════════════════════════════════════════════
 console.log('\n§9 THE PAY TILE reads the same numbers the statement does — both types');
 {
+  // '2026-08-25' carries 8.00 payable hours in the module fixture.
   const items = [
     flat('e-carlos', 10000, 'Performance bonus'),
     flat('e-carlos', 5000, 'Attendance bonus'),
-    hourly('e-carlos', 200, 'Productivity incentive'),
+    hourly('e-carlos', 200, 'Tuesday incentive', '2026-08-25'),
   ];
 
-  // Exactly what PayView does for a tile: computePay for worked pay and HOURS, then the SAME
-  // shared functions the statement uses for the bonus and the addition.
+  // Exactly what PayView now does for a tile: computePay for the worked figures, and the NORMALIZED
+  // STATEMENT for the bonus — because a day-specific bonus needs per-day hours only it produces.
   const pay = computePay([CARLOS, OTHER], SHIFTS);
   for (const p of pay) {
-    const summary = bonusSummaryFor(items, p.employee.id, PERIOD, p.hours);
-    const tileTotal = totalOwedOf(p.pay, summary.total);
     const detail = stmt(items, p.employee);
+    const tileTotal = totalOwedOf(p.pay, detail.totals.bonusTotal);
     check(`${p.employee.name}: the tile's total owed IS the statement's total owed`,
       cents(tileTotal) === cents(detail.totals.totalOwed), formatMoney(tileTotal));
-    check(`${p.employee.name}: the tile's bonus IS the statement's bonus`,
-      summary.cents === detail.totals.bonusCents);
+    check(`${p.employee.name}: computePay's worked pay IS the statement's gross`,
+      cents(p.pay) === cents(detail.totals.gross));
     check(`${p.employee.name}: computePay's hours ARE the statement's payable hours`,
       p.hours === detail.totals.paidHours);
   }
-  check('Carlos\'s tile reads $1,890.00', formatMoney(stmt(items).totals.totalOwed) === '$1,890.00');
 
-  // The hours a tile passes in are what price the incentive, so the tile cannot price it differently.
-  const carlos = pay.find((p) => p.employee.id === 'e-carlos');
-  check('the tile prices the incentive off the SAME hours the drawer does',
-    bonusSummaryFor(items, 'e-carlos', PERIOD, carlos.hours).hourlyCents === stmt(items).totals.bonusCents - 15000);
+  const carlos = stmt(items);
+  check('Carlos: $150.00 flat + 8.00 hr x $2.00 = $166.00 of bonus pay',
+    cents(carlos.totals.flatBonusTotal) === 15000 && cents(carlos.totals.hourlyBonusTotal) === 1600 &&
+      formatMoney(carlos.totals.bonusTotal) === '$166.00');
+  check('Dana carries none of it', stmt(items, OTHER).totals.bonusCents === 0);
+  check('...and still gets paid her own worked time', cents(stmt(items, OTHER).totals.gross) === cents(8 * 22));
 
-  const rosterTotal = pay.reduce((a, p) => a + totalOwedOf(p.pay, bonusSummaryFor(items, p.employee.id, PERIOD, p.hours).total), 0);
+  const rosterTotal = pay.reduce((a, p) => a + totalOwedOf(p.pay, stmt(items, p.employee).totals.bonusTotal), 0);
   const rosterWorked = pay.reduce((a, p) => a + p.pay, 0);
   check('the roster total exceeds worked pay by exactly the bonuses',
-    cents(rosterTotal) - cents(rosterWorked) === 29500);
+    cents(rosterTotal) - cents(rosterWorked) === 16600);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -521,13 +530,13 @@ console.log('\n§9b THE PRINTED WORKING MUST MULTIPLY OUT TO THE PRINTED MONEY')
   // figure was printed beside arithmetic that made it look a penny short.
   const oddHost = EMP({ id: 'e-odd', role: 'host', hourly_rate: 25 });
   const oddShift = [punch('e-odd', '2026-08-24', '06:00', '14:00', { approved_minutes: 1828 })];
-  const oddS = stmt([hourly('e-odd', 300, 'Live show incentive')], oddHost, PERIOD, oddShift);
+  const oddS = stmt([hourly('e-odd', 300, 'Live show incentive', '2026-08-24')], oddHost, PERIOD, oddShift);
   const oddItem = oddS.bonusItems[0];
 
   check('the exact payable duration is still 30.4666… hours',
     Math.abs(oddItem.eligiblePaidHours - 1828 / 60) < 1e-12, String(oddItem.eligiblePaidHours));
   check('the money is unchanged — still $91.40', oddItem.calculatedBonusCents === 9140);
-  check('the basis now reads as a duration', formatBonusBasis(oddItem) === '$3.00/hr × 30h 28m payable',
+  check('the basis reads as a DAY plus a duration', formatBonusBasis(oddItem) === 'Mon Aug 24 · $3.00/hr × 30h 28m payable',
     formatBonusBasis(oddItem));
   check('...and 30h 28m x $3.00 IS $91.40 — the visible arithmetic reconciles',
     Math.round(300 * (30 + 28 / 60)) === 9140);
@@ -535,17 +544,17 @@ console.log('\n§9b THE PRINTED WORKING MUST MULTIPLY OUT TO THE PRINTED MONEY')
   check('...nor any bare 2-decimal hour figure at all', !/\d+\.\d\d\s*hr/.test(formatBonusBasis(oddItem)));
 
   // The clean case still reads cleanly.
-  const clean = stmt([hourly('e-carlos', 200, 'Productivity incentive')]).bonusItems[0];
-  check('72.50 payable hours reads as 72h 30m', formatBonusBasis(clean) === '$2.00/hr × 72h 30m payable',
+  const clean = stmt([hourly('e-carlos', 200, 'Productivity incentive', '2026-08-24')]).bonusItems[0];
+  check('a whole-hour day reads as a duration too', formatBonusBasis(clean).endsWith('$2.00/hr × 8h payable'),
     formatBonusBasis(clean));
-  check('...and 72h 30m x $2.00 IS $145.00', Math.round(200 * 72.5) === 14500 && clean.calculatedBonusCents === 14500);
+  check('...and 8h x $2.00 IS $16.00', Math.round(200 * 8) === 1600 && clean.calculatedBonusCents === 1600);
 
   // ── THE PROPERTY ITSELF, not just two examples ───────────────────────────────────────────────
   // Parse the rendered duration back out of the string and multiply it by the rendered rate. That
   // is exactly what a reader checking the line by hand would do, so it must come out at the
   // rendered money — unless the line carries the '~' that says the figure is rounded.
   const parseBasis = (basis) => {
-    const m = /^\$([\d,]+\.\d\d)\/hr × (~?)((?:\d+h ?)?(?:\d+m ?)?(?:\d+s ?)?) payable$/.exec(basis);
+    const m = /^(?:[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} · )?\$([\d,]+\.\d\d)\/hr × (~?)((?:\d+h ?)?(?:\d+m ?)?(?:\d+s ?)?) payable$/.exec(basis);
     if (!m) return null;
     const rateCents = Math.round(Number(m[1].replace(/,/g, '')) * 100);
     const d = /^(?:(\d+)h ?)?(?:(\d+)m ?)?(?:(\d+)s ?)?$/.exec(m[3].trim());
@@ -566,8 +575,8 @@ console.log('\n§9b THE PRINTED WORKING MUST MULTIPLY OUT TO THE PRINTED MONEY')
   for (const rateCents of RATES) {
     for (const h of HOURS) {
       const item = {
-        calculationType: 'hourly', rateCentsPerHour: rateCents, eligiblePaidHours: h,
-        calculatedBonusCents: hourlyBonusCents(rateCents, h),
+        calculationType: 'hourly', rateCentsPerHour: rateCents, targetDateISO: '2026-09-01',
+        eligiblePaidHours: h, calculatedBonusCents: hourlyBonusCents(rateCents, h),
       };
       const basis = formatBonusBasis(item);
       const parsed = parseBasis(basis);
@@ -593,14 +602,14 @@ console.log('\n§9b THE PRINTED WORKING MUST MULTIPLY OUT TO THE PRINTED MONEY')
 
   // The three tiers, named.
   check('tier 1 — whole minutes, for an approved-hours host', formatBonusBasis(oddItem).includes('30h 28m'));
-  const secs = { calculationType: 'hourly', rateCentsPerHour: 200, eligiblePaidHours: 7 + 40 / 60 + 23 / 3600 };
+  const secs = { calculationType: 'hourly', rateCentsPerHour: 200, targetDateISO: '2026-09-01', eligiblePaidHours: 7 + 40 / 60 + 23 / 3600 };
   secs.calculatedBonusCents = hourlyBonusCents(200, secs.eligiblePaidHours);
   check('tier 2 — whole seconds, for an ordinary clocked punch',
-    formatBonusBasis(secs) === '$2.00/hr × 7h 40m 23s payable', formatBonusBasis(secs));
-  const wild = { calculationType: 'hourly', rateCentsPerHour: 90000, eligiblePaidHours: 7.6730872 };
+    formatBonusBasis(secs) === 'Tue Sep 1 · $2.00/hr × 7h 40m 23s payable', formatBonusBasis(secs));
+  const wild = { calculationType: 'hourly', rateCentsPerHour: 90000, targetDateISO: '2026-09-01', eligiblePaidHours: 7.6730872 };
   wild.calculatedBonusCents = hourlyBonusCents(90000, wild.eligiblePaidHours);
   check('tier 3 — a rate so high that even seconds cannot reconcile says so with "~"',
-    formatBonusBasis(wild).startsWith('$900.00/hr × ~'), formatBonusBasis(wild));
+    formatBonusBasis(wild).includes('$900.00/hr × ~'), formatBonusBasis(wild));
 
   // Shapes of the duration itself.
   check('a whole number of hours drops the minutes', formatPayableDuration(8) === '8h');
@@ -619,6 +628,59 @@ console.log('\n§9b THE PRINTED WORKING MUST MULTIPLY OUT TO THE PRINTED MONEY')
     payPeriodWeeks(BASE)[0].hours.toFixed(2) === '40.50');
   check('a FLAT line still just says "Flat" — no duration anywhere near it',
     formatBonusBasis(stmt([flat('e-carlos', 10000, 'Performance bonus')]).bonusItems[0]) === 'Flat');
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+console.log('\n§9c THE DAY IS ENFORCED, AND THERE IS NO PAY-PERIOD HOURLY OPTION');
+{
+  const sql = src('../../../supabase/migrations/151_bonus_target_date.sql');
+  const ddl = sql.replace(/^\s*--[^\n]*$/gm, '');
+
+  check('151 adds target_date, nullable with no default', /add column if not exists target_date date/.test(ddl));
+  check('...and NOTHING else — no scope column', !/add column[^;]*scope/i.test(ddl));
+  check('a FLAT row may not carry a day',
+    /check \(calculation_type <> 'flat' or target_date is null\)/.test(ddl));
+  check('an HOURLY row MUST carry a day — the client is not trusted with this',
+    /check \(calculation_type <> 'hourly' or target_date is not null\)/.test(ddl));
+  check('...and that day must be INSIDE the bonus\'s own pay period',
+    /check \(target_date is null\s+or \(target_date >= period_start and target_date <= period_end\)\)/.test(ddl));
+  check('150\'s constraints are left alone — no drop/re-add on a table holding real money',
+    !/drop constraint/i.test(ddl));
+  check('it writes no data — no backfill of any kind',
+    !/\binsert\s+into\b/i.test(ddl) && !/\bupdate\s+public\./i.test(ddl) && !/\bdelete\s+from\b/i.test(ddl));
+  check('it creates and replaces no function', !/create (or replace )?function/i.test(ddl));
+  check('...and touches no payroll table', !/alter table public\.(shifts|employees|shift_instances)/i.test(ddl));
+  check('the file records that it HAS been applied, with a date and a do-not-repeat warning',
+    /✅ APPLIED TO PRODUCTION \d{4}-\d{2}-\d{2}/.test(sql) && /DO NOT APPLY IT AGAIN/.test(sql) &&
+      !/⛔ NOT APPLIED/.test(sql));
+  check('...and states the zero-hourly-rows gate that made the change safe',
+    /ZERO hourly rows/.test(sql));
+
+  // The constraint predicates, as a truth table, evaluated here the way the preflight runs them
+  // against live Postgres.
+  const flatOk   = (t, d) => t !== 'flat'   || d === null;
+  const hourlyOk = (t, d) => t !== 'hourly' || d !== null;
+  const inPeriod = (d) => d === null || (d >= PERIOD.start && d <= PERIOD.end);
+  const TRUTH = [
+    ['flat',   null,         true ],
+    ['flat',   '2026-08-25', false],  // a flat bonus has no day
+    ['hourly', '2026-08-25', true ],
+    ['hourly', null,         false],  // an hourly bonus must name one
+    ['hourly', '2026-09-07', false],  // ...inside its own period
+    ['hourly', '2026-08-23', false],  // ...on both sides
+  ];
+  const bad = TRUTH.filter(([t, d, want]) => (flatOk(t, d) && hourlyOk(t, d) && inPeriod(d)) !== want);
+  check('the three predicates admit exactly the rows they should', bad.length === 0,
+    `${TRUTH.length} cases, ${TRUTH.filter((x) => x[2]).length} admissible`);
+
+  // NO PAY-PERIOD HOURLY OPTION ANYWHERE.
+  const model = strip(src('./statement.ts'));
+  check('the statement model exposes no period-wide hourly concept',
+    !/periodWide|wholePeriod|entirePeriod/i.test(model));
+  check('an hourly BonusItem always reports the day it priced',
+    /targetDateISO: string \| null/.test(src('./statement.ts')));
+  check('...and the basis string leads with it',
+    /const day = item\.targetDateISO \?/.test(src('./statement.ts')));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -748,8 +810,10 @@ console.log('\n§11 THE UI RENDERS THE MODEL AND NEITHER ADDS NOR MULTIPLIES');
   check('the bonus section comes AFTER the week tables and BEFORE the total',
     modal.indexOf('<BonusSection') > modal.lastIndexOf('<Week') &&
       modal.indexOf('<BonusSection') < modal.lastIndexOf('Total owed'));
-  check('the form is told the payable hours rather than working them out',
-    /paidHours=\{statement\.totals\.paidHours\}/.test(modal));
+  check('the form is told the period\'s days and their hours, rather than working them out',
+    /periodDays=\{periodDays\}/.test(modal) && /paidHoursByDate=\{statement\.totals\.paidHoursByDate\}/.test(modal));
+  check('...and that day list comes from the SAME week grouping the panel renders',
+    /weeks\.flatMap\(\(w\) => w\.days\.map\(\(d\) => d\.dateISO\)\)/.test(modal));
   check('Pay Details does no arithmetic over money',
     !/totals\.gross\s*\+|\+\s*totals\.bonus|bonusItems\.reduce|rateCentsPerHour\s*\*/.test(modal));
 
@@ -766,6 +830,24 @@ console.log('\n§11 THE UI RENDERS THE MODEL AND NEITHER ADDS NOR MULTIPLIES');
     (panel.match(/<OverlayLayer>/g) || []).length === 2);
   check('the form offers BOTH bonus types when adding',
     /value: 'flat'/.test(panel) && /value: 'hourly'/.test(panel) && /type="radio"/.test(panel));
+  // THE SIMPLIFICATION: an hourly bonus is day-specific, full stop.
+  check('an hourly bonus REQUIRES a day, offered as a closed list of the period\'s own dates',
+    /periodDays\.map\(\(d\)/.test(panel) && /periodDays\.includes\(targetDate\)/.test(panel));
+  check('...and there is NO "entire pay period" hourly option anywhere in the UI',
+    !/entire pay period/i.test(panel) && !/whole pay period/i.test(panel) && !/scope/i.test(panel));
+  // Comment-stripped: these files describe themselves at length and both legitimately use the WORD
+  // "scope" in prose ("scoped to one pay period", "RLS already scopes this"). What must not exist
+  // is a scope IDENTIFIER — a field, column or variable encoding a second source of truth beside
+  // target_date.
+  check('...nor any scope field/column in the model or the write path', (() => {
+    const model = strip(src('./statement.ts'));
+    const hook2 = strip(src('../../hooks/usePayAdjustments.ts'));
+    const ident = /\bscope\b\s*[:?=]|['"]scope['"]|scope_/i;
+    return !ident.test(model) && !ident.test(hook2);
+  })());
+  check('...and the row type carries a target_date, not a scope',
+    /target_date/.test(src('../../types/index.ts')) && !/\bscope\b\s*[:?]/i.test(strip(src('../../types/index.ts'))));
+  check('...and the hourly hint says ONE chosen day', /ONE chosen day/.test(panel));
   check('...and does NOT offer a type change when editing — delete and re-add instead',
     /editing \?/.test(panel) && /delete this bonus and add it again/.test(panel));
   check('the form parses money through the shared parser, never with Number()',
@@ -788,11 +870,14 @@ console.log('\n§11 THE UI RENDERS THE MODEL AND NEITHER ADDS NOR MULTIPLIES');
     /computePay\(employees, periodShifts\)/.test(view));
   check('...and fetches bonuses for exactly the selected period',
     /usePayAdjustments\(period\.start, period\.end\)/.test(view));
-  check('...pricing each tile off THAT employee\'s own payable hours',
-    /bonusSummaryFor\(adjustments, p\.employee\.id, period, p\.hours\)/.test(view));
-  check('...and adding with the shared rule', /totalOwedOf\(p\.pay, bonus\.total\)/.test(view));
+  check('...building one statement per employee, which is what knows the per-day hours',
+    /const statementsByEmployee = useMemo/.test(view));
+  check('...and adding with the shared rule', /totalOwedOf\(p\.pay, bonusTotal\)/.test(view));
   check('PayView never prices an hourly bonus by hand',
-    !/rate_cents_per_hour\s*\*|\*\s*p\.hours/.test(view));
+    !/rate_cents_per_hour\s*\*|\*\s*p\.hours|paidHoursByDate\[/.test(view));
+  check('...it reads bonusTotal off the normalized statement instead',
+    /statementsByEmployee\.get\(p\.employee\.id\)\?\.totals\.bonusTotal/.test(view) &&
+      /buildPayStatement\(\{/.test(view));
 
   // THE HOOK.
   check('every mutation refetches instead of patching a cached total',
@@ -800,9 +885,10 @@ console.log('\n§11 THE UI RENDERS THE MODEL AND NEITHER ADDS NOR MULTIPLIES');
   check('the query is keyed on the period, so switching periods refetches',
     /queryKey = \['pay_adjustments', user\?\.id, periodStart, periodEnd\]/.test(hook));
   check('the hook does no payroll maths', !/hourly_rate|paidShiftHours|computePay|\* 100|\/ 100/.test(hook));
-  check('both money columns are ALWAYS named on a write, one of them null',
+  check('all three shape columns are ALWAYS named on a write, with the unused ones null',
     /amount_cents: hourly \? null : fields\.amount_cents/.test(hook) &&
-      /rate_cents_per_hour: hourly \? fields\.rate_cents_per_hour : null/.test(hook));
+      /rate_cents_per_hour: hourly \? fields\.rate_cents_per_hour : null/.test(hook) &&
+      /target_date: hourly \? fields\.target_date : null/.test(hook));
   check('an edit cannot move a bonus to another person, period, or calculation type', (() => {
     const update = hook.split('const updateBonus')[1].split('const deleteBonus')[0];
     return !/employee_id:/.test(update) && !/period_start/.test(update) && /calculation_type, \.\.\.patch/.test(update);

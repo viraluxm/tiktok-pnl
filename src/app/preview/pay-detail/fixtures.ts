@@ -17,7 +17,7 @@ export const PREVIEW_EMPLOYEES: Employee[] = [
   // Carlos is the BONUS review case, and his numbers are exact on purpose: 72.50 payable hours at
   // $22.00 = $1,595.00 of worked pay, plus a $100 and a $50 bonus = $150.00, for $1,745.00 owed.
   // Everything on the screen and on his PDF has to add up to those four figures.
-  mkEmployee('e-carlos', 'Carlos Herrera', 'fulfillment', 22),
+  mkEmployee('e-carlos', 'Carlos Herrera', 'fulfillment', 25),
   mkEmployee('e-juan', 'Juan Reyes', 'fulfillment', 22),
   mkEmployee('e-adriana', 'Adriana Salas', 'host', 25),
   mkEmployee('e-chris', 'Chris Okafor', 'fulfillment', 19.5),
@@ -66,18 +66,22 @@ function addDays(iso: string, days: number): string {
 }
 
 export const PREVIEW_SHIFTS: Shift[] = [
-  // ── Carlos: an ORDINARY two weeks. No forgotten punch, no stacked correction, no anomaly ──
-  // Deliberately dull, because the bonus review is about the bonus. 40.50 h in week 1 and 32.00 h
-  // in week 2 = 72.50 h; at $22.00 that is exactly $1,595.00 of worked pay.
+  // ── Carlos: an ORDINARY two weeks, and ONE Tuesday that carries a split shift ─────────────
+  // Deliberately dull apart from Tuesday, because the review is about the day-specific incentive.
+  // Week 1 = 40.00, week 2 = 40.00 → 80.00 payable hours; at $25.00 that is exactly $2,000.00.
   punch('e-carlos', '2026-08-24', '08:00', '16:00'),  //  8.00
   punch('e-carlos', '2026-08-25', '08:00', '16:00'),  //  8.00
   punch('e-carlos', '2026-08-26', '08:00', '16:00'),  //  8.00
-  punch('e-carlos', '2026-08-27', '08:00', '16:30'),  //  8.50
-  punch('e-carlos', '2026-08-28', '08:00', '16:00'),  //  8.00  → week 1 = 40.50
+  punch('e-carlos', '2026-08-27', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-08-28', '08:00', '16:00'),  //  8.00  → week 1 = 40.00
   punch('e-carlos', '2026-08-31', '08:00', '16:00'),  //  8.00
-  punch('e-carlos', '2026-09-01', '08:00', '16:00'),  //  8.00
+  // TUESDAY Sep 1 — TWO separate shifts, 4.00 each. The day is worth 8.00 payable hours, so the
+  // Tuesday incentive must price BOTH of them: 8 x $5.00 = $40.00, not 4 x $5.00.
+  punch('e-carlos', '2026-09-01', '06:00', '10:00'),  //  4.00
+  punch('e-carlos', '2026-09-01', '14:00', '18:00'),  //  4.00  → Tuesday = 8.00
   punch('e-carlos', '2026-09-02', '08:00', '16:00'),  //  8.00
-  punch('e-carlos', '2026-09-03', '09:00', '17:00'),  //  8.00  → week 2 = 32.00
+  punch('e-carlos', '2026-09-03', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-09-04', '08:00', '16:00'),  //  8.00  → week 2 = 40.00
   // ── Juan: the double-pay pattern, a forgotten clock-out, and clean days ───────────────────
   // A 47.75h punch with a 40h break — abnormal span, ordinary paid hours.
   punch('e-juan', '2026-08-24', '05:59', '05:44', {
@@ -128,53 +132,62 @@ export const PREVIEW_SHIFTS: Shift[] = [
   punch('e-devon', '2026-09-02', '08:00', '12:00'),
 ];
 
-// ── Bonus / incentive fixtures (migration 150 rows) ─────────────────────────────────────────
+// ── Bonus / incentive fixtures (migrations 150 + 151 rows) ──────────────────────────────────
 //
 // Plain objects shaped exactly like `employee_pay_adjustments` rows. The periods are the real
 // canonical windows, because the selector matches on them: PREVIEW_PERIOD is 2026-08-24 →
-// 2026-09-06, and the row below dated to the PREVIOUS period (2026-08-10 → 2026-08-23) is here to
-// prove the scoping — it must never appear in the period on screen, and the review is worth less
-// without something that is supposed to be invisible.
+// 2026-09-06, and the row dated to the PREVIOUS period is here to prove the scoping — it must never
+// appear in the period on screen, and the review is worth less without something that is supposed
+// to be invisible.
 //
-// Money is INTEGER CENTS, as the columns are. 10000 = $100.00 flat; 200 = $2.00 PER PAYABLE HOUR.
+// Money is INTEGER CENTS. 10000 = $100.00 flat; 500 = $5.00 PER PAYABLE HOUR ON ONE DAY.
 //
-// NOTE WHAT IS *NOT* HERE: no calculated total for the hourly row. Its worth is derived from
-// Carlos's payable hours every time a statement is built, which is what the review is meant to
-// demonstrate — edit one of his shifts and the incentive re-prices itself.
+// EVERY HOURLY ROW NAMES A DAY. There is no pay-period-wide hourly bonus any more, and the database
+// refuses an hourly row without a target_date inside its own period (migration 151).
 //
-// Carlos's reviewed figures: 72.50 payable hours at $22.00 = $1,595.00 worked pay, plus a $100 and
-// a $50 flat bonus and a $2.00/hr incentive worth 72.50 x $2.00 = $145.00 — $295.00 of bonus pay,
-// and $1,890.00 owed.
+// NOTE WHAT IS *NOT* HERE: no calculated total on any hourly row. Its worth is derived from that
+// DAY's payable hours every time a statement is built — which is what the review demonstrates:
+// edit one of Carlos's Tuesday shifts and the Tuesday incentive re-prices itself.
+//
+// Carlos's reviewed figures: 80.00 payable hours at $25.00 = $2,000.00 worked pay; Tuesday Sep 1
+// carries 8.00 of those hours (a 4 hr + 4 hr split shift); a $5.00/hr Tuesday incentive is worth
+// $40.00 → $2,040.00 owed. His stored hourly_rate stays $25.00 — never $30.00.
+// His Saturday line is the ZERO-HOUR case and adds $0.00, so it does not disturb that figure.
 export const PREVIEW_ADJUSTMENTS: PayAdjustment[] = [
+  // THE HEADLINE CASE — a day-specific hourly incentive on a Tuesday that carries a split shift.
   {
     id: 'pv-b1', user_id: 'preview-owner', employee_id: 'e-carlos',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
-    kind: 'bonus', calculation_type: 'flat', amount_cents: 10000, rate_cents_per_hour: null,
-    description: 'Performance bonus',
+    kind: 'bonus', calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour: 500,
+    target_date: '2026-09-01', description: 'Tuesday incentive',
     created_at: '2026-09-07T18:00:00.000Z', updated_at: '2026-09-07T18:00:00.000Z',
   },
+  // A FLAT bonus — unchanged behaviour, no day, no hours dependency. Deliberately on SOMEONE ELSE
+  // so Carlos's headline stays exactly $2,000.00 worked + $40.00 Tuesday = $2,040.00, which is the
+  // figure this review is for.
   {
-    id: 'pv-b2', user_id: 'preview-owner', employee_id: 'e-carlos',
+    id: 'pv-b2', user_id: 'preview-owner', employee_id: 'e-juan',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
-    kind: 'bonus', calculation_type: 'flat', amount_cents: 5000, rate_cents_per_hour: null,
-    description: 'Attendance bonus',
+    kind: 'bonus', calculation_type: 'flat', amount_cents: 10000, rate_cents_per_hour: null,
+    target_date: null, description: 'Performance bonus',
     created_at: '2026-09-07T18:05:00.000Z', updated_at: '2026-09-07T18:05:00.000Z',
   },
-  // THE HOURLY ONE. $2.00 per payable hour — no total stored anywhere.
+  // A ZERO-HOUR DAY. Saturday Aug 29 is an Off day for Carlos, so this incentive is worth $0.00
+  // today — legal, visible, and it re-prices itself the moment a Saturday shift is confirmed.
   {
     id: 'pv-b3', user_id: 'preview-owner', employee_id: 'e-carlos',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
-    kind: 'bonus', calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour: 200,
-    description: 'Productivity incentive',
+    kind: 'bonus', calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour: 500,
+    target_date: '2026-08-29', description: 'Saturday cover incentive',
     created_at: '2026-09-07T18:10:00.000Z', updated_at: '2026-09-07T18:10:00.000Z',
   },
-  // A LIVE HOST on an hourly incentive, so the review covers the team whose payable hours are the
-  // APPROVED duration rather than the punch. Adriana's incentive is priced off that same figure.
+  // A LIVE HOST on a day-specific incentive, so the review covers the team whose payable hours are
+  // the APPROVED duration rather than the punch. Priced off that same figure, for that one day.
   {
     id: 'pv-b4', user_id: 'preview-owner', employee_id: 'e-adriana',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
     kind: 'bonus', calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour: 300,
-    description: 'Live show incentive',
+    target_date: '2026-08-31', description: 'Live show incentive',
     created_at: '2026-09-07T19:00:00.000Z', updated_at: '2026-09-07T19:00:00.000Z',
   },
   // A bonus with no reason given — it has to render as something, and "Bonus" is that something.
@@ -182,7 +195,7 @@ export const PREVIEW_ADJUSTMENTS: PayAdjustment[] = [
     id: 'pv-b5', user_id: 'preview-owner', employee_id: 'e-haley',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
     kind: 'bonus', calculation_type: 'flat', amount_cents: 7500, rate_cents_per_hour: null,
-    description: null,
+    target_date: null, description: null,
     created_at: '2026-09-07T19:05:00.000Z', updated_at: '2026-09-07T19:05:00.000Z',
   },
   // ANOTHER PERIOD'S BONUS. Same person, $999.00, and it must be nowhere on this screen.
@@ -190,7 +203,7 @@ export const PREVIEW_ADJUSTMENTS: PayAdjustment[] = [
     id: 'pv-b-other-period', user_id: 'preview-owner', employee_id: 'e-carlos',
     period_start: '2026-08-10', period_end: '2026-08-23',
     kind: 'bonus', calculation_type: 'flat', amount_cents: 99900, rate_cents_per_hour: null,
-    description: 'Previous period bonus',
+    target_date: null, description: 'Previous period bonus',
     created_at: '2026-08-24T18:00:00.000Z', updated_at: '2026-08-24T18:00:00.000Z',
   },
 ];

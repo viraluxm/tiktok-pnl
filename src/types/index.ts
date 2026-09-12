@@ -161,16 +161,19 @@ export interface Shift {
 // (buildPayStatement, src/lib/pay/statement.ts).
 //
 // TWO CALCULATION TYPES, ONE ROW SHAPE:
-//   'flat'   a fixed sum      → amount_cents is set, rate_cents_per_hour is NULL
-//   'hourly' a per-hour rate  → rate_cents_per_hour is set, amount_cents is NULL
+//   'flat'   a fixed sum       → amount_cents set, rate_cents_per_hour NULL, target_date NULL
+//   'hourly' a rate for ONE DAY → rate_cents_per_hour set, amount_cents NULL, target_date SET
 // The two are mutually exclusive and the database enforces it with a pair of CHECK constraints, so
 // the `| ` union below is a description of what can be stored, not just a hope.
 //
-// AN HOURLY BONUS STORES ITS RATE, NEVER ITS RESULT. Its dollar value is rate x the employee's
-// canonical payable hours for the period, worked out by buildPayStatement every time a statement is
-// built. Freezing the product into a column would make it a stale number the moment a manager
-// corrected a punch — which is exactly when a bonus most needs to be right. There is deliberately
-// no `calculated_cents` column anywhere.
+// AN HOURLY BONUS IS ALWAYS FOR ONE SPECIFIC DAY (migration 151). "+$5/hr on Tuesday" is the thing
+// managers actually mean; there is no pay-period-wide hourly scope and no scope toggle — the
+// presence of `target_date` IS the scope, which is why no separate column encodes it.
+//
+// AND IT STORES ITS RATE, NEVER ITS RESULT. Its dollar value is rate x that DAY'S canonical payable
+// hours, worked out by buildPayStatement every time a statement is built. Freezing the product into
+// a column would make it a stale number the moment a manager corrected a punch — which is exactly
+// when a bonus most needs to be right. There is deliberately no `calculated_cents` column anywhere.
 //
 // Money is INTEGER CENTS in both columns ($100.00 -> 10000; $2.50/hr -> 250). Never read either as
 // dollars directly; the statement model divides, once.
@@ -192,6 +195,12 @@ export interface PayAdjustment {
   amount_cents: number | null;
   /** HOURLY only: cents per payable hour. NULL on a flat row. */
   rate_cents_per_hour: number | null;
+  /**
+   * HOURLY only: the ONE canonical work date the rate is paid on — a `shifts.date`, so it groups
+   * exactly as Pay Details groups. NULL on a flat row. CHECK-constrained to lie inside
+   * [period_start, period_end], and to be present on every hourly row.
+   */
+  target_date: string | null;
   description: string | null;
   created_at: string;
   updated_at: string;
