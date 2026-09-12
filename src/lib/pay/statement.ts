@@ -1,6 +1,7 @@
 import {
   isPayableShift,
   paidShiftHours,
+  payrollTeamOfRole,
   type ShiftLike,
 } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
@@ -211,11 +212,17 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
   // period its own `date` falls in, which is the existing rule and is deliberately not changed.
   const inPeriod = mine.filter((s) => s.date >= period.start && s.date <= period.end);
 
+  // ONE team for the whole statement — it is one employee's statement by construction. For a
+  // live host a stored approved_minutes is the payable figure; for anyone else the payable figure
+  // is the punch, and a legacy stored value is ignored rather than paid. Screen and PDF both
+  // render these rows, so neither can disagree with the other or with the Pay tab's tiles.
+  const team = payrollTeamOfRole(employee.role);
+
   const payable = inPeriod.filter((s) => isPayableShift(s));
   const rows: StatementRow[] = payable
     .map((s) => {
       const span = displaySpan(s);
-      const paidHours = paidShiftHours(s);
+      const paidHours = paidShiftHours(s, team);
       return {
         shiftId: s.id,
         dateISO: s.date,

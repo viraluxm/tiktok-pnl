@@ -1,4 +1,4 @@
-import { clockedShiftHours, isPayableShift, paidShiftHours, payPeriodContaining, paydayForPeriod } from '@/lib/employees';
+import { clockedShiftHours, isPayableShift, paidShiftHours, payPeriodContaining, paydayForPeriod, type PayrollTeam } from '@/lib/employees';
 import { shiftBusinessDate } from '@/lib/labor';
 import { laWallTimeToUtc, addDaysISO } from './timezone';
 import type { PayPeriodSummary, TimecardDay, TimecardEntry, TimecardEntryState, TimecardOpenPunch, TimecardPayload, TimecardPeriodPayload, TimecardWindow } from './portalTypes';
@@ -61,7 +61,14 @@ function wallCrossesMidnight(start: string, end: string): boolean {
   return toMin(end) <= toMin(start);
 }
 
-export function toTimecardEntry(s: TimecardShiftRow): TimecardEntry | null {
+/**
+ * `team` is the OWNING employee's payroll team, and it decides whether a stored approved_minutes
+ * is the payable figure (live host) or is ignored in favour of the punch (everyone else). It is
+ * threaded in rather than read from the row because `shifts` carries no role — the caller always
+ * knows whose timecard this is, and guessing here would either pay a fulfillment typo or quietly
+ * strip a host's verified live time.
+ */
+export function toTimecardEntry(s: TimecardShiftRow, team: PayrollTeam): TimecardEntry | null {
   if (s.source_rule_id != null) return null; // plan, never worked time
   const hasInstants = !!(s.clock_in_at && s.clock_out_at);
   const clock_in = s.clock_in_at ?? wallToInstant(s.date, s.start_time);
@@ -88,7 +95,7 @@ export function toTimecardEntry(s: TimecardShiftRow): TimecardEntry | null {
   // APPROVED (payable) vs CLOCKED (attendance) — the whole point of migration 137. paidShiftHours
   // returns the approved minutes when a manager set them; clockedShiftHours always describes the
   // punch. An open punch has no completed duration, so both read 0 and the UI says "in progress".
-  const hours = clock_out == null ? 0 : paidShiftHours(asShift);
+  const hours = clock_out == null ? 0 : paidShiftHours(asShift, team);
   const clockedHours = clock_out == null ? 0 : clockedShiftHours(asShift);
 
   let state: TimecardEntryState;
@@ -150,8 +157,10 @@ export function buildTimecard(input: {
   todayISO: string;
   week: { start: string; end: string };
   period: { start: string; end: string };
+  /** The timecard's own employee's payroll team — see toTimecardEntry. */
+  team: PayrollTeam;
 }): TimecardPayload {
-  const entries = input.shifts.map(toTimecardEntry).filter((e): e is TimecardEntry => e !== null);
+  const entries = input.shifts.map((s) => toTimecardEntry(s, input.team)).filter((e): e is TimecardEntry => e !== null);
   const open: TimecardOpenPunch | null = input.open
     ? { clockedInAt: input.open.clocked_in_at, onBreak: input.open.on_break, needsManualClose: input.open.needs_manual_close }
     : null;
@@ -219,8 +228,10 @@ export function resolvePeriodStart(raw: string | null | undefined, todayISO: str
 export function buildPayPeriods(input: {
   shifts: readonly TimecardShiftRow[];
   periods: readonly { start: string; end: string }[];
+  /** The timecard's own employee's payroll team — see toTimecardEntry. */
+  team: PayrollTeam;
 }): PayPeriodSummary[] {
-  const entries = input.shifts.map(toTimecardEntry).filter((e): e is TimecardEntry => e !== null);
+  const entries = input.shifts.map((s) => toTimecardEntry(s, input.team)).filter((e): e is TimecardEntry => e !== null);
   return input.periods.map((p) => payPeriodSummary(entries, p));
 }
 
@@ -229,8 +240,10 @@ export function buildTimecardPeriod(input: {
   shifts: readonly TimecardShiftRow[];
   todayISO: string;
   period: { start: string; end: string };
+  /** The timecard's own employee's payroll team — see toTimecardEntry. */
+  team: PayrollTeam;
 }): TimecardPeriodPayload {
-  const entries = input.shifts.map(toTimecardEntry).filter((e): e is TimecardEntry => e !== null);
+  const entries = input.shifts.map((s) => toTimecardEntry(s, input.team)).filter((e): e is TimecardEntry => e !== null);
   return {
     todayISO: input.todayISO,
     summary: payPeriodSummary(entries, input.period),

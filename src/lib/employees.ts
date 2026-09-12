@@ -52,28 +52,83 @@ export function isPayableShift(s: ShiftLike): boolean {
   return true;
 }
 
-// APPROVED HOURS (migration 137) — the manager-confirmed payable duration, when one exists.
+// ── THE ONE PAYROLL RULE ──────────────────────────────────────────────────────────────────────
+//
+// The team a shift's employee belongs to, for payroll purposes. Identical to TeamKey /
+// teamOfRole() in '@/lib/timeclock' and to ApprovedTeam / approvedHoursApply() in
+// '@/lib/shifts/approvedHours'.
+//
+// WHY THIS IS RESTATED HERE RATHER THAN IMPORTED. employees.ts is deliberately dependency-free
+// apart from its `type` import: THIRTY test files transpile this module standalone and load it as
+// plain ESM, so a runtime import of '@/lib/timeclock' would make every one of them fail to
+// resolve. The vocabulary is instead pinned equal to teamOfRole()'s, character for character,
+// across the whole role domain in src/lib/shifts/approvedHoursLiveHostOnly.test.mjs — the same
+// cross-assertion pattern that already keeps the SQL role predicate in migration 139 honest.
+export type PayrollTeam = 'host' | 'fulfillment' | 'other';
+
+/** teamOfRole(), restated. Trim + lowercase, 'host'/'live host' → host, 'fulfillment' → that. */
+export function payrollTeamOfRole(role: string | null | undefined): PayrollTeam {
+  const r = (role ?? '').trim().toLowerCase();
+  if (r === 'host' || r === 'live host') return 'host';
+  if (r === 'fulfillment') return 'fulfillment';
+  return 'other';
+}
+
+/**
+ * DOES A STORED approved_minutes CONTROL WHAT THIS TEAM IS PAID? Live hosts only.
+ *
+ * This is the payroll half of the rule whose UI/write half is approvedHoursApply(). They answer
+ * different questions — "may a figure be entered and written" vs "does a stored figure pay" — and
+ * both answer 'host'. Kept as two functions in two dependency-free modules, pinned equal by test.
+ *
+ * Stated as `=== 'host'`, never `!== 'fulfillment'`: an unrecognised role must fall on the side
+ * that pays the punch, not the side that inherits the host exception.
+ */
+export function approvedMinutesPay(team: PayrollTeam): boolean {
+  return team === 'host';
+}
+
+// APPROVED HOURS (migration 137) — the manager-confirmed payable duration, for a LIVE HOST.
 //
 // THREE QUANTITIES, ONE OF THEM PAYS:
 //   SCHEDULED  the plan            → shift_instances, never payable
 //   CLOCKED    the attendance      → clock_in_at / clock_out_at (see clockedShiftHours)
-//   APPROVED   what payroll pays   → approved_minutes, and it WINS here when set
+//   APPROVED   what payroll pays   → approved_minutes, and it wins here for a LIVE HOST
 //
 // For a LIVE HOST payable time is the verified live-session duration, which is normally SHORTER
 // than the clock-in→clock-out span (they punch in before going live and out after). Before this
 // column the only way to make payroll match was to rewrite the punch, destroying the attendance
 // record to move a payroll number. Now the punch stays truthful and the approved figure pays.
 //
-// LEGACY FALLBACK, AND WHY IT IS A NULL CHECK. Every shift that existed before 137 has
-// approved_minutes NULL and therefore keeps its exact previous figure — deploying this code
-// recalculates nothing and re-pays nobody. `== null` (not a falsy check) is load-bearing: an
-// approved duration of 0 is a real decision ("this shift pays nothing") and must not fall through
-// to the clocked span.
+// FOR EVERY OTHER TEAM, approved_minutes HAS NO EFFECT — not "usually null", but ignored outright.
+// Fulfillment worked time is fully determined by the punch, so the payable figure is always
+// clockedShiftHours(): clock in → clock out − breaks. The column may still hold a value on rows
+// confirmed before this rule (production has 40 of them, one reading 23h41m against a 7h40m
+// punch); those rows now pay their punch like every other fulfillment row, and the stored number
+// survives only as audit history. A null check alone would have left them paying the typo until
+// someone remembered to clear them, which is the same as not having a rule.
+//
+// LEGACY FALLBACK, AND WHY IT IS A NULL CHECK. Every host shift that existed before 137 has
+// approved_minutes NULL and therefore keeps its exact previous figure. `== null` (not a falsy
+// check) is load-bearing: an approved duration of 0 is a real decision ("this shift pays nothing")
+// and must not fall through to the clocked span.
 //
 // WHAT THIS DOES NOT DO: it does not make a shift payable. isPayableShift() is still the only
 // payability gate, so an unconfirmed punch with an approved duration stays out of pay entirely.
-export function paidShiftHours(s: ShiftLike): number {
-  if (s.approved_minutes != null) return Math.max(0, s.approved_minutes / 60);
+//
+// `team` IS REQUIRED, AND IS NEVER DEFAULTED. Guessing it wrong is wrong in both directions: guess
+// 'host' and a fulfillment typo keeps paying; guess anything else and a live host is silently paid
+// their clocked span, the exact overpayment migration 139 exists to prevent. TypeScript makes the
+// argument mandatory for the app; the runtime check below covers the untyped .mjs test suite, and
+// fires ONLY when a stored value could actually change the answer, so it cannot break a caller for
+// whom the team is irrelevant.
+export function paidShiftHours(s: ShiftLike, team: PayrollTeam): number {
+  if (s.approved_minutes != null) {
+    if (team !== 'host' && team !== 'fulfillment' && team !== 'other') {
+      throw new Error('paidShiftHours: an explicit team is required for a shift carrying approved_minutes');
+    }
+    if (approvedMinutesPay(team)) return Math.max(0, s.approved_minutes / 60);
+  }
   return clockedShiftHours(s);
 }
 
@@ -102,34 +157,33 @@ export function hoursToMinutes(hours: number): number {
   return Math.max(0, Math.round(hours * 60));
 }
 
-/**
- * The approved duration a manager should be OFFERED as the default at confirmation.
- *
- * Fulfillment (and anyone who is not a live host): the existing canonical payable duration, so the
- * default reproduces today's payroll exactly — breaks already subtracted, instants preferred.
- *
- * A LIVE HOST gets NO default: null. Their payable time is verified live time, and there is no
- * authoritative shift→live-session link in this schema to read it from (live_sessions.host_id
- * attributes a session to a host, but liveHoursForHostDate clips to one Pacific day, which
- * under-reports every 6pm–2am host shift — and matching a session to a shift by time overlap would
- * be exactly the guesswork we refuse to put behind payroll). So the manager states it, and the
- * confirm RPC refuses the shift without it. Returning null here rather than the clocked span is
- * the point: a host must never be paid their punch span by default.
- */
-export function defaultApprovedMinutes(s: ShiftLike, isLiveHost: boolean): number | null {
-  if (isLiveHost) return null;
-  return hoursToMinutes(clockedShiftHours(s));
-}
+// defaultApprovedMinutes() USED TO LIVE HERE and is deliberately gone. It answered "what approved
+// duration should the manager be OFFERED as a default", and its only answer for a non-host was
+// `hoursToMinutes(clockedShiftHours(s))` — the clocked figure, rounded to whole minutes and then
+// stored back as an override of itself. That is what put 37 approved_minutes rows on fulfillment
+// shifts in three days: 33 of them the prefilled figure retyped, differing from the punch by the
+// rounding alone, and one a fat-finger 23h41m on a 7h40m shift.
+//
+// Approved hours are now a LIVE-HOST instrument only (approvedHoursApply in shifts/approvedHours),
+// and a live host's default was already null — so the function had no answer left to give. It had
+// no callers in the app either: PersonCard computed the same default inline. Payroll is unchanged
+// by its removal; paidShiftHours() below is untouched and still pays approved_minutes whenever a
+// host has one, and the canonical clocked figure whenever the column is NULL.
 
 // Per-employee hours + derived pay owed for the given set of shifts (already scoped to
 // the pay period by the caller). Accepts one-off shifts and/or generated recurring
 // instances — pass them combined so recurring hours count toward pay.
 export function computePay(employees: Employee[], shifts: ReadonlyArray<ShiftLike>): EmployeePay[] {
   const hoursByEmployee = new Map<string, number>();
+  // The team comes from the roster this function was already given, so the caller never has to
+  // supply it and cannot supply a different one than the money is attributed to. A shift whose
+  // employee is not in `employees` contributes to nobody's pay anyway (the loop below only reads
+  // hoursByEmployee for listed employees), so 'other' — the no-override side — is the safe read.
+  const teamById = new Map<string, PayrollTeam>(employees.map((e) => [e.id, payrollTeamOfRole(e.role)]));
   for (const s of shifts) {
     if (!isPayableShift(s)) continue; // open, or unconfirmed time-clock → excluded from pay
     const prev = hoursByEmployee.get(s.employee_id) || 0;
-    hoursByEmployee.set(s.employee_id, prev + paidShiftHours(s));
+    hoursByEmployee.set(s.employee_id, prev + paidShiftHours(s, teamById.get(s.employee_id) ?? 'other'));
   }
   return employees.map((employee) => {
     const hours = hoursByEmployee.get(employee.id) || 0;

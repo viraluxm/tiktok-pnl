@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { CalendarDay, DayPerson } from '@/lib/schedule/calendarModel';
+import type { ApprovedTeam } from '@/lib/shifts/approvedHours';
 import PersonCard from './PersonCard';
 
 // The day overlay — a grid of person tiles rather than a stack of rows. At 10–20 people a day,
@@ -21,9 +22,9 @@ export default function DayPeopleModal({
   day: CalendarDay;
   dateLabel: string;
   onClose: () => void;
-  onConfirm: (shiftId: string, confirmed: boolean, approvedMinutes?: number | null) => Promise<void>;
+  onConfirm: (shiftId: string, confirmed: boolean, team: ApprovedTeam, approvedMinutes?: number | null) => Promise<void>;
   /** Payroll-only correction on an already-confirmed shift (migration 137). Forwarded to the tile. */
-  onApprovedMinutes?: (shiftId: string, approvedMinutes: number | null) => Promise<void>;
+  onApprovedMinutes?: (shiftId: string, team: ApprovedTeam, approvedMinutes: number | null) => Promise<void>;
   onEdit: (shiftId: string) => void;
   onAddShift: (date: string) => void;
   /** Remove a one-off scheduled shift. Absent → the tiles offer no Remove action. */

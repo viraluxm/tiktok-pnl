@@ -1,6 +1,6 @@
 import 'server-only';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { payPeriodContaining } from '@/lib/employees';
+import { payPeriodContaining, payrollTeamOfRole } from '@/lib/employees';
 import type { Employee } from '@/types';
 import { laTodayISO } from './timezone';
 import { weekBoundsMonSun } from './hours';
@@ -77,7 +77,7 @@ export async function getTimecard(employee: Employee, now: Date = new Date()): P
   ]);
   if (error) throw new Error(`getTimecard: ${error.message}`);
 
-  return buildTimecard({ shifts: (rows ?? []) as TimecardShiftRow[], open, todayISO, week, period });
+  return buildTimecard({ shifts: (rows ?? []) as TimecardShiftRow[], open, todayISO, week, period, team: payrollTeamOfRole(employee.role) });
 }
 
 /**
@@ -106,7 +106,7 @@ export async function getPayPeriodHistory(employee: Employee, now: Date = new Da
     .order('date', { ascending: false });
   if (error) throw new Error(`getPayPeriodHistory: ${error.message}`);
 
-  return buildPayPeriods({ shifts: (rows ?? []) as TimecardShiftRow[], periods });
+  return buildPayPeriods({ shifts: (rows ?? []) as TimecardShiftRow[], periods, team: payrollTeamOfRole(employee.role) });
 }
 
 /**
@@ -131,5 +131,5 @@ export async function getTimecardPeriod(employee: Employee, period: { start: str
     .order('date', { ascending: false });
   if (error) throw new Error(`getTimecardPeriod: ${error.message}`);
 
-  return buildTimecardPeriod({ shifts: (rows ?? []) as TimecardShiftRow[], todayISO, period });
+  return buildTimecardPeriod({ shifts: (rows ?? []) as TimecardShiftRow[], todayISO, period, team: payrollTeamOfRole(employee.role) });
 }

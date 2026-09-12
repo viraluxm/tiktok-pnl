@@ -220,6 +220,12 @@ export function confirmErrorMessage(token: string): string {
       return 'End the open break before confirming.';
     case 'NOT_AUTHENTICATED':
       return 'Your session expired — please sign in again.';
+    // Raised by lensed_set_approved_minutes (migration 149) when the shift is not a live host's.
+    // Unreachable from a current build — the tile offers no approved-hours control for anyone
+    // else — so seeing it means a stale tab or a direct call, and the sentence has to explain the
+    // rule rather than just say "failed".
+    case 'APPROVED_MINUTES_NOT_ALLOWED_FOR_TEAM':
+      return 'Approved hours apply to Live Hosts only. Fulfillment shifts are paid their clocked time — edit the punch instead.';
     default:
       return 'Could not update confirmation. Please try again.';
   }

@@ -17,6 +17,8 @@ import {
   buildPayPeriods, buildTimecard, buildTimecardPeriod, previousPayPeriods, resolvePeriodStart,
   type TimecardShiftRow,
 } from '@/lib/schedule/timecardModel';
+import { approvedMinutesForTeam, type ApprovedTeam } from '@/lib/shifts/approvedHours';
+import { payrollTeamOfRole } from '@/lib/employees';
 import { buildCalendarDays, type DayPerson } from '@/lib/schedule/calendarModel';
 import { buildTradeOptions, planTradeRequest, otherDates, TRADE_REFUSAL_MESSAGES, type TradeableInstance } from '@/lib/schedule/tradePlan';
 import { laTodayISO } from '@/lib/schedule/timezone';
@@ -308,8 +310,17 @@ export function timecardFor(w: DemoWorld): TimecardPayload {
   return buildTimecard({
     shifts: w.viewerId === CARLOS ? w.punches : w.viewerId === MADISON ? madisonPunches : [],
     open: w.clockedInAt && w.viewerId === CARLOS ? { clocked_in_at: w.clockedInAt, on_break: false, needs_manual_close: false } : null,
-    todayISO: today, week, period: payPeriodContaining(today),
+    todayISO: today, week, period: payPeriodContaining(today), team: viewerTeam(w),
   });
+}
+
+/**
+ * The viewer's payroll team, for the timecard builders. Carlos is a live host, so his approved
+ * minutes pay; Madison is fulfillment, so hers are ignored and the punch pays — which is exactly
+ * the split the real /s/[token] timecard applies, via the same payrollTeamOfRole().
+ */
+function viewerTeam(w: DemoWorld) {
+  return payrollTeamOfRole(empOf(w, w.viewerId).role);
 }
 
 // ── Previous pay periods ─────────────────────────────────────────────────────────────────────
@@ -344,14 +355,14 @@ function punchesFor(w: DemoWorld): TimecardShiftRow[] {
 }
 
 export function payPeriodsFor(w: DemoWorld): PayPeriodsPayload {
-  return { periods: buildPayPeriods({ shifts: punchesFor(w), periods: previousPayPeriods(payPeriodContaining(today).start) }) };
+  return { periods: buildPayPeriods({ shifts: punchesFor(w), periods: previousPayPeriods(payPeriodContaining(today).start), team: viewerTeam(w) }) };
 }
 
 export function timecardPeriodFor(w: DemoWorld, start: string): TimecardPeriodPayload {
   // The same refusal the route applies, so an impossible period is impossible here too.
   const period = resolvePeriodStart(start, today);
   if (!period) throw new Error('That pay period does not exist.');
-  return buildTimecardPeriod({ shifts: punchesFor(w), todayISO: today, period });
+  return buildTimecardPeriod({ shifts: punchesFor(w), todayISO: today, period, team: viewerTeam(w) });
 }
 
 /** The scheduled Pay Day for the CURRENT period — the same derivation the server ships. */
@@ -453,22 +464,29 @@ export const act = {
    * Confirm / unconfirm a punch, carrying the approved minutes — mirroring
    * lensed_confirm_time_clock_shift, INCLUDING its refusal to confirm a live host without a
    * figure, so the preview shows the same error the server would raise.
+   *
+   * The `team` gate mirrors useShifts: approved hours are a LIVE-HOST instrument, so a non-host
+   * confirm stores NULL and the preview world reproduces exactly what production would keep —
+   * a worked-time row that pays its canonical clocked duration.
    */
-  confirmPunch: (id: string, confirmed: boolean, approvedMinutes: number | null): Mutation => (w) => {
+  confirmPunch: (id: string, confirmed: boolean, team: ApprovedTeam, approvedMinutes: number | null): Mutation => (w) => {
     const c = w.confirmable.find((x) => x.id === id);
     if (!c) return w;
-    if (confirmed && empOf(w, c.employee_id).role === 'host' && approvedMinutes == null && c.approved_minutes == null) {
+    const minutes = approvedMinutesForTeam(team, approvedMinutes);
+    if (confirmed && empOf(w, c.employee_id).role === 'host' && minutes == null && c.approved_minutes == null) {
       throw new Error('HOST_APPROVED_MINUTES_REQUIRED');
     }
     return {
       ...w,
       confirmable: w.confirmable.map((x) => (x.id === id
         ? confirmed
-          ? { ...x, confirmed_at: x.confirmed_at ?? nowISO(), approved_minutes: approvedMinutes ?? x.approved_minutes }
+          ? { ...x, confirmed_at: x.confirmed_at ?? nowISO(), approved_minutes: minutes ?? x.approved_minutes }
           : { ...x, confirmed_at: null, approved_minutes: null }
         : x)),
       log: [confirmed
-        ? `Manager confirmed ${nameOf(w, c.employee_id)} — approved ${approvedMinutes ?? c.approved_minutes} min (punch untouched)`
+        ? (minutes == null && c.approved_minutes == null
+          ? `Manager confirmed ${nameOf(w, c.employee_id)} — worked time as clocked, no approved-hours override`
+          : `Manager confirmed ${nameOf(w, c.employee_id)} — approved ${minutes ?? c.approved_minutes} min (punch untouched)`)
         : `Manager unconfirmed ${nameOf(w, c.employee_id)} — approval withdrawn`, ...w.log],
     };
   },

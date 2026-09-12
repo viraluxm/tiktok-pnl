@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import MemberNav from '@/components/member/MemberNav';
 import { DROP_CAP } from '@/lib/schedule/drops';
 import { toTimecardEntry, type TimecardShiftRow } from '@/lib/schedule/timecardModel';
+import { payrollTeamOfRole, type PayrollTeam } from '@/lib/employees';
 import { dowShort, fmtDuration, fmtTimeLA, laDateOf } from '@/lib/schedule/portalModel';
 
 // Member 'team' scope — READ-ONLY roster / schedule / performance under the bare (station) layout.
@@ -41,7 +42,7 @@ const fmtPct = (v: number | null) => (v == null ? '—' : `${v.toFixed(0)}%`);
 //
 // Returns null for a materialized PLAN row (source_rule_id set) — a plan is not worked time — and
 // for a row too incomplete to place on the clock.
-function timecardRow(s: Shift) {
+function timecardRow(s: Shift, team: PayrollTeam) {
   if (!s.employee_id || !s.date || !s.start_time) return null;
   return toTimecardEntry({
     id: s.id,
@@ -57,7 +58,7 @@ function timecardRow(s: Shift) {
     clock_out_at: s.clock_out_at ?? null,
     auto_closed: s.auto_closed ?? false,
     approved_minutes: s.approved_minutes ?? null,
-  });
+  }, team);
 }
 
 // The one-line status a manager needs: why a row is not simply "done".
@@ -106,6 +107,10 @@ export default function MemberStaffPage() {
   }, []);
 
   const nameById = useMemo(() => { const m = new Map<string, string>(); for (const e of employees) m.set(e.id, e.name ?? e.id); return m; }, [employees]);
+  // The payable figure is team-dependent (a stored approved_minutes pays for a live host and is
+  // ignored for everyone else), so each row needs its own employee's role — read from the roster
+  // this page already loads rather than added to the shifts query.
+  const roleById = useMemo(() => { const m = new Map<string, string | null>(); for (const e of employees) m.set(e.id, e.role); return m; }, [employees]);
   // Worked-time rows, newest first. CLOCKED is the attendance record; APPROVED is what payroll
   // pays — after migration 137 they answer different questions (a live host's approved time is
   // normally shorter than their punch), so the table shows both rather than one number that
@@ -115,10 +120,10 @@ export default function MemberStaffPage() {
   const timecardRows = useMemo(
     () =>
       shifts
-        .map((shift) => ({ shift, entry: timecardRow(shift) }))
+        .map((shift) => ({ shift, entry: timecardRow(shift, payrollTeamOfRole(roleById.get(shift.employee_id ?? '') ?? null)) }))
         .filter((r): r is { shift: Shift; entry: NonNullable<typeof r.entry> } => r.entry != null)
         .sort((a, b) => Date.parse(b.entry.clock_in) - Date.parse(a.entry.clock_in)),
-    [shifts],
+    [shifts, roleById],
   );
   const dropByEmp = useMemo(() => { const m = new Map<string, DropRow>(); for (const d of drops) m.set(d.employee_id, d); return m; }, [drops]);
   const liveHoursByHost = useMemo(() => {
