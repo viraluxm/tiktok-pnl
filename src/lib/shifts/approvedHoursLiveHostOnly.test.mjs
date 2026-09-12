@@ -616,7 +616,15 @@ console.log('\n10. THE SERVER ENFORCES IT TOO — migration 149');
   // OPERATIONAL SAFETY, per CLAUDE.md and CONVENTIONS.md.
   check('one transaction', (code.match(/^begin;$/gm) ?? []).length === 1 && (code.match(/^commit;$/gm) ?? []).length === 1);
   check('a lock_timeout is set before touching anything', /^set local lock_timeout = '3s';$/m.test(code));
-  check('the header records that it is NOT yet applied', /⛔ NOT APPLIED TO PRODUCTION/.test(M));
+  // This DB has no migration ledger, so the header IS the applied-state record (same rule as 139).
+  check('the header records that it IS applied, with a timestamp, and does not still claim otherwise',
+    /✅ APPLIED TO PRODUCTION 2026-09-12 05:18 UTC/.test(M) && !/⛔ NOT APPLIED/.test(M));
+  check('…and warns against applying it a second time', /DO NOT APPLY IT AGAIN/.test(M));
+  check('…and records the before/after evidence CLAUDE.md requires',
+    /capture path never paused/.test(M) && /md5\(prosrc\) before\/after/.test(M)
+    && /DATA UNTOUCHED/.test(M) && /62 rows total, 40 of/.test(M));
+  check('…and the live behaviour check, including that it was rolled back',
+    /ROLLED BACK/.test(M) && /APPROVED_MINUTES_NOT_ALLOWED_FOR_TEAM/.test(M));
   check('…and states the CODE-FIRST deploy order, which is the reverse of 139',
     /DEPLOY ORDER — CODE FIRST/.test(M) && /OPPOSITE OF 139/.test(M));
   check('…and records the live prosrc md5s it was diffed against',
