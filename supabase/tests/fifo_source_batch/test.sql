@@ -289,16 +289,24 @@ begin
   select qty_remaining, qty_added into v_rem, v_add from public.sku_batches where id = BE;
   if v_rem <> v_add then raise exception 'E: setup failed, guard not defeated (%,%)', v_rem, v_add; end if;
 
+  -- Two layers of defence must BOTH be acceptable here, and which one answers depends on
+  -- whether 151 is applied: with 151 the RPC's own BATCH_HAS_CONSUMPTION pre-check fires
+  -- first (friendly); without it the 149 FK fires (correct but raw). Test 9 in
+  -- test_finalize.sql asserts the friendly one specifically.
+  v_msg := null;
   begin
     perform public.lensed_delete_batch(SK_E, BE);
-    raise exception 'E: CONSUMED LAYER WAS DELETED — attribution destroyed';
-  exception when foreign_key_violation then
-    null;  -- the FK is the real backstop, and it held
-  when others then
-    get stacked diagnostics v_msg = message_text;
-    if position('BATCH_NOT_DELETABLE' in v_msg) = 0 and position('foreign key' in lower(v_msg)) = 0 then
-      raise exception 'E: unexpected error: %', v_msg; end if;
+    v_msg := '__SUCCEEDED__';
+  exception
+    when foreign_key_violation then v_msg := 'foreign key';
+    when others then get stacked diagnostics v_msg = message_text;
   end;
+  if v_msg = '__SUCCEEDED__' then
+    raise exception 'E: CONSUMED LAYER WAS DELETED — attribution destroyed'; end if;
+  if position('BATCH_HAS_CONSUMPTION' in v_msg) = 0
+     and position('BATCH_NOT_DELETABLE' in v_msg) = 0
+     and position('foreign key' in lower(v_msg)) = 0 then
+    raise exception 'E: unexpected error: %', v_msg; end if;
 
   -- the sale still points at the original layer, and quantities are untouched by the failure
   select count(*) into v_n from public.sku_batches where id = BE;
@@ -390,35 +398,72 @@ begin
     raise notice '✓ EXTRA3/4: oversell names the negative layer; settle keeps Received 5 / Consumed 5 truthful';
   end;
 
-  -- ══ EXTRA 5 — cost_status transitions, and the CHECK that makes them total ════════
-  declare SK_T uuid; BT uuid; begin
+  -- ══ EXTRA 5 — cost_status transitions + ONE COST PATH + the CHECK that makes it total ══
+  -- 151 moved the cost transition out of lensed_edit_batch for ATTRIBUTABLE layers, so this
+  -- block now asserts the refusal as well as the transition itself.
+  declare SK_T uuid; BT uuid; SK_TL uuid; BTL uuid; v_e text; begin
     insert into public.inventory_skus (user_id, org_id, sku_number, barcode, title, unit_cost_cents, qty_on_hand)
       values (A, ORG1, 40, 'T', 'Transitions', null, 0) returning id into SK_T;
     select public.lensed_add_batch(SK_T, 10, null) into BT;
     if (select cost_status from public.sku_batches where id = BT) <> 'pending' then
       raise exception 'EXTRA5: new blank-cost layer must be pending'; end if;
 
-    perform public.lensed_edit_batch(SK_T, BT, 10, 425, true);
-    if (select cost_status from public.sku_batches where id = BT) <> 'final' then
-      raise exception 'EXTRA5: entering a cost must move pending -> final'; end if;
-
-    perform public.lensed_edit_batch(SK_T, BT, 10, null, true);
-    if (select cost_status from public.sku_batches where id = BT) <> 'pending' then
-      raise exception 'EXTRA5: blanking a cost must move final -> pending'; end if;
-
-    -- a qty-only edit (p_set_cost false) must leave BOTH cost and state alone
-    perform public.lensed_edit_batch(SK_T, BT, 9, null, false);
+    -- (a) the generic edit MUST NOT move an attributable layer's cost any more.
+    -- NB: a RAISE inside a begin/exception block is caught by that block's OWN handler, so
+    -- the "it succeeded" case is recorded in a flag and asserted after the block, not raised
+    -- inside it.
+    v_e := null;
+    begin
+      perform public.lensed_edit_batch(SK_T, BT, 10, 425, true);
+      v_e := '__SUCCEEDED__';
+    exception when others then
+      get stacked diagnostics v_e = message_text;
+    end;
+    if v_e = '__SUCCEEDED__' then
+      raise exception 'EXTRA5: edit_batch changed an ATTRIBUTABLE layer cost — the bypass is open'; end if;
+    if position('COST_EDIT_REQUIRES_FINALIZE' in v_e) = 0 then
+      raise exception 'EXTRA5: wrong error: %', v_e; end if;
     if (select cost_status from public.sku_batches where id = BT) <> 'pending'
        or (select unit_cost_cents from public.sku_batches where id = BT) is not null then
-      raise exception 'EXTRA5: qty-only edit disturbed cost state'; end if;
+      raise exception 'EXTRA5: refused edit still mutated the layer'; end if;
 
-    -- and the CHECK really can fail (proving it is not vacuous)
+    -- (b) re-submitting the SAME cost is not a change, so the ordinary qty edit still works
+    perform public.lensed_edit_batch(SK_T, BT, 9, null, true);   -- cost unchanged (still NULL)
+    if (select qty_remaining from public.sku_batches where id = BT) <> 9 then
+      raise exception 'EXTRA5: qty edit with an unchanged cost was blocked'; end if;
+
+    -- (c) a qty-only edit (p_set_cost false) is untouched
+    perform public.lensed_edit_batch(SK_T, BT, 8, null, false);
+    if (select qty_remaining from public.sku_batches where id = BT) <> 8
+       or (select cost_status from public.sku_batches where id = BT) <> 'pending' then
+      raise exception 'EXTRA5: qty-only edit disturbed the layer'; end if;
+
+    -- (d) finalize IS the path, and it moves pending -> final
+    perform * from public.lensed_finalize_batch_cost(SK_T, BT, 425);
+    if (select cost_status from public.sku_batches where id = BT) <> 'final'
+       or (select unit_cost_cents from public.sku_batches where id = BT) <> 425 then
+      raise exception 'EXTRA5: finalize did not move pending -> final'; end if;
+
+    -- (e) LEGACY layers keep the old combined behaviour, including blanking a cost
+    insert into public.inventory_skus (user_id, org_id, sku_number, barcode, title, unit_cost_cents, qty_on_hand)
+      values (A, ORG1, 41, 'TL', 'Transitions legacy', null, 0) returning id into SK_TL;
+    insert into public.sku_batches (user_id, org_id, sku_id, qty_remaining, qty_added, unit_cost_cents, sequence)
+      values (A, ORG1, SK_TL, 10, 10, 500, 1) returning id into BTL;   -- authoritative FALSE
+    update public.inventory_skus set qty_on_hand = 10 where id = SK_TL;
+    perform public.lensed_edit_batch(SK_TL, BTL, 10, 600, true);
+    if (select unit_cost_cents from public.sku_batches where id = BTL) <> 600 then
+      raise exception 'EXTRA5: legacy cost edit REGRESSED'; end if;
+    perform public.lensed_edit_batch(SK_TL, BTL, 10, null, true);
+    if (select cost_status from public.sku_batches where id = BTL) <> 'pending' then
+      raise exception 'EXTRA5: legacy blank-cost edit should read pending'; end if;
+
+    -- (f) and the CHECK really can fail (proving it is not vacuous)
     begin
-      update public.sku_batches set cost_status = 'final' where id = BT;   -- cost is NULL
+      update public.sku_batches set cost_status = 'final' where id = BTL;   -- cost is NULL
       raise exception 'EXTRA5: sku_batches_cost_status_chk did NOT reject (final, NULL)';
     exception when check_violation then null;
     end;
-    raise notice '✓ EXTRA5: pending<->final transitions work; CHECK proven able to fail';
+    raise notice '✓ EXTRA5: ONE cost path enforced (edit refuses, finalize performs); legacy unchanged; CHECK proven able to fail';
   end;
 
   raise notice '── all in-SQL assertions passed ──';

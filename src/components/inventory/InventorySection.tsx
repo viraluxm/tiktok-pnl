@@ -12,6 +12,7 @@ import {
   useSettleBatch,
   useEditBatch,
   useDeleteBatch,
+  useFinalizeBatchCost,
   type InventorySku,
   type SkuBatch,
 } from '@/hooks/useInventorySkus';
@@ -32,6 +33,13 @@ const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixe
 // the disabled-button tooltip matches what the server would actually return. The
 // server enforces the rule regardless of what the UI shows.
 function batchDeleteBlockReason(b: SkuBatch, totalLayers: number): string | null {
+  // 151: an attributable layer that has given up units has sale rows pointing at it
+  // (every draw since migration 150 records source_batch_id). Deleting it would erase
+  // those sales' provenance, so the RPC raises BATCH_HAS_CONSUMPTION and the database FK
+  // refuses it outright. Say so here rather than letting the user discover it on click.
+  if (b.qty_added_authoritative === true && b.qty_added != null && b.qty_added !== b.qty_remaining) {
+    return "This batch has inventory already used in sales and can't be deleted. Edit its remaining quantity to 0 instead.";
+  }
   if (b.qty_added == null || b.qty_remaining !== b.qty_added) {
     return 'This layer has unverified or existing sales history and cannot be deleted. Edit its remaining quantity to 0 instead.';
   }
@@ -209,6 +217,7 @@ export default function InventorySection() {
   const settleBatch = useSettleBatch();
   const editBatch = useEditBatch();
   const deleteBatch = useDeleteBatch();
+  const finalizeCost = useFinalizeBatchCost();
 
   // Add-batch form inputs (lives in the Edit panel; the SKU is `editingId`).
   const [batchQty, setBatchQty] = useState('');
@@ -219,6 +228,12 @@ export default function InventorySection() {
   const [editBatchQty, setEditBatchQty] = useState('');   // remaining quantity
   const [editBatchCost, setEditBatchCost] = useState(''); // unit cost, dollars
   const [confirmDeleteBatchId, setConfirmDeleteBatchId] = useState<string | null>(null);
+  // 151: the ONE cost path for an attributable layer. Separate from the qty editor above
+  // because it is a different operation with different consequences — it reprices the
+  // sales that layer already supplied.
+  const [costingBatchId, setCostingBatchId] = useState<string | null>(null);
+  const [costBatchValue, setCostBatchValue] = useState('');   // dollars
+  const [costBatchNote, setCostBatchNote] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -330,6 +345,7 @@ export default function InventorySection() {
     clearImageState();
     setBatchQty(''); setBatchCost(''); setBatchErr(null);
     setEditingBatchId(null); setEditBatchQty(''); setEditBatchCost(''); setConfirmDeleteBatchId(null);
+    setCostingBatchId(null); setCostBatchValue(''); setCostBatchNote(null);
     setExistingThumbUrl(s.thumbnail_url);
     setEditingId(s.id);
     setForm({
@@ -357,6 +373,7 @@ export default function InventorySection() {
     setError(null);
     setBatchQty(''); setBatchCost(''); setBatchErr(null);
     setEditingBatchId(null); setEditBatchQty(''); setEditBatchCost(''); setConfirmDeleteBatchId(null);
+    setCostingBatchId(null); setCostBatchValue(''); setCostBatchNote(null);
   }
 
   async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
@@ -494,6 +511,43 @@ export default function InventorySection() {
       setEditBatchQty(''); setEditBatchCost('');
     } catch (e) {
       setBatchErr(e instanceof Error ? e.message : 'Failed to edit batch');
+    }
+  }
+
+  // Open the cost editor for one layer, pre-filled with its current cost (blank when pending).
+  function openCostBatch(b: SkuBatch) {
+    setEditingBatchId(null); setConfirmDeleteBatchId(null); setBatchErr(null); setCostBatchNote(null);
+    setCostingBatchId(b.id);
+    setCostBatchValue(b.unit_cost_cents != null ? (b.unit_cost_cents / 100).toFixed(2) : '');
+  }
+  function cancelCostBatch() {
+    setCostingBatchId(null); setCostBatchValue(''); setCostBatchNote(null); setBatchErr(null);
+  }
+
+  // Submit the authoritative cost change. A cost is REQUIRED here — leaving it blank means
+  // the layer stays pending, which is what NOT opening this editor already achieves.
+  async function submitCostBatch(skuId: string, batchId: string) {
+    const raw = costBatchValue.trim();
+    if (raw === '') {
+      setBatchErr('Enter a unit cost. Leave the layer pending instead if the cost is still unknown.');
+      return;
+    }
+    const cents = Math.round(Number(raw) * 100);
+    if (!Number.isFinite(cents) || cents < 0) { setBatchErr('Unit cost must be an amount of at least 0'); return; }
+    setBatchErr(null); setCostBatchNote(null);
+    try {
+      const res = await finalizeCost.mutateAsync({ skuId, batchId, unit_cost_cents: cents });
+      // Report what actually moved, so a correction is never silent.
+      const r = res?.result as { lines_repriced?: number; units_repriced?: number; cogs_delta_cents?: number } | null;
+      const units = r?.units_repriced ?? 0;
+      setCostBatchNote(
+        units > 0
+          ? `Repriced ${units} previously sold unit${units === 1 ? '' : 's'} · COGS ${(r?.cogs_delta_cents ?? 0) >= 0 ? '+' : ''}${fmtCents(r?.cogs_delta_cents ?? 0)}`
+          : 'Cost saved. No past sales from this layer needed repricing.',
+      );
+      setCostingBatchId(null); setCostBatchValue('');
+    } catch (e) {
+      setBatchErr(e instanceof Error ? e.message : 'Failed to set batch cost');
     }
   }
 
@@ -789,7 +843,7 @@ export default function InventorySection() {
             <div className="mt-5 rounded-xl border border-tt-border bg-tt-bg/40 p-4">
               <div className="flex items-baseline justify-between gap-3 mb-2">
                 <span className="text-xs font-semibold text-tt-text">Cost layers (FIFO)</span>
-                <span className="text-[11px] text-tt-muted text-right">Remaining quantity @ unit cost · a sale draws fully from the oldest layer that can cover it · total = Σ layers = {editingSku.qty_on_hand ?? 0}</span>
+                <span className="text-[11px] text-tt-muted text-right">Added / Remaining / Consumed @ unit cost · a sale draws fully from the oldest layer that can cover it · total remaining = Σ layers = {editingSku.qty_on_hand ?? 0}</span>
               </div>
               <div className="space-y-1.5 mb-3">
                 {editingSku.batches.length === 0 ? (
@@ -810,15 +864,21 @@ export default function InventorySection() {
                     // "Sold": without an inventory-movement ledger these units may also be
                     // damage, samples or corrections.
                     const q = deriveBatchQuantities(b);
-                    const qtyCells = q.received == null ? (
+                    const qtyCells = q.added == null ? (
                       <span className={`${qtyClass} w-16 text-right`}>{b.qty_remaining}</span>
                     ) : (
                       <span className="flex items-baseline gap-2 text-[11px] tabular-nums">
-                        <span className="text-tt-muted">Received <span className="text-tt-text">{q.received}</span></span>
+                        <span className="text-tt-muted">Added <span className="text-tt-text">{q.added}</span></span>
                         <span className="text-tt-muted">Remaining <span className={b.qty_remaining < 0 ? 'text-tt-red font-semibold' : 'text-tt-text'}>{b.qty_remaining}</span></span>
                         <span className="text-tt-muted">Consumed <span className="text-tt-text">{q.consumed}</span></span>
                       </span>
                     );
+                    // 151: an attributable layer's sales carry source_batch_id, so its cost
+                    // is changed through the finalize path (which also reprices them), never
+                    // through the inline qty editor. A legacy layer has nothing to reprice
+                    // and keeps the original combined qty+cost editor.
+                    const attributable = b.qty_added_authoritative === true;
+                    const isCosting = costingBatchId === b.id;
                     // 'pending' is the ONE state that must not render as a number: a blank
                     // cost and a genuine $0 are different facts as of 149.
                     const costCell = b.cost_status === 'pending'
@@ -838,15 +898,17 @@ export default function InventorySection() {
                                 className="w-20 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
                               />
                             </label>
-                            <label className="flex items-center gap-1">
-                              <span className="text-[10px] uppercase tracking-wide text-tt-muted">@ $</span>
-                              <input
-                                inputMode="decimal" placeholder="cost" value={editBatchCost}
-                                onChange={(e) => setEditBatchCost(e.target.value)}
-                                aria-label="Unit cost in dollars"
-                                className="w-24 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
-                              />
-                            </label>
+                            {!attributable && (
+                              <label className="flex items-center gap-1">
+                                <span className="text-[10px] uppercase tracking-wide text-tt-muted">@ $</span>
+                                <input
+                                  inputMode="decimal" placeholder="cost" value={editBatchCost}
+                                  onChange={(e) => setEditBatchCost(e.target.value)}
+                                  aria-label="Unit cost in dollars"
+                                  className="w-24 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
+                                />
+                              </label>
+                            )}
                             <button
                               type="button"
                               onClick={() => submitEditBatch(editingSku.id, b.id)}
@@ -864,7 +926,44 @@ export default function InventorySection() {
                               Cancel
                             </button>
                             <span className="w-full text-[10px] text-tt-muted">
-                              Cost changes affect future sales only. Previously recorded COGS will not change.
+                              {attributable
+                                ? 'Quantity only. Use Enter cost to change this layer’s unit cost — that also corrects the sales it supplied.'
+                                : 'Cost changes affect future sales only. This layer pre-dates cost tracking, so previously recorded COGS will not change.'}
+                            </span>
+                          </>
+                        ) : isCosting ? (
+                          <>
+                            {qtyCells}
+                            <label className="flex items-center gap-1">
+                              <span className="text-[10px] uppercase tracking-wide text-tt-muted">Unit cost $</span>
+                              <input
+                                inputMode="decimal" placeholder="0.00" value={costBatchValue}
+                                onChange={(e) => setCostBatchValue(e.target.value)}
+                                aria-label="Unit cost in dollars"
+                                autoFocus
+                                className="w-24 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => submitCostBatch(editingSku.id, b.id)}
+                              disabled={finalizeCost.isPending}
+                              className="px-2.5 py-1 rounded-md bg-tt-cyan text-black text-xs font-semibold cursor-pointer hover:opacity-90 disabled:opacity-40"
+                            >
+                              {finalizeCost.isPending ? 'Saving…' : 'Save cost'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelCostBatch}
+                              disabled={finalizeCost.isPending}
+                              className="px-2.5 py-1 rounded-md border border-tt-border text-tt-muted text-xs cursor-pointer hover:bg-tt-card-hover disabled:opacity-40"
+                            >
+                              Cancel
+                            </button>
+                            <span className="w-full text-[10px] text-tt-muted">
+                              {(q.consumed ?? 0) > 0
+                                ? `Sets this layer’s true unit cost and reprices the ${q.consumed} unit${q.consumed === 1 ? '' : 's'} already sold from it. Quantities do not change.`
+                                : 'Sets this layer’s true unit cost. Nothing has been sold from it yet, so no past COGS changes.'}
                             </span>
                           </>
                         ) : isConfirmingDelete ? (
@@ -902,6 +1001,25 @@ export default function InventorySection() {
                               >
                                 Edit
                               </button>
+                              {attributable && (
+                                <button
+                                  type="button"
+                                  onClick={() => openCostBatch(b)}
+                                  disabled={mutating || finalizeCost.isPending}
+                                  title={
+                                    b.cost_status === 'pending'
+                                      ? 'Enter this layer’s true unit cost once it is known — past sales from this layer are repriced too'
+                                      : 'Correct this layer’s unit cost — past sales from this layer are repriced too'
+                                  }
+                                  className={`px-2.5 py-1 rounded-md border text-xs font-medium cursor-pointer disabled:opacity-40 ${
+                                    b.cost_status === 'pending'
+                                      ? 'border-tt-yellow/60 text-tt-yellow hover:bg-tt-yellow/10'
+                                      : 'border-tt-border text-tt-muted hover:bg-tt-card-hover'
+                                  }`}
+                                >
+                                  {b.cost_status === 'pending' ? 'Enter cost' : 'Edit cost'}
+                                </button>
+                              )}
                               {b.qty_remaining < 0 && (
                                 <button
                                   type="button"
@@ -929,6 +1047,9 @@ export default function InventorySection() {
                     );
                   })
                 )}
+                {costBatchNote && (
+                  <div className="text-[11px] text-tt-green" role="status">{costBatchNote}</div>
+                )}
               </div>
               <div className="flex flex-wrap items-end gap-2 border-t border-tt-border pt-3">
                 <div className="flex flex-col">
@@ -942,7 +1063,7 @@ export default function InventorySection() {
                     <input
                       inputMode="decimal" placeholder="Unit cost $" value={batchCost}
                       onChange={(e) => setBatchCost(e.target.value)}
-                      title="Leave blank if the cost is not known yet — the layer is recorded as Cost pending. Enter 0 only if the stock genuinely was free."
+                      title="Leave blank if the cost is not known yet — the layer is recorded as Cost pending, and you can Enter cost later to price it and the sales it supplied. Enter 0 only if the stock genuinely was free."
                       className="w-28 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
                     />
                     <button

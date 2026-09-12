@@ -135,7 +135,10 @@ export interface BatchQuantityInput {
 
 export interface BatchQuantityView {
   // Original quantity that entered this layer. null when we cannot prove it.
-  received: number | null;
+  // Called ADDED, not Received: the same field is written by a manual add, a SKU's
+  // opening stock, a ViewTrack receipt, an unbind restock and a settled oversell
+  // deficit. "Added" is true of all five; "Received" implies a purchase receipt.
+  added: number | null;
   // Current remaining quantity in this FIFO layer (may be negative on oversell).
   remaining: number;
   // Units drawn out of this layer so far. Deliberately labelled CONSUMED, not SOLD:
@@ -152,10 +155,29 @@ export interface BatchQuantityView {
 export function deriveBatchQuantities(b: BatchQuantityInput): BatchQuantityView {
   const trustworthy = b.qty_added_authoritative === true && b.qty_added != null;
   return {
-    received: trustworthy ? (b.qty_added as number) : null,
+    added: trustworthy ? (b.qty_added as number) : null,
     remaining: b.qty_remaining,
     consumed: trustworthy ? (b.qty_added as number) - b.qty_remaining : null,
   };
+}
+
+// ── Finalize / correct a batch's true unit cost (migration 151) ──────────────────────
+// The ONE way an attributable layer's cost may change. Unlike parseBatchEdit, a cost is
+// REQUIRED here: "finalize" means asserting a number, and blanking a cost is not a
+// correction. 0 is valid and means genuinely free — the whole point of cost_status.
+export type FinalizeCostParse =
+  | { ok: true; value: { unit_cost_cents: number } }
+  | { ok: false; error: string };
+
+export function parseFinalizeCost(raw: unknown): FinalizeCostParse {
+  if (raw === null || raw === undefined || raw === '') {
+    return { ok: false, error: 'Enter a unit cost. Leave the layer pending instead if the cost is still unknown.' };
+  }
+  const c = toIntStrict(raw);
+  if (c === null || c < 0) {
+    return { ok: false, error: 'Unit cost must be a whole number of cents, 0 or more' };
+  }
+  return { ok: true, value: { unit_cost_cents: c } };
 }
 
 export interface BatchRpcErrorResponse {
@@ -170,6 +192,39 @@ export interface BatchRpcErrorResponse {
 export function mapBatchRpcError(message: string | null | undefined): BatchRpcErrorResponse {
   const m = message ?? '';
   if (m.includes('BATCH_NOT_FOUND')) return { status: 404, error: 'Batch not found' };
+  // 151: the friendly answer to what the 149 FK would otherwise raise as a raw 23503.
+  if (m.includes('BATCH_HAS_CONSUMPTION')) {
+    return {
+      status: 409,
+      error:
+        "This batch has inventory already used in sales and can't be deleted. Edit its remaining quantity to 0 instead.",
+    };
+  }
+  // 151: one cost path. The generic edit may not move an attributable layer's cost,
+  // because only the finalize path also reprices that layer's recorded sales.
+  if (m.includes('COST_EDIT_REQUIRES_FINALIZE')) {
+    return {
+      status: 409,
+      error: "Use Enter cost to change this layer's unit cost — that also corrects the sales it supplied.",
+    };
+  }
+  if (m.includes('BATCH_NOT_ATTRIBUTABLE')) {
+    return {
+      status: 409,
+      error:
+        "This layer pre-dates cost tracking, so its past sales can't be identified. Edit its unit cost directly — historical COGS will not change.",
+    };
+  }
+  if (m.includes('COST_REQUIRED')) {
+    return { status: 400, error: 'Enter a unit cost. Leave the layer pending instead if the cost is still unknown.' };
+  }
+  // The FK itself, if anything ever reaches a DELETE without the pre-check above.
+  if (m.includes('foreign key') || m.includes('23503') || m.includes('source_batch_id_fkey')) {
+    return {
+      status: 409,
+      error: "This batch has inventory already used in sales and can't be deleted. Edit its remaining quantity to 0 instead.",
+    };
+  }
   if (m.includes('INVALID_QTY')) return { status: 400, error: 'Remaining quantity must be a whole number of at least 0' };
   if (m.includes('INVALID_COST')) return { status: 400, error: 'Unit cost must be empty or an amount of at least 0' };
   if (m.includes('BATCH_NOT_DELETABLE')) {

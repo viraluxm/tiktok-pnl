@@ -60,6 +60,12 @@ create table if not exists public.organization_members (
 create or replace function public.current_user_org() returns uuid language sql stable as $$
   select m.org_id from public.organization_members m where m.user_id = auth.uid() order by m.created_at limit 1
 $$;
+-- 151's audit table declares org-scoped RLS policies, and a policy cannot be created
+-- against a function that does not exist. Verbatim from production.
+create or replace function public.is_org_member(p_org uuid) returns boolean
+  language sql stable security definer set search_path to 'public' as $$
+  select exists (select 1 from public.organization_members m where m.org_id = p_org and m.user_id = auth.uid());
+$$;
 
 -- ── org-scoped inventory + FIFO batches (034/035b + 046 qty_added) ─────────────
 create table if not exists public.inventory_skus (
@@ -69,6 +75,8 @@ create table if not exists public.inventory_skus (
   sku_number int, barcode text, title text,
   unit_cost_cents int, qty_on_hand int not null default 0,
   is_active boolean not null default true,
+  -- 038: pnl_by_sku names these in its RETURNS TABLE, so it will not compile without them.
+  lead_time_days int, reorder_point int,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now()
 );
 create table if not exists public.sku_batches (
@@ -96,6 +104,11 @@ create table if not exists public.live_sessions (
   user_id uuid not null references auth.users(id) on delete cascade,
   store_id uuid,
   status text not null default 'live',
+  -- 022/050: pnl_by_show_as selects these; pnl_order_grain joins host_id.
+  title text,
+  started_at timestamptz default now(),
+  ended_at timestamptz,
+  host_id uuid,
   created_at timestamptz not null default now()
 );
 create table if not exists public.live_auction_items (
@@ -131,6 +144,31 @@ create table if not exists public.live_auction_item_skus (
   title_snapshot text,
   short_at_bind boolean,
   created_at timestamptz not null default now()
+);
+
+-- ── the two order-side tables the P&L surfaces read (036 / 005, minimal) ──────
+-- capture_events is the ONLY extra dependency of migration 103's whole function family;
+-- synced_order_ids is additionally needed by the prod-only pnl_order_grain view. Both are
+-- cut down to the columns those definitions actually reference.
+create table if not exists public.capture_events (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  store_id uuid,
+  order_id text,
+  selling_price_cents integer,
+  ordered_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.synced_order_ids (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  store_id uuid,
+  order_id text,
+  gmv numeric,
+  shipping numeric,
+  status text,
+  order_date date,
+  order_created_at timestamptz
 );
 
 -- ── seed TWO users + orgs (cross-org tests need a real second org) ─────────────

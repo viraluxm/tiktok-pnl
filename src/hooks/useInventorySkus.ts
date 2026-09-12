@@ -219,8 +219,13 @@ export function useSettleBatch() {
 }
 
 // Edit ONE cost layer's remaining qty and/or unit cost (current-inventory
-// correction). The server keeps qty_on_hand in lockstep and never rewrites recorded
-// sale COGS — a cost change affects future sales only. Send both current values.
+// correction). The server keeps qty_on_hand in lockstep. Send both current values.
+//
+// 151: on an ATTRIBUTABLE layer (qty_added_authoritative) this may only carry the
+// UNCHANGED cost — a real cost change is refused with COST_EDIT_REQUIRES_FINALIZE and
+// must go through useFinalizeBatchCost, which also reprices the sales that layer
+// supplied. On a legacy layer this still edits the cost directly, and still changes no
+// recorded COGS, because a legacy layer's sales carry no attribution.
 export function useEditBatch() {
   const qc = useQueryClient();
   return useMutation({
@@ -233,6 +238,29 @@ export function useEditBatch() {
         body: JSON.stringify({ qty_remaining, unit_cost_cents }),
       });
       if (!res.ok) throw new Error(await readError(res, 'Failed to edit batch'));
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),
+  });
+}
+
+// Set this layer's TRUE unit cost and reprice every sale attributed to it (151).
+// One operation for both pending -> final and a correction of an already-known cost.
+// Atomic server-side: batch cost, cost_status, the attributed sale snapshots, the SKU
+// cost scalar and the audit row all move together. Quantities are never touched.
+// Returns { lines_repriced, units_repriced, cogs_delta_cents, revision_recorded, ... }.
+export function useFinalizeBatchCost() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ skuId, batchId, unit_cost_cents }: {
+      skuId: string; batchId: string; unit_cost_cents: number;
+    }) => {
+      const res = await fetch(`/api/inventory/skus/${skuId}/batches/${batchId}/finalize-cost`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ unit_cost_cents }),
+      });
+      if (!res.ok) throw new Error(await readError(res, 'Failed to set batch cost'));
       return res.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: [KEY] }),

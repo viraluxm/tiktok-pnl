@@ -142,7 +142,20 @@ CLAUDE.md's `prosrc` rule.
 
 ---
 
-## 4. Other prod-only objects (named here, not addressed)
+## 4. `pnl_order_grain` — the canonical COGS view, defined nowhere in the repo
+
+`rg "create (or replace )?(materialized )?view"` across the entire repository returns **zero
+hits**, yet `public.pnl_order_grain` is live and is the order-grain surface behind
+`pnl_by_show_as`, `chat_pnl_totals_as` and the owner dashboard (`/api/tiktok/product-stats`
+selects from it directly). Captured verbatim at
+[`prod-only-cost-objects/pnl_order_grain.prod.sql`](./prod-only-cost-objects/pnl_order_grain.prod.sql).
+
+Its cost expression — `sum(las.qty * coalesce(las.unit_cost_cents_snapshot, isk.unit_cost_cents))`
+— reads the snapshot dynamically, which is why migration 151's reprice propagates to it with
+no further work. `supabase/tests/fifo_source_batch/pnl_surfaces.sql` installs this exact text
+in the throwaway test database so the propagation is **proven, not assumed**.
+
+## 5. Other prod-only objects (named here, not addressed)
 
 `git grep` across `origin/main` finds no mention of these live `public` functions:
 
