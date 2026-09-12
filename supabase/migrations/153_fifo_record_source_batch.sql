@@ -104,6 +104,28 @@
 -- backstop for the Management-API path CI cannot see.
 
 
+-- ── LOCK SAFETY (CLAUDE.md, "Required recipe, every time") ────────────────────────────
+-- CLAUDE.md is explicit that a quiet window is NOT what makes this safe: "A foreign key takes
+-- SHARE ROW EXCLUSIVE on the *referenced* table, and inventory_skus IS written mid-show …
+-- lock_timeout is what makes that safe — not the absence of a show. Never skip it."
+--
+-- The danger is not how long these statements HOLD a lock (measured end-to-end at production
+-- scale — 178,632 live_auction_item_skus rows, 25 MB — all three files apply in ~80 ms, index
+-- build and validation scan included). The danger is WAITING for one: a pending ACCESS
+-- EXCLUSIVE request queues ahead of every later request, including plain SELECTs, so a single
+-- long-running reader turns an 80 ms migration into an unbounded stall of the capture path.
+-- lock_timeout converts that stall into a clean abort.
+--
+-- SET LOCAL is scoped to the surrounding transaction, so this is correct in both supported
+-- apply modes: `psql -1 -f <file>` (one transaction per file) and — preferred — all three
+-- files inside a single BEGIN/COMMIT, where the first SET LOCAL covers the whole thing and
+-- the later ones are harmless. Applied outside any transaction it degrades to a WARNING and
+-- no timeout, which is why the runbook requires one of the two modes above.
+--
+-- If this aborts with 55P03 (lock_not_available), nothing was applied — the transaction rolls
+-- back whole. Re-check for long-running transactions and retry; do NOT raise the timeout.
+set local lock_timeout = '3s';
+
 -- ══ 1. lensed_add_batch — a manual receipt: authoritative qty + explicit cost state ══
 CREATE OR REPLACE FUNCTION public.lensed_add_batch(p_sku_id uuid, p_qty integer, p_unit_cost_cents integer)
  RETURNS uuid

@@ -125,10 +125,47 @@ end $$;""" % {'A':A,'ORG':ORG1}
     print(f'  checksums  lines={bLH[:12]}  batches={bBH[:12]}  skus={bSH[:12]}')
     if int(bL) == 0: bad('VACUOUS baseline — no sale lines to protect')
 
-    hdr('3. APPLY IN PRODUCTION ORDER')
     order = ['152_fifo_batch_cost_state_and_attribution',
              '153_fifo_record_source_batch',
              '154_fifo_finalize_batch_cost']
+
+    hdr('2b. LOCK SAFETY — contended apply must ABORT, not queue')
+    # CLAUDE.md: "lock_timeout is what makes that safe — not the absence of a show. Never skip
+    # it." The hold is ~80ms at production scale; the danger is WAITING, because a pending
+    # ACCESS EXCLUSIVE queues ahead of every later request including SELECTs. Hold the table
+    # hostage and prove the apply gives up cleanly and leaves nothing behind.
+    holder = subprocess.Popen(
+        ['docker','exec','-i',CONTAINER,'psql','-U','postgres','-d',DB,'-v','ON_ERROR_STOP=1'],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+    holder.stdin.write('begin;\nlock table public.sku_batches in access exclusive mode;\n'
+                       'select pg_sleep(12);\nrollback;\n')
+    holder.stdin.flush()
+    time.sleep(2)
+    combined = 'begin;\n' + '\n'.join(
+        open(os.path.join(MIGS, m + '.sql')).read() for m in order) + '\ncommit;\n'
+    t0 = time.time()
+    r = sh(['docker','exec','-i',CONTAINER,'psql','-U','postgres','-d',DB,'-v','ON_ERROR_STOP=1'],
+           input=combined)
+    waited = time.time() - t0
+    blocked = ('lock_not_available' in r.stderr or 'canceling statement due to lock timeout' in r.stderr
+               or '55P03' in r.stderr)
+    if blocked and waited < 9:
+        ok(f'contended apply ABORTED after {waited:.1f}s (lock_timeout 3s) instead of queueing')
+    elif not blocked:
+        bad(f'contended apply did NOT abort — it waited {waited:.1f}s and returned rc={r.returncode}')
+    else:
+        bad(f'aborted but only after {waited:.1f}s — lock_timeout not taking effect')
+    left = q("""select count(*) from information_schema.columns where table_schema='public'
+                 and (table_name,column_name) in (('sku_batches','cost_status'),
+                     ('sku_batches','qty_added_authoritative'),('live_auction_item_skus','source_batch_id'))""")
+    (ok if left and left[0]=='0' else bad)('nothing half-applied after the abort — transaction rolled back whole'
+        if left and left[0]=='0' else f'PARTIAL APPLY after abort: {left} of 3 columns exist')
+    try:
+        holder.stdin.close(); holder.wait(timeout=20)
+    except Exception:
+        holder.kill()
+
+    hdr('3. APPLY IN PRODUCTION ORDER')
     for m in order:
         good, err = apply_file(os.path.join(MIGS, m+'.sql'), m)
         ok(f'applied {m}') if good else bad(f'FAILED to apply {m}: {err.strip().splitlines()[:4]}')
