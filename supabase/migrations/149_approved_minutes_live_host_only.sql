@@ -2,9 +2,32 @@
 -- The server decides who may have one, so hiding the input is no longer the only thing stopping a
 -- fulfillment override.
 --
--- ⛔ NOT APPLIED TO PRODUCTION. This DB has NO migration ledger — migrations are applied BY HAND
---    and the repo file is the only record (see CONVENTIONS.md), so this line IS the record. Update
---    it to "✅ APPLIED …" with the UTC timestamp at the moment it is applied, and not before.
+-- ✅ APPLIED TO PRODUCTION 2026-09-12 05:18 UTC. This DB has NO migration ledger — migrations are
+--    applied BY HAND and the repo file is the only record (see CONVENTIONS.md), so this line IS the
+--    record. DO NOT APPLY IT AGAIN: both function bodies below are what production runs.
+--
+--    Applied straight through the Management API, after the code deploy, in the approved order.
+--    Evidence recorded either side of the apply, per CLAUDE.md's deploy gate:
+--      • 05:18:17 UTC before — latest capture_events write 05:18:04 (13s earlier), 76 events in the
+--        preceding 15 minutes, live_sessions.last_seen_at 05:18:16, 4 sessions marked live. A show
+--        WAS running; the lock footprint is two pg_proc rows and `set local lock_timeout = '3s'`
+--        makes contention abort rather than queue, so it went ahead and is reported here.
+--      • 05:19:09 UTC after — 5 further capture_events had landed across the window and
+--        live_sessions.last_seen_at had advanced to 05:19:05. The capture path never paused.
+--      • md5(prosrc) before/after: the two functions below CHANGED and nothing else did — the
+--        legacy lensed_confirm_time_clock_shift(uuid) (6a5cbd9c…), lensed_unconfirm_time_clock_shift
+--        (cfff0137…) and shifts_guard_confirmation (154c0f8e…) are byte-identical to before.
+--      • SECURITY INVOKER, search_path=public, owner postgres and the `authenticated` EXECUTE grant
+--        all verified unchanged on both functions afterwards.
+--      • DATA UNTOUCHED: approved_minutes population identical either side — 62 rows total, 40 of
+--        them fulfillment across 16 people, sum 28991 minutes.
+--
+--    Behaviour verified live afterwards inside a transaction that was ROLLED BACK (the two refusal
+--    cases raise before their UPDATE, so they could not have written even without it):
+--      • FULFILLMENT lensed_set_approved_minutes(600) → refused, APPROVED_MINUTES_NOT_ALLOWED_FOR_TEAM
+--      • FULFILLMENT confirm(900)  → ignored; the row's stored 1421 was returned and left as it was
+--      • FULFILLMENT confirm(NULL) → succeeded, approved_minutes untouched
+--      • LIVE HOST  set_approved_minutes(372) and confirm(341) → both still work, then rolled back
 --
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- ⚠️  DEPLOY ORDER — CODE FIRST. THIS IS THE OPPOSITE OF 139 AND IT MATTERS.
