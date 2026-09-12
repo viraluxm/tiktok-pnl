@@ -441,4 +441,33 @@ console.log('\n§7 A correction reaches the paper');
   check('the document changed', beforeText !== afterText);
 }
 
+console.log('\nA LEGACY FULFILLMENT OVERRIDE NEVER REACHES THE PRINTED STATEMENT');
+{
+  // Roberto's real production row, reduced to this fixture's shape: a 7h39m punch carrying a
+  // 1421-minute (23h41m) approved figure typed before approved hours became live-host-only.
+  // The PDF renders buildPayStatement's rows and computes nothing itself, so what it prints is
+  // the proof that the model, the screen and the paper all read one number.
+  const overridden = punch('2026-08-25', '16:55', '01:00', { break_minutes: 25, approved_minutes: 1421 });
+
+  const fulPdf = textOf(await render(build([overridden])));                        // EMP() is fulfillment
+  const hostPdf = textOf(await render(build([overridden], EMP({ role: 'host' }))));
+
+  check('fulfillment: the printed hours are the clocked 7.67, not 23.68',
+    fulPdf.includes('7.67') && !fulPdf.includes('23.68'), 'row + total');
+  check('fulfillment: the printed gross is the clocked one',
+    fulPdf.includes(formatMoney(build([overridden]).totals.gross))
+    && !fulPdf.includes(formatMoney(build([overridden], EMP({ role: 'host' })).totals.gross)));
+  check('live host: the SAME row still prints its approved 23.68 hours',
+    hostPdf.includes('23.68'), 'unchanged host behaviour');
+  check('...so the two documents differ, and neither check is vacuous', fulPdf !== hostPdf);
+  check('both print the real punch times — the override never rewrote the attendance record',
+    fulPdf.includes('4:55 PM') && hostPdf.includes('4:55 PM'));
+  check('the paper agrees with the model it was handed, for both teams',
+    fulPdf.includes(build([overridden]).totals.paidHours.toFixed(2))
+    && hostPdf.includes(build([overridden], EMP({ role: 'host' })).totals.paidHours.toFixed(2)));
+  const pdfSrc = readFileSync(fileURLToPath(new URL('./statementPdf.ts', import.meta.url)), 'utf8');
+  check('the renderer still imports no payroll function of its own',
+    !pdfSrc.includes('@/lib/employees') && !pdfSrc.includes('paidShiftHours'));
+}
+
 console.log(`\n${passed} checks passed`);

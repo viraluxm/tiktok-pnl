@@ -209,15 +209,24 @@ export default function PersonCard({
 
       <span className={`mt-1.5 rounded-full border px-2 py-0.5 text-[9.5px] font-semibold ${badge.cls}`}>{badge.text}</span>
 
-      {/* CLOCKED — the attendance record. Labelled, because since migration 137 it is NOT
-          necessarily what pays, and a manager confirming a host shift must see both figures. */}
+      {/* THE PUNCH — clock in, clock out, break, and the duration.
+          The duration shown is punch.hours, the PAYABLE figure from calendarModel (which calls
+          paidShiftHours with this person's team). For a non-host that IS the canonical clocked
+          span, so the tile is labelled "Paid" and there is nothing else to read: what the manager
+          sees is what payroll pays, by construction rather than by coincidence. For a live host it
+          is labelled "Clocked" and the approved figure appears separately below, because for them
+          the two genuinely differ. */}
       <div className="mt-2 w-full">
         {punch ? (
           <>
             <div className="text-[9px] font-bold uppercase tracking-wider text-tt-muted">Clocked</div>
             <div className="text-[12.5px] font-medium tabular-nums text-tt-text">{range(punch.start_time, punch.end_time)}</div>
             <div className="text-[10.5px] tabular-nums text-tt-muted">
-              {punch.isOpen ? 'in progress' : formatApprovedMinutes(hoursToMinutes(punch.clockedHours))}
+              {punch.isOpen
+                ? 'in progress'
+                : approvedApplies
+                  ? formatApprovedMinutes(hoursToMinutes(punch.clockedHours))
+                  : <><span className="font-semibold uppercase tracking-wider text-tt-green">Paid</span>{' '}{formatApprovedMinutes(hoursToMinutes(punch.hours))}</>}
               {punch.breakMinutes > 0 && ` · ${punch.breakMinutes}m break`}
             </div>
           </>
@@ -226,15 +235,13 @@ export default function PersonCard({
         )}
       </div>
 
-      {/* APPROVED — what payroll pays. Only meaningful once a figure exists.
-          NOT gated on approvedApplies, on purpose. A fulfillment shift confirmed under this build
-          carries NULL here, so the block simply does not render and the tile reads exactly like
-          the mock: Clocked, then Edit / Confirm. But 37 rows confirmed BEFORE this build do carry
-          a value, and that value is still what payroll pays — one of them by 16 hours. Hiding it
-          would make the tile disagree with the pay statement in silence, which is worse than
-          showing a figure the manager can no longer edit here. It disappears on its own as those
-          rows are unconfirmed/reconfirmed or cleared. */}
-      {punch && !punch.isOpen && punch.approvedMinutes != null && !adjusting && (
+      {/* APPROVED — what payroll pays, FOR A LIVE HOST. Gated on approvedApplies, not merely on a
+          stored value: a non-host's approved_minutes no longer reaches payroll at all
+          (paidShiftHours ignores it for them), so surfacing one on a fulfillment tile would be
+          printing a number that pays nobody — the precise misreading this rule removes. The 40
+          legacy fulfillment rows keep their value in the database as audit history and are
+          reported by the impact audit; they are simply not a payroll figure any more. */}
+      {approvedApplies && punch && !punch.isOpen && punch.approvedMinutes != null && !adjusting && (
         <div className="mt-1.5 w-full">
           <div className="text-[9px] font-bold uppercase tracking-wider text-tt-muted">Approved</div>
           <div className="text-[12.5px] font-semibold tabular-nums text-tt-green">{formatApprovedMinutes(punch.approvedMinutes)}</div>

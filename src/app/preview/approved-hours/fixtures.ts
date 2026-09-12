@@ -1,4 +1,4 @@
-import { laWallTimeToUtc } from '@/lib/schedule/timezone';
+import { addDaysISO, laWallTimeToUtc } from '@/lib/schedule/timezone';
 
 // FIXTURES FOR THE APPROVED-HOURS ROLE REVIEW ROUTE. Plain objects in the shape buildCalendarDays
 // takes — no query, no Supabase client, nothing that can reach a database or a real employee.
@@ -30,7 +30,11 @@ export const PREVIEW_EMPLOYEES = [
   { id: 'e-juan', name: 'Juan Reyes', role: 'fulfillment' },
   { id: 'e-adriana', name: 'Adriana Cruz', role: 'host' },
   { id: 'e-marisol', name: 'Marisol Vega', role: 'fulfillment' },
+  { id: 'e-roberto', name: 'Roberto Salas', role: 'fulfillment' },
 ];
+
+/** 'HH:MM' as minutes since midnight, for the overnight test below. */
+const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
 function punch(
   id: string,
@@ -39,6 +43,11 @@ function punch(
   end: string | null,
   over: Partial<PreviewPunch> = {},
 ): PreviewPunch {
+  // A clock-out at or before the clock-in on the wall clock means the shift ran past midnight, so
+  // the OUT instant belongs to the next calendar day. Getting this wrong is not cosmetic here: the
+  // instants are what clockedShiftHours reads, and a backwards span floors to zero hours — which
+  // would make the Roberto row read "0h 00m paid" and quietly prove the wrong thing.
+  const endDate = end != null && mins(end) <= mins(start) ? addDaysISO(PREVIEW_DATE, 1) : PREVIEW_DATE;
   return {
     id,
     employee_id,
@@ -47,7 +56,7 @@ function punch(
     start_time: start,
     end_time: end,
     clock_in_at: laWallTimeToUtc(PREVIEW_DATE, start).toISOString(),
-    clock_out_at: end ? laWallTimeToUtc(PREVIEW_DATE, end).toISOString() : null,
+    clock_out_at: end ? laWallTimeToUtc(endDate, end).toISOString() : null,
     break_minutes: 0,
     confirmed_at: null,
     approved_minutes: null,
@@ -77,17 +86,30 @@ export const MARISOL_MORNING = punch('pk-am', 'e-marisol', '06:00', '10:00');
 export const MARISOL_AFTERNOON = punch('pk-pm', 'e-marisol', '14:00', '18:00');
 
 /**
- * A LEGACY fulfillment row: confirmed BEFORE this change, so it still carries an approved figure —
- * here the fat-finger shape production actually holds (23h 41m approved against a 7h 40m punch).
- * This build offers no way to create another one, and no way to edit this one from the tile; it is
- * on the page so the reviewer can see that the stored figure is still SHOWN rather than hidden,
- * because it is still what payroll pays.
+ * THE ROBERTO CASE, reproduced from the real production row (read-only, 2026-09-12):
+ *   shift bc7a1b1b-6440-40bf-8e95-7cb52c300435 · 2026-09-10 · Roberto, fulfillment, $22.00/h
+ *   punched 4:55 PM → 1:00 AM with a 25-minute unpaid break, and carries approved_minutes = 1421
+ *   (23h 41m) — a fat-finger typed before approved hours became live-host-only.
+ *
+ * Under the OLD rule that figure paid $521.03. Under THIS rule it pays nothing at all: the tile
+ * shows the punch, payroll uses the punch, and the stored 1421 survives only as audit history.
+ * The row is here so a reviewer can see exactly that — no Approved read-out, no editor, and a
+ * Paid figure that is the clocked one.
+ *
+ * (The person is renamed for the preview. No production employee, id or name appears on this page.)
  */
-export const MARISOL_LEGACY = punch('pk-legacy', 'e-marisol', '16:55', '23:59', {
+export const ROBERTO_LEGACY = punch('pk-legacy', 'e-roberto', '16:55', '01:00', {
   break_minutes: 25,
   confirmed_at: CONFIRMED_AT,
   approved_minutes: 1421,
+  // The clock-in instant is written out to the SECOND, exactly as production holds it (:17), so
+  // the figures on this page are the real ones — 7.661856 h and $168.56 — rather than a
+  // whole-minute approximation that would be 30 seconds and 18 cents off.
+  clock_in_at: laWallTimeToUtc(PREVIEW_DATE, '16:55').toISOString().replace(':00.000Z', ':17.317Z'),
 });
+
+/** What that shift is worth, so the preview can print the money without inventing a rate. */
+export const ROBERTO_RATE = 22;
 
 /** Nobody is scheduled in this review — the tiles are about worked time, not the plan. */
 export const PREVIEW_SCHEDULED: never[] = [];

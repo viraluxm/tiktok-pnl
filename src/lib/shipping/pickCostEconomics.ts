@@ -163,8 +163,11 @@ export function employeeCostForDay(
 
     const rate = Number(emp.hourly_rate) || 0;
 
+    // 'fulfillment' is not a guess here: the role filter three lines up already excluded everyone
+    // else, so this module only ever sees fulfillment punches — whose payable figure is the
+    // canonical clocked span, with any legacy approved_minutes ignored.
     if (isPayableShift(s)) {
-      const hours = paidShiftHours(s);
+      const hours = paidShiftHours(s, 'fulfillment');
       const b = bucket(emp.id);
       b.payable_hours += hours;
       b.payable_cents += Math.round(hours * rate * 100);
@@ -175,7 +178,7 @@ export function employeeCostForDay(
     // Anything else (an OPEN punch with indeterminate hours, a source_rule_id plan row) is
     // neither payable nor pending and contributes nothing.
     if (!isOpenShift(s) && s.source_rule_id == null && s.source === 'time_clock' && s.confirmed_at == null) {
-      const hours = paidShiftHours(s);
+      const hours = paidShiftHours(s, 'fulfillment');
       const b = bucket(emp.id);
       if (hours > MAX_PLAUSIBLE_PUNCH_HOURS) {
         // Forgotten clock-out. Kept out of the projection so one unclosed punch cannot

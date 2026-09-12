@@ -5,20 +5,21 @@ import { buildCalendarDays } from '@/lib/schedule/calendarModel';
 import DayPeopleModal from '@/components/employees/weekly/DayPeopleModal';
 import PendingConfirmModal from '@/components/employees/weekly/PendingConfirmModal';
 import { approvedMinutesForTeam, formatApprovedMinutes } from '@/lib/shifts/approvedHours';
-import { hoursToMinutes } from '@/lib/employees';
+import { hoursToMinutes, paidShiftHours, payrollTeamOfRole } from '@/lib/employees';
 import {
   ADRIANA_CONFIRMED,
   ADRIANA_SHOW,
   CONFIRMED_AT,
   JUAN_DAY,
   MARISOL_AFTERNOON,
-  MARISOL_LEGACY,
   MARISOL_MORNING,
   PREVIEW_DATE,
   PREVIEW_DAYS,
   PREVIEW_EMPLOYEES,
   PREVIEW_SCHEDULED,
   PREVIEW_TODAY,
+  ROBERTO_LEGACY,
+  ROBERTO_RATE,
   type PreviewPunch,
 } from './fixtures';
 
@@ -38,7 +39,7 @@ const SCENARIOS: { key: Scenario; label: string; blurb: string }[] = [
   { key: 'side-by-side', label: 'Fulfillment vs Live Host', blurb: 'Juan 6:00 AM–2:00 PM has no Approved fields. Adriana 4:00 PM–10:00 PM still does.' },
   { key: 'split-day', label: 'Two fulfillment shifts, one day', blurb: '6:00–10:00 and 2:00–6:00 — separate records, separate Confirm, no Approved fields on either.' },
   { key: 'host-confirmed', label: 'Live Host already confirmed', blurb: 'The approved figure and "Adjust approved hours" are unchanged for a host.' },
-  { key: 'legacy-row', label: 'A legacy fulfillment override', blurb: 'Confirmed before this change: the stored figure is still shown, but can no longer be edited here.' },
+  { key: 'legacy-row', label: 'Roberto — a legacy fulfillment override', blurb: 'approved_minutes 1421 (23h 41m) still stored on a 7h 39m punch. Payroll ignores it; the tile shows the punch.' },
 ];
 
 function seedFor(s: Scenario): PreviewPunch[] {
@@ -50,15 +51,20 @@ function seedFor(s: Scenario): PreviewPunch[] {
     case 'host-confirmed':
       return [JUAN_DAY, ADRIANA_CONFIRMED];
     case 'legacy-row':
-      return [MARISOL_LEGACY, ADRIANA_CONFIRMED];
+      return [ROBERTO_LEGACY, ADRIANA_CONFIRMED];
   }
 }
 
-/** What paidShiftHours() would pay this row: the approved figure when set, else the clocked one. */
-function payable(p: PreviewPunch, clockedHours: number): string {
-  return p.approved_minutes != null
-    ? `${formatApprovedMinutes(p.approved_minutes)} (approved)`
-    : `${formatApprovedMinutes(hoursToMinutes(clockedHours))} (clocked)`;
+/**
+ * What payroll pays this row, and why. The number itself comes from DayPunch.hours, which
+ * calendarModel produced by calling the real paidShiftHours with this person's team — so this
+ * label describes the shipping calculation rather than re-deriving one beside it.
+ */
+function payableNote(p: PreviewPunch, isHost: boolean): string {
+  if (p.approved_minutes == null) return 'clocked — no override stored';
+  return isHost
+    ? `approved ${formatApprovedMinutes(p.approved_minutes)} — a Live Host's stored figure pays`
+    : `clocked — the stored ${formatApprovedMinutes(p.approved_minutes)} is ignored`;
 }
 
 export default function ApprovedHoursPreview() {
@@ -175,14 +181,55 @@ export default function ApprovedHoursPreview() {
                 <span className="tabular-nums">{formatApprovedMinutes(hoursToMinutes(p.punch!.clockedHours))}</span>
                 {' · pays '}
                 <span className="font-semibold tabular-nums text-tt-green">
-                  {payable(punches.find((r) => r.id === p.punch!.id)!, p.punch!.clockedHours)}
-                </span>
+                  {formatApprovedMinutes(hoursToMinutes(p.punch!.hours))}
+                </span>{' '}
+                <span className="text-tt-muted">({payableNote(punches.find((r) => r.id === p.punch!.id)!, p.role === 'host')})</span>
                 {' · '}
                 <span className="text-tt-muted">{p.punch!.confirmed ? 'confirmed' : 'pending'}</span>
               </li>
             ))}
           </ul>
         </div>
+
+        {scenario === 'legacy-row' && (() => {
+          const row = cell.people.find((p) => p.punch?.id === 'pk-legacy');
+          if (!row?.punch) return null;
+          // Money comes from the REAL paidShiftHours on the real fixture row, unrounded — the same
+          // basis computePay and buildPayStatement use. DayPunch.hours beside it is rounded to 2dp
+          // for display, and paying a rounded number is how a statement stops reconciling.
+          const paid = paidShiftHours({
+            employee_id: ROBERTO_LEGACY.employee_id,
+            start_time: ROBERTO_LEGACY.start_time,
+            end_time: ROBERTO_LEGACY.end_time,
+            break_minutes: ROBERTO_LEGACY.break_minutes,
+            clock_in_at: ROBERTO_LEGACY.clock_in_at,
+            clock_out_at: ROBERTO_LEGACY.clock_out_at,
+            approved_minutes: ROBERTO_LEGACY.approved_minutes ?? null,
+          }, payrollTeamOfRole(row.role));
+          const stored = (ROBERTO_LEGACY.approved_minutes ?? 0) / 60;
+          return (
+            <div className="mb-5 rounded-lg border border-tt-yellow/30 bg-tt-yellow/[0.06] px-4 py-3">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-tt-yellow">
+                What the rule change is worth on this one row
+              </div>
+              <p className="mt-1 text-[12px] leading-relaxed text-tt-text">
+                The punch is <span className="tabular-nums">4:55 PM – 1:00 AM</span> with a{' '}
+                <span className="tabular-nums">25m</span> break ={' '}
+                <span className="font-semibold tabular-nums">{paid.toFixed(4)} h</span>. The row still
+                stores <span className="font-semibold tabular-nums">1421</span> approved minutes (
+                <span className="tabular-nums">{stored.toFixed(4)} h</span>) from before this rule.
+              </p>
+              <p className="mt-1 text-[12px] leading-relaxed text-tt-muted">
+                Old gross at ${ROBERTO_RATE}/h:{' '}
+                <span className="line-through tabular-nums">${(stored * ROBERTO_RATE).toFixed(2)}</span>
+                {' → '}
+                new gross:{' '}
+                <span className="font-semibold tabular-nums text-tt-green">${(paid * ROBERTO_RATE).toFixed(2)}</span>
+                {' · '}the stored value is left in the database as audit history.
+              </p>
+            </div>
+          );
+        })()}
 
         <div className="mb-5 flex flex-wrap gap-2">
           <button

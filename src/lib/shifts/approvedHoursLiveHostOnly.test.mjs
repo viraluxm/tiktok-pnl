@@ -1,9 +1,9 @@
 // APPROVED HOURS ARE FOR LIVE HOSTS ONLY.
 //
 // THE RULE THIS FILE EXISTS TO PROTECT, in one sentence: a FULFILLMENT shift has no Approved Hours
-// input, no override control and no approved_minutes written through any app path, so payroll pays
-// its canonical worked time (clock in → clock out − breaks) — while LIVE HOST behaviour is exactly
-// what main shipped.
+// input, no override control and no approved_minutes written through any app path, AND a stored
+// approved_minutes has ZERO effect on what it pays — payroll always uses its canonical worked time
+// (clock in → clock out − breaks) — while LIVE HOST behaviour is exactly what main shipped.
 //
 // WHY IT MATTERS. Before this change the manager tile prefilled the approval box for a
 // non-host with the clocked figure ROUNDED TO WHOLE MINUTES, and Confirm stored that copy. Within
@@ -44,6 +44,10 @@ const E = await import(employeesUrl);
 const TC = await import(transpile('../timeclock.ts', 'timeclock.mjs'));
 const CM = await import(transpile('../schedule/calendarModel.ts', 'calendarModel.mjs', {
   "'@/lib/employees'": `'${employeesUrl}'`,
+}));
+const timezone = transpile('../schedule/timezone.ts', 'timezone.mjs');
+const ST = await import(transpile('../pay/statement.ts', 'statement.mjs', {
+  "'@/lib/employees'": `'${employeesUrl}'`, "'@/lib/schedule/timezone'": `'${timezone}'`,
 }));
 
 let passed = 0;
@@ -176,50 +180,128 @@ console.log('\n3. THE FULFILLMENT TILE — no input, no override control, confir
   check('Edit and Confirm are still offered', />Edit<\/button>/.test(CARD) && /'Confirm'/.test(CARD_CODE));
 }
 
-console.log('\n4. A LEGACY FULFILLMENT FIGURE IS STILL SHOWN — hiding it would hide what pays');
+console.log('\n4. A LEGACY FULFILLMENT FIGURE IS NOT SHOWN — because it no longer pays anything');
 {
-  // 37 rows were confirmed BEFORE this change and still carry a value, one of them by 16 hours.
-  // The read-only Approved line is deliberately NOT gated on approvedApplies: it renders on a
-  // stored value alone, so the tile can never disagree with the pay statement in silence.
-  const block = CARD_CODE.slice(CARD_CODE.indexOf('punch.approvedMinutes != null && !adjusting'));
-  check('the read-only Approved line keys on a STORED value, not on the role',
-    /\{punch && !punch\.isOpen && punch\.approvedMinutes != null && !adjusting && \(/.test(CARD_CODE));
-  check('…and it is a display, not an input', /formatApprovedMinutes\(punch\.approvedMinutes\)/.test(block)
-    && !/aria-label="Approved hours"/.test(block.slice(0, 400)));
-  // A row confirmed under THIS build has approved_minutes null, so the line does not render.
-  eq('a fulfillment row confirmed under this build carries no figure to show',
+  // 40 rows were confirmed BEFORE this change and still carry a value, one of them by 16 hours.
+  // Those values are audit history now: paidShiftHours ignores them for a fulfillment employee, so
+  // printing one beside the punch would be printing a number that pays nobody. The read-out is
+  // therefore gated on the TEAM, not merely on the presence of a stored value.
+  check('the read-only Approved line renders only where approved hours apply',
+    /\{approvedApplies && punch && !punch\.isOpen && punch\.approvedMinutes != null && !adjusting && \(/.test(CARD_CODE));
+  // …and the duration a non-host tile shows is the PAYABLE figure, sourced from punch.hours
+  // (calendarModel's paidShiftHours call), not re-derived from the punch here.
+  check('a non-host tile labels its duration "Paid" and reads it from punch.hours',
+    /approvedApplies\s*\?\s*formatApprovedMinutes\(hoursToMinutes\(punch\.clockedHours\)\)\s*:\s*<>[\s\S]{0,200}?formatApprovedMinutes\(hoursToMinutes\(punch\.hours\)\)/.test(CARD_CODE));
+  check('…and the clock-in → clock-out range and the break are still both on the tile',
+    /range\(punch\.start_time, punch\.end_time\)/.test(CARD_CODE) && /punch\.breakMinutes > 0 &&/.test(CARD_CODE));
+  // A row confirmed under THIS build has approved_minutes null anyway.
+  eq('a fulfillment row confirmed under this build carries no figure at all',
     A.approvedMinutesForTeam('fulfillment', E.hoursToMinutes(E.clockedShiftHours(JUAN))), null);
 }
 
-console.log('\n5. PAYROLL IS UNCHANGED — and strictly more exact than the prefill was');
+console.log('\n5. FULFILLMENT PAYROLL IS ALWAYS THE CANONICAL WORKED TIME');
 {
-  // THE PROOF ASKED FOR: removing the input does not move fulfillment payroll, because NULL was
-  // always the fallback and the fallback is the canonical worked-time calculation.
   near('clock in → clock out − breaks = 7h23m17s', E.clockedShiftHours(JUAN), (8 * 3600 + 3 * 60 + 17 - 40 * 60) / 3600);
-  near('with approved_minutes NULL, paidShiftHours pays exactly that', E.paidShiftHours(JUAN), E.clockedShiftHours(JUAN));
+  near('with approved_minutes NULL, paidShiftHours pays exactly that', E.paidShiftHours(JUAN, 'fulfillment'), E.clockedShiftHours(JUAN));
   eq('the shift is payable on its own (approval is not a payability gate)', E.isPayableShift(JUAN), true);
 
-  // What the OLD prefill would have stored, and what it cost.
+  // THE CORE ASSERTION. A stored value — any stored value — changes nothing for fulfillment.
+  for (const m of [0, 1, 180, 443, 480, 1421, 1440]) {
+    near(`approved ${m} min has ZERO effect on a fulfillment shift`,
+      E.paidShiftHours({ ...JUAN, approved_minutes: m }, 'fulfillment'), E.clockedShiftHours(JUAN));
+  }
+  check('…and those same values DO move a host, so the loop above is not vacuous',
+    [0, 180, 1421].every((m) => E.paidShiftHours({ ...JUAN, approved_minutes: m }, 'host') === m / 60));
+  near('an unclassified role is paid its punch too — the safe side, never the host exception',
+    E.paidShiftHours({ ...JUAN, approved_minutes: 1421 }, 'other'), E.clockedShiftHours(JUAN));
+
+  // The old prefill's rounding is gone as well: NULL keeps the span to the second.
   const prefill = E.hoursToMinutes(E.clockedShiftHours(JUAN));
   check('the old prefill would have rounded the span to whole minutes',
-    Math.abs(E.paidShiftHours({ ...JUAN, approved_minutes: prefill }) - E.clockedShiftHours(JUAN)) > 0,
-    `${prefill} min vs ${E.clockedShiftHours(JUAN)} h`);
-  check('…so removing it makes the figure MORE exact, never less',
-    Math.abs(E.paidShiftHours(JUAN) - E.clockedShiftHours(JUAN))
-      < Math.abs(E.paidShiftHours({ ...JUAN, approved_minutes: prefill }) - E.clockedShiftHours(JUAN)));
+    Math.abs(prefill / 60 - E.clockedShiftHours(JUAN)) > 0, `${prefill} min vs ${E.clockedShiftHours(JUAN)} h`);
+  near('…and payroll now keeps the exact span regardless', E.paidShiftHours({ ...JUAN, approved_minutes: prefill }, 'fulfillment'), E.clockedShiftHours(JUAN));
 
-  // computePay is the money path.
-  const emp = [{ id: 'e-juan', name: 'Juan Reyes', role: 'fulfillment', hourly_rate: 22, status: 'active', user_id: 'o', hire_date: null, probation_end_date: null, created_at: '', updated_at: '' }];
-  near('computePay hours = the canonical worked time', E.computePay(emp, [JUAN])[0].hours, E.clockedShiftHours(JUAN));
-  near('computePay pay = those hours × rate', E.computePay(emp, [JUAN])[0].pay, E.clockedShiftHours(JUAN) * 22);
+  // computePay is the money path, and it resolves the team from the roster it was handed — the
+  // caller never states it, so no caller can state it wrongly.
+  const FUL = { id: 'e-juan', name: 'Juan Reyes', role: 'fulfillment', hourly_rate: 22, status: 'active', user_id: 'o', hire_date: null, probation_end_date: null, created_at: '', updated_at: '' };
+  const legacy = { ...JUAN, approved_minutes: 1421 };
+  near('computePay hours = the canonical worked time, even on a legacy override',
+    E.computePay([FUL], [legacy])[0].hours, E.clockedShiftHours(JUAN));
+  near('computePay pay = those hours × rate', E.computePay([FUL], [legacy])[0].pay, E.clockedShiftHours(JUAN) * 22);
+  near('the SAME row for a host pays the override — the roster role is what decides',
+    E.computePay([{ ...FUL, role: 'host' }], [legacy])[0].hours, 1421 / 60);
+  eq('the roster vocabulary is teamOfRole\'s, character for character', [
+    E.payrollTeamOfRole('host'), E.payrollTeamOfRole('Live Host'), E.payrollTeamOfRole('  FULFILLMENT '),
+    E.payrollTeamOfRole('warehouse lead'), E.payrollTeamOfRole(null), E.payrollTeamOfRole(undefined), E.payrollTeamOfRole(''),
+  ], ['host', 'host', 'fulfillment', 'other', 'other', 'other', 'other']);
+  for (const r of ['host', 'Live Host', '  LIVE HOST ', 'fulfillment', ' Fulfillment ', 'warehouse lead', '', null, undefined]) {
+    eq(`payrollTeamOfRole(${JSON.stringify(r)}) === teamOfRole(...)`, E.payrollTeamOfRole(r), TC.teamOfRole(r));
+  }
+  eq('approvedMinutesPay (payroll) and approvedHoursApply (UI/write) agree on every team',
+    ['host', 'fulfillment', 'other'].map((t) => [E.approvedMinutesPay(t), A.approvedHoursApply(t)]),
+    [[true, true], [false, false], [false, false]]);
 
-  // paidShiftHours itself is NOT rewritten — the null-fallback branch is exactly as main has it.
+  // clockedShiftHours is NOT rewritten, and paidShiftHours' host branch is the same arithmetic.
   const emp_ts = strip(read('../employees.ts'));
-  check('paidShiftHours still reads approved_minutes first and falls back to clockedShiftHours',
-    /export function paidShiftHours\(s: ShiftLike\): number \{\s*if \(s\.approved_minutes != null\) return Math\.max\(0, s\.approved_minutes \/ 60\);\s*return clockedShiftHours\(s\);\s*\}/.test(emp_ts));
   check('clockedShiftHours is untouched: instants preferred, break subtracted, floored at 0',
     /const spanH = \(new Date\(s\.clock_out_at\)\.getTime\(\) - new Date\(s\.clock_in_at\)\.getTime\(\)\) \/ 3_600_000;/.test(emp_ts)
     && /return Math\.max\(0, spanH - breakHours\);/.test(emp_ts));
+  check('the host branch still divides the stored minutes by 60, floored at 0',
+    /if \(approvedMinutesPay\(team\)\) return Math\.max\(0, s\.approved_minutes \/ 60\);/.test(emp_ts));
+  // The team is never defaulted, in either direction.
+  check('paidShiftHours declares team as a REQUIRED parameter',
+    /export function paidShiftHours\(s: ShiftLike, team: PayrollTeam\): number/.test(emp_ts)
+    && !/team: PayrollTeam = /.test(emp_ts) && !/team\?: PayrollTeam/.test(emp_ts));
+  let threw = false;
+  try { E.paidShiftHours({ ...JUAN, approved_minutes: 480 }); } catch { threw = true; }
+  check('…and omitting it on a row that carries a stored value throws rather than guessing', threw);
+  check('omitting it on a row with NO stored value is harmless (the team cannot change the answer)',
+    Math.abs(E.paidShiftHours(JUAN) - E.clockedShiftHours(JUAN)) < 1e-12);
+}
+
+console.log('\n5b. ROBERTO — the real production row, under the new rule');
+{
+  // THE REAL ROW, copied field for field out of production on 2026-09-12 (read-only):
+  //   shift  bc7a1b1b-6440-40bf-8e95-7cb52c300435   Roberto, fulfillment, $22.00/h
+  //   date   2026-09-10
+  //   punch  2026-09-10 23:55:17.31674+00 → 2026-09-11 08:00:00+00   (LA 16:55:17 → 01:00:00)
+  //   break  25 min       approved_minutes 1421 (23h41m)
+  // Under the OLD rule the stored figure paid: 23.6833h × $22 = $521.03.
+  // Under THIS rule the punch pays: 8.078523h span − 25m = 7.661856h × $22 = $168.56.
+  const ROBERTO = {
+    employee_id: 'e-roberto', date: '2026-09-10',
+    start_time: '16:55:00', end_time: '01:00:00',
+    source: 'time_clock', source_rule_id: null, confirmed_at: '2026-09-11T00:00:00Z',
+    break_minutes: 25,
+    clock_in_at: '2026-09-10T23:55:17.31674+00:00', clock_out_at: '2026-09-11T08:00:00+00:00',
+    approved_minutes: 1421,
+  };
+  const EMP_R = { id: 'e-roberto', name: 'Roberto', role: 'fulfillment', hourly_rate: 22, status: 'active', user_id: 'o', hire_date: null, probation_end_date: null, created_at: '', updated_at: '' };
+  const canonical = E.clockedShiftHours(ROBERTO);
+  check('the raw punch span is 8.078523h', Math.abs((Date.parse(ROBERTO.clock_out_at) - Date.parse(ROBERTO.clock_in_at)) / 3_600_000 - 8.078523) < 1e-6);
+  check('the canonical figure is 7.661856h (span − 25m break)', Math.abs(canonical - 7.661856) < 1e-6, `${canonical}`);
+  near('paidShiftHours pays the punch, not the 23h41m', E.paidShiftHours(ROBERTO, 'fulfillment'), canonical);
+  check('the old rule would have paid 23.6833h — the difference is 16.02 hours of real money',
+    Math.abs(E.paidShiftHours(ROBERTO, 'host') - canonical - 16.0215) < 1e-3,
+    `${E.paidShiftHours(ROBERTO, 'host')} vs ${canonical}`);
+  near('computePay agrees', E.computePay([EMP_R], [ROBERTO])[0].hours, canonical);
+  check('gross pay is $168.56, not $521.03',
+    Math.abs(E.computePay([EMP_R], [ROBERTO])[0].pay - 168.56) < 0.005,
+    `$${E.computePay([EMP_R], [ROBERTO])[0].pay.toFixed(2)}`);
+  // Pay Details and the PDF both render buildPayStatement's rows, so proving it here proves both.
+  const stmt = ST.buildPayStatement({
+    employee: EMP_R, period: { start: '2026-08-31', end: '2026-09-13', payday: '2026-09-18' },
+    shifts: [{ ...ROBERTO, id: 'bc7a1b1b', user_id: 'o' }], generatedAtISO: '2026-09-14T00:00:00Z',
+  });
+  eq('the statement has exactly one payable row', stmt.rows.length, 1);
+  check('Pay Details shows 7.661856 paid hours', Math.abs(stmt.rows[0].paidHours - 7.661856) < 1e-6, `${stmt.rows[0].paidHours}`);
+  check('…at $22.00, for $168.56', stmt.rows[0].rate === 22 && Math.abs(stmt.rows[0].amount - 168.56) < 0.005, `$${stmt.rows[0].amount.toFixed(2)}`);
+  check('…and the statement total is the same $168.56 over 7.661856 hours',
+    Math.abs(stmt.totals.gross - 168.56) < 0.005 && Math.abs(stmt.totals.paidHours - 7.661856) < 1e-6,
+    `$${stmt.totals.gross.toFixed(2)} / ${stmt.totals.paidHours}h`);
+  check('the row still prints the real punch times, unedited',
+    stmt.rows[0].breakMinutes === 25 && stmt.rows[0].dateISO === '2026-09-10');
+  eq('the stored 1421 is untouched — this feature reads it, never writes it', ROBERTO.approved_minutes, 1421);
 }
 
 console.log('\n6. LIVE HOST — everything main shipped, unchanged');
@@ -230,7 +312,7 @@ console.log('\n6. LIVE HOST — everything main shipped, unchanged');
     clock_in_at: '2026-09-15T16:00:00-07:00', clock_out_at: '2026-09-15T22:00:00-07:00',
   };
   near('the clocked span is 6h', E.clockedShiftHours(ADRIANA), 6);
-  near('an approved 5h20m pays 5h20m, not the 6h punch', E.paidShiftHours({ ...ADRIANA, approved_minutes: 320 }), 320 / 60);
+  near('an approved 5h20m pays 5h20m, not the 6h punch', E.paidShiftHours({ ...ADRIANA, approved_minutes: 320 }, 'host'), 320 / 60);
   near('…and the punch is still 6h afterwards', E.clockedShiftHours({ ...ADRIANA, approved_minutes: 320 }), 6);
   eq('the approved figure survives the write gate for a host', A.approvedMinutesForTeam('host', 320), 320);
 
@@ -247,14 +329,13 @@ console.log('\n6. LIVE HOST — everything main shipped, unchanged');
   check('the host requirement still reaches the parser as `mustApprove`',
     /parseApprovedInput\(approved\.hours, approved\.minutes, mustApprove\)/.test(CARD_CODE));
 
-  // THE SERVER SIDE IS UNTOUCHED. Migration 139 still refuses a host with no figure, and this
-  // change adds no migration — the schema already supports NULL as "pay the canonical figure".
+  // THE HOST SERVER PATH IS UNTOUCHED. 139 still refuses a host with no figure; 149 keeps that
+  // line and every other line of the host branch exactly as it is (see section 10).
   const mig = read('../../../supabase/migrations/139_shift_approved_minutes.sql');
   check('139 still raises HOST_APPROVED_MINUTES_REQUIRED', /HOST_APPROVED_MINUTES_REQUIRED/.test(mig));
   check('139 still gates that on the host role predicate', /lower\(btrim\(e\.role\)\) in \('host', 'live host'\)/.test(mig));
-  const migs = (await import('node:fs')).readdirSync(fileURLToPath(new URL('../../../supabase/migrations', import.meta.url)));
-  eq('this change adds NO migration — 139 is still the last approved-hours one',
-    migs.filter((f) => /approved/i.test(f)).sort(), ['139_shift_approved_minutes.sql']);
+  check('139 is not edited by this change — it is the applied record of what production runs',
+    /✅ APPLIED TO PRODUCTION 2026-09-09/.test(mig));
 }
 
 console.log('\n7. TWO FULFILLMENT SHIFTS IN ONE DAY — separate rows, separate confirms, actual hours');
@@ -292,9 +373,10 @@ console.log('\n8. NOTHING IN THIS CHANGE TOUCHES HISTORY');
   // The gate shapes NEW writes only. It is a pure function of (team, minutes) — it cannot reach a
   // stored row, and nothing in this change issues an UPDATE, a backfill or a migration.
   const legacy = { ...JUAN, approved_minutes: 1421 }; // the real production outlier, 23h41m
-  near('a legacy fulfillment row keeps paying its stored figure', E.paidShiftHours(legacy), 1421 / 60);
-  check('…which is emphatically NOT the clocked figure, so the assertion means something',
-    Math.abs(E.paidShiftHours(legacy) - E.clockedShiftHours(legacy)) > 15);
+  near('a legacy fulfillment row still holds its stored figure', legacy.approved_minutes / 60, 1421 / 60);
+  near('…but pays its punch, because the payroll rule ignores it', E.paidShiftHours(legacy, 'fulfillment'), E.clockedShiftHours(legacy));
+  check('…and the two are 16h apart, so that assertion means something',
+    Math.abs(1421 / 60 - E.clockedShiftHours(legacy)) > 15);
   eq('reading it back leaves the column exactly as stored', legacy.approved_minutes, 1421);
   check('the write gate has no way to reach a stored row (pure, two scalars in)',
     /export function approvedMinutesForTeam\(team: ApprovedTeam, minutes: number \| null\): number \| null \{\s*return approvedHoursApply\(team\) \? minutes : null;\s*\}/
@@ -310,9 +392,7 @@ console.log('\n8. NOTHING IN THIS CHANGE TOUCHES HISTORY');
       !/\.(update|upsert|insert)\(\s*\{[^}]*approved_minutes/.test(src)
       && !/from\('shifts'\)[\s\S]{0,200}approved_minutes\s*[:=]/.test(src));
   }
-  check('and the whole change adds no SQL file at all',
-    (await import('node:fs')).readdirSync(fileURLToPath(new URL('../../../supabase/migrations', import.meta.url)))
-      .every((f) => !/approved_hours|live_host_only|140_/.test(f) || f === '140_squish_multibind_stable_plan.sql'));
+  // The ONE migration this change adds writes no data either — asserted in full in section 10.
 }
 
 console.log('\n9. THE REVIEW ROUTE IS FIXTURE-ONLY');
@@ -333,6 +413,109 @@ console.log('\n9. THE REVIEW ROUTE IS FIXTURE-ONLY');
     /Juan Reyes/.test(fx) && /Adriana Cruz/.test(fx) && /Marisol Vega/.test(fx));
   check('it covers the fulfillment single day, the host shift and the split fulfillment day',
     /JUAN_DAY/.test(fx) && /ADRIANA_SHOW/.test(fx) && /MARISOL_MORNING/.test(fx) && /MARISOL_AFTERNOON/.test(fx));
+  check('…and the Roberto legacy-override case, with the stored 1421 minutes',
+    /ROBERTO_LEGACY/.test(fx) && /approved_minutes: 1421/.test(fx) && /break_minutes: 25/.test(fx));
+  check('the preview prints the payable figure from DayPunch.hours, never re-deriving one',
+    /formatApprovedMinutes\(hoursToMinutes\(p\.punch!\.hours\)\)/.test(pv)
+    && !/approved_minutes \/ 60/.test(strip(pv)));
+}
+
+console.log('\n10. THE SERVER ENFORCES IT TOO — migration 149');
+{
+  const M = read('../../../supabase/migrations/149_approved_minutes_live_host_only.sql');
+  // `--` comments are not touched by strip() (it is JS-oriented), so isolate executable SQL before
+  // asserting anything about what the file DOES. The header quotes error names and rollback notes.
+  const code = M.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n');
+
+  // CONFIRM: a non-host's argument is coerced to NULL before anything can write it.
+  check('confirm computes v_approved from the host predicate',
+    /v_approved := case when v_is_host is true then p_approved_minutes else null end;/.test(code));
+  check('…and the UPDATE writes v_approved, never the raw argument',
+    /approved_minutes = coalesce\(v_approved, approved_minutes\)/.test(code)
+    && !/approved_minutes = coalesce\(p_approved_minutes/.test(code));
+  check('…and the write is not even entered unless v_approved is non-null or it is a first confirm',
+    /if v_shift\.confirmed_at is null or v_approved is not null then/.test(code));
+  // Inside the CONFIRM body specifically, the raw argument may appear only in the signature, the
+  // range check and the coercion. Any fourth mention is a path that could write it unfiltered.
+  const confirmSql = code.slice(
+    code.indexOf('create or replace function public.lensed_confirm_time_clock_shift'),
+    code.indexOf('create or replace function public.lensed_set_approved_minutes'),
+  );
+  check('the confirm body isolates cleanly', confirmSql.length > 500 && confirmSql.includes('v_approved :='));
+  // Three lines only: the signature, the 0..1440 range check (three mentions on one line), and
+  // the coercion. Five mentions in total; a sixth would be a path that writes it unfiltered.
+  eq('p_approved_minutes appears in confirm only as signature, range check and coercion',
+    (confirmSql.match(/p_approved_minutes/g) ?? []).length, 5);
+  eq('…on exactly three lines',
+    confirmSql.split('\n').filter((l) => l.includes('p_approved_minutes')).length, 3);
+  // set_approved_minutes DOES write the raw argument — correctly, because by that line the shift
+  // has already been proven to belong to a live host and anything else has raised.
+  const setSql = code.slice(code.indexOf('create or replace function public.lensed_set_approved_minutes'));
+  check('the correction RPC raises for a non-host BEFORE it reaches its UPDATE',
+    setSql.indexOf("raise exception 'APPROVED_MINUTES_NOT_ALLOWED_FOR_TEAM'") < setSql.indexOf('update public.shifts')
+    && setSql.indexOf("raise exception 'APPROVED_MINUTES_NOT_ALLOWED_FOR_TEAM'") > 0);
+
+  // SET-APPROVED-MINUTES: a non-host is refused outright.
+  check('the correction RPC refuses a non-host',
+    /if v_is_host is distinct from true then\s*raise exception 'APPROVED_MINUTES_NOT_ALLOWED_FOR_TEAM'/.test(code));
+  check('…using `is distinct from true`, so a NULL role lookup is refused too, not allowed through',
+    !/if v_is_host is false then/.test(code));
+  check('the refusal token has a manager-readable sentence in the app',
+    /APPROVED_MINUTES_NOT_ALLOWED_FOR_TEAM/.test(read('../timeclock.ts'))
+    && /Approved hours apply to Live Hosts only/.test(read('../timeclock.ts')));
+
+  // BOTH new lookups use the SAME role vocabulary as teamOfRole and as 139, and both are
+  // owner-scoped — a shift belonging to another tenant must not be classifiable at all.
+  const predicates = code.match(/lower\(btrim\(e\.role\)\) in \([^)]*\)/g) ?? [];
+  eq('both functions use the same host predicate, twice', predicates.length, 2);
+  for (const pr of predicates) eq('…and it is the teamOfRole vocabulary', pr, "lower(btrim(e.role)) in ('host', 'live host')");
+  eq('both employees lookups are scoped to the calling owner',
+    (code.match(/where e\.id = v_shift\.employee_id and e\.user_id = v_user;/g) ?? []).length, 2);
+
+  // THE HOST PATH IS UNCHANGED, line for line.
+  check('the host requirement is still raised', /HOST_APPROVED_MINUTES_REQUIRED/.test(code));
+  check('the range check is still 0..1440', /p_approved_minutes < 0 or p_approved_minutes > 1440/.test(code));
+  check('ownership, source, closed-entry and open-break guards all survive',
+    ['SHIFT_NOT_FOUND', 'SHIFT_NOT_TIME_CLOCK', 'SHIFT_NOT_CLOSED', 'TIME_ENTRY_NOT_FOUND',
+      'TIME_ENTRY_NOT_CLOSED', 'BREAK_OPEN', 'SHIFT_NOT_CONFIRMED', 'NOT_AUTHENTICATED']
+      .every((t) => code.includes(t)));
+  check('the punch is never written', !/(update public\.shifts[\s\S]*?where)[\s\S]*?/.test(code)
+    || (code.match(/update public\.shifts[\s\S]*?where/g) ?? []).every((u) => !/clock_in_at|clock_out_at|start_time|end_time/.test(u)));
+
+  // SECURITY POSTURE PRESERVED — verified against pg_proc before writing this file.
+  check('neither function is turned into SECURITY DEFINER', !/security definer/i.test(code));
+  eq('both keep set search_path to public', (code.match(/set search_path to 'public'/g) ?? []).length, 2);
+  eq('both keep language plpgsql returning jsonb', (code.match(/returns jsonb\s*language plpgsql/g) ?? []).length, 2);
+  eq('both re-issue their grant to authenticated (CONVENTIONS.md)',
+    (code.match(/grant execute on function[^\n]*to authenticated;/g) ?? []).length, 2);
+  check('…and to nothing else', !/to service_role|to anon|to public/.test(code));
+  check('neither is registered service-role-only',
+    !/lensed_set_approved_minutes|lensed_confirm_time_clock_shift/.test(read('../../../scripts/check-rpc-grants.mjs')));
+
+  // NO DATA IS TOUCHED. This is the assertion the whole "historical rows are preserved" promise
+  // rests on, so it is made against executable SQL only.
+  const updates = code.match(/update public\.shifts[\s\S]*?where [^\n]*/g) ?? [];
+  eq('exactly two UPDATEs, both inside a function body and both keyed to one shift id', updates.length, 2);
+  for (const u of updates) check('…scoped `where id = p_shift_id`', /where id = p_shift_id/.test(u), u.slice(-40));
+  check('no DELETE, no INSERT, no backfill, no ALTER, no DROP anywhere in executable SQL',
+    !/\b(delete\s+from|insert\s+into|alter\s+table|drop\s+\w+|truncate)\b/i.test(code),
+    (code.match(/\b(delete\s+from|insert\s+into|alter\s+table|drop\s+\w+|truncate)\b/gi) ?? []).join(' | '));
+  check('…and nothing sweeps the column across rows',
+    !/set approved_minutes = null\s*(where\s+)?(;|$)/im.test(code) && !/approved_minutes is not null[\s\S]{0,40}update/i.test(code));
+
+  // OPERATIONAL SAFETY, per CLAUDE.md and CONVENTIONS.md.
+  check('one transaction', (code.match(/^begin;$/gm) ?? []).length === 1 && (code.match(/^commit;$/gm) ?? []).length === 1);
+  check('a lock_timeout is set before touching anything', /^set local lock_timeout = '3s';$/m.test(code));
+  check('the header records that it is NOT yet applied', /⛔ NOT APPLIED TO PRODUCTION/.test(M));
+  check('…and states the CODE-FIRST deploy order, which is the reverse of 139',
+    /DEPLOY ORDER — CODE FIRST/.test(M) && /OPPOSITE OF 139/.test(M));
+  check('…and records the live prosrc md5s it was diffed against',
+    /d5adb95d2d90eadeaed090e26d3a7ac3/.test(M) && /347f2bcdda9a1c45fa0f82bcd1e54b51/.test(M));
+  check('…and documents its rollback', /^-- ROLLBACK$/m.test(M) && /139_shift_approved_minutes\.sql, sections 3 and 5/.test(M));
+  check('…and carries post-apply verification that proves its own lookups found rows',
+    /POST-APPLY VERIFICATION/.test(M) && /or the comparison is\n--     vacuous/.test(M));
+  check('…and states plainly that no historical value is modified',
+    /NO DATA IS MODIFIED/.test(M) && /separately-approved change/.test(M));
 }
 
 console.log(`\n${passed} checks passed`);

@@ -1,5 +1,5 @@
 import type { Employee, Shift } from '@/types';
-import { isOpenShift, isPayableShift, paidShiftHours } from '@/lib/employees';
+import { isOpenShift, isPayableShift, paidShiftHours, payrollTeamOfRole } from '@/lib/employees';
 
 // Punch-derived labor per business date per role. The ONLY hours/payability logic is
 // paidShiftHours + isPayableShift reused VERBATIM from employees.ts — this module never
@@ -87,8 +87,12 @@ export function computeLaborByDateRole(
     if (!emp) continue; // orphan (verified 0 in window); skip defensively
     const bd = shiftBusinessDate(s);
 
+    // The team decides whether a stored approved_minutes pays at all (fulfillment: never). `emp`
+    // is already in hand, so labor reads the same figure payroll does without a second lookup.
+    const team = payrollTeamOfRole(emp.role);
+
     if (isPayableShift(s)) {
-      const hours = paidShiftHours(s);
+      const hours = paidShiftHours(s, team);
       const rate = Number(emp.hourly_rate) || 0;
       contributions.push({
         employee_id: s.employee_id, date: bd, role: emp.role, basis: 'punch',
@@ -103,7 +107,7 @@ export function computeLaborByDateRole(
       // recent day doesn't read artificially cheap and then quietly climb as punches confirm.
       if (emp.role === 'host' || emp.role === 'fulfillment') {
         const k = `${bd}|${emp.role}`;
-        unconfirmed.set(k, (unconfirmed.get(k) ?? 0) + paidShiftHours(s));
+        unconfirmed.set(k, (unconfirmed.get(k) ?? 0) + paidShiftHours(s, team));
       }
     }
   }

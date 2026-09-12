@@ -200,9 +200,10 @@ console.log('\n§3 Payroll pays both, through the existing semantics');
   check('week 1 + week 2 still equals the period total',
     near(weeks[0].hours + weeks[1].hours, s.totals.paidHours));
 
-  // approved_minutes applies PER ROW and must not leak between same-day rows.
+  // approved_minutes applies PER ROW and must not leak between same-day rows — FOR A LIVE HOST.
   const amApproved = shift('s-am', '06:00', '10:00', { approved_minutes: 180 }); // 3.00h approved
-  const s2 = buildPayStatement({ employee: EMP(), period: PERIOD, shifts: [amApproved, pm], generatedAtISO: '2026-09-21T17:00:00.000Z' });
+  const HOST = EMP({ role: 'host' });
+  const s2 = buildPayStatement({ employee: HOST, period: PERIOD, shifts: [amApproved, pm], generatedAtISO: '2026-09-21T17:00:00.000Z' });
   check('an approved figure applies only to its own row',
     near(s2.rows.find((r) => r.shiftId === 's-am').paidHours, 3) &&
       near(s2.rows.find((r) => r.shiftId === 's-pm').paidHours, 4));
@@ -210,7 +211,26 @@ console.log('\n§3 Payroll pays both, through the existing semantics');
   check('the clocked span is still 4.00 — approval did not rewrite the punch',
     near(clockedShiftHours(amApproved), 4));
   check('approved totals match computePay exactly',
-    s2.totals.paidHours === computePay([EMP()], [amApproved, pm])[0].hours);
+    s2.totals.paidHours === computePay([HOST], [amApproved, pm])[0].hours);
+
+  // THE SAME TWO ROWS FOR A FULFILLMENT EMPLOYEE. Approved hours are a live-host instrument, so a
+  // stored figure on a fulfillment row is ignored outright and each session pays its own actual
+  // worked time. Juan is fulfillment in every other case in this file — this is the shape a split
+  // day really has here.
+  const sFul = buildPayStatement({ employee: EMP(), period: PERIOD, shifts: [amApproved, pm], generatedAtISO: '2026-09-21T17:00:00.000Z' });
+  check('fulfillment: the morning row pays its own 4.00h, not the stored 3.00h',
+    near(sFul.rows.find((r) => r.shiftId === 's-am').paidHours, 4),
+    `${sFul.rows.find((r) => r.shiftId === 's-am').paidHours}`);
+  check('fulfillment: the afternoon row still pays its own 4.00h',
+    near(sFul.rows.find((r) => r.shiftId === 's-pm').paidHours, 4));
+  check('fulfillment: the split day totals 8.00h — both sessions, actual time, neither collapsed',
+    near(workedDayGroups(sFul)[0].hours, 8) && near(sFul.totals.paidHours, 8));
+  check('...and that genuinely differs from the host reading, so the check is not vacuous',
+    !near(sFul.totals.paidHours, s2.totals.paidHours));
+  check('fulfillment totals match computePay exactly — one rule, both surfaces',
+    sFul.totals.paidHours === computePay([EMP()], [amApproved, pm])[0].hours);
+  check('the stored 180 is untouched by any of this — it is history, not a payroll input',
+    amApproved.approved_minutes === 180);
 
   // A scheduled-only row on the same day stays out of pay.
   const plan = shift('s-plan', '20:00', '22:00', { source_rule_id: 'rule-1' });

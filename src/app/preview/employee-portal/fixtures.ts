@@ -18,6 +18,7 @@ import {
   type TimecardShiftRow,
 } from '@/lib/schedule/timecardModel';
 import { approvedMinutesForTeam, type ApprovedTeam } from '@/lib/shifts/approvedHours';
+import { payrollTeamOfRole } from '@/lib/employees';
 import { buildCalendarDays, type DayPerson } from '@/lib/schedule/calendarModel';
 import { buildTradeOptions, planTradeRequest, otherDates, TRADE_REFUSAL_MESSAGES, type TradeableInstance } from '@/lib/schedule/tradePlan';
 import { laTodayISO } from '@/lib/schedule/timezone';
@@ -309,8 +310,17 @@ export function timecardFor(w: DemoWorld): TimecardPayload {
   return buildTimecard({
     shifts: w.viewerId === CARLOS ? w.punches : w.viewerId === MADISON ? madisonPunches : [],
     open: w.clockedInAt && w.viewerId === CARLOS ? { clocked_in_at: w.clockedInAt, on_break: false, needs_manual_close: false } : null,
-    todayISO: today, week, period: payPeriodContaining(today),
+    todayISO: today, week, period: payPeriodContaining(today), team: viewerTeam(w),
   });
+}
+
+/**
+ * The viewer's payroll team, for the timecard builders. Carlos is a live host, so his approved
+ * minutes pay; Madison is fulfillment, so hers are ignored and the punch pays — which is exactly
+ * the split the real /s/[token] timecard applies, via the same payrollTeamOfRole().
+ */
+function viewerTeam(w: DemoWorld) {
+  return payrollTeamOfRole(empOf(w, w.viewerId).role);
 }
 
 // ── Previous pay periods ─────────────────────────────────────────────────────────────────────
@@ -345,14 +355,14 @@ function punchesFor(w: DemoWorld): TimecardShiftRow[] {
 }
 
 export function payPeriodsFor(w: DemoWorld): PayPeriodsPayload {
-  return { periods: buildPayPeriods({ shifts: punchesFor(w), periods: previousPayPeriods(payPeriodContaining(today).start) }) };
+  return { periods: buildPayPeriods({ shifts: punchesFor(w), periods: previousPayPeriods(payPeriodContaining(today).start), team: viewerTeam(w) }) };
 }
 
 export function timecardPeriodFor(w: DemoWorld, start: string): TimecardPeriodPayload {
   // The same refusal the route applies, so an impossible period is impossible here too.
   const period = resolvePeriodStart(start, today);
   if (!period) throw new Error('That pay period does not exist.');
-  return buildTimecardPeriod({ shifts: punchesFor(w), todayISO: today, period });
+  return buildTimecardPeriod({ shifts: punchesFor(w), todayISO: today, period, team: viewerTeam(w) });
 }
 
 /** The scheduled Pay Day for the CURRENT period — the same derivation the server ships. */
