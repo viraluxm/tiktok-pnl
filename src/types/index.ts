@@ -153,6 +153,33 @@ export interface Shift {
   updated_at: string;
 }
 
+// ─── Bonus / incentive pay (migration 150) ──────────────────────────────────
+// A PAYROLL LINE ITEM THAT IS NOT WORKED TIME. One row = one bonus owed to one employee for one
+// pay period. It references no shift and creates no hours: worked pay is still
+// `paid hours x hourly_rate` and is completely unaffected by this table's existence. Total owed
+// is worked pay PLUS the sum of these, and that addition happens in exactly one place
+// (buildPayStatement, src/lib/pay/statement.ts).
+//
+// `amount_cents` is INTEGER CENTS, strictly positive — the repo's money convention, and the only
+// representation under which adding several bonuses is exact. Never read it as dollars directly;
+// use centsToDollars() from the statement model.
+//
+// `kind` exists so the table has an honest name and a future category needs no second table. Its
+// CHECK constraint admits 'bonus' and nothing else today, so the type says the same.
+export interface PayAdjustment {
+  id: string;
+  user_id: string;
+  employee_id: string;
+  /** Canonical pay-period window, per payPeriodFor() — CHECK-constrained to the cycle in SQL. */
+  period_start: string;
+  period_end: string;
+  kind: 'bonus';
+  amount_cents: number;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // A recurring-shift RULE. Instances are computed from the rule minus its
 // exceptions at read time — never materialized (see migration 047).
 export interface ShiftRule {

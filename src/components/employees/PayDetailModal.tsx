@@ -14,11 +14,19 @@ import {
   type PeriodWeek,
   type StatementRow,
 } from '@/lib/pay/statement';
+import type { BonusItem } from '@/lib/pay/statement';
 import { formatPeriodRange } from '@/lib/pay/statementPdf';
 import { fmt } from '@/lib/calculations';
 import { fmtHours, titleCase } from './shared';
 import OverlayLayer from './OverlayLayer';
 import PersonAvatar from './weekly/PersonAvatar';
+import {
+  AddBonusButton,
+  BonusDeleteConfirm,
+  BonusFormModal,
+  BonusSection,
+  type BonusHandlers,
+} from './BonusPanel';
 
 // ONE PERSON'S PAY PERIOD, LAID OUT THE WAY THE PRINTED STATEMENT READS IT: Week 1 then Week 2,
 // every calendar day present, so a manager can scan the whole fortnight top to bottom and see the
@@ -31,6 +39,11 @@ import PersonAvatar from './weekly/PersonAvatar';
 // IT DOES NOT JUDGE THE RECORDS. No anomaly badge, no warning colour, no "needs review". Two
 // records on one day simply sit together under that day, which is what makes a duplicate obvious
 // without anything having to say so.
+//
+// BONUS PAY IS SHOWN AS WHAT IT IS: a separate section of its own line items, under the worked
+// time and before the total, never mixed into a day, a week or an hours column. `bonusItems` and
+// `totals.bonusTotal` / `totals.totalOwed` are read off the same statement everything else here is
+// read off, so the panel still contains no arithmetic — the bonus feature did not add any.
 
 // Desktop column template, shared by the header and every row so the whole period lines up as one
 // table. Mobile drops to labelled cells inside a per-day card.
@@ -262,6 +275,7 @@ export default function PayDetailModal({
   onDeleteRow,
   canDelete,
   deleteBlockedReason,
+  bonus,
 }: {
   statement: PayStatement;
   onClose: () => void;
@@ -273,12 +287,23 @@ export default function PayDetailModal({
   canDelete: (row: StatementRow) => boolean;
   /** Why Delete is unavailable on a record, shown on the disabled control. */
   deleteBlockedReason: (row: StatementRow) => string | undefined;
+  /**
+   * Bonus writes, all three of which go through the caller's canonical database path and are
+   * followed by a refetch. Omitted → bonuses still DISPLAY, they just cannot be changed here.
+   */
+  bonus?: BonusHandlers;
 }) {
   const [busy, setBusy] = useState<null | 'download' | 'print'>(null);
   const [docError, setDocError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<StatementRow | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Bonus UI state. `bonusForm` is 'add' or the item being edited; one piece of state for both,
+  // because they are the same two fields over the same write path.
+  const [bonusForm, setBonusForm] = useState<'add' | BonusItem | null>(null);
+  const [bonusDelete, setBonusDelete] = useState<BonusItem | null>(null);
+  const [bonusBusy, setBonusBusy] = useState(false);
+  const [bonusError, setBonusError] = useState<string | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   // Object URLs are revoked on unmount rather than straight after the click: Safari can still be
   // reading the blob when a synchronous revoke lands, which shows as an empty print window.
@@ -355,7 +380,40 @@ export default function PayDetailModal({
     }
   }
 
+  // SAVE, THEN LET THE DATA COME BACK. Neither of these touches a total locally: the caller's
+  // mutation refetches and the whole statement is rebuilt from what the database holds, so a write
+  // that failed can never leave a number on screen that nobody owes.
+  async function submitBonus(input: { amountCents: number; description: string | null }) {
+    if (!bonus || bonusForm === null) return;
+    setBonusBusy(true);
+    setBonusError(null);
+    try {
+      if (bonusForm === 'add') await bonus.onAdd(input);
+      else await bonus.onEdit(bonusForm.id, input);
+      setBonusForm(null);
+    } catch (e) {
+      setBonusError(e instanceof Error ? e.message : 'Could not save that bonus. Try again.');
+    } finally {
+      setBonusBusy(false);
+    }
+  }
+
+  async function runBonusDelete() {
+    if (!bonus || !bonusDelete) return;
+    setBonusBusy(true);
+    setBonusError(null);
+    try {
+      await bonus.onDelete(bonusDelete.id);
+      setBonusDelete(null);
+    } catch (e) {
+      setBonusError(e instanceof Error ? e.message : 'Could not delete that bonus. Try again.');
+    } finally {
+      setBonusBusy(false);
+    }
+  }
+
   const weeks = useMemo(() => payPeriodWeeks(statement), [statement]);
+  const hasBonus = statement.bonusItems.length > 0;
 
   if (typeof document === 'undefined') return null;
 
@@ -397,12 +455,23 @@ export default function PayDetailModal({
         {/* ── One compact summary row ────────────────────────────────────────── */}
         <div className="mb-5 flex flex-wrap items-end justify-between gap-x-8 gap-y-3 border-y border-tt-border py-3">
           <div className="flex flex-wrap gap-x-8 gap-y-3">
-            <Stat label="Total owed" value={fmt(statement.totals.gross)} tone="money" />
+            {/* THE HEADLINE IS WHAT IS OWED — worked pay plus bonuses. With no bonuses
+                totals.totalOwed IS totals.gross, so this reads exactly as it always has. */}
+            <Stat label="Total owed" value={fmt(statement.totals.totalOwed)} tone="money" />
+            {/* The two components appear only when there is something to split. A permanent
+                "Bonus pay $0.00" on every statement is clutter on the 95% that have none. */}
+            {hasBonus && <Stat label="Hourly pay" value={fmt(statement.totals.gross)} />}
+            {hasBonus && <Stat label="Bonus pay" value={fmt(statement.totals.bonusTotal)} />}
             <Stat label="Payable hours" value={fmtHours(statement.totals.paidHours)} />
             <Stat label="Rate" value={`${fmt(statement.rate)}/hr`} />
             <Stat label="Worked days" value={String(statement.totals.workedDays)} />
           </div>
           <div className="flex items-center gap-2">
+            {bonus && (
+              <AddBonusButton
+                onClick={() => { setBonusError(null); setBonusForm('add'); }}
+              />
+            )}
             <button
               type="button"
               onClick={handlePrint}
@@ -436,17 +505,53 @@ export default function PayDetailModal({
           />
         ))}
 
-        {/* Period total, read off statement.totals — never re-added from the weeks above. */}
-        <div className="flex items-center justify-between rounded-xl border border-tt-border bg-white/[0.03] px-4 py-3">
-          <span className="text-[13px] font-bold text-tt-text">Total owed</span>
-          <span className="flex items-baseline gap-5">
-            <span className="text-[13px] font-bold tabular-nums text-tt-text">
-              {statement.totals.paidHours.toFixed(2)} hr
+        {/* BONUSES & INCENTIVES — after the worked time, before the total, and absent entirely
+            when there are none. Its line items and its subtotal both come off the statement. */}
+        <BonusSection
+          items={statement.bonusItems}
+          bonusTotal={statement.totals.bonusTotal}
+          onEditItem={bonus ? (item) => { setBonusError(null); setBonusForm(item); } : undefined}
+          onDeleteItem={bonus ? (item) => { setBonusError(null); setBonusDelete(item); } : undefined}
+        />
+
+        {/* Period total, read off statement.totals — never re-added from the weeks or the bonuses
+            above. When there are bonuses the two components are broken out on their own lines so
+            the final figure shows its working; when there are none this is the row it always was. */}
+        <div className="rounded-xl border border-tt-border bg-white/[0.03] px-4 py-3">
+          {hasBonus && (
+            <>
+              <div className="flex items-center justify-between pb-2">
+                <span className="text-[12.5px] text-tt-muted">Hourly pay</span>
+                <span className="flex items-baseline gap-5">
+                  <span className="text-[12.5px] tabular-nums text-tt-muted">
+                    {statement.totals.paidHours.toFixed(2)} hr
+                  </span>
+                  <span className="text-[13px] font-semibold tabular-nums text-tt-text">
+                    {fmt(statement.totals.gross)}
+                  </span>
+                </span>
+              </div>
+              <div className="flex items-center justify-between border-b border-tt-border pb-2">
+                <span className="text-[12.5px] text-tt-muted">Bonus pay</span>
+                <span className="text-[13px] font-semibold tabular-nums text-tt-text">
+                  {fmt(statement.totals.bonusTotal)}
+                </span>
+              </div>
+            </>
+          )}
+          <div className={`flex items-center justify-between ${hasBonus ? 'pt-2' : ''}`}>
+            <span className="text-[13px] font-bold text-tt-text">Total owed</span>
+            <span className="flex items-baseline gap-5">
+              {!hasBonus && (
+                <span className="text-[13px] font-bold tabular-nums text-tt-text">
+                  {statement.totals.paidHours.toFixed(2)} hr
+                </span>
+              )}
+              <span className="text-[15px] font-bold tabular-nums text-tt-green">
+                {fmt(statement.totals.totalOwed)}
+              </span>
             </span>
-            <span className="text-[15px] font-bold tabular-nums text-tt-green">
-              {fmt(statement.totals.gross)}
-            </span>
-          </span>
+          </div>
         </div>
 
         <p className="mt-4 text-[10.5px] leading-relaxed text-tt-muted">
@@ -466,6 +571,34 @@ export default function PayDetailModal({
           error={deleteError}
           onCancel={() => setConfirmDelete(null)}
           onConfirm={runDelete}
+        />
+      )}
+
+      {/* Both bonus dialogs go through OverlayLayer (inside BonusPanel) for the same reason the
+          worked-time one does: this panel is portalled to <body> at z-50, so anything it opens has
+          to leave the subtree and sit above it or it mounts correctly and is painted underneath. */}
+      {bonus && bonusForm !== null && (
+        <BonusFormModal
+          // Remounts between add and edit, so the form always opens on the right values rather
+          // than keeping the last ones in state.
+          key={bonusForm === 'add' ? 'add' : bonusForm.id}
+          employeeName={statement.employee.name}
+          periodLabel={formatPeriodRange(statement.period.start, statement.period.end)}
+          editing={bonusForm === 'add' ? null : bonusForm}
+          busy={bonusBusy}
+          error={bonusError}
+          onCancel={() => { setBonusForm(null); setBonusError(null); }}
+          onSubmit={submitBonus}
+        />
+      )}
+      {bonus && bonusDelete && (
+        <BonusDeleteConfirm
+          employeeName={statement.employee.name}
+          item={bonusDelete}
+          busy={bonusBusy}
+          error={bonusError}
+          onCancel={() => { setBonusDelete(null); setBonusError(null); }}
+          onConfirm={runBonusDelete}
         />
       )}
     </div>,

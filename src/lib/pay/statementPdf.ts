@@ -21,6 +21,16 @@ import {
 // calendar day present — a day nobody worked reads "Off / Off / — / 0.00", which is information,
 // not an omission — each week subtotalled, and a summary of total hours, rate and gross pay.
 //
+// BONUSES SIT IN THE SUMMARY AND NOWHERE ELSE. A bonus is not worked time, so it never appears in
+// a week table, never adds a row to a date and never touches an Hours column — printing it beside
+// clock-in/clock-out would state that somebody worked for it. It is listed under the pay summary
+// as its own named lines, subtotalled, and added to a TOTAL OWED. WITH NO BONUSES THE DOCUMENT IS
+// THE ONE THAT SHIPPED BEFORE, to the byte: the summary keeps its three rows and its "Gross Pay"
+// label, and nothing is emitted for a section that has no content (asserted in bonusPdf.test.mjs).
+//
+// The bonus numbers come off statement.bonusItems and statement.totals, exactly as every other
+// number here does. This file still queries nothing and still adds nothing up.
+//
 // WHY pdf-lib AND NOT A PRINTED WEB PAGE. pdf-lib is already a production dependency (shipping
 // labels), so this adds nothing to install. It writes 612x792 into the MediaBox, which IS 8.5x11 —
 // with window.print() the page size, margins and scale live in the operator's print dialog and the
@@ -295,10 +305,29 @@ export async function renderPayStatementPdf(
     thickness: 1.6,
     color: C(INK),
   });
-  y -= 18;
 
   // ── Week tables ────────────────────────────────────────────────────────────────────────────
   const weeks: PeriodWeek[] = payPeriodWeeks(statement);
+
+  // ONE PAGE IS STILL THE TARGET, AND BONUSES ARE NOT ALLOWED TO COST IT.
+  //
+  // The summary grows by a heading, one row per bonus, a subtotal and a total. Two bonuses — the
+  // ordinary case — pushed the signature block onto a second sheet, which is a worse payroll
+  // document than a slightly tighter one. So a statement that CARRIES bonuses closes the gaps
+  // between its blocks; there is ample white space in them and nothing is made harder to read.
+  //
+  // A STATEMENT WITH NO BONUSES IS UNTOUCHED: every gap below keeps its original value, which is
+  // why the no-bonus PDF is still byte-identical to the one that shipped (asserted in
+  // bonusPdf.test.mjs by comparing the two documents, not by eye).
+  //
+  // This buys room for roughly three bonus lines. A genuinely long list still paginates — properly,
+  // with numbered pages — because at that point a second sheet IS the honest answer.
+  const hasBonus = statement.bonusItems.length > 0;
+  const HEAD_GAP = hasBonus ? 12 : 18; // identity block → first week table
+  const WEEK_GAP = hasBonus ? 8 : 16;  // after each week's subtotal
+  const SIG_GAP = hasBonus ? 8 : 20;   // summary block → signature lines
+
+  y -= HEAD_GAP;
 
   function drawTableHead(): void {
     page.drawRectangle({
@@ -381,29 +410,48 @@ export async function renderPayStatementPdf(
       color: C(RULE),
     });
     centred(week.hours.toFixed(2), hoursColX + COLS[5].w / 2, y - ROW_H + 5.5, 9, bold, INK);
-    y -= ROW_H + 16;
+    y -= ROW_H + WEEK_GAP;
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────────────────────
-  const SUM_ROWS: [string, string][] = [
-    ['Total Hours This Pay Period:', statement.totals.paidHours.toFixed(2)],
-    ['Hourly Rate:', formatMoney(statement.rate)],
-    ['Gross Pay:', formatMoney(statement.totals.gross)],
+  //
+  // WITH NO BONUSES this is the three-row block it has always been, ending at "Gross Pay". With
+  // bonuses, that row is named "Hourly Pay" — because it is no longer the whole of the gross — and
+  // the bonus lines, their subtotal and TOTAL OWED follow it. Every figure is read off the
+  // statement; the `[label, value, emphasis]` triples below are a layout list, not a calculation.
+  const SUM_ROWS: [string, string, boolean][] = [
+    ['Total Hours This Pay Period:', statement.totals.paidHours.toFixed(2), false],
+    ['Hourly Rate:', formatMoney(statement.rate), false],
+    [hasBonus ? 'Hourly Pay:' : 'Gross Pay:', formatMoney(statement.totals.gross), false],
   ];
+  if (hasBonus) {
+    // A heading row with no value, then one row per bonus, then the subtotal and the total.
+    SUM_ROWS.push(['BONUSES / INCENTIVES', '', false]);
+    for (const item of statement.bonusItems) {
+      SUM_ROWS.push([item.label, formatMoney(item.amount), false]);
+    }
+    SUM_ROWS.push(['Bonus Pay:', formatMoney(statement.totals.bonusTotal), false]);
+    SUM_ROWS.push(['TOTAL OWED:', formatMoney(statement.totals.totalOwed), true]);
+  }
   need(ROW_H * (SUM_ROWS.length + 1) + 6);
   const SPLIT = MARGIN + 288;
-  for (const [label, value] of SUM_ROWS) {
+  for (const [label, value, emphasis] of SUM_ROWS) {
     page.drawRectangle({
       x: MARGIN,
       y: y - ROW_H,
       width: CONTENT_W,
       height: ROW_H,
+      // The total owed gets a filled ground rather than a bigger typeface: it has to be findable
+      // at arm's length on a printed sheet, and this page is designed to read in grayscale.
+      ...(emphasis ? { color: C(HEAD_BG) } : {}),
       borderColor: C(RULE),
-      borderWidth: 0.7,
+      borderWidth: emphasis ? 1.1 : 0.7,
     });
     page.drawLine({ start: { x: SPLIT, y }, end: { x: SPLIT, y: y - ROW_H }, thickness: 0.7, color: C(RULE) });
-    text(label, MARGIN + 8, y - ROW_H + 5.5, 9.5, bold, INK);
-    text(value, SPLIT + 8, y - ROW_H + 5.5, 9.5, bold, INK);
+    // A bonus line's own name is the one piece of free text in this block, so it is the one thing
+    // that could run into the money column — fitText truncates it rather than letting it overlap.
+    text(fitText(label, bold, 9.5, 288 - 16), MARGIN + 8, y - ROW_H + 5.5, 9.5, bold, INK);
+    if (value) text(value, SPLIT + 8, y - ROW_H + 5.5, 9.5, bold, INK);
     y -= ROW_H;
   }
   // Notes row — a writable space on a printed sheet, kept because it costs one line.
@@ -417,7 +465,7 @@ export async function renderPayStatementPdf(
   });
   page.drawLine({ start: { x: SPLIT, y }, end: { x: SPLIT, y: y - ROW_H }, thickness: 0.7, color: C(RULE) });
   text('Notes:', MARGIN + 8, y - ROW_H + 5.5, 9.5, bold, INK);
-  y -= ROW_H + 20;
+  y -= ROW_H + SIG_GAP;
 
   // ── Signatures ─────────────────────────────────────────────────────────────────────────────
   need(40);

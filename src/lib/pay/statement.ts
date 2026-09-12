@@ -5,7 +5,7 @@ import {
   type ShiftLike,
 } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
-import type { Employee, Shift } from '@/types';
+import type { Employee, PayAdjustment, Shift } from '@/types';
 
 // ONE NORMALIZED PAY STATEMENT. This module is the single place a pay period is turned into
 // per-employee rows, hours and money. The Pay Detail screen and the PDF both
@@ -145,12 +145,149 @@ export interface RateLine {
   amount: number;
 }
 
+// ── Bonus / incentive pay ───────────────────────────────────────────────────────────────────
+//
+// A BONUS IS NOT WORKED TIME AND IS NOT MODELLED AS ANY. It creates no hours, touches no rate,
+// no approved duration, no punch and no shift row — it is a dollar amount a manager attached to a
+// PERSON and a PAY PERIOD, and the only thing it does to payroll is get added at the end.
+//
+// WHY IT LIVES IN THIS FILE. The whole premise of this module is that one object drives the Pay
+// tile, the Pay Details panel and the PDF, so none of them can disagree. A bonus total computed
+// anywhere else would be a second payroll calculation by another name — the exact thing the header
+// above says must not exist. So the selector and the sum live here, next to the statement, and the
+// Pay tab's tiles call the SAME two functions buildPayStatement calls internally (pinned in
+// bonus.test.mjs), exactly as computePay and buildPayStatement already share isPayableShift and
+// paidShiftHours.
+//
+// MONEY IS SUMMED IN INTEGER CENTS AND DIVIDED ONCE. The database stores `amount_cents integer`
+// (migration 150) and so does BonusItem. Summing dollars would put 0.1 + 0.2 into somebody's
+// cheque; summing cents cannot. `amount` is carried alongside purely so a renderer never has to
+// do the division itself and get it different.
+
+/** One bonus line, normalized for display. `amount` is `amountCents / 100` and nothing else. */
+export interface BonusItem {
+  id: string;
+  amountCents: number;
+  amount: number;
+  description: string | null;
+  /** What the line is called on screen and on paper. Never blank. */
+  label: string;
+  createdAtISO: string;
+}
+
+/** Cents → dollars, in ONE place, so no surface can round it its own way. */
+export function centsToDollars(cents: number): number {
+  return cents / 100;
+}
+
+/** The default line label when a manager entered an amount and no reason. */
+export const BONUS_FALLBACK_LABEL = 'Bonus';
+
+/**
+ * The bonus lines belonging to ONE employee in ONE pay period, oldest first.
+ *
+ * Filtering happens HERE, on the period's own canonical boundaries, so a caller may safely hand
+ * over a wider fetch — the same contract `shifts` has in BuildStatementInput. The match is on the
+ * row's OWN [period_start, period_end], not on created_at: a bonus entered in October for the
+ * September period belongs to September, and when it was typed is irrelevant to whose cheque it
+ * lands on.
+ *
+ * Exported because the Pay tab's tiles need the same numbers the statement has, and the only
+ * honest way to guarantee that is for both to call this function rather than two like it.
+ */
+export function bonusItemsFor(
+  adjustments: ReadonlyArray<PayAdjustment>,
+  employeeId: string,
+  period: { start: string; end: string },
+): BonusItem[] {
+  return adjustments
+    .filter(
+      (a) =>
+        a.employee_id === employeeId &&
+        a.period_start === period.start &&
+        a.period_end === period.end,
+    )
+    .map((a) => {
+      const description = a.description?.trim() ? a.description.trim() : null;
+      return {
+        id: a.id,
+        amountCents: a.amount_cents,
+        amount: centsToDollars(a.amount_cents),
+        description,
+        label: description ?? BONUS_FALLBACK_LABEL,
+        createdAtISO: a.created_at,
+      } satisfies BonusItem;
+    })
+    // Entry order, with the id as a tiebreak so two bonuses saved in the same second still come
+    // out in a stable order on screen, on paper and in a test.
+    .sort((a, b) => a.createdAtISO.localeCompare(b.createdAtISO) || a.id.localeCompare(b.id));
+}
+
+/** Integer cents. The ONLY place bonus money is added up. */
+export function sumBonusCents(items: ReadonlyArray<BonusItem>): number {
+  let cents = 0;
+  for (const b of items) cents += b.amountCents;
+  return cents;
+}
+
+/** One employee's bonus lines and their total, selected and summed once. */
+export interface BonusSummary {
+  items: BonusItem[];
+  cents: number;
+  /** cents / 100. */
+  total: number;
+}
+
+/**
+ * THE ONE BONUS CALCULATION. buildPayStatement calls this, and so does the Pay tab when it totals
+ * its tiles — so the bonus figure on a tile and the bonus figure in that person's Pay Details are
+ * the same number by construction, not by two functions that happen to agree.
+ */
+export function bonusSummaryFor(
+  adjustments: ReadonlyArray<PayAdjustment> | undefined,
+  employeeId: string,
+  period: { start: string; end: string },
+): BonusSummary {
+  const items = adjustments ? bonusItemsFor(adjustments, employeeId, period) : [];
+  const cents = sumBonusCents(items);
+  return { items, cents, total: centsToDollars(cents) };
+}
+
+/**
+ * TOTAL OWED = WORKED PAY + BONUS PAY. The entire feature, in one expression, in one place.
+ *
+ * It exists as a function rather than a `+` at each call site for the same reason paidShiftHours
+ * does: the Pay tile, the Pay Details panel and the PDF must not each own a copy of the rule. Both
+ * arguments are dollars — `workedPay` is the untouched payroll result (statement.totals.gross,
+ * identical to computePay's `pay`) and `bonusTotal` comes from bonusSummaryFor above.
+ */
+export function totalOwedOf(workedPay: number, bonusTotal: number): number {
+  return workedPay + bonusTotal;
+}
+
 export interface StatementTotals {
   paidHours: number;
+  /**
+   * WORKED PAY — `paidHours * rate`, and NOTHING ELSE. This is the field every existing surface
+   * already reads and its meaning is deliberately unchanged by the bonus feature: whatever payroll
+   * paid before, `gross` still is. Bonus money is never folded into it. (It keeps the name `gross`
+   * because that is what the printed statement calls it and what the suite already asserts; where
+   * this codebase says "worked pay", this is the number.)
+   */
   gross: number;
   /** Distinct calendar dates with at least one payable row. */
   workedDays: number;
   rowCount: number;
+  /** Bonus pay in integer cents — sumBonusCents(statement.bonusItems). 0 when there are none. */
+  bonusCents: number;
+  /** The same figure in dollars. Exactly `bonusCents / 100`; never a sum of dollar amounts. */
+  bonusTotal: number;
+  /**
+   * TOTAL OWED = gross + bonusTotal. The one number the Pay tile, the Pay Details summary and the
+   * PDF all print, so none of them can add it up differently. With no bonuses it IS `gross`, which
+   * is why every pre-existing statement reads exactly as it did before.
+   */
+  totalOwed: number;
 }
 
 export interface PayStatement {
@@ -160,6 +297,8 @@ export interface PayStatement {
   rows: StatementRow[];
   excluded: ExcludedRow[];
   rateLines: RateLine[];
+  /** Bonus lines for THIS employee in THIS period, oldest first. Empty when there are none. */
+  bonusItems: BonusItem[];
   totals: StatementTotals;
   /** Passed in by the caller — this module never reads a clock. */
   generatedAtISO: string;
@@ -200,11 +339,21 @@ export interface BuildStatementInput {
    * safely pass a wider fetch.
    */
   shifts: Shift[];
+  /**
+   * `employee_pay_adjustments` rows (migration 150). Same contract as `shifts`: anything for
+   * another employee or another period is ignored here, so a caller may pass a wider fetch.
+   *
+   * OPTIONAL, AND THAT IS LOAD-BEARING. Omitting it yields a statement with no bonus lines, a
+   * bonusTotal of 0 and `totalOwed === totals.gross` — i.e. byte-for-byte the statement this
+   * module produced before bonuses existed. Every caller that has nothing to say about bonuses
+   * keeps its exact previous behaviour without having to say so.
+   */
+  adjustments?: ReadonlyArray<PayAdjustment>;
   generatedAtISO: string;
 }
 
 export function buildPayStatement(input: BuildStatementInput): PayStatement {
-  const { employee, period, shifts, generatedAtISO } = input;
+  const { employee, period, shifts, adjustments, generatedAtISO } = input;
   const rate = employee.hourly_rate;
 
   const mine = shifts.filter((s) => s.employee_id === employee.id);
@@ -266,6 +415,14 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
 
   const workedDays = new Set(rows.map((r) => r.dateISO)).size;
 
+  // BONUS PAY IS ADDED, NEVER MIXED IN. Everything above this line is the payroll calculation
+  // exactly as it was — the same rows, the same predicate, the same `paidHours * rate`. Nothing
+  // below it can reach back and change any of that; it can only append.
+  //
+  // The selector and the sum are the shared functions above, which is what makes the Pay tile's
+  // bonus figure and this one the same number rather than two numbers that agree today.
+  const bonus = bonusSummaryFor(adjustments, employee.id, period);
+
   return {
     employee: { id: employee.id, name: employee.name, role: employee.role },
     period,
@@ -273,9 +430,20 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
     rows,
     excluded,
     // One line, because one rate is all the product stores. Kept as a list so a real rate history
-    // would extend this rather than force a second total somewhere else.
+    // would extend this rather than force a second total somewhere else. BONUSES ARE NOT A RATE
+    // LINE — they are not hours at a price, and putting them here would make the hours column lie.
     rateLines: rows.length > 0 ? [{ rate, hours: paidHours, amount: gross }] : [],
-    totals: { paidHours, gross, workedDays, rowCount: rows.length },
+    bonusItems: bonus.items,
+    totals: {
+      paidHours,
+      gross,
+      workedDays,
+      rowCount: rows.length,
+      bonusCents: bonus.cents,
+      bonusTotal: bonus.total,
+      // The one addition in the whole feature, and the Pay tab's tiles call the same function.
+      totalOwed: totalOwedOf(gross, bonus.total),
+    },
     generatedAtISO,
   };
 }

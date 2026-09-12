@@ -1,5 +1,5 @@
 import { laWallTimeToUtc } from '@/lib/schedule/timezone';
-import type { Employee, Shift } from '@/types';
+import type { Employee, PayAdjustment, Shift } from '@/types';
 
 // FIXTURES FOR THE PAY DETAIL REVIEW ROUTE. Plain objects, shaped exactly like `shifts` rows —
 // no query, no client, nothing that could reach a database.
@@ -14,6 +14,10 @@ export const PREVIEW_PERIOD = { start: '2026-08-24', end: '2026-09-06', payday: 
 export const PREVIEW_GENERATED_AT = '2026-09-08T17:00:00.000Z';
 
 export const PREVIEW_EMPLOYEES: Employee[] = [
+  // Carlos is the BONUS review case, and his numbers are exact on purpose: 72.50 payable hours at
+  // $22.00 = $1,595.00 of worked pay, plus a $100 and a $50 bonus = $150.00, for $1,745.00 owed.
+  // Everything on the screen and on his PDF has to add up to those four figures.
+  mkEmployee('e-carlos', 'Carlos Herrera', 'fulfillment', 22),
   mkEmployee('e-juan', 'Juan Reyes', 'fulfillment', 22),
   mkEmployee('e-adriana', 'Adriana Salas', 'host', 25),
   mkEmployee('e-chris', 'Chris Okafor', 'fulfillment', 19.5),
@@ -62,6 +66,18 @@ function addDays(iso: string, days: number): string {
 }
 
 export const PREVIEW_SHIFTS: Shift[] = [
+  // ── Carlos: an ORDINARY two weeks. No forgotten punch, no stacked correction, no anomaly ──
+  // Deliberately dull, because the bonus review is about the bonus. 40.50 h in week 1 and 32.00 h
+  // in week 2 = 72.50 h; at $22.00 that is exactly $1,595.00 of worked pay.
+  punch('e-carlos', '2026-08-24', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-08-25', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-08-26', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-08-27', '08:00', '16:30'),  //  8.50
+  punch('e-carlos', '2026-08-28', '08:00', '16:00'),  //  8.00  → week 1 = 40.50
+  punch('e-carlos', '2026-08-31', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-09-01', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-09-02', '08:00', '16:00'),  //  8.00
+  punch('e-carlos', '2026-09-03', '09:00', '17:00'),  //  8.00  → week 2 = 32.00
   // ── Juan: the double-pay pattern, a forgotten clock-out, and clean days ───────────────────
   // A 47.75h punch with a 40h break — abnormal span, ordinary paid hours.
   punch('e-juan', '2026-08-24', '05:59', '05:44', {
@@ -110,4 +126,42 @@ export const PREVIEW_SHIFTS: Shift[] = [
 
   // ── Devon: worked hours at a $0 rate — reported as zero owed, never hidden ────────────────
   punch('e-devon', '2026-09-02', '08:00', '12:00'),
+];
+
+// ── Bonus / incentive fixtures (migration 150 rows) ─────────────────────────────────────────
+//
+// Plain objects shaped exactly like `employee_pay_adjustments` rows. The periods are the real
+// canonical windows, because the selector matches on them: PREVIEW_PERIOD is 2026-08-24 →
+// 2026-09-06, and the row below dated to the PREVIOUS period (2026-08-10 → 2026-08-23) is here to
+// prove the scoping — it must never appear in the period on screen, and the review is worth less
+// without something that is supposed to be invisible.
+//
+// Money is INTEGER CENTS, as the column is. 10000 = $100.00.
+export const PREVIEW_ADJUSTMENTS: PayAdjustment[] = [
+  {
+    id: 'pv-b1', user_id: 'preview-owner', employee_id: 'e-carlos',
+    period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
+    kind: 'bonus', amount_cents: 10000, description: 'Performance bonus',
+    created_at: '2026-09-07T18:00:00.000Z', updated_at: '2026-09-07T18:00:00.000Z',
+  },
+  {
+    id: 'pv-b2', user_id: 'preview-owner', employee_id: 'e-carlos',
+    period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
+    kind: 'bonus', amount_cents: 5000, description: 'Attendance incentive',
+    created_at: '2026-09-07T18:05:00.000Z', updated_at: '2026-09-07T18:05:00.000Z',
+  },
+  // A bonus with no reason given — it has to render as something, and "Bonus" is that something.
+  {
+    id: 'pv-b3', user_id: 'preview-owner', employee_id: 'e-adriana',
+    period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
+    kind: 'bonus', amount_cents: 7500, description: null,
+    created_at: '2026-09-07T19:00:00.000Z', updated_at: '2026-09-07T19:00:00.000Z',
+  },
+  // ANOTHER PERIOD'S BONUS. Same person, $999.00, and it must be nowhere on this screen.
+  {
+    id: 'pv-b-other-period', user_id: 'preview-owner', employee_id: 'e-carlos',
+    period_start: '2026-08-10', period_end: '2026-08-23',
+    kind: 'bonus', amount_cents: 99900, description: 'Previous period bonus',
+    created_at: '2026-08-24T18:00:00.000Z', updated_at: '2026-08-24T18:00:00.000Z',
+  },
 ];

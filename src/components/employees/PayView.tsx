@@ -11,11 +11,17 @@ import {
   fmtPayDate,
   fmtMonthDay,
 } from '@/lib/employees';
-import { buildPayStatement, type PayStatement } from '@/lib/pay/statement';
+import {
+  bonusSummaryFor,
+  buildPayStatement,
+  totalOwedOf,
+  type PayStatement,
+} from '@/lib/pay/statement';
 import { canDeleteRecord, deleteBlockedReasonFor } from '@/lib/pay/deleteEligibility';
 import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
+import { usePayAdjustments } from '@/hooks/usePayAdjustments';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
 import PayGrid, { type PayTile } from './PayGrid';
@@ -59,6 +65,11 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   } = useShifts(period.start, period.end);
   const { rules, exceptions, upsertException } = useShiftRules();
 
+  // BONUS / INCENTIVE PAY for this same period, for the whole roster. Scoped to exactly the pay
+  // period the selector is on, so the money a tile shows is the money that period owes — and so
+  // moving to another period refetches rather than carrying a bonus across.
+  const { adjustments, addBonus, updateBonus, deleteBonus } = usePayAdjustments(period.start, period.end);
+
   const periodMaterialized = useMemo(
     () => new Set(periodShifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
     [periodShifts],
@@ -98,10 +109,11 @@ export default function PayView({ employees }: { employees: Employee[] }) {
             employee: detail.employee,
             period: { start: period.start, end: period.end, payday },
             shifts: periodShifts,
+            adjustments,
             generatedAtISO: detail.generatedAtISO,
           })
         : null,
-    [detail, period.start, period.end, payday, periodShifts],
+    [detail, period.start, period.end, payday, periodShifts, adjustments],
   );
 
   // The editor's own card model, built by the SAME indexer the calendars use — never by hand, so
@@ -140,6 +152,36 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     },
     [deleteShift],
   );
+  // The canonical bonus writes. Each mutation invalidates and refetches (usePayAdjustments), so
+  // the statement and the tiles are rebuilt from what the database holds — never from a guess about
+  // what the totals should now be, which is the same discipline handleDeleteRow follows above.
+  //
+  // The employee and the period are bound HERE, from the open panel and the selected period, so the
+  // form never has to name either and cannot name the wrong one.
+  const bonusHandlers = useMemo(
+    () =>
+      detail
+        ? {
+            onAdd: async ({ amountCents, description }: { amountCents: number; description: string | null }) => {
+              await addBonus.mutateAsync({
+                employee_id: detail.employee.id,
+                period_start: period.start,
+                period_end: period.end,
+                amount_cents: amountCents,
+                description,
+              });
+            },
+            onEdit: async (id: string, { amountCents, description }: { amountCents: number; description: string | null }) => {
+              await updateBonus.mutateAsync({ id, amount_cents: amountCents, description });
+            },
+            onDelete: async (id: string) => {
+              await deleteBonus.mutateAsync(id);
+            },
+          }
+        : undefined,
+    [detail, period.start, period.end, addBonus, updateBonus, deleteBonus],
+  );
+
   const openEditor = useCallback(
     (shiftId: string) => {
       const card = cardById.get(shiftId);
@@ -154,26 +196,36 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     () => (payRole === 'all' ? pay : pay.filter((p) => p.employee.role?.toLowerCase() === payRole)),
     [pay, payRole],
   );
+  // WORKED PAY COMES FROM computePay AND IS NOT TOUCHED. The bonus is selected and summed by
+  // bonusSummaryFor() and added by totalOwedOf() — the same two functions buildPayStatement calls,
+  // so a tile and that person's Pay Details cannot disagree about either figure.
   const tiles = useMemo<PayTile[]>(
-    () => filteredPay.map((p) => ({
-      employee: p.employee,
-      hours: p.hours,
-      pay: p.pay,
-      scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
-    })),
-    [filteredPay, plannedHoursByEmployee],
+    () => filteredPay.map((p) => {
+      const bonus = bonusSummaryFor(adjustments, p.employee.id, period);
+      return {
+        employee: p.employee,
+        hours: p.hours,
+        bonusTotal: bonus.total,
+        totalOwed: totalOwedOf(p.pay, bonus.total),
+        scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
+      };
+    }),
+    [filteredPay, plannedHoursByEmployee, adjustments, period],
   );
+  // The roster total is the sum of the tiles, bonuses included — otherwise the headline figure the
+  // pay run is built around would be smaller than the tiles under it add up to.
   const totals = useMemo(
     () =>
-      filteredPay.reduce(
-        (acc, p) => ({
-          hours: acc.hours + p.hours,
-          scheduled: acc.scheduled + (plannedHoursByEmployee.get(p.employee.id) ?? 0),
-          pay: acc.pay + p.pay,
+      tiles.reduce(
+        (acc, t) => ({
+          hours: acc.hours + t.hours,
+          scheduled: acc.scheduled + t.scheduled,
+          pay: acc.pay + t.totalOwed,
+          bonus: acc.bonus + t.bonusTotal,
         }),
-        { hours: 0, scheduled: 0, pay: 0 },
+        { hours: 0, scheduled: 0, pay: 0, bonus: 0 },
       ),
-    [filteredPay, plannedHoursByEmployee],
+    [tiles],
   );
 
   return (
@@ -243,6 +295,11 @@ export default function PayView({ employees }: { employees: Employee[] }) {
               Total{payRole !== 'all' ? ` · ${titleCase(payRole)}` : ''} for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}
             </div>
             <div className="mt-1 text-3xl font-bold tabular-nums text-tt-green">{fmt(totals.pay)}</div>
+            {totals.bonus > 0 && (
+              <div className="mt-0.5 text-[11px] tabular-nums text-tt-muted">
+                includes {fmt(totals.bonus)} in bonuses
+              </div>
+            )}
           </div>
           <div className="flex gap-6 text-right">
             <div>
@@ -281,6 +338,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
         onDeleteRow={handleDeleteRow}
         canDelete={canDeleteRecord}
         deleteBlockedReason={deleteBlockedReasonFor}
+        bonus={bonusHandlers}
       />
     )}
     {/* THE EDITOR MUST BE A BODY-LEVEL LAYER ABOVE THE PANEL THAT OPENED IT.
