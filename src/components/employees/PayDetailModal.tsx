@@ -25,6 +25,7 @@ import {
   BonusDeleteConfirm,
   BonusFormModal,
   BonusSection,
+  type BonusDraft,
   type BonusHandlers,
 } from './BonusPanel';
 
@@ -43,7 +44,9 @@ import {
 // BONUS PAY IS SHOWN AS WHAT IT IS: a separate section of its own line items, under the worked
 // time and before the total, never mixed into a day, a week or an hours column. `bonusItems` and
 // `totals.bonusTotal` / `totals.totalOwed` are read off the same statement everything else here is
-// read off, so the panel still contains no arithmetic — the bonus feature did not add any.
+// read off, so the panel still contains no arithmetic — the bonus feature did not add any, and an
+// HOURLY bonus did not either: its rate x hours was done in the model, and this file prints the
+// result and the working side by side.
 
 // Desktop column template, shared by the header and every row so the whole period lines up as one
 // table. Mobile drops to labelled cells inside a per-day card.
@@ -383,7 +386,7 @@ export default function PayDetailModal({
   // SAVE, THEN LET THE DATA COME BACK. Neither of these touches a total locally: the caller's
   // mutation refetches and the whole statement is rebuilt from what the database holds, so a write
   // that failed can never leave a number on screen that nobody owes.
-  async function submitBonus(input: { amountCents: number; description: string | null }) {
+  async function submitBonus(input: BonusDraft) {
     if (!bonus || bonusForm === null) return;
     setBonusBusy(true);
     setBonusError(null);
@@ -584,6 +587,9 @@ export default function PayDetailModal({
           key={bonusForm === 'add' ? 'add' : bonusForm.id}
           employeeName={statement.employee.name}
           periodLabel={formatPeriodRange(statement.period.start, statement.period.end)}
+          // Shown in the form so a manager choosing an hourly rate can see what it will be
+          // multiplied by. The form never multiplies — buildPayStatement does, on the way back.
+          paidHours={statement.totals.paidHours}
           editing={bonusForm === 'add' ? null : bonusForm}
           busy={bonusBusy}
           error={bonusError}

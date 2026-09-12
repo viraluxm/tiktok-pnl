@@ -12,6 +12,7 @@ import PayGrid, { type PayTile } from '@/components/employees/PayGrid';
 import PayDetailModal from '@/components/employees/PayDetailModal';
 import OverlayLayer from '@/components/employees/OverlayLayer';
 import ShiftEditorModal, { type EditorIntent, type EditorHandlers } from '@/components/employees/weekly/ShiftEditorModal';
+import type { BonusDraft } from '@/components/employees/BonusPanel';
 import type { Employee, PayAdjustment, Shift } from '@/types';
 import {
   PREVIEW_ADJUSTMENTS,
@@ -37,6 +38,11 @@ import {
 // of `employee_pay_adjustments` rows, and the statement is then rebuilt by the production
 // buildPayStatement from that array — so the line items, the bonus subtotal, the tile's total owed
 // and the PDF all come from the shipping model, not from a preview that agrees with itself.
+//
+// THE HOURLY INCENTIVE IS THE THING TO PROD. Nothing stores what it is worth: edit one of Carlos's
+// shifts and watch his $2.00/hr line re-price itself in the same render that moved his hours — on
+// the tile, in the drawer and on the PDF. That is the behaviour this page exists to demonstrate,
+// and it is demonstrated by the shipping model rather than by a mock arranged to agree.
 //
 // ZERO DATABASE PATH: no Supabase client, no fetch, no RPC, no server action. Pinned by
 // noWrites.test.mjs over this file's source.
@@ -64,7 +70,7 @@ export default function PayDetailPreview() {
   const tiles = useMemo<PayTile[]>(
     () =>
       pay.map((p) => {
-        const bonus = bonusSummaryFor(adjustments, p.employee.id, period);
+        const bonus = bonusSummaryFor(adjustments, p.employee.id, period, p.hours);
         return {
           employee: p.employee,
           hours: p.hours,
@@ -106,7 +112,9 @@ export default function PayDetailPreview() {
             return patch === null ? r : ({ ...r, ...patch } as Shift);
           }),
         );
-        setSaved(`Saved — totals rebuilt from the corrected record at ${nowLabel()}`);
+        setSaved(
+          `Saved — totals rebuilt at ${nowLabel()}. Any hourly bonus re-priced with the hours.`,
+        );
       },
       onCreate: async () => { setSaved('Creating is out of scope for this review.'); },
       onDeleteOneOff: async (id) => {
@@ -130,7 +138,7 @@ export default function PayDetailPreview() {
   // same "save, then read it back" shape production has, minus the round trip.
   const bonusHandlers = useMemo(
     () => (detail ? {
-      onAdd: async ({ amountCents, description }: { amountCents: number; description: string | null }) => {
+      onAdd: async (draft: BonusDraft) => {
         const now = new Date().toISOString();
         setAdjustments((rows) => [
           ...rows,
@@ -141,19 +149,33 @@ export default function PayDetailPreview() {
             period_start: period.start,
             period_end: period.end,
             kind: 'bonus' as const,
-            amount_cents: amountCents,
-            description,
+            // Both money columns are named, one of them null — the shape the CHECK constraints
+            // require, applied here the way Postgres would apply it.
+            calculation_type: draft.calculationType,
+            amount_cents: draft.amountCents,
+            rate_cents_per_hour: draft.rateCentsPerHour,
+            description: draft.description,
             created_at: now,
             updated_at: now,
           },
         ]);
-        setSaved('Bonus added — total owed rebuilt from the statement.');
+        setSaved(
+          draft.calculationType === 'hourly'
+            ? 'Hourly bonus added — priced from this period\u2019s payable hours.'
+            : 'Bonus added — total owed rebuilt from the statement.',
+        );
       },
-      onEdit: async (id: string, { amountCents, description }: { amountCents: number; description: string | null }) => {
+      onEdit: async (id: string, draft: BonusDraft) => {
         setAdjustments((rows) =>
           rows.map((r) =>
             r.id === id
-              ? { ...r, amount_cents: amountCents, description, updated_at: new Date().toISOString() }
+              ? {
+                  ...r,
+                  amount_cents: draft.amountCents,
+                  rate_cents_per_hour: draft.rateCentsPerHour,
+                  description: draft.description,
+                  updated_at: new Date().toISOString(),
+                }
               : r,
           ),
         );
@@ -188,8 +210,9 @@ export default function PayDetailPreview() {
             here can reach the database. Click a person, then Edit a record and watch the day
             total, the period total and the PDF move together. Then open Carlos Herrera and use
             <strong className="font-semibold text-tt-text"> + Add Bonus</strong> — 72.50 hr at
-            $22.00 is $1,595.00 of worked pay, and his two bonuses take the total owed to $1,745.00
-            on the tile, in Pay Details and on the PDF.
+            $22.00 is $1,595.00 of worked pay; two flat bonuses ($100 + $50) and a $2.00/hr
+            incentive worth $145.00 take the total owed to $1,890.00 on the tile, in Pay Details and
+            on the PDF. Then edit one of his shifts and watch the hourly incentive re-price itself.
           </p>
         </header>
 

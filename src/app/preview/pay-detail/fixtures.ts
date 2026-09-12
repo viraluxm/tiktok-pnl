@@ -136,32 +136,61 @@ export const PREVIEW_SHIFTS: Shift[] = [
 // prove the scoping — it must never appear in the period on screen, and the review is worth less
 // without something that is supposed to be invisible.
 //
-// Money is INTEGER CENTS, as the column is. 10000 = $100.00.
+// Money is INTEGER CENTS, as the columns are. 10000 = $100.00 flat; 200 = $2.00 PER PAYABLE HOUR.
+//
+// NOTE WHAT IS *NOT* HERE: no calculated total for the hourly row. Its worth is derived from
+// Carlos's payable hours every time a statement is built, which is what the review is meant to
+// demonstrate — edit one of his shifts and the incentive re-prices itself.
+//
+// Carlos's reviewed figures: 72.50 payable hours at $22.00 = $1,595.00 worked pay, plus a $100 and
+// a $50 flat bonus and a $2.00/hr incentive worth 72.50 x $2.00 = $145.00 — $295.00 of bonus pay,
+// and $1,890.00 owed.
 export const PREVIEW_ADJUSTMENTS: PayAdjustment[] = [
   {
     id: 'pv-b1', user_id: 'preview-owner', employee_id: 'e-carlos',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
-    kind: 'bonus', amount_cents: 10000, description: 'Performance bonus',
+    kind: 'bonus', calculation_type: 'flat', amount_cents: 10000, rate_cents_per_hour: null,
+    description: 'Performance bonus',
     created_at: '2026-09-07T18:00:00.000Z', updated_at: '2026-09-07T18:00:00.000Z',
   },
   {
     id: 'pv-b2', user_id: 'preview-owner', employee_id: 'e-carlos',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
-    kind: 'bonus', amount_cents: 5000, description: 'Attendance incentive',
+    kind: 'bonus', calculation_type: 'flat', amount_cents: 5000, rate_cents_per_hour: null,
+    description: 'Attendance bonus',
     created_at: '2026-09-07T18:05:00.000Z', updated_at: '2026-09-07T18:05:00.000Z',
+  },
+  // THE HOURLY ONE. $2.00 per payable hour — no total stored anywhere.
+  {
+    id: 'pv-b3', user_id: 'preview-owner', employee_id: 'e-carlos',
+    period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
+    kind: 'bonus', calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour: 200,
+    description: 'Productivity incentive',
+    created_at: '2026-09-07T18:10:00.000Z', updated_at: '2026-09-07T18:10:00.000Z',
+  },
+  // A LIVE HOST on an hourly incentive, so the review covers the team whose payable hours are the
+  // APPROVED duration rather than the punch. Adriana's incentive is priced off that same figure.
+  {
+    id: 'pv-b4', user_id: 'preview-owner', employee_id: 'e-adriana',
+    period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
+    kind: 'bonus', calculation_type: 'hourly', amount_cents: null, rate_cents_per_hour: 300,
+    description: 'Live show incentive',
+    created_at: '2026-09-07T19:00:00.000Z', updated_at: '2026-09-07T19:00:00.000Z',
   },
   // A bonus with no reason given — it has to render as something, and "Bonus" is that something.
   {
-    id: 'pv-b3', user_id: 'preview-owner', employee_id: 'e-adriana',
+    id: 'pv-b5', user_id: 'preview-owner', employee_id: 'e-haley',
     period_start: PREVIEW_PERIOD.start, period_end: PREVIEW_PERIOD.end,
-    kind: 'bonus', amount_cents: 7500, description: null,
-    created_at: '2026-09-07T19:00:00.000Z', updated_at: '2026-09-07T19:00:00.000Z',
+    kind: 'bonus', calculation_type: 'flat', amount_cents: 7500, rate_cents_per_hour: null,
+    description: null,
+    created_at: '2026-09-07T19:05:00.000Z', updated_at: '2026-09-07T19:05:00.000Z',
   },
   // ANOTHER PERIOD'S BONUS. Same person, $999.00, and it must be nowhere on this screen.
   {
     id: 'pv-b-other-period', user_id: 'preview-owner', employee_id: 'e-carlos',
     period_start: '2026-08-10', period_end: '2026-08-23',
-    kind: 'bonus', amount_cents: 99900, description: 'Previous period bonus',
+    kind: 'bonus', calculation_type: 'flat', amount_cents: 99900, rate_cents_per_hour: null,
+    description: 'Previous period bonus',
     created_at: '2026-08-24T18:00:00.000Z', updated_at: '2026-08-24T18:00:00.000Z',
   },
 ];

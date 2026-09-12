@@ -1,4 +1,12 @@
--- 150_employee_pay_adjustments.sql — BONUS / INCENTIVE PAY as its own payroll line item.
+-- 150_employee_pay_adjustments.sql — BONUS / INCENTIVE PAY as its own payroll line item,
+-- in two calculation types: a FLAT sum, or a RATE PER CANONICAL PAYABLE HOUR.
+--
+-- 📝 REVISED BEFORE FIRST APPLY (hourly bonuses added). This file has never run anywhere, so the
+--    two calculation types are folded into it rather than chased with a 151 that would alter a
+--    table nothing has ever created. There is no deployed schema to be compatible with, so the
+--    columns below are the shape this table has always had as far as any database is concerned.
+--    Prefix 150 re-verified free across origin/main, every local and remote branch and every
+--    sibling worktree at the time of the revision.
 --
 -- ⛔ NOT APPLIED. As of writing this file has NOT been run against production. This DB has no
 --    migration ledger (see CONVENTIONS.md) — the repo file is the only record, so when it IS
@@ -20,6 +28,13 @@
 --
 -- A bonus is therefore its own row, with its own money, attached to a PERSON and a PAY PERIOD and
 -- to nothing else. It touches no shift, no punch, no rate and no approved duration.
+--
+-- AND A PER-HOUR INCENTIVE IS THE SAME PROBLEM, ONE STEP WORSE. "Everyone gets an extra $2 an hour
+-- this fortnight" has, until now, only one expression in this product: raise `employees.hourly_rate`
+-- and remember to put it back. That rewrites the person's actual wage, applies to every period from
+-- then on, leaves nothing saying why, and is wrong the moment somebody forgets the second half. So
+-- an hourly bonus is a row here too — a rate that is paid PER PAYABLE HOUR, sitting entirely beside
+-- the base rate and changing nothing about it.
 --
 -- WHAT WAS AUDITED FIRST (2026-09-12, read-only, against the LIVE catalog — not the repo):
 --   • No table anywhere in `public` matching bonus / adjust / incentive / payroll / reimburs.
@@ -91,12 +106,25 @@
 -- THE DESIGN, AND THE FOUR THINGS THAT ARE LOAD-BEARING
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 --
--- 1. MONEY IS INTEGER CENTS, NEVER A FLOAT. `amount_cents integer`. This is the repo's dominant
---    money convention — ~30 migrations use `*_cents` (cost_cents, gmv_cents, expected_price_cents,
+-- 1. MONEY IS INTEGER CENTS, NEVER A FLOAT — in BOTH money columns. This is the repo's dominant
+--    convention — ~30 migrations use `*_cents` (cost_cents, gmv_cents, expected_price_cents,
 --    net_payout_cents …) and docs/viewtrack-integration.md states it outright: "integer cents
---    (USD)". `employees.hourly_rate` is `numeric(10,2)` because a RATE is not an amount, and
---    payroll multiplies it by fractional hours; a bonus is a literal dollar amount a human typed,
---    and summing several of them must be exact. The app sums in cents and divides once.
+--    (USD)". $100.00 flat is 10000; $2.50 per hour is 250. The app sums in cents and divides once.
+--
+-- 1b. AN HOURLY BONUS STORES ITS RATE AND NEVER ITS RESULT. There is deliberately NO
+--    `calculated_cents` column and there must never be one. The source of truth is
+--    (employee + pay period + rate) and the answer is that rate multiplied by the employee's
+--    canonical payable hours, worked out by buildPayStatement each time a statement is built.
+--
+--    WHY THAT IS THE WHOLE POINT: a manager fixes a forgotten clock-out and 72.50 payable hours
+--    become 74.00. A derived incentive goes from $145.00 to $148.00 by itself, everywhere, at once.
+--    A stored total would still say $145.00 — on the tile, in Pay Details, on the employee's
+--    statement — and nothing anywhere would ever mention that it had gone stale. Payroll numbers
+--    that silently stop tracking their inputs are the failure this schema is shaped to prevent.
+--
+--    The multiplicand is NOT redefined here either: it is `paidShiftHours()` summed over
+--    `isPayableShift()` rows — the clocked span minus unpaid breaks for fulfillment, the approved
+--    duration for a live host. One definition of an hour, the one payroll already pays.
 --
 -- 2. THE OWNER IS TAKEN FROM THE SESSION, NOT FROM THE CLIENT. `user_id` DEFAULTS to `auth.uid()`,
 --    so the browser never sends an owner id at all, and RLS's WITH CHECK refuses one that is not
@@ -132,9 +160,12 @@
 --       migration, and any rows already written keep their own (still 14-day-aligned) window.
 --
 -- WHAT IS DELIBERATELY NOT HERE: deductions, taxes, reimbursements, commissions, benefits, net pay,
--- approval state, payment evidence. `kind` exists so the table has an honest name and a future
--- category does not need a second table — but its CHECK admits 'bonus' and nothing else today, so
--- no unbuilt concept can be written by accident. Lensed still records no evidence that money moved.
+-- approval state, payment evidence, and any way to attach an incentive to ONE day or ONE shift — an
+-- hourly bonus applies to every payable hour in its period, which needs no extra column and no
+-- join. `kind` exists so the table has an honest name and a future category does not need a second
+-- table, but its CHECK admits 'bonus' and nothing else today, so no unbuilt concept can be written
+-- by accident. `calculation_type` is closed the same way. Lensed still records no evidence that
+-- money moved.
 
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- SECTION 1 — the FK target index on `employees`. Own transaction.
@@ -176,8 +207,18 @@ create table if not exists public.employee_pay_adjustments (
   -- 'bonus' and only 'bonus' today. See the header.
   kind text not null default 'bonus',
 
-  -- Integer cents. Positive: this feature adds pay and never subtracts it.
-  amount_cents integer not null,
+  -- HOW THIS LINE IS WORTH WHAT IT IS WORTH:
+  --   'flat'    a fixed sum          → amount_cents set,         rate_cents_per_hour NULL
+  --   'hourly'  a rate per hour      → rate_cents_per_hour set,  amount_cents NULL
+  -- The pair of shape constraints below make those the only two rows that can exist.
+  calculation_type text not null default 'flat',
+
+  -- FLAT only. Integer cents, positive: this feature adds pay and never subtracts it.
+  amount_cents integer,
+
+  -- HOURLY only. Integer cents PER CANONICAL PAYABLE HOUR — $2.50/hr is 250. Multiplied by the
+  -- employee's payable hours for this period at read time; the product is stored NOWHERE.
+  rate_cents_per_hour integer,
 
   -- The manager's short reason ("Performance bonus"). Optional — the money is the fact; the
   -- sentence is a courtesy to whoever reads the statement in six months.
@@ -193,14 +234,37 @@ create table if not exists public.employee_pay_adjustments (
 
   constraint employee_pay_adjustments_kind_check
     check (kind = 'bonus'),
+  constraint employee_pay_adjustments_calculation_type_check
+    check (calculation_type in ('flat', 'hourly')),
 
-  -- Positive, and capped at $1,000,000 so a slipped keyboard cannot enter a number no payroll run
-  -- could ever be. `> 0`, not `>= 0`: a zero-dollar bonus is a row that says nothing and still
-  -- prints a line on someone's statement.
-  constraint employee_pay_adjustments_amount_positive
-    check (amount_cents > 0),
+  -- ── EXACTLY ONE OF THE TWO MONEY COLUMNS, PER TYPE ──────────────────────────────────────────
+  -- Each type requires its own column to be present and positive AND the other to be NULL, so a
+  -- half-flat/half-hourly row — or a row that is neither — cannot be written at all, and nothing
+  -- downstream has to decide what one would mean.
+  --
+  -- `> 0`, not `>= 0`, in both: a zero-dollar bonus is a row that says nothing and still prints a
+  -- line on somebody's statement.
+  --
+  -- These are written as `type <> X or (...)`, and every branch evaluates to a true/false rather
+  -- than to NULL — `is not null` / `is null` are used rather than a bare comparison — because a
+  -- CHECK that evaluates to NULL is treated as SATISFIED. That trap let a bad `shift_trades` row
+  -- through a harness in migration 138; it does not get to happen twice.
+  constraint employee_pay_adjustments_flat_shape
+    check (calculation_type <> 'flat'
+           or (amount_cents is not null and amount_cents > 0 and rate_cents_per_hour is null)),
+  constraint employee_pay_adjustments_hourly_shape
+    check (calculation_type <> 'hourly'
+           or (rate_cents_per_hour is not null and rate_cents_per_hour > 0 and amount_cents is null)),
+
+  -- Sanity ceilings, so a slipped keyboard cannot enter a number no payroll run could ever be.
+  -- $1,000,000 flat.
   constraint employee_pay_adjustments_amount_sane
-    check (amount_cents <= 100000000),
+    check (amount_cents is null or amount_cents <= 100000000),
+  -- $1,000.00 PER HOUR — far lower, because a rate is MULTIPLIED. Across a two-week period a person
+  -- can be paid for roughly 336 hours, so this already allows a third of a million dollars of
+  -- incentive; its real job is to stop a flat amount typed into the per-hour box.
+  constraint employee_pay_adjustments_rate_sane
+    check (rate_cents_per_hour is null or rate_cents_per_hour <= 100000),
 
   -- THE CANONICAL PAY PERIOD. See note 4 — the literal is pinned to PAY_ANCHOR by test.
   constraint employee_pay_adjustments_period_canonical
@@ -213,14 +277,23 @@ create table if not exists public.employee_pay_adjustments (
 );
 
 comment on table public.employee_pay_adjustments is
-  'BONUS / INCENTIVE PAY. One row = one bonus line item owed to one employee for one pay period. '
+  'BONUS / INCENTIVE PAY. One row = one bonus line item owed to one employee for one pay period, '
+  'either a FLAT sum (amount_cents) or a RATE PER CANONICAL PAYABLE HOUR (rate_cents_per_hour). '
   'Separate from worked time by construction: it references no shift, creates no hours, and changes '
-  'no rate or approved duration. Total owed = (paid hours x hourly_rate) + sum(amount_cents)/100.';
+  'no rate or approved duration. An hourly line stores its RATE only — its dollar value is derived '
+  'from the period''s payable hours every time a statement is built, so correcting a punch re-prices '
+  'it automatically. Never add a calculated-total column. Total owed = worked pay + sum(bonus lines).';
 
 comment on column public.employee_pay_adjustments.user_id is
   'Owner (tenant). Defaults to auth.uid() so the client never supplies it; RLS refuses any other value.';
+comment on column public.employee_pay_adjustments.calculation_type is
+  'flat = a fixed amount_cents; hourly = rate_cents_per_hour x the employee''s canonical payable '
+  'hours for this period. Not editable in the UI — changing type is delete-and-re-add.';
 comment on column public.employee_pay_adjustments.amount_cents is
-  'Integer cents, strictly positive. Never a float — the app sums in cents and divides once.';
+  'FLAT only. Integer cents, strictly positive; NULL on an hourly row. Never a float.';
+comment on column public.employee_pay_adjustments.rate_cents_per_hour is
+  'HOURLY only. Integer cents per canonical payable hour; NULL on a flat row. The dollar value is '
+  'DERIVED at read time and deliberately stored nowhere.';
 comment on column public.employee_pay_adjustments.period_start is
   'Canonical pay-period Monday, per payPeriodFor() in src/lib/employees.ts. CHECK-constrained to the cycle.';
 

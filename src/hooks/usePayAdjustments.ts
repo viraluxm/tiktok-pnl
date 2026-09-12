@@ -2,7 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { createClient } from '@/lib/supabase/client';
-import type { PayAdjustment } from '@/types';
+import type { PayAdjustment, PayAdjustmentCalculationType } from '@/types';
 import { useUser } from './useUser';
 
 // BONUS / INCENTIVE PAY — the only read and write path for `employee_pay_adjustments` (150).
@@ -23,7 +23,10 @@ import { useUser } from './useUser';
 //   • WHOSE EMPLOYEE   a COMPOSITE foreign key (employee_id, user_id) → employees (id, user_id).
 //                      Postgres itself refuses a bonus that pairs this owner with another tenant's
 //                      employee — RLS alone would not, because RLS only constrains user_id.
-//   • HOW MUCH         `amount_cents > 0` and a $1,000,000 cap, as CHECK constraints.
+//   • HOW MUCH         a PAIR of CHECK constraints, one per calculation type, each requiring its
+//                      own column to be present and positive AND the other to be NULL. A row that
+//                      is half flat and half hourly — or neither — cannot exist, so nothing
+//                      downstream has to cope with one.
 //   • WHICH PERIOD     a CHECK pins (period_start, period_end) to the real biweekly cycle, so an
 //                      off-cycle window is refused rather than becoming money no period displays.
 //
@@ -36,14 +39,45 @@ import { useUser } from './useUser';
 // same discipline the shift editor follows and the reason a failed write can never leave a total
 // on screen that nobody owes.
 
-export interface BonusInput {
+/**
+ * What the form collects. EXACTLY ONE of `amount_cents` / `rate_cents_per_hour` is set, and the
+ * other is explicitly NULL rather than omitted — see the write below for why that matters.
+ */
+export interface BonusFields {
+  calculation_type: PayAdjustmentCalculationType;
+  /** FLAT: integer cents, > 0. NULL on an hourly bonus. */
+  amount_cents: number | null;
+  /** HOURLY: integer cents per payable hour, > 0. NULL on a flat bonus. */
+  rate_cents_per_hour: number | null;
+  description: string | null;
+}
+
+export interface BonusInput extends BonusFields {
   employee_id: string;
   /** Canonical period boundaries, straight from payPeriodFor(). Never hand-built. */
   period_start: string;
   period_end: string;
-  /** Integer cents, > 0. The form converts once, in dollarsToCents(). */
-  amount_cents: number;
-  description: string | null;
+}
+
+/**
+ * THE SHAPE THE DATABASE WILL ACCEPT, built in one place from a type and a value.
+ *
+ * Both columns are ALWAYS named, one of them as null. Leaving the unused column out of an UPDATE
+ * would leave whatever was there before in place, and the CHECK constraints would then reject the
+ * row — or, worse on an INSERT, a future default could fill it. Being explicit costs nothing and
+ * means the "exactly one of these two" rule is expressed identically on the way in and in the
+ * schema. (A type change is not offered in the edit form — see BonusPanel — so in practice an
+ * update rewrites the same pair it read, but the write does not depend on that.)
+ */
+export function bonusColumns(fields: BonusFields) {
+  const hourly = fields.calculation_type === 'hourly';
+  return {
+    kind: 'bonus' as const,
+    calculation_type: fields.calculation_type,
+    amount_cents: hourly ? null : fields.amount_cents,
+    rate_cents_per_hour: hourly ? fields.rate_cents_per_hour : null,
+    description: fields.description,
+  };
 }
 
 /**
@@ -90,9 +124,7 @@ export function usePayAdjustments(periodStart: string | null, periodEnd: string 
           employee_id: input.employee_id,
           period_start: input.period_start,
           period_end: input.period_end,
-          kind: 'bonus',
-          amount_cents: input.amount_cents,
-          description: input.description,
+          ...bonusColumns(input),
         })
         .select('*')
         .single();
@@ -102,16 +134,19 @@ export function usePayAdjustments(periodStart: string | null, periodEnd: string 
     onSuccess: refetchAll,
   });
 
-  // Amount and reason only. employee_id and the period are NOT editable: moving a bonus to another
-  // person or another pay period is not a correction, it is a different bonus — delete and re-add,
-  // which leaves an honest created_at behind instead of silently restating history.
+  // The FIGURE and the reason only. employee_id, the period and the CALCULATION TYPE are not
+  // editable: moving a bonus to another person or another pay period is not a correction, it is a
+  // different bonus — and so is turning $2.00 from a one-off payment into a per-hour rate worth
+  // seventy times as much. Each is delete-and-re-add, which leaves an honest created_at behind
+  // instead of silently restating history. (The write below is still shaped by bonusColumns, so it
+  // sets both money columns explicitly and cannot leave a half-converted row behind.)
   const updateBonus = useMutation({
-    mutationFn: async ({ id, amount_cents, description }: {
-      id: string; amount_cents: number; description: string | null;
-    }) => {
+    mutationFn: async ({ id, ...fields }: { id: string } & BonusFields) => {
+      const { calculation_type, ...patch } = bonusColumns(fields);
+      void calculation_type; // never changed by an edit; named here only to keep it out of the patch
       const { data, error } = await supabase
         .from('employee_pay_adjustments')
-        .update({ amount_cents, description })
+        .update(patch)
         .eq('id', id)
         .select('*')
         .single();
@@ -141,8 +176,11 @@ export function usePayAdjustments(periodStart: string | null, periodEnd: string 
 /** Tokens in, sentences out — a raw Postgres error never reaches a manager. */
 export function bonusWriteErrorMessage(error: { message?: string; code?: string } | null): string {
   const raw = error?.message ?? '';
-  if (raw.includes('employee_pay_adjustments_amount_positive')) return 'A bonus has to be more than $0.00.';
+  if (raw.includes('employee_pay_adjustments_flat_shape')) return 'A flat bonus needs an amount of more than $0.00.';
+  if (raw.includes('employee_pay_adjustments_hourly_shape')) return 'An hourly bonus needs a per-hour rate of more than $0.00.';
   if (raw.includes('employee_pay_adjustments_amount_sane')) return 'That amount is too large to be a bonus.';
+  if (raw.includes('employee_pay_adjustments_rate_sane')) return 'That is too large to be a per-hour bonus rate.';
+  if (raw.includes('employee_pay_adjustments_calculation_type_check')) return 'A bonus must be either a flat amount or an hourly rate.';
   if (raw.includes('employee_pay_adjustments_period_canonical')) return 'That is not a real pay period. Reopen the Pay tab and try again.';
   if (raw.includes('employee_pay_adjustments_description_len')) return 'That reason is too long — keep it under 120 characters.';
   if (raw.includes('employee_pay_adjustments_employee_fk')) return 'That employee is not on your roster.';

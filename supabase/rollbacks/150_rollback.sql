@@ -6,9 +6,14 @@
 -- ⚠️ THIS DESTROYS MONEY OWED. Every bonus a manager has entered lives in this table and nowhere
 --    else — there is no second copy and no derivation that could rebuild it. Export first:
 --
---      select id, user_id, employee_id, period_start, period_end, amount_cents, description,
---             created_at, updated_at
+--      select id, user_id, employee_id, period_start, period_end, calculation_type,
+--             amount_cents, rate_cents_per_hour, description, created_at, updated_at
 --      from public.employee_pay_adjustments order by created_at;
+--
+--    An HOURLY row's export carries its RATE, not its dollar value — nothing stores that. To record
+--    what each one was worth at the moment of the rollback, capture the Pay Details or the PDF for
+--    the affected periods first; it cannot be reconstructed from this table alone once the payable
+--    hours behind it move.
 --
 -- EFFECT OF ROLLING BACK: Total Owed on the Pay tab, in Pay Details and on the PDF returns to
 -- worked pay alone. NOTHING ELSE CHANGES — no shift, punch, break, confirmation, approved duration

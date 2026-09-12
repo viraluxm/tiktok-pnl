@@ -69,20 +69,74 @@ select date '2026-07-17' - 5                                   as derived_period
 -- EXPECT matches_migration_literal = true. src/lib/pay/bonus.test.mjs asserts the same thing in CI
 -- against the real helper, so this is a second pair of eyes, not the only check.
 
+\echo '── 8. the two shape constraints, evaluated on THIS engine before they are created ──'
+-- The predicates below are the CHECK bodies from migration 150, character for character, run as a
+-- plain SELECT over a truth table. Nothing is created and nothing is written — this is the real
+-- Postgres deciding whether the constraints admit exactly the rows they are meant to.
+select ct, amt, rate, should_pass,
+       (ct <> 'flat'   or (amt  is not null and amt  > 0 and rate is null)) as flat_shape_ok,
+       (ct <> 'hourly' or (rate is not null and rate > 0 and amt  is null)) as hourly_shape_ok,
+       ((ct <> 'flat'   or (amt  is not null and amt  > 0 and rate is null))
+        and (ct <> 'hourly' or (rate is not null and rate > 0 and amt  is null))) = should_pass
+                                                                            as matches_expectation
+from (values
+  ('flat',   10000, null,  true ),   -- a $100.00 flat bonus
+  ('flat',   null,  null,  false),   -- flat with no amount
+  ('flat',   0,     null,  false),   -- flat, zero
+  ('flat',   -1,    null,  false),   -- flat, negative
+  ('flat',   10000, 200,   false),   -- flat carrying a rate as well
+  ('hourly', null,  200,   true ),   -- a $2.00/hr incentive
+  ('hourly', null,  null,  false),   -- hourly with no rate
+  ('hourly', null,  0,     false),   -- hourly, zero
+  ('hourly', 10000, 200,   false),   -- hourly carrying an amount as well
+  ('hourly', 10000, null,  false)    -- hourly with only an amount
+) as t(ct, amt, rate, should_pass)
+order by ct, amt nulls first, rate nulls first;
+-- EXPECT matches_expectation = true on ALL TEN rows. Five should_pass=false rows and two
+-- should_pass=true rows means the check is not vacuous in either direction.
+
+\echo '── 9. the sanity ceilings, same treatment ──'
+select amt, rate, should_pass,
+       ((amt  is null or amt  <= 100000000) and (rate is null or rate <= 100000)) = should_pass
+         as matches_expectation
+from (values
+  (100000000, null,   true ),   -- $1,000,000.00 flat — allowed
+  (100000001, null,   false),   -- a dollar over
+  (null,      100000, true ),   -- $1,000.00/hr — allowed
+  (null,      100001, false)    -- a cent over
+) as t(amt, rate, should_pass);
+-- EXPECT matches_expectation = true on all four.
+
 \echo '── POST-APPLY VERIFICATION (run only after sections 1-3 have been applied) ──'
--- 8. The constraints actually landed.
+-- 10. The constraints actually landed — EXPECT nine, including BOTH shape checks.
 -- select conname, pg_get_constraintdef(oid) from pg_constraint
 -- where conrelid = 'public.employee_pay_adjustments'::regclass order by conname;
 --
--- 9. RLS is ON and the policy is the own-row one.
+-- 10b. And the two money columns are NULLABLE — the shape checks, not NOT NULL, are what police
+--      them, and a stray NOT NULL would make one of the two types unwritable.
+-- select column_name, is_nullable from information_schema.columns
+-- where table_schema = 'public' and table_name = 'employee_pay_adjustments'
+--   and column_name in ('amount_cents', 'rate_cents_per_hour', 'calculation_type');
+-- EXPECT amount_cents YES, rate_cents_per_hour YES, calculation_type NO.
+--
+-- 10c. There is NO stored total. If a column matching /calculated|total/ ever appears on this
+--      table, an hourly bonus has been frozen and will go stale — that is a bug, not a feature.
+-- select count(*) as forbidden_columns,
+--        (select count(*) from information_schema.columns
+--         where table_schema = 'public' and table_name = 'employee_pay_adjustments') as rows_examined
+-- from information_schema.columns
+-- where table_schema = 'public' and table_name = 'employee_pay_adjustments'
+--   and column_name ~* 'calculated|total';
+--
+-- 11. RLS is ON and the policy is the own-row one.
 -- select relrowsecurity from pg_class where oid = 'public.employee_pay_adjustments'::regclass;
 -- select policyname, cmd, qual, with_check from pg_policies
 -- where tablename = 'employee_pay_adjustments';
 --
--- 10. `authenticated` can actually use it (the CONVENTIONS.md failure mode).
+-- 12. `authenticated` can actually use it (the CONVENTIONS.md failure mode).
 -- select privilege_type from information_schema.role_table_grants
 -- where table_name = 'employee_pay_adjustments' and grantee = 'authenticated' order by 1;
 -- EXPECT DELETE, INSERT, SELECT, UPDATE.
 --
--- 11. The table is empty and stays empty until a manager enters a bonus. No backfill exists.
+-- 13. The table is empty and stays empty until a manager enters a bonus. No backfill exists.
 -- select count(*) as bonus_rows from public.employee_pay_adjustments;   -- EXPECT 0

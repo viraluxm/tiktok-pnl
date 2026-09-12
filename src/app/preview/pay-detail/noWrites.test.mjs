@@ -81,18 +81,31 @@ check('the preview does no hours arithmetic of its own',
 //     never work a bonus total out for itself, or the figure approved here would not be the figure
 //     that ships.
 check('the preview feeds its adjustments into the statement build', /adjustments,/.test(view));
-check('...and re-selects them per employee with the shared selector',
-  /bonusSummaryFor\(adjustments, p\.employee\.id, period\)/.test(view));
+check('...and re-selects them per employee, priced off that employee\'s own payable hours',
+  /bonusSummaryFor\(adjustments, p\.employee\.id, period, p\.hours\)/.test(view));
 check('...adding them with the shared rule, never by hand',
   /totalOwedOf\(p\.pay, bonus\.total\)/.test(view) &&
     !/amount_cents\s*\+|bonusItems\.reduce|\/ 100|\* 100/.test(view));
+check('...and NEVER pricing an hourly bonus itself — no rate x hours in the preview',
+  !/rate_cents_per_hour\s*\*|\*\s*p\.hours|\*\s*paidHours/.test(view));
 check('the preview hands the bonus write path to the real panel', /bonus=\{bonusHandlers\}/.test(view));
 check('the fixtures carry a bonus from ANOTHER pay period, so scoping is visible',
   /period_start: '2026-08-10'/.test(fx) && /period_end: '2026-08-23'/.test(fx));
 check('...and a bonus with no description, so the fallback label is visible',
   /description: null/.test(fx));
 check('fixture money is integer cents, never dollars',
-  /amount_cents: \d+/.test(fx) && !/amount_cents: \d+\.\d/.test(fx));
+  /amount_cents: \d+/.test(fx) && !/amount_cents: \d+\.\d/.test(fx) &&
+    /rate_cents_per_hour: \d+/.test(fx) && !/rate_cents_per_hour: \d+\.\d/.test(fx));
+// BOTH calculation types must be on the page, or half the feature is unreviewed.
+check('the fixtures carry FLAT bonuses', /calculation_type: 'flat'/.test(fx));
+check('...and HOURLY ones', /calculation_type: 'hourly'/.test(fx));
+check('...including one for a LIVE HOST, whose payable hours are the approved duration',
+  /employee_id: 'e-adriana'[\s\S]{0,220}calculation_type: 'hourly'/.test(fx));
+check('every fixture row sets BOTH money columns, one of them null — the shape the CHECKs require',
+  (fx.match(/calculation_type: '(flat|hourly)'/g) || []).length ===
+    (fx.match(/rate_cents_per_hour:/g) || []).length);
+check('NO fixture row stores a calculated hourly total — the whole point of deriving it',
+  !/calculated/i.test(fx));
 
 // 7. Production must not depend on the preview. Fixtures leaking into the app would put invented
 //    employees one import away from a real Pay tab.

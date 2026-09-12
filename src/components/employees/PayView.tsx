@@ -21,7 +21,8 @@ import { canDeleteRecord, deleteBlockedReasonFor } from '@/lib/pay/deleteEligibi
 import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
-import { usePayAdjustments } from '@/hooks/usePayAdjustments';
+import { usePayAdjustments, type BonusFields } from '@/hooks/usePayAdjustments';
+import type { BonusDraft } from './BonusPanel';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
 import PayGrid, { type PayTile } from './PayGrid';
@@ -38,6 +39,19 @@ const PAY_ROLE_OPTIONS: { value: PayRole; label: string }[] = [
   { value: 'fulfillment', label: 'Fulfillment' },
   { value: 'host', label: 'Host' },
 ];
+
+/**
+ * The form's draft → the row's columns. One renaming, in one place, so the UI does not have to know
+ * the column names and the hook does not have to know the form's.
+ */
+function toBonusFields(draft: BonusDraft): BonusFields {
+  return {
+    calculation_type: draft.calculationType,
+    amount_cents: draft.amountCents,
+    rate_cents_per_hour: draft.rateCentsPerHour,
+    description: draft.description,
+  };
+}
 
 /** Which person's detail is open, and the timestamp the statement/PDF is stamped with. Captured
  *  at OPEN time rather than during render, so nothing here reads a clock while rendering. */
@@ -162,17 +176,16 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     () =>
       detail
         ? {
-            onAdd: async ({ amountCents, description }: { amountCents: number; description: string | null }) => {
+            onAdd: async (draft: BonusDraft) => {
               await addBonus.mutateAsync({
                 employee_id: detail.employee.id,
                 period_start: period.start,
                 period_end: period.end,
-                amount_cents: amountCents,
-                description,
+                ...toBonusFields(draft),
               });
             },
-            onEdit: async (id: string, { amountCents, description }: { amountCents: number; description: string | null }) => {
-              await updateBonus.mutateAsync({ id, amount_cents: amountCents, description });
+            onEdit: async (id: string, draft: BonusDraft) => {
+              await updateBonus.mutateAsync({ id, ...toBonusFields(draft) });
             },
             onDelete: async (id: string) => {
               await deleteBonus.mutateAsync(id);
@@ -201,7 +214,10 @@ export default function PayView({ employees }: { employees: Employee[] }) {
   // so a tile and that person's Pay Details cannot disagree about either figure.
   const tiles = useMemo<PayTile[]>(
     () => filteredPay.map((p) => {
-      const bonus = bonusSummaryFor(adjustments, p.employee.id, period);
+      // p.hours IS the statement's paidHours — computePay and buildPayStatement sum the same
+      // per-row function over the same predicate (pinned in statement.test.mjs), which is what lets
+      // an hourly incentive be priced identically here and in the drawer.
+      const bonus = bonusSummaryFor(adjustments, p.employee.id, period, p.hours);
       return {
         employee: p.employee,
         hours: p.hours,
