@@ -1,6 +1,6 @@
--- 150: FIFO foundation, part 2 — populate the 149 columns. REQUIRES 149.
+-- 153: FIFO foundation, part 2 — populate the 152 columns. REQUIRES 152.
 --
--- Seven CREATE OR REPLACE statements. Their bodies are migration-105-style: the LIVE
+-- Eight CREATE OR REPLACE statements. Their bodies are migration-105-style: the LIVE
 -- pg_get_functiondef() output pulled from production on 2026-09-11, with a small number of
 -- surgical edits and NOTHING else changed. Each edit was applied by exact string match and
 -- asserted to hit exactly one occurrence, so the diff against production is only what is
@@ -8,14 +8,27 @@
 -- locking, org/store scoping, idempotency, the subtransaction + unique_violation replay
 -- handler, Option-X FIFO selection and the p_allow_negative oversell path are all untouched.
 --
--- ── WHY lensed_add_batch_admin IS BASED ON PRODUCTION, NOT ON MIGRATION 045 ────────────
--- They differ. 045 does not stamp qty_added; production does, and production also has every
--- comment stripped. Migration 083's header asserts the ViewTrack path "already does" stamp
--- qty_added — true of the live function, false of the repo file. Rebuilding this function
--- from 045 would silently REVERT a live behaviour. The captured production baseline is at
--- docs/runbooks/prod-only-cost-objects/lensed_add_batch_admin.prod.sql. Every other function
--- here was verified byte-identical between its repo migration and production first
--- (log_auction/_as vs 105, add/edit/delete_batch vs 083, unbind/_as vs 083_lensed_unbind_multisku).
+-- ── PROVENANCE OF EACH BASELINE (checked by normalized diff against live prosrc) ────────
+-- Every one of the eight bodies below was verified byte-identical to production before being
+-- edited, so nothing unexplained is overwritten. The WINNING pre-feature definition of each —
+-- which is also its ROLLBACK source — is:
+--
+--   lensed_add_batch        083_fifo_batch_edit_delete
+--   lensed_add_batch_admin  046_viewtrack_void_batch      ← NOT 045: 046 supersedes it
+--   lensed_edit_batch       083_fifo_batch_edit_delete
+--   lensed_settle_batch     035b_shared_inventory_orgs
+--   lensed_log_auction      105_bind_records_short_at_bind
+--   lensed_log_auction_as   105_bind_records_short_at_bind
+--   lensed_unbind           083_lensed_unbind_multisku
+--   lensed_unbind_as        134_squish_multibind_audit    ← NOT 083_lensed_unbind_multisku,
+--                                                            which does not define it; reverting
+--                                                            from anywhere else re-opens the
+--                                                            uq_sku_batches_source_ref collision
+--                                                            that 134 fixed.
+--
+-- A note on lensed_add_batch_admin specifically: migration 045 does NOT stamp qty_added, which
+-- once looked like production drift. It is not. 046 redefines the function WITH qty_added and
+-- is byte-identical to live. 045 is simply superseded.
 --
 -- ── THE COMPLETE SET OF BEHAVIOUR CHANGES ─────────────────────────────────────────────
 --
@@ -43,7 +56,7 @@
 --
 -- 3. AN AUTHORITATIVE qty_added IS NEVER RE-BASED BY A STOCK CORRECTION.
 --    lensed_edit_batch previously rewrote qty_added to the new quantity whenever a layer
---    looked untouched. On a post-149 batch that erases the receipt: receive 500, correct
+--    looked untouched. On a post-152 batch that erases the receipt: receive 500, correct
 --    current stock to 450, and nothing remembers that 500 arrived. The re-base is now gated
 --    on NOT qty_added_authoritative, so legacy layers behave EXACTLY as before and new layers
 --    keep their receipt. (coalesce guards the concurrent-delete race where the post-lock
@@ -63,13 +76,13 @@
 --    correctly), then settle takes it to 0 and Consumed silently becomes 0 - 0 = 0. Growing
 --    qty_added by the same deficit keeps "Received 5 / Remaining 0 / Consumed 5" truthful.
 --    Gated on qty_added_authoritative, so legacy layers are byte-for-byte unchanged. This is
---    included NOT as scope creep but because the derived figure 149 introduces would
+--    included NOT as scope creep but because the derived figure 152 introduces would
 --    otherwise regress on the very first oversell-then-settle.
 --
 -- ── WHAT THIS MIGRATION STILL DOES NOT DO ─────────────────────────────────────────────
 --   • No repricing. unit_cost_cents_snapshot is written exactly when it was before, from
 --     exactly the same value. Every historical COGS figure is byte-identical after this.
---   • No backfill of source_batch_id. Pre-149 lines stay NULL.
+--   • No backfill of source_batch_id. Pre-152 lines stay NULL.
 --   • No new RPC. The finalize-cost / historical-repricing RPC is a SEPARATE, REVIEWED stage.
 --   • No change to FIFO selection. The whole-line "Option X" rule (oldest layer that covers
 --     the entire line quantity; a line is never split) is preserved verbatim, including its
@@ -81,8 +94,8 @@
 --   • No change to the prod-only per-minute cost-mirror cron.
 --
 -- ── APPLY ORDER ───────────────────────────────────────────────────────────────────────
--- 149 first (schema, inert). This file second. 150 cannot be applied against a schema
--- without 149's columns — the INSERT column lists name them.
+-- 152 first (schema, inert). This file second. 153 cannot be applied against a schema
+-- without 152's columns — the INSERT column lists name them.
 --
 -- ── CLASS ─────────────────────────────────────────────────────────────────────────────
 -- CLASS B per CLAUDE.md: CREATE OR REPLACE on functions the live capture path calls. Needs a
@@ -109,7 +122,7 @@ begin
   end if;
   perform pg_advisory_xact_lock(hashtextextended('sku:'||p_sku_id::text, 0));
   select coalesce(max(sequence),0)+1 into v_seq from public.sku_batches where sku_id = p_sku_id and org_id = v_org;
-  -- 150: a manually added layer is a RECEIPT — qty_added is authoritative from creation.
+  -- 153: a manually added layer is a RECEIPT — qty_added is authoritative from creation.
   -- Cost state is explicit: blank cost is 'pending', any number (INCLUDING 0) is 'final'.
   insert into public.sku_batches
     (user_id, org_id, sku_id, qty_remaining, qty_added, qty_added_authoritative, unit_cost_cents, cost_status, sequence)
@@ -168,7 +181,7 @@ begin
   select coalesce(max(sequence),0)+1 into v_seq
     from public.sku_batches where sku_id = p_sku_id and org_id = p_org_id;
 
-  -- 150: ViewTrack pushes a real receipt, so qty_added is authoritative; cost state explicit.
+  -- 153: ViewTrack pushes a real receipt, so qty_added is authoritative; cost state explicit.
   insert into public.sku_batches
     (user_id, org_id, sku_id, qty_remaining, qty_added, qty_added_authoritative, unit_cost_cents, cost_status, sequence, source, external_ref)
   values
@@ -193,7 +206,7 @@ AS $function$
 declare
   v_org uuid := public.current_user_org();
   v_sku uuid; v_old int; v_added int; v_new_added int; v_was_untouched boolean;
-  v_auth boolean;   -- 150: is qty_added the authoritative original receipt?
+  v_auth boolean;   -- 153: is qty_added the authoritative original receipt?
   v_delta int; v_qoh int; v_final_cost int;
 begin
   if auth.uid() is null then raise exception 'NOT_AUTHENTICATED' using errcode='28000'; end if;
@@ -221,10 +234,10 @@ begin
   -- Untouched BEFORE the edit ⇒ re-base qty_added with the correction so it stays
   -- untouched. Otherwise keep qty_added EXACTLY (legacy NULL stays NULL; a consumed
   -- original is never rewritten).
-  -- 150: an AUTHORITATIVE qty_added is the ORIGINAL QUANTITY RECEIVED and is never re-based
+  -- 153: an AUTHORITATIVE qty_added is the ORIGINAL QUANTITY RECEIVED and is never re-based
   -- by an ordinary current-stock correction. Receive 500, correct stock to 450, and the row
   -- still says 500 arrived. Legacy layers (qty_added_authoritative = false) keep the exact
-  -- pre-150 behaviour, including the re-base, so nothing about existing data changes.
+  -- pre-153 behaviour, including the re-base, so nothing about existing data changes.
   v_was_untouched := (not coalesce(v_auth, false) and v_added is not null and v_old = v_added);
   v_new_added := case when v_was_untouched then p_qty_remaining else v_added end;
   v_delta := p_qty_remaining - v_old;
@@ -233,7 +246,7 @@ begin
      set qty_remaining = p_qty_remaining,
          qty_added = v_new_added,
          unit_cost_cents = case when p_set_cost then p_unit_cost_cents else b.unit_cost_cents end,
-         -- 150: setting a cost RESOLVES its certainty, so the state moves with it — blank to
+         -- 153: setting a cost RESOLVES its certainty, so the state moves with it — blank to
          -- 'pending', any number (including 0) to 'final'. This also lifts a legacy row out of
          -- 'legacy' once a human asserts its cost, and it is what keeps
          -- sku_batches_cost_status_chk true by construction. A qty-only edit (p_set_cost false)
@@ -270,7 +283,7 @@ begin
   select qty_remaining into v_q from public.sku_batches where id = p_batch_id and org_id = v_org;
   if v_q >= 0 then return 0; end if;
   v_deficit := -v_q;
-  -- 150: settle brings an oversold layer up to 0 by ADDING v_deficit units that genuinely
+  -- 153: settle brings an oversold layer up to 0 by ADDING v_deficit units that genuinely
   -- arrived. An authoritative receipt total must grow by the same amount, or the derived
   -- Consumed (qty_added - qty_remaining) would report 0 for units that really were consumed
   -- (seed layer qty_added=0 -> sells 5 -> qty_remaining=-5 -> settle -> 0-0=0, wrong).
@@ -298,7 +311,7 @@ declare
   v_total int := 0; v_missing boolean := false; v_expected int; v_seq int; v_item uuid;
   v_is_bundle boolean := (jsonb_array_length(p_skus) > 1);
   v_be record; v_costed jsonb := '[]'::jsonb; v_short boolean;
-  v_batch_id uuid;   -- 150: the layer this line actually drew, persisted as provenance
+  v_batch_id uuid;   -- 153: the layer this line actually drew, persisted as provenance
 begin
   if v_user is null then raise exception 'NOT_AUTHENTICATED' using errcode='28000'; end if;
   if v_org is null then raise exception 'NO_ORG' using errcode='P0001'; end if;
@@ -349,7 +362,7 @@ begin
           end if;
           update public.sku_batches set qty_remaining = qty_remaining - v_be.qty where id = v_batch.id;
           update public.inventory_skus set qty_on_hand = qty_on_hand - v_be.qty where id = v_be.inventory_sku_id and org_id = v_org;
-          -- 150: record WHICH layer supplied this line, alongside the cost it supplied.
+          -- 153: record WHICH layer supplied this line, alongside the cost it supplied.
           update public.live_auction_item_skus set unit_cost_cents_snapshot = v_batch.unit_cost_cents, short_at_bind = v_short, source_batch_id = v_batch.id
             where auction_item_id = v_existing.id and inventory_sku_id = v_be.inventory_sku_id and user_id = v_user;
         end loop;
@@ -388,7 +401,7 @@ begin
       select id, sku_number, title, unit_cost_cents into v_sku from public.inventory_skus where id = v_sku_id and org_id = v_org;
       if not found then raise exception 'SKU_NOT_FOUND' using errcode='22023'; end if;
       v_short := false;
-      v_batch_id := null;   -- 150: reset PER LINE. v_batch is a loop-scoped record that
+      v_batch_id := null;   -- 153: reset PER LINE. v_batch is a loop-scoped record that
                             -- survives iterations, so a not_sold line (which draws nothing)
                             -- would otherwise inherit the previous line's batch id.
       if p_result = 'sold' then
@@ -404,7 +417,7 @@ begin
         update public.sku_batches set qty_remaining = qty_remaining - v_qty where id = v_batch.id;
         update public.inventory_skus set qty_on_hand = qty_on_hand - v_qty where id = v_sku_id and org_id = v_org;
         v_unit_cost := v_batch.unit_cost_cents;
-        v_batch_id  := v_batch.id;   -- 150: same layer whose qty_remaining was just decremented
+        v_batch_id  := v_batch.id;   -- 153: same layer whose qty_remaining was just decremented
       else
         v_unit_cost := v_sku.unit_cost_cents;
       end if;
@@ -462,7 +475,7 @@ declare
   v_total int := 0; v_missing boolean := false; v_expected int; v_seq int; v_item uuid;
   v_is_bundle boolean := (jsonb_array_length(p_skus) > 1);
   v_be record; v_costed jsonb := '[]'::jsonb; v_short boolean;
-  v_batch_id uuid;   -- 150: the layer this line actually drew, persisted as provenance
+  v_batch_id uuid;   -- 153: the layer this line actually drew, persisted as provenance
 begin
   if v_user is null then raise exception 'NOT_AUTHENTICATED' using errcode='28000'; end if;
   if v_org is null then raise exception 'NO_ORG' using errcode='P0001'; end if;
@@ -513,7 +526,7 @@ begin
           end if;
           update public.sku_batches set qty_remaining = qty_remaining - v_be.qty where id = v_batch.id;
           update public.inventory_skus set qty_on_hand = qty_on_hand - v_be.qty where id = v_be.inventory_sku_id and org_id = v_org;
-          -- 150: record WHICH layer supplied this line, alongside the cost it supplied.
+          -- 153: record WHICH layer supplied this line, alongside the cost it supplied.
           update public.live_auction_item_skus set unit_cost_cents_snapshot = v_batch.unit_cost_cents, short_at_bind = v_short, source_batch_id = v_batch.id
             where auction_item_id = v_existing.id and inventory_sku_id = v_be.inventory_sku_id and user_id = v_user;
         end loop;
@@ -552,7 +565,7 @@ begin
       select id, sku_number, title, unit_cost_cents into v_sku from public.inventory_skus where id = v_sku_id and org_id = v_org;
       if not found then raise exception 'SKU_NOT_FOUND' using errcode='22023'; end if;
       v_short := false;
-      v_batch_id := null;   -- 150: reset PER LINE. v_batch is a loop-scoped record that
+      v_batch_id := null;   -- 153: reset PER LINE. v_batch is a loop-scoped record that
                             -- survives iterations, so a not_sold line (which draws nothing)
                             -- would otherwise inherit the previous line's batch id.
       if p_result = 'sold' then
@@ -568,7 +581,7 @@ begin
         update public.sku_batches set qty_remaining = qty_remaining - v_qty where id = v_batch.id;
         update public.inventory_skus set qty_on_hand = qty_on_hand - v_qty where id = v_sku_id and org_id = v_org;
         v_unit_cost := v_batch.unit_cost_cents;
-        v_batch_id  := v_batch.id;   -- 150: same layer whose qty_remaining was just decremented
+        v_batch_id  := v_batch.id;   -- 153: same layer whose qty_remaining was just decremented
       else
         v_unit_cost := v_sku.unit_cost_cents;
       end if;
@@ -656,7 +669,7 @@ begin
     if v_line.cost is not null then
       select coalesce(max(sequence), 0) + 1 into v_seq
         from public.sku_batches where sku_id = v_line.inventory_sku_id and org_id = v_org;
-      -- 150: the compensating layer is created here and now, and this branch only runs when
+      -- 153: the compensating layer is created here and now, and this branch only runs when
       -- v_line.cost IS NOT NULL, so both new facts are provable: qty_added is its true
       -- starting quantity, and the cost is known ⇒ 'final'.
       insert into public.sku_batches
@@ -722,7 +735,7 @@ begin
     if v_line.cost is not null then
       select coalesce(max(sequence), 0) + 1 into v_seq
         from public.sku_batches where sku_id = v_line.inventory_sku_id and org_id = v_org;
-      -- 150: the compensating layer is created here and now, and this branch only runs when
+      -- 153: the compensating layer is created here and now, and this branch only runs when
       -- v_line.cost IS NOT NULL, so both new facts are provable: qty_added is its true
       -- starting quantity, and the cost is known ⇒ 'final'.
       insert into public.sku_batches

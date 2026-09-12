@@ -116,31 +116,25 @@ See [`prod-only-cost-objects/sku_cost_mirror_runs.prod.sql`](./prod-only-cost-ob
 
 ---
 
-## 3. `lensed_add_batch_admin` — repo/prod drift on a live function
+## 3. `lensed_add_batch_admin` — ~~repo/prod drift~~ **CORRECTED: no drift**
 
-`supabase/migrations/045_viewtrack_add_batch_admin.sql` does **not** stamp `qty_added`. Production
-**does**:
+*An earlier revision of this file claimed production had drifted from the repo here. That was
+wrong, and it is corrected rather than deleted because a rollback plan was briefly written
+against it.*
 
-```sql
--- migration 045 (repo)
-insert into public.sku_batches
-  (user_id, org_id, sku_id, qty_remaining, unit_cost_cents, sequence, source, external_ref)
-values (v_user, p_org_id, p_sku_id, p_qty, p_unit_cost_cents, v_seq, 'viewtrack', p_external_ref)
+Migration **045** does not stamp `qty_added`. Migration **046** redefines the same function and
+**does**, and 046 is byte-identical to the live body (verified by normalized diff against
+`prosrc`). 045 is simply superseded — the ordinary redefinition pattern this repo uses
+everywhere. Migration 083's header assertion that "the ViewTrack path already does (045/046)"
+is correct as written.
 
--- production (live)
-insert into public.sku_batches
-  (user_id, org_id, sku_id, qty_remaining, qty_added, unit_cost_cents, sequence, source, external_ref)
-values (v_user, p_org_id, p_sku_id, p_qty, p_qty,    p_unit_cost_cents, v_seq, 'viewtrack', p_external_ref)
-```
+**Consequence for rollback:** the pre-feature body of `lensed_add_batch_admin` is recoverable
+from `046_viewtrack_void_batch.sql`, not from 045. Reverting from 045 would drop `qty_added`
+stamping on every new ViewTrack layer.
 
-The live version also has every explanatory comment stripped. Migration 083's header asserts *"the
-ViewTrack path already does (045/046)"* stamp `qty_added` — true of production, false of the repo
-file. The correct prod body is captured at
+The live capture is retained at
 [`prod-only-cost-objects/lensed_add_batch_admin.prod.sql`](./prod-only-cost-objects/lensed_add_batch_admin.prod.sql)
-and **that** is the baseline any future `CREATE OR REPLACE` of this function must start from — per
-CLAUDE.md's `prosrc` rule.
-
----
+as a belt-and-braces reference.
 
 ## 4. `pnl_order_grain` — the canonical COGS view, defined nowhere in the repo
 
@@ -151,7 +145,7 @@ selects from it directly). Captured verbatim at
 [`prod-only-cost-objects/pnl_order_grain.prod.sql`](./prod-only-cost-objects/pnl_order_grain.prod.sql).
 
 Its cost expression — `sum(las.qty * coalesce(las.unit_cost_cents_snapshot, isk.unit_cost_cents))`
-— reads the snapshot dynamically, which is why migration 151's reprice propagates to it with
+— reads the snapshot dynamically, which is why migration 154's reprice propagates to it with
 no further work. `supabase/tests/fifo_source_batch/pnl_surfaces.sql` installs this exact text
 in the throwaway test database so the propagation is **proven, not assumed**.
 

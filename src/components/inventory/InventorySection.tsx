@@ -33,8 +33,8 @@ const fmtCents = (c: number | null) => (c == null ? '—' : `$${(c / 100).toFixe
 // the disabled-button tooltip matches what the server would actually return. The
 // server enforces the rule regardless of what the UI shows.
 function batchDeleteBlockReason(b: SkuBatch, totalLayers: number): string | null {
-  // 151: an attributable layer that has given up units has sale rows pointing at it
-  // (every draw since migration 150 records source_batch_id). Deleting it would erase
+  // 154: an attributable layer that has given up units has sale rows pointing at it
+  // (every draw since migration 153 records source_batch_id). Deleting it would erase
   // those sales' provenance, so the RPC raises BATCH_HAS_CONSUMPTION and the database FK
   // refuses it outright. Say so here rather than letting the user discover it on click.
   if (b.qty_added_authoritative === true && b.qty_added != null && b.qty_added !== b.qty_remaining) {
@@ -228,7 +228,7 @@ export default function InventorySection() {
   const [editBatchQty, setEditBatchQty] = useState('');   // remaining quantity
   const [editBatchCost, setEditBatchCost] = useState(''); // unit cost, dollars
   const [confirmDeleteBatchId, setConfirmDeleteBatchId] = useState<string | null>(null);
-  // 151: the ONE cost path for an attributable layer. Separate from the qty editor above
+  // 154: the ONE cost path for an attributable layer. Separate from the qty editor above
   // because it is a different operation with different consequences — it reprices the
   // sales that layer already supplied.
   const [costingBatchId, setCostingBatchId] = useState<string | null>(null);
@@ -857,7 +857,7 @@ export default function InventorySection() {
                     // (prevents overlapping/double submissions on shared stock).
                     const mutating = editBatch.isPending || deleteBatch.isPending || settleBatch.isPending;
                     const qtyClass = `tabular-nums ${b.qty_remaining < 0 ? 'text-tt-red font-semibold' : 'text-tt-text'}`;
-                    // 149: Received/Consumed are DERIVED, never stored, and shown only when
+                    // 152: Received/Consumed are DERIVED, never stored, and shown only when
                     // qty_added is provably this layer's original quantity. A legacy layer
                     // renders exactly as it did before — remaining @ cost — rather than a
                     // plausible-looking number we cannot stand behind. "Consumed", not
@@ -873,14 +873,14 @@ export default function InventorySection() {
                         <span className="text-tt-muted">Consumed <span className="text-tt-text">{q.consumed}</span></span>
                       </span>
                     );
-                    // 151: an attributable layer's sales carry source_batch_id, so its cost
+                    // 154: an attributable layer's sales carry source_batch_id, so its cost
                     // is changed through the finalize path (which also reprices them), never
                     // through the inline qty editor. A legacy layer has nothing to reprice
                     // and keeps the original combined qty+cost editor.
                     const attributable = b.qty_added_authoritative === true;
                     const isCosting = costingBatchId === b.id;
                     // 'pending' is the ONE state that must not render as a number: a blank
-                    // cost and a genuine $0 are different facts as of 149.
+                    // cost and a genuine $0 are different facts as of 152.
                     const costCell = b.cost_status === 'pending'
                       ? <span className="text-tt-yellow">Cost pending</span>
                       : <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>;
@@ -928,7 +928,7 @@ export default function InventorySection() {
                             <span className="w-full text-[10px] text-tt-muted">
                               {attributable
                                 ? 'Quantity only. Use Enter cost to change this layer’s unit cost — that also corrects the sales it supplied.'
-                                : 'Cost changes affect future sales only. This layer pre-dates cost tracking, so previously recorded COGS will not change.'}
+                                : 'This layer pre-dates cost tracking, so its own past sales can’t be identified and won’t be repriced. If it is this SKU’s oldest layer with stock, any past sale that was recorded without a cost may still shift — those are priced from the SKU’s current cost.'}
                             </span>
                           </>
                         ) : isCosting ? (
@@ -962,8 +962,8 @@ export default function InventorySection() {
                             </button>
                             <span className="w-full text-[10px] text-tt-muted">
                               {(q.consumed ?? 0) > 0
-                                ? `Sets this layer’s true unit cost and reprices the ${q.consumed} unit${q.consumed === 1 ? '' : 's'} already sold from it. Quantities do not change.`
-                                : 'Sets this layer’s true unit cost. Nothing has been sold from it yet, so no past COGS changes.'}
+                                ? `Sets this layer’s true unit cost and reprices the past sales recorded against it — up to ${q.consumed} unit${q.consumed === 1 ? '' : 's'}. Quantities do not change.`
+                                : 'Sets this layer’s true unit cost. Nothing has been consumed from it yet, so no past COGS changes.'}
                             </span>
                           </>
                         ) : isConfirmingDelete ? (

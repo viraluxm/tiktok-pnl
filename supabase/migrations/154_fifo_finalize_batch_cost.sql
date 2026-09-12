@@ -1,8 +1,8 @@
--- 151: enter or correct a batch's true unit cost ONCE, and carry it back through every
--- sale that batch actually supplied. REQUIRES 149 + 150.
+-- 154: enter or correct a batch's true unit cost ONCE, and carry it back through every
+-- sale that batch actually supplied. REQUIRES 152 + 153.
 --
--- This is the stage 149/150 were built for. 149 recorded WHICH layer each sale consumed;
--- 150 started writing it. Neither changed a single historical cost. This migration is the
+-- This is the stage 152/153 were built for. 152 recorded WHICH layer each sale consumed;
+-- 153 started writing it. Neither changed a single historical cost. This migration is the
 -- operation that does — deliberately, atomically, audibly, and only over rows whose
 -- attribution was genuinely recorded.
 --
@@ -20,7 +20,7 @@
 --
 -- ── WHAT IT REFUSES TO GUESS ──────────────────────────────────────────────────────────
 -- Only layers with qty_added_authoritative = true are finalizable. A legacy layer's sales
--- have source_batch_id NULL — the pre-149 draw discarded the id — so there is no set of
+-- have source_batch_id NULL — the pre-152 draw discarded the id — so there is no set of
 -- rows to reprice, and there is no honest way to find one. Matching on snapshot value or
 -- replaying FIFO quantities would both be guesses presented as facts. The RPC raises
 -- BATCH_NOT_ATTRIBUTABLE rather than silently repricing nothing (or, worse, something).
@@ -46,7 +46,7 @@
 -- and the prior snapshots were NULL. The measured effect of an event belongs with the event.
 --
 -- ON DELETE CASCADE on batch_id is safe by construction, not by luck: step 4 below refuses
--- to delete any layer that has attributed sales, and 149's FK enforces the same thing at the
+-- to delete any layer that has attributed sales, and 152's FK enforces the same thing at the
 -- database. So the only batch that can ever be deleted is one with ZERO attributed lines,
 -- whose revisions therefore all have lines_repriced = 0 and cogs_delta_cents = 0. Cascading
 -- those away removes no accounting history.
@@ -107,7 +107,7 @@ comment on table public.sku_batch_cost_revisions is
 --
 --   Why the no-op test is "cost unchanged AND zero rows moved", not just "cost unchanged":
 --   a layer can be at 340 while some of its attributed lines still read something else — for
---   instance rows bound before this migration shipped, or after a pre-151 edit moved the cost
+--   instance rows bound before this migration shipped, or after a pre-154 edit moved the cost
 --   without repricing. Testing only the cost would declare that divergence a no-op and leave
 --   it uncorrected. Testing the rows repairs it and records the repair.
 --
@@ -256,14 +256,14 @@ end;
 $$;
 
 comment on function public.lensed_finalize_batch_cost(uuid, uuid, int) is
-  'Set a post-149 batch''s true unit cost and reprice every sale line attributed to it '
+  'Set a post-152 batch''s true unit cost and reprice every sale line attributed to it '
   '(source_batch_id), atomically, with an audit row. Handles pending->final and '
   'final->corrected identically. Never touches quantities. Refuses legacy layers '
   '(BATCH_NOT_ATTRIBUTABLE) because their sales carry no attribution to reprice.';
 
 -- ══ 3. lensed_edit_batch — close the bypass ════════════════════════════════════════════
--- Baseline: the migration-150 body (150 is not yet applied to production, so prod prosrc is
--- NOT the baseline here — 150 is). Single edit: refuse a real cost CHANGE on an
+-- Baseline: the migration-153 body (153 is not yet applied to production, so prod prosrc is
+-- NOT the baseline here — 153 is). Single edit: refuse a real cost CHANGE on an
 -- attributable layer, so there are not two ways to move a cost where only one fixes history.
 
 CREATE OR REPLACE FUNCTION public.lensed_edit_batch(p_sku_id uuid, p_batch_id uuid, p_qty_remaining integer, p_unit_cost_cents integer, p_set_cost boolean DEFAULT true)
@@ -273,8 +273,8 @@ AS $function$
 declare
   v_org uuid := public.current_user_org();
   v_sku uuid; v_old int; v_added int; v_new_added int; v_was_untouched boolean;
-  v_auth boolean;   -- 150: is qty_added the authoritative original receipt?
-  v_cur_cost int;   -- 151: current cost, to tell a real change from a re-submit
+  v_auth boolean;   -- 153: is qty_added the authoritative original receipt?
+  v_cur_cost int;   -- 154: current cost, to tell a real change from a re-submit
   v_delta int; v_qoh int; v_final_cost int;
 begin
   if auth.uid() is null then raise exception 'NOT_AUTHENTICATED' using errcode='28000'; end if;
@@ -300,16 +300,16 @@ begin
     into v_old, v_added, v_auth, v_cur_cost
     from public.sku_batches b where b.id = p_batch_id and b.org_id = v_org;
 
-  -- 151: ONE COST PATH FOR ATTRIBUTABLE BATCHES.
+  -- 154: ONE COST PATH FOR ATTRIBUTABLE BATCHES.
   -- A post-cutover layer's sales carry source_batch_id, so its cost can be corrected
   -- everywhere at once by lensed_finalize_batch_cost. If this RPC were also allowed to
   -- change the cost it would move the layer WITHOUT repricing those sales, leaving the
-  -- batch and its own history disagreeing — the precise failure 151 exists to end. So a
+  -- batch and its own history disagreeing — the precise failure 154 exists to end. So a
   -- real cost CHANGE on an authoritative layer is refused here and must go through
   -- finalize. Re-submitting the SAME cost is not a change and stays allowed, which is what
   -- keeps the ordinary quantity edit working: the inline form posts the unchanged cost
   -- alongside the new quantity. Legacy layers (qty_added_authoritative = false) have no
-  -- attribution to reprice, so they keep the pre-151 behaviour untouched.
+  -- attribution to reprice, so they keep the pre-154 behaviour untouched.
   if p_set_cost and coalesce(v_auth, false)
      and p_unit_cost_cents is distinct from v_cur_cost then
     raise exception 'COST_EDIT_REQUIRES_FINALIZE' using errcode='P0001';
@@ -318,10 +318,10 @@ begin
   -- Untouched BEFORE the edit ⇒ re-base qty_added with the correction so it stays
   -- untouched. Otherwise keep qty_added EXACTLY (legacy NULL stays NULL; a consumed
   -- original is never rewritten).
-  -- 150: an AUTHORITATIVE qty_added is the ORIGINAL QUANTITY RECEIVED and is never re-based
+  -- 153: an AUTHORITATIVE qty_added is the ORIGINAL QUANTITY RECEIVED and is never re-based
   -- by an ordinary current-stock correction. Receive 500, correct stock to 450, and the row
   -- still says 500 arrived. Legacy layers (qty_added_authoritative = false) keep the exact
-  -- pre-150 behaviour, including the re-base, so nothing about existing data changes.
+  -- pre-153 behaviour, including the re-base, so nothing about existing data changes.
   v_was_untouched := (not coalesce(v_auth, false) and v_added is not null and v_old = v_added);
   v_new_added := case when v_was_untouched then p_qty_remaining else v_added end;
   v_delta := p_qty_remaining - v_old;
@@ -330,7 +330,7 @@ begin
      set qty_remaining = p_qty_remaining,
          qty_added = v_new_added,
          unit_cost_cents = case when p_set_cost then p_unit_cost_cents else b.unit_cost_cents end,
-         -- 150: setting a cost RESOLVES its certainty, so the state moves with it — blank to
+         -- 153: setting a cost RESOLVES its certainty, so the state moves with it — blank to
          -- 'pending', any number (including 0) to 'final'. This also lifts a legacy row out of
          -- 'legacy' once a human asserts its cost, and it is what keeps
          -- sku_batches_cost_status_chk true by construction. A qty-only edit (p_set_cost false)
@@ -352,7 +352,7 @@ end;
 $function$;
 
 -- ══ 4. lensed_delete_batch — a friendly answer instead of a raw 23503 ══════════════════
--- Baseline: production (neither 150 nor anything else redefined this function).
+-- Baseline: production (neither 153 nor anything else redefined this function).
 CREATE OR REPLACE FUNCTION public.lensed_delete_batch(p_sku_id uuid, p_batch_id uuid)
  RETURNS TABLE(deleted_batch_id uuid, deleted_qty integer, new_qty_on_hand integer)
  LANGUAGE plpgsql
@@ -380,10 +380,10 @@ begin
     raise exception 'BATCH_NOT_DELETABLE' using errcode='P0001';
   end if;
 
-  -- 151: FRIENDLY PRE-CHECK, ahead of the database's last word.
+  -- 154: FRIENDLY PRE-CHECK, ahead of the database's last word.
   -- The untouched proof above is DEFEATABLE: lensed_edit_batch evaluates untouched-ness on
   -- the PRE-edit state, so raising qty_remaining back up to equal qty_added makes a layer
-  -- that HAS been drawn from look pristine again. 149's FK then refuses the delete — but as
+  -- that HAS been drawn from look pristine again. 152's FK then refuses the delete — but as
   -- a raw 23503 foreign_key_violation, which the route can only render as a generic 500.
   -- This check asks the real question directly, in the same locked transaction, and answers
   -- it with a domain error the UI can explain. The FK is NOT weakened: it remains the final
@@ -445,7 +445,7 @@ begin
     raise exception 'ALREADY_DRAWN' using errcode='P0001';
   end if;
 
-  -- 151: same friendly pre-check as lensed_delete_batch. void_batch uses the identical
+  -- 154: same friendly pre-check as lensed_delete_batch. void_batch uses the identical
   -- defeatable qty_remaining = qty_added proof, and lensed_edit_batch has no source filter,
   -- so a 'viewtrack' layer can be edited back to looking untouched and then voided. Ask the
   -- attribution question directly rather than letting the FK answer it as a raw 23503.
@@ -529,7 +529,25 @@ create trigger sku_batches_guard_cost_write
 -- already has; CREATE OR REPLACE preserves an existing ACL, so those lines are no-ops.
 -- lensed_void_batch stays service-role-only and is already registered in SERVICE_ROLE_ONLY
 -- in scripts/check-rpc-grants.mjs.
-grant execute on function public.lensed_finalize_batch_cost(uuid, uuid, int) to authenticated;
+--
+-- ⚠ THE REVOKE BELOW IS NOT OPTIONAL, AND IT MUST COME BEFORE THE GRANT.
+-- A newly CREATEd function has proacl = NULL, and a NULL ACL means PUBLIC holds EXECUTE
+-- implicitly — so `anon` can call it the moment it exists. Granting to `authenticated`
+-- does NOT take that away (verified: after `grant ... to authenticated`,
+-- has_function_privilege('anon', …, 'EXECUTE') is still true; only an explicit revoke
+-- clears it, and the revoke leaves `authenticated` intact). Without this line, shipping a
+-- brand-new write RPC would silently re-open the exact anon/PUBLIC write exposure
+-- 202608161754_revoke_anon_write_rpcs.sql exists to close. It is not exploitable — the
+-- function raises NOT_AUTHENTICATED when auth.uid() is null — but "not exploitable today"
+-- is not the posture this repo holds for write RPCs.
+-- Revoking PUBLIC also strips `service_role`, which on a brand-new function holds EXECUTE
+-- only through PUBLIC. Every one of this function's ten siblings carries an explicit
+-- service_role=X in production, so it is re-granted here to match that posture exactly —
+-- not a widening (service_role is the server-side master key and already bypasses RLS),
+-- just consistency, so an admin-client caller never hits a surprise permission error.
+revoke execute on function public.lensed_finalize_batch_cost(uuid, uuid, int) from public, anon;
+grant  execute on function public.lensed_finalize_batch_cost(uuid, uuid, int) to authenticated;
+grant  execute on function public.lensed_finalize_batch_cost(uuid, uuid, int) to service_role;
 grant execute on function public.lensed_edit_batch(uuid, uuid, int, int, boolean) to authenticated;
 grant execute on function public.lensed_delete_batch(uuid, uuid) to authenticated;
 revoke execute on function public.lensed_void_batch(uuid, uuid) from public, anon, authenticated;

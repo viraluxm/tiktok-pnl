@@ -1,6 +1,6 @@
--- Behavioral assertions for migration 151 — lensed_finalize_batch_cost.
+-- Behavioral assertions for migration 154 — lensed_finalize_batch_cost.
 --
--- Runs after: bootstrap -> 083 -> 105 -> seed_legacy -> 149 -> 150 -> 151 -> P&L surfaces.
+-- Runs after: bootstrap -> 083 -> 105 -> seed_legacy -> 152 -> 153 -> 154 -> P&L surfaces.
 -- The real migration-103 P&L functions and the prod-only pnl_order_grain view are installed
 -- in this same database, so §10 proves propagation through the ACTUAL reporting surfaces
 -- rather than re-implementing their arithmetic.
@@ -182,7 +182,7 @@ begin
     raise exception 'T5: free stock must still be attributed'; end if;
   -- and a free layer can still be corrected later
   select * into r from public.lensed_finalize_batch_cost(SK5, B5, 100);
-  if r.old_unit_cost_cents <> 0 then raise exception 'T5: old cost should be 0 not NULL — the distinction 149 exists for'; end if;
+  if r.old_unit_cost_cents <> 0 then raise exception 'T5: old cost should be 0 not NULL — the distinction 152 exists for'; end if;
   if r.cogs_delta_cents <> 10*100 then raise exception 'T5: delta expected % got %', 10*100, r.cogs_delta_cents; end if;
   raise notice '✓ T5: $0 is final + attributed + never flagged pending; $0 -> $1 reprices safely';
 
@@ -520,7 +520,7 @@ begin
     raise exception 'CATALOG: lensed_finalize_batch_cost signature unexpected'; end if;
 
   -- The grant the app depends on. scripts/check-rpc-grants.mjs asserts this against the LIVE
-  -- database, so it necessarily fails until 151 is applied there; proving it here closes the
+  -- database, so it necessarily fails until 154 is applied there; proving it here closes the
   -- loop without touching production. has_function_privilege is a POSITIVE assertion — it
   -- cannot pass vacuously the way a NOT EXISTS over the catalog could.
   if not has_function_privilege('authenticated',
@@ -529,6 +529,15 @@ begin
   end if;
   if has_function_privilege('anon', 'public.lensed_void_batch(uuid,uuid)', 'EXECUTE') then
     raise exception 'CATALOG: void_batch must stay revoked from anon';
+  end if;
+  -- A new function's proacl is NULL, which means PUBLIC (hence anon) holds EXECUTE
+  -- implicitly. 154 revokes it explicitly BEFORE granting to authenticated; assert both
+  -- halves, because the grant alone does not clear the implicit PUBLIC privilege.
+  if has_function_privilege('anon', 'public.lensed_finalize_batch_cost(uuid,uuid,int)', 'EXECUTE') then
+    raise exception 'CATALOG: the NEW write RPC is executable by anon — the revoke is missing or ordered after the grant';
+  end if;
+  if not has_function_privilege('service_role', 'public.lensed_finalize_batch_cost(uuid,uuid,int)', 'EXECUTE') then
+    raise exception 'CATALOG: service_role lost EXECUTE on the finalize RPC';
   end if;
 
   -- The guard trigger is what actually closes the direct-PostgREST cost path.

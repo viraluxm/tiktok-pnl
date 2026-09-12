@@ -6,7 +6,7 @@
 -- order-grain COGS surface behind pnl_by_show_as, chat_pnl_totals_as and the owner
 -- dashboard (/api/tiktok/product-stats reads it directly).
 --
--- Its cost expression is the one that matters to migrations 149-151:
+-- Its cost expression is the one that matters to migrations 152-154:
 --     sum(las.qty * COALESCE(las.unit_cost_cents_snapshot, isk.unit_cost_cents))
 -- i.e. it reads the snapshot dynamically, which is why repricing snapshots propagates here
 -- with no further work. supabase/tests/fifo_source_batch/pnl_surfaces.sql installs this same

@@ -1,8 +1,8 @@
--- Pre-149 world. Runs AFTER 083+105 but BEFORE 149/150, so the rows it creates are
+-- Pre-152 world. Runs AFTER 083+105 but BEFORE 152/153, so the rows it creates are
 -- genuine legacy rows: batches with no cost_status/qty_added_authoritative concept, and
 -- sale lines produced by the OLD bind RPC that never knew about source_batch_id.
 --
--- Test H later proves migrations 149 and 150 left every one of them exactly as it is. The
+-- Test H later proves migrations 152 and 153 left every one of them exactly as it is. The
 -- snapshot table below is taken now, while "now" is still the old world.
 
 do $$
@@ -23,7 +23,7 @@ begin
 
   insert into public.live_sessions (user_id, status) values (A, 'live') returning id into SESS;
 
-  -- Three real binds through the PRE-149 lensed_log_auction.
+  -- Three real binds through the PRE-152 lensed_log_auction.
   perform * from public.lensed_log_auction(SESS, 'sold',
     jsonb_build_array(jsonb_build_object('sku_id', SKU_L, 'qty', 2)), 'legacy-order-1', false, false);
   perform * from public.lensed_log_auction(SESS, 'sold',
@@ -31,7 +31,7 @@ begin
   perform * from public.lensed_log_auction(SESS, 'not_sold',
     jsonb_build_array(jsonb_build_object('sku_id', SKU_L, 'qty', 1)), 'legacy-order-3', false, false);
 
-  raise notice '✓ legacy world seeded (pre-149): sku=% batch=% session=%', SKU_L, L1, SESS;
+  raise notice '✓ legacy world seeded (pre-152): sku=% batch=% session=%', SKU_L, L1, SESS;
 end $$;
 
 -- Freeze the pre-migration state so Test H can diff against it rather than against

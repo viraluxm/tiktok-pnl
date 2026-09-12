@@ -87,7 +87,7 @@ export interface SeedBatchArgs {
 // lensed_add_batch and the ViewTrack admin path. org_id is stamped by the
 // zz_set_org_id trigger; a brand-new SKU has no prior layers, so sequence is always 1.
 //
-// Migration 149/150 adds two facts this row must now assert, because it is the ONLY
+// Migration 152/153 adds two facts this row must now assert, because it is the ONLY
 // direct INSERT into sku_batches in the whole application:
 //   • qty_added_authoritative: true — the layer is created here and now with nothing yet
 //     drawn from it, so qty_added IS the quantity that entered it. (For a SKU created
@@ -96,7 +96,7 @@ export interface SeedBatchArgs {
 //     which is what Consumed = qty_added - qty_remaining needs.) Marking it authoritative
 //     is also what stops lensed_edit_batch re-basing it on the first stock correction.
 //   • cost_status — a blank cost is 'pending' (not yet known), any number INCLUDING 0 is
-//     'final'. This is the whole point of 149: a genuine $0 and an unentered cost stop
+//     'final'. This is the whole point of 152: a genuine $0 and an unentered cost stop
 //     being the same row.
 export function buildSeedBatchRow(args: SeedBatchArgs): {
   user_id: string;
@@ -122,9 +122,9 @@ export function buildSeedBatchRow(args: SeedBatchArgs): {
   };
 }
 
-// ── Cost state + received-quantity derivation (migration 149) ────────────────────────
-// Mirrors sku_batches_cost_status_chk. 'legacy' exists so pre-149 rows are not falsely
-// asserted to be finalized; see 149's header for why that is a state and not a NULL.
+// ── Cost state + received-quantity derivation (migration 152) ────────────────────────
+// Mirrors sku_batches_cost_status_chk. 'legacy' exists so pre-152 rows are not falsely
+// asserted to be finalized; see 152's header for why that is a state and not a NULL.
 export type BatchCostStatus = 'pending' | 'final' | 'legacy';
 
 export interface BatchQuantityInput {
@@ -149,8 +149,8 @@ export interface BatchQuantityView {
 }
 
 // Derived, never stored. `received - remaining` is only meaningful when qty_added is
-// KNOWN to be this layer's original quantity — i.e. a post-149 row. A legacy row's
-// qty_added may be NULL, or may have been re-based by a pre-150 edit, so we report
+// KNOWN to be this layer's original quantity — i.e. a post-152 row. A legacy row's
+// qty_added may be NULL, or may have been re-based by a pre-153 edit, so we report
 // null rather than a plausible-looking wrong number.
 export function deriveBatchQuantities(b: BatchQuantityInput): BatchQuantityView {
   const trustworthy = b.qty_added_authoritative === true && b.qty_added != null;
@@ -161,7 +161,7 @@ export function deriveBatchQuantities(b: BatchQuantityInput): BatchQuantityView 
   };
 }
 
-// ── Finalize / correct a batch's true unit cost (migration 151) ──────────────────────
+// ── Finalize / correct a batch's true unit cost (migration 154) ──────────────────────
 // The ONE way an attributable layer's cost may change. Unlike parseBatchEdit, a cost is
 // REQUIRED here: "finalize" means asserting a number, and blanking a cost is not a
 // correction. 0 is valid and means genuinely free — the whole point of cost_status.
@@ -192,7 +192,7 @@ export interface BatchRpcErrorResponse {
 export function mapBatchRpcError(message: string | null | undefined): BatchRpcErrorResponse {
   const m = message ?? '';
   if (m.includes('BATCH_NOT_FOUND')) return { status: 404, error: 'Batch not found' };
-  // 151: the friendly answer to what the 149 FK would otherwise raise as a raw 23503.
+  // 154: the friendly answer to what the 152 FK would otherwise raise as a raw 23503.
   if (m.includes('BATCH_HAS_CONSUMPTION')) {
     return {
       status: 409,
@@ -200,7 +200,7 @@ export function mapBatchRpcError(message: string | null | undefined): BatchRpcEr
         "This batch has inventory already used in sales and can't be deleted. Edit its remaining quantity to 0 instead.",
     };
   }
-  // 151: one cost path. The generic edit may not move an attributable layer's cost,
+  // 154: one cost path. The generic edit may not move an attributable layer's cost,
   // because only the finalize path also reprices that layer's recorded sales.
   if (m.includes('COST_EDIT_REQUIRES_FINALIZE')) {
     return {
@@ -212,7 +212,7 @@ export function mapBatchRpcError(message: string | null | undefined): BatchRpcEr
     return {
       status: 409,
       error:
-        "This layer pre-dates cost tracking, so its past sales can't be identified. Edit its unit cost directly — historical COGS will not change.",
+        "This layer pre-dates cost tracking, so its own past sales can't be identified and can't be repriced. Edit its unit cost directly instead.",
     };
   }
   if (m.includes('COST_REQUIRED')) {

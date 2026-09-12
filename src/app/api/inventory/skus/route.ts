@@ -99,7 +99,7 @@ export async function GET() {
       // qty_added: original inserted qty (NULL for legacy layers). The UI uses it
       // ONLY to decide whether Delete is offered; the RPC enforces the rule.
       qty_added: b.qty_added,
-      // 149: qty_added_authoritative gates whether qty_added may be read as the
+      // 152: qty_added_authoritative gates whether qty_added may be read as the
       // ORIGINAL QUANTITY RECEIVED (and therefore whether Consumed is derivable at
       // all); cost_status distinguishes a genuine $0 from a cost nobody has entered
       // yet. Both are raw passthroughs — Received/Consumed are derived client-side by

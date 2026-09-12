@@ -13,14 +13,14 @@ export interface SkuBatch {
   // recorded. Used ONLY to decide whether Delete is offered (untouched ⇔
   // qty_remaining === qty_added); the server RPC enforces the rule regardless.
   qty_added: number | null;
-  // ── migration 149 ──
+  // ── migration 152 ──
   // true ⇒ qty_added is the ORIGINAL QUANTITY RECEIVED into this layer, stamped at
   // creation and never re-based by a stock correction. Only then is
   // Consumed = qty_added − qty_remaining a real number; see deriveBatchQuantities.
-  // Absent on a payload served before 149 ships, hence optional.
+  // Absent on a payload served before 152 ships, hence optional.
   qty_added_authoritative?: boolean | null;
   // 'final' = cost is known (INCLUDING a genuine 0) · 'pending' = not entered yet
-  // (unit_cost_cents is null) · 'legacy' = pre-149 row, meaning deliberately not
+  // (unit_cost_cents is null) · 'legacy' = pre-152 row, meaning deliberately not
   // asserted. Optional for the same reason.
   cost_status?: BatchCostStatus | null;
 }
@@ -221,7 +221,7 @@ export function useSettleBatch() {
 // Edit ONE cost layer's remaining qty and/or unit cost (current-inventory
 // correction). The server keeps qty_on_hand in lockstep. Send both current values.
 //
-// 151: on an ATTRIBUTABLE layer (qty_added_authoritative) this may only carry the
+// 154: on an ATTRIBUTABLE layer (qty_added_authoritative) this may only carry the
 // UNCHANGED cost — a real cost change is refused with COST_EDIT_REQUIRES_FINALIZE and
 // must go through useFinalizeBatchCost, which also reprices the sales that layer
 // supplied. On a legacy layer this still edits the cost directly, and still changes no
@@ -244,7 +244,7 @@ export function useEditBatch() {
   });
 }
 
-// Set this layer's TRUE unit cost and reprice every sale attributed to it (151).
+// Set this layer's TRUE unit cost and reprice every sale attributed to it (154).
 // One operation for both pending -> final and a correction of an already-known cost.
 // Atomic server-side: batch cost, cost_status, the attributed sale snapshots, the SKU
 // cost scalar and the audit row all move together. Quantities are never touched.

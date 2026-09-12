@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Local verification for migrations 149 + 150 (FIFO source-batch attribution, explicit
+# Local verification for migrations 152 + 153 (FIFO source-batch attribution, explicit
 # batch cost state, authoritative received quantity).
 #
 # Boots a throwaway Postgres in Docker and applies the REAL migration stack in the real
 # order, with the legacy world seeded in between so the "migration did not touch history"
 # assertions are made against rows that genuinely predate it:
 #
-#   bootstrap.sql -> 083 -> 105 -> seed_legacy.sql -> 149 -> 150 -> 151
+#   bootstrap.sql -> 083 -> 105 -> seed_legacy.sql -> 152 -> 153 -> 154
 #     -> 103 + pnl_order_grain (the REAL reporting surfaces) -> test.sql -> test_finalize.sql
 #
 # Then two live concurrency proofs (Test G) that cannot be written in a single session.
@@ -56,19 +56,19 @@ echo "── apply 083 (batch add/edit/delete RPCs) ──"
 psqlf -1 < "$MIGS/083_fifo_batch_edit_delete.sql" >/dev/null || FAILED=1
 echo "── apply 105 (the bind RPCs — the real FIFO draw) ──"
 psqlf -1 < "$MIGS/105_bind_records_short_at_bind.sql" >/dev/null || FAILED=1
-echo "── seed the PRE-149 legacy world (batches + real binds + snapshots) ──"
+echo "── seed the PRE-152 legacy world (batches + real binds + snapshots) ──"
 psqlf < "$SCRIPT_DIR/seed_legacy.sql" >/dev/null || FAILED=1
-echo "── apply 149 (schema: cost_status, qty_added_authoritative, source_batch_id) ──"
-psqlf -1 < "$MIGS/149_fifo_batch_cost_state_and_attribution.sql" || FAILED=1
-echo "── apply 150 (RPCs populate them) ──"
-psqlf -1 < "$MIGS/150_fifo_record_source_batch.sql" || FAILED=1
+echo "── apply 152 (schema: cost_status, qty_added_authoritative, source_batch_id) ──"
+psqlf -1 < "$MIGS/152_fifo_batch_cost_state_and_attribution.sql" || FAILED=1
+echo "── apply 153 (RPCs populate them) ──"
+psqlf -1 < "$MIGS/153_fifo_record_source_batch.sql" || FAILED=1
 
-echo "── idempotency: re-applying 149 must be a no-op ──"
-psqlf -1 < "$MIGS/149_fifo_batch_cost_state_and_attribution.sql" >/dev/null \
-  && echo "  ✓ 149 re-applies cleanly" || { echo "  ✗ 149 is NOT idempotent"; FAILED=1; }
+echo "── idempotency: re-applying 152 must be a no-op ──"
+psqlf -1 < "$MIGS/152_fifo_batch_cost_state_and_attribution.sql" >/dev/null \
+  && echo "  ✓ 152 re-applies cleanly" || { echo "  ✗ 152 is NOT idempotent"; FAILED=1; }
 
-echo "── apply 151 (finalize/correct batch cost + historical backfill) ──"
-psqlf -1 < "$MIGS/151_fifo_finalize_batch_cost.sql" || FAILED=1
+echo "── apply 154 (finalize/correct batch cost + historical backfill) ──"
+psqlf -1 < "$MIGS/154_fifo_finalize_batch_cost.sql" || FAILED=1
 
 # The reporting layer, installed from the REAL sources so the propagation test proves
 # something rather than re-implementing anyone's arithmetic: migration 103 owns every
@@ -78,9 +78,9 @@ echo "── install P&L surfaces: migration 103 + the prod-only pnl_order_grain
 psqlf -1 < "$MIGS/103_platform_fee_centralization.sql" >/dev/null || FAILED=1
 psqlf -1 < "$SCRIPT_DIR/pnl_order_grain.prodview.sql" >/dev/null || FAILED=1
 
-echo "── idempotency: re-applying 151 must be a no-op ──"
-psqlf -1 < "$MIGS/151_fifo_finalize_batch_cost.sql" >/dev/null \
-  && echo "  ✓ 151 re-applies cleanly" || { echo "  ✗ 151 is NOT idempotent"; FAILED=1; }
+echo "── idempotency: re-applying 154 must be a no-op ──"
+psqlf -1 < "$MIGS/154_fifo_finalize_batch_cost.sql" >/dev/null \
+  && echo "  ✓ 154 re-applies cleanly" || { echo "  ✗ 154 is NOT idempotent"; FAILED=1; }
 
 echo "── behavioral assertions (test.sql) ──"
 psqlf < "$SCRIPT_DIR/test.sql" || FAILED=1

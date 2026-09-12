@@ -1,10 +1,10 @@
--- 149: FIFO foundation — explicit batch cost state + permanent source-batch attribution.
+-- 152: FIFO foundation — explicit batch cost state + permanent source-batch attribution.
 --
 -- SCHEMA ONLY. Applying THIS FILE ALONE changes no behaviour anywhere: every column is
 -- additive, every existing row keeps a value that asserts nothing new, and nothing reads
--- or writes the new columns until migration 150 replaces the RPCs. That ordering is
+-- or writes the new columns until migration 153 replaces the RPCs. That ordering is
 -- deliberate and is the same one migration 104 used for short_at_bind — column first
--- (inert), RPCs second. The reverse ordering is impossible: 150 cannot be applied against
+-- (inert), RPCs second. The reverse ordering is impossible: 153 cannot be applied against
 -- a table without these columns.
 --
 -- ── WHY ───────────────────────────────────────────────────────────────────────────────
@@ -34,7 +34,7 @@
 --   • No backfill. All 178,632 existing sale lines keep source_batch_id NULL — honestly
 --     unattributed, because the information to attribute them was never recorded. Any
 --     heuristic (matching on snapshot value) would be a guess presented as a fact.
---   • No re-pricing. unit_cost_cents_snapshot is not touched, by this file or by 150.
+--   • No re-pricing. unit_cost_cents_snapshot is not touched, by this file or by 153.
 --   • No data mutation. Existing sku_batches rows are classified 'legacy', which asserts
 --     only that we do not know — see the cost_status vocabulary below.
 --   • No change to the prod-only cost-mirror cron. It is documented, not modified.
@@ -83,9 +83,9 @@ alter table public.sku_batches
 comment on column public.sku_batches.cost_status is
   'Is this layer''s unit_cost_cents a KNOWN cost? ''final'' = yes (including a genuine 0); '
   '''pending'' = not entered yet (unit_cost_cents IS NULL); ''legacy'' = pre-dates migration '
-  '149, meaning is unproven and is deliberately not asserted. Enforced by '
+  '152, meaning is unproven and is deliberately not asserted. Enforced by '
   'sku_batches_cost_status_chk. Set by lensed_add_batch / lensed_add_batch_admin / the '
-  'create-SKU seed / lensed_unbind restock (150); moved by lensed_edit_batch only when the '
+  'create-SKU seed / lensed_unbind restock (153); moved by lensed_edit_batch only when the '
   'caller explicitly sets a cost.';
 
 -- ══ 2. sku_batches.qty_added_authoritative — is qty_added the ORIGINAL RECEIPT? ════════
@@ -105,13 +105,13 @@ comment on column public.sku_batches.cost_status is
 --
 -- So the distinction is carried by a separate boolean rather than inferred:
 --   true  ⇒ this row was created after the cutover by a path that stamps the received
---           quantity, and qty_added means ORIGINAL QUANTITY RECEIVED. Migration 150 makes
+--           quantity, and qty_added means ORIGINAL QUANTITY RECEIVED. Migration 153 makes
 --           lensed_edit_batch refuse to re-base it.
 --   false ⇒ legacy. qty_added keeps exactly today's meaning and today's behaviour,
 --           re-basing included. Nothing about existing rows changes.
 --
 -- WHY NOT REUSE cost_status <> 'legacy' AS THE CUTOVER MARKER. Cost certainty and quantity
--- provenance are orthogonal facts. lensed_edit_batch (150) moves a legacy row's cost_status
+-- provenance are orthogonal facts. lensed_edit_batch (153) moves a legacy row's cost_status
 -- to 'final' when a human enters a cost — which must NOT simultaneously start asserting
 -- that its qty_added is a trustworthy receipt. Conflating the two would re-create, in a new
 -- column, the exact class of ambiguity this migration exists to remove.
@@ -128,9 +128,9 @@ alter table public.sku_batches
 
 comment on column public.sku_batches.qty_added_authoritative is
   'true = qty_added is the ORIGINAL QUANTITY RECEIVED into this layer, stamped at creation '
-  'by a post-149 path, and lensed_edit_batch will never re-base it. false = legacy row: '
-  'qty_added keeps its pre-149 meaning (possibly NULL, possibly re-based by an earlier '
-  'edit) and its pre-149 behaviour. Consumed units are derived as '
+  'by a post-152 path, and lensed_edit_batch will never re-base it. false = legacy row: '
+  'qty_added keeps its pre-152 meaning (possibly NULL, possibly re-based by an earlier '
+  'edit) and its pre-152 behaviour. Consumed units are derived as '
   'qty_added - qty_remaining, and ONLY when this flag is true.';
 
 -- ══ 3. live_auction_item_skus.source_batch_id — WHICH layer did this line consume? ═════
@@ -141,7 +141,7 @@ comment on column public.sku_batches.qty_added_authoritative is
 -- line is never split across layers). One nullable uuid is therefore a complete record of
 -- the allocation, with no ledger table required.
 --
--- NULL is permanent and honest for every pre-149 row: it means "bound before attribution
+-- NULL is permanent and honest for every pre-152 row: it means "bound before attribution
 -- existed", not "no batch". Nothing is backfilled.
 alter table public.live_auction_item_skus
   add column if not exists source_batch_id uuid;
@@ -167,11 +167,19 @@ alter table public.live_auction_item_skus
 -- second, earlier-firing one.)
 --
 -- NOT VALID + VALIDATE, in two statements, because live_auction_item_skus is a hot
--- capture-path table with 178,632 rows. ADD CONSTRAINT ... NOT VALID takes a brief
--- ACCESS EXCLUSIVE and does not scan; VALIDATE CONSTRAINT scans under SHARE UPDATE
--- EXCLUSIVE, which does not block inserts. Every existing row is NULL, so validation is
--- trivially satisfied — but the lock profile is what makes this safe to apply during a
--- show rather than only in a quiet window.
+-- capture-path table with 178,632 rows.
+--
+-- LOCKS, stated precisely (an earlier draft of this comment understated them):
+--   • ADD CONSTRAINT ... NOT VALID does NOT scan, but it takes SHARE ROW EXCLUSIVE on BOTH
+--     the child (live_auction_item_skus) AND the referenced parent (sku_batches) — the
+--     parent lock is needed to install the RI triggers. sku_batches is the hot FIFO table,
+--     so this briefly blocks INSERT/UPDATE/DELETE on the very table a live draw writes.
+--     It does not block SELECT, and it is instant because nothing is scanned.
+--   • VALIDATE CONSTRAINT scans all 178,632 rows but under SHARE UPDATE EXCLUSIVE on the
+--     child + ROW SHARE on the parent, which blocks NEITHER reads NOR writes.
+-- So the write-blocking part is instant and the scanning part is non-blocking — which is
+-- the whole reason for splitting them. It still belongs in a write-silence window because
+-- of the parent-side lock, not because of the scan.
 alter table public.live_auction_item_skus
   drop constraint if exists live_auction_item_skus_source_batch_id_fkey;
 alter table public.live_auction_item_skus
@@ -184,23 +192,32 @@ alter table public.live_auction_item_skus
 
 -- Partial index: batch -> its sale lines. This is the lookup the future finalize-cost RPC
 -- performs ("reprice every line drawn from batch B"), and the one an audit performs. It is
--- partial because every pre-149 row is NULL and indexing 178k NULLs would be pure waste —
+-- partial because every pre-152 row is NULL and indexing 178k NULLs would be pure waste —
 -- the index starts at zero entries and grows only with newly attributed lines.
 --
--- Plain CREATE INDEX rather than CONCURRENTLY: the predicate matches no existing row, so
--- the build is effectively instant, and a plain build keeps this migration applicable as a
--- single transaction (CONCURRENTLY cannot run inside one). If it is ever applied to a table
--- where the predicate matches many rows, switch to CONCURRENTLY and run it outside the txn.
+-- Plain CREATE INDEX rather than CONCURRENTLY — and the cost of that is a real, if short,
+-- write block, NOT "instant". A partial predicate is a filter, not an access path: the build
+-- still performs a full heap scan of all 178,632 rows to evaluate `source_batch_id is not
+-- null` per tuple, even though the resulting index has zero entries. It holds SHARE on
+-- live_auction_item_skus for that scan, which blocks every INSERT/UPDATE/DELETE on the table
+-- (SELECTs are unaffected). On a table this size that is well under a second, and it is
+-- inside the write-silence window regardless.
+--
+-- CONCURRENTLY is deliberately NOT used, because it cannot run inside a transaction — and
+-- applying 152 + 153 + 154 as ONE transaction is worth more than avoiding a sub-second write
+-- block: it makes the intermediate states (152 without 153) unobservable, which is what stops
+-- batches being created with default 'legacy' / non-authoritative values that nothing ever
+-- corrects. If this is ever applied to a table where the predicate matches many rows, revisit.
 create index if not exists idx_live_auction_item_skus_source_batch
   on public.live_auction_item_skus (source_batch_id)
   where source_batch_id is not null;
 
 comment on column public.live_auction_item_skus.source_batch_id is
   'The sku_batches layer this order line actually consumed, recorded by lensed_log_auction '
-  '/ lensed_log_auction_as at bind time (migration 150). Immutable provenance: set once when '
-  'the draw happens, never recomputed. NULL = bound before migration 149 shipped, or the '
+  '/ lensed_log_auction_as at bind time (migration 153). Immutable provenance: set once when '
+  'the draw happens, never recomputed. NULL = bound before migration 152 shipped, or the '
   'line was not a sale (not_sold draws nothing) — NEVER "no batch". Deliberately NOT '
-  'backfilled: the pre-149 draw discarded the batch id, so any reconstruction would be a '
+  'backfilled: the pre-152 draw discarded the batch id, so any reconstruction would be a '
   'guess. ON DELETE NO ACTION, so a consumed layer can no longer be deleted out from under '
   'its sales.';
 

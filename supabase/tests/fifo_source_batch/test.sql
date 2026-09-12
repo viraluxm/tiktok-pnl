@@ -1,8 +1,8 @@
--- Behavioral assertions for migrations 149 + 150 (FIFO source-batch attribution +
+-- Behavioral assertions for migrations 152 + 153 (FIFO source-batch attribution +
 -- explicit batch cost state + authoritative received quantity).
 --
 -- Runs inside a throwaway Postgres (see run.sh) after:
---   bootstrap.sql -> 083 -> 105 -> seed_legacy.sql -> 149 -> 150
+--   bootstrap.sql -> 083 -> 105 -> seed_legacy.sql -> 152 -> 153
 --
 -- Any failed assertion RAISEs and aborts (ON_ERROR_STOP=1). Every negative assertion also
 -- reports the cardinality of the set it examined, per supabase/migrations/CONVENTIONS.md:
@@ -10,7 +10,7 @@
 
 -- ════════════════════════════════════════════════════════════════════════════════════
 -- TEST H (first, because it is about what the MIGRATION did, before we add new data):
---   legacy rows are untouched by 149 + 150.
+--   legacy rows are untouched by 152 + 153.
 -- ════════════════════════════════════════════════════════════════════════════════════
 do $$
 declare v_n int; v_diff int; v_null int;
@@ -122,7 +122,7 @@ begin
     from public.live_auction_item_skus las join public.live_auction_items lai on lai.id = las.auction_item_id
    where lai.client_idempotency_key = 'B-1';
   -- snapshot behaviour is DELIBERATELY unchanged by this stage: a pending cost still
-  -- snapshots NULL exactly as it did before 149. Only the attribution is new.
+  -- snapshots NULL exactly as it did before 152. Only the attribution is new.
   if v_cost is not null then raise exception 'B: snapshot expected NULL (unchanged behaviour) got %', v_cost; end if;
   if v_src is distinct from BB then raise exception 'B: source_batch_id expected % got %', BB, v_src; end if;
   select qty_remaining into v_rem from public.sku_batches where id = BB;
@@ -196,7 +196,7 @@ begin
   select public.lensed_add_batch(SK_J, 500, 340) into BJ;
 
   -- the supported quantity-edit path, on a still-UNTOUCHED post-cutover layer: this is the
-  -- exact case where the pre-150 RPC re-based qty_added to the new number.
+  -- exact case where the pre-153 RPC re-based qty_added to the new number.
   perform public.lensed_edit_batch(SK_J, BJ, 450, 340, true);
   select qty_added, qty_remaining into v_add, v_rem from public.sku_batches where id = BJ;
   if v_add <> 500 then raise exception 'J: RECEIPT REWRITTEN — qty_added became % (must stay 500)', v_add; end if;
@@ -204,7 +204,7 @@ begin
   -- and the SKU total moved by exactly the delta, as before
   select qty_on_hand into v_qoh from public.inventory_skus where id = SK_J;
   if v_qoh <> 450 then raise exception 'J: qty_on_hand expected 450 got %', v_qoh; end if;
-  raise notice '✓ J: stock 500->450 leaves Received=500 intact (pre-150 would have said 450)';
+  raise notice '✓ J: stock 500->450 leaves Received=500 intact (pre-153 would have said 450)';
 
   -- J2: the legacy re-base behaviour is PRESERVED for legacy layers (no regression).
   declare LEG uuid; SK_LEG uuid; begin
@@ -216,7 +216,7 @@ begin
     perform public.lensed_edit_batch(SK_LEG, LEG, 90, 500, true);
     select qty_added into v_add from public.sku_batches where id = LEG;
     if v_add <> 90 then raise exception 'J2: legacy re-base REGRESSED — qty_added % (expected 90)', v_add; end if;
-    raise notice '✓ J2: legacy layers keep the pre-150 re-base behaviour exactly';
+    raise notice '✓ J2: legacy layers keep the pre-153 re-base behaviour exactly';
   end;
 
   -- ══ TEST K — the raw fields the app layer derives Received/Remaining/Consumed from ══
@@ -283,15 +283,15 @@ begin
   end;
 
   -- Now DEFEAT that guard exactly as the audit showed is possible: edit qty_remaining back
-  -- up to equal qty_added, which makes a drawn-from layer look untouched again. Before 149
+  -- up to equal qty_added, which makes a drawn-from layer look untouched again. Before 152
   -- this is the point at which the layer — and its sales' provenance — could be deleted.
   perform public.lensed_edit_batch(SK_E, BE, 10, 700, true);
   select qty_remaining, qty_added into v_rem, v_add from public.sku_batches where id = BE;
   if v_rem <> v_add then raise exception 'E: setup failed, guard not defeated (%,%)', v_rem, v_add; end if;
 
   -- Two layers of defence must BOTH be acceptable here, and which one answers depends on
-  -- whether 151 is applied: with 151 the RPC's own BATCH_HAS_CONSUMPTION pre-check fires
-  -- first (friendly); without it the 149 FK fires (correct but raw). Test 9 in
+  -- whether 154 is applied: with 154 the RPC's own BATCH_HAS_CONSUMPTION pre-check fires
+  -- first (friendly); without it the 152 FK fires (correct but raw). Test 9 in
   -- test_finalize.sql asserts the friendly one specifically.
   v_msg := null;
   begin
@@ -399,7 +399,7 @@ begin
   end;
 
   -- ══ EXTRA 5 — cost_status transitions + ONE COST PATH + the CHECK that makes it total ══
-  -- 151 moved the cost transition out of lensed_edit_batch for ATTRIBUTABLE layers, so this
+  -- 154 moved the cost transition out of lensed_edit_batch for ATTRIBUTABLE layers, so this
   -- block now asserts the refusal as well as the transition itself.
   declare SK_T uuid; BT uuid; SK_TL uuid; BTL uuid; v_e text; begin
     insert into public.inventory_skus (user_id, org_id, sku_number, barcode, title, unit_cost_cents, qty_on_hand)
@@ -492,7 +492,7 @@ begin
      and conname in ('sku_batches_cost_status_chk','sku_batches_qty_added_authoritative_chk');
   if v_cnt <> 2 then raise exception 'CATALOG: expected 2 new CHECKs, found %', v_cnt; end if;
 
-  -- signatures must be byte-identical to pre-150 (no accidental API break)
+  -- signatures must be byte-identical to pre-153 (no accidental API break)
   if pg_get_function_identity_arguments('public.lensed_log_auction'::regproc)
      <> 'p_session_id uuid, p_result text, p_skus jsonb, p_idem_key text, p_manual boolean, p_allow_negative boolean' then
     raise exception 'CATALOG: lensed_log_auction signature changed';

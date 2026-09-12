@@ -79,18 +79,18 @@ const check = (name, cond, extra = '') => {
   check('null starting qty ⇒ 0 (and qty_added 0)', zero.qty_remaining === 0 && zero.qty_added === 0);
   check('null cost ⇒ null', zero.unit_cost_cents === null);
 
-  // ── migration 149: the seed layer must assert both new facts ──
+  // ── migration 152: the seed layer must assert both new facts ──
   check('seed marks qty_added authoritative', row.qty_added_authoritative === true);
   check('seed with a cost ⇒ cost_status final', row.cost_status === 'final');
   check('seed with NO cost ⇒ cost_status pending', zero.cost_status === 'pending');
-  check('pending seed leaves unit_cost_cents null (149 CHECK invariant)',
+  check('pending seed leaves unit_cost_cents null (152 CHECK invariant)',
     zero.cost_status === 'pending' && zero.unit_cost_cents === null);
   const free = buildSeedBatchRow({ userId: 'u', skuId: 's', qtyOnHand: 3, unitCostCents: 0 });
-  check('GENUINE $0 seed ⇒ final, not pending — the 149 distinction',
+  check('GENUINE $0 seed ⇒ final, not pending — the 152 distinction',
     free.cost_status === 'final' && free.unit_cost_cents === 0);
 }
 
-// ── deriveBatchQuantities — Received / Remaining / Consumed (migration 149) ─────
+// ── deriveBatchQuantities — Received / Remaining / Consumed (migration 152) ─────
 // Consumed is DERIVED (qty_added − qty_remaining) and is only a number when qty_added
 // is provably the layer's original quantity. These cases mirror the SQL harness's
 // Tests I/K/L so both ends of the seam agree.
@@ -112,7 +112,7 @@ const check = (name, cond, extra = '') => {
   const over = auth(10, -4);
   check('oversold layer ⇒ consumed exceeds added', over.consumed === 14 && over.remaining === -4);
 
-  // Legacy rows: qty_added may be NULL, or may have been re-based by a pre-150 edit.
+  // Legacy rows: qty_added may be NULL, or may have been re-based by a pre-153 edit.
   // Report null rather than a plausible-looking wrong number.
   const legacyNull = deriveBatchQuantities({ qty_added: null, qty_remaining: 12, qty_added_authoritative: false });
   check('legacy NULL qty_added ⇒ added/consumed null', legacyNull.added === null && legacyNull.consumed === null);
@@ -123,7 +123,7 @@ const check = (name, cond, extra = '') => {
     legacyNumeric.added === null && legacyNumeric.consumed === null);
 
   const preFlag = deriveBatchQuantities({ qty_added: 50, qty_remaining: 12 });
-  check('absent flag (pre-149 payload) is treated as legacy',
+  check('absent flag (pre-152 payload) is treated as legacy',
     preFlag.added === null && preFlag.consumed === null);
 
   const flaggedButNull = deriveBatchQuantities({ qty_added: null, qty_remaining: 5, qty_added_authoritative: true });
@@ -131,7 +131,7 @@ const check = (name, cond, extra = '') => {
     flaggedButNull.added === null && flaggedButNull.consumed === null);
 }
 
-// ── parseFinalizeCost — the ONE cost-change input (migration 151) ───────────────
+// ── parseFinalizeCost — the ONE cost-change input (migration 154) ───────────────
 // Unlike parseBatchEdit, a cost is REQUIRED: "finalize" means asserting a number.
 {
   const ok = parseFinalizeCost(340);
@@ -163,7 +163,7 @@ const check = (name, cond, extra = '') => {
   check('CANNOT_DELETE_LAST_BATCH → 409 + only-layer hint', last.status === 409 && /only cost layer/i.test(last.error));
   check('NO_ORG → 403', mapBatchRpcError('NO_ORG').status === 403);
   check('NOT_AUTHENTICATED → 401', mapBatchRpcError('NOT_AUTHENTICATED').status === 401);
-  // ── migration 151 tokens: no raw Postgres error may reach a user ──
+  // ── migration 154 tokens: no raw Postgres error may reach a user ──
   const consumed = mapBatchRpcError('BATCH_HAS_CONSUMPTION');
   check('BATCH_HAS_CONSUMPTION → 409, not 500', consumed.status === 409);
   check('…and says the stock was used in sales', /used in sales/i.test(consumed.error));

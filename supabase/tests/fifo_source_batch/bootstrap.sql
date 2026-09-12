@@ -1,7 +1,7 @@
--- FIFO source-batch attribution harness — base schema for migrations 149 + 150.
+-- FIFO source-batch attribution harness — base schema for migrations 152 + 153.
 --
 -- Derived from supabase/tests/batch_edit_delete/bootstrap.sql (the org-scoped inventory +
--- FIFO world) and EXTENDED with the full live-auction chain, because 149/150 are the first
+-- FIFO world) and EXTENDED with the full live-auction chain, because 152/153 are the first
 -- migrations whose behaviour spans BOTH sides of the seam: the batch RPCs AND the bind RPCs
 -- that actually draw from a batch. The older harness stubs live_auction_item_skus down to
 -- four columns, which cannot exercise a real draw.
@@ -19,7 +19,7 @@ create extension if not exists "uuid-ossp";
 
 -- Supabase provides these roles in prod; create them so the migrations' GRANT and REVOKE
 -- statements succeed under plain Postgres. `anon` and `service_role` are required as well
--- as `authenticated`: migration 105 revokes from anon, and 150 revokes the three
+-- as `authenticated`: migration 105 revokes from anon, and 153 revokes the three
 -- service-role-only twins from public/anon/authenticated.
 do $$ begin
   if not exists (select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if;
@@ -60,7 +60,7 @@ create table if not exists public.organization_members (
 create or replace function public.current_user_org() returns uuid language sql stable as $$
   select m.org_id from public.organization_members m where m.user_id = auth.uid() order by m.created_at limit 1
 $$;
--- 151's audit table declares org-scoped RLS policies, and a policy cannot be created
+-- 154's audit table declares org-scoped RLS policies, and a policy cannot be created
 -- against a function that does not exist. Verbatim from production.
 create or replace function public.is_org_member(p_org uuid) returns boolean
   language sql stable security definer set search_path to 'public' as $$
@@ -97,7 +97,7 @@ create unique index if not exists uq_sku_batches_source_ref
   on public.sku_batches (org_id, source, external_ref) where source is not null;
 
 -- ── the FULL live-auction chain (023 + 041 store_id + 104 short_at_bind) ───────
--- 150 replaces lensed_log_auction / _as / unbind / _as, so the harness needs the real
+-- 153 replaces lensed_log_auction / _as / unbind / _as, so the harness needs the real
 -- tables those functions read and write — not a stub.
 create table if not exists public.live_sessions (
   id uuid primary key default uuid_generate_v4(),
