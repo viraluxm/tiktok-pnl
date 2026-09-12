@@ -34,6 +34,18 @@ function range(start: string, end: string | null): string {
   return end == null ? `${formatTime12(start)} – open` : `${formatTime12(start)} – ${formatTime12(end)}`;
 }
 
+/**
+ * Payable hours in DECIMAL, to 2dp — '7.50 hr'. The unit payroll actually pays in, and the one
+ * Pay Details and the PDF print, so a manager comparing the tile to the statement sees the same
+ * number rather than having to convert '7h 30m' in their head.
+ *
+ * Display only: the value passed in is already rounded to 2dp by calendarModel, and payroll sums
+ * the UNROUNDED figure. Nothing downstream reads this string.
+ */
+function fmtPaidHours(hours: number): string {
+  return `${hours.toFixed(2)} hr`;
+}
+
 export default function PersonCard({
   person,
   dateLabel,
@@ -209,26 +221,44 @@ export default function PersonCard({
 
       <span className={`mt-1.5 rounded-full border px-2 py-0.5 text-[9.5px] font-semibold ${badge.cls}`}>{badge.text}</span>
 
-      {/* THE PUNCH — clock in, clock out, break, and the duration.
-          The duration shown is punch.hours, the PAYABLE figure from calendarModel (which calls
-          paidShiftHours with this person's team). For a non-host that IS the canonical clocked
-          span, so the tile is labelled "Paid" and there is nothing else to read: what the manager
-          sees is what payroll pays, by construction rather than by coincidence. For a live host it
-          is labelled "Clocked" and the approved figure appears separately below, because for them
-          the two genuinely differ. */}
+      {/* THE PUNCH.
+          TWO LAYOUTS, because the two teams are answering different questions.
+
+          NO APPROVED HOURS (fulfillment, and anyone else who is not a live host) — the manager is
+          never asked to decide anything, so the tile just shows the arithmetic and stops:
+
+              CLOCKED     6:03 AM – 2:03 PM
+              BREAK       30 min
+              PAID HOURS  7.50 hr
+
+          PAID HOURS is punch.hours, the payable figure calendarModel got from paidShiftHours with
+          this person's team — not a second calculation that happens to agree. It is printed in
+          DECIMAL hours because that is the unit payroll pays in and the unit Pay Details and the
+          PDF already print, so the three surfaces read alike. BREAK is shown even at 0 min: it is
+          a term in the sum on screen, and a missing line reads as a missing deduction.
+
+          LIVE HOST — unchanged: CLOCKED span, its duration, the break inline, and the approved
+          figure separately below, because for them those two genuinely differ. */}
       <div className="mt-2 w-full">
         {punch ? (
           <>
             <div className="text-[9px] font-bold uppercase tracking-wider text-tt-muted">Clocked</div>
             <div className="text-[12.5px] font-medium tabular-nums text-tt-text">{range(punch.start_time, punch.end_time)}</div>
-            <div className="text-[10.5px] tabular-nums text-tt-muted">
-              {punch.isOpen
-                ? 'in progress'
-                : approvedApplies
-                  ? formatApprovedMinutes(hoursToMinutes(punch.clockedHours))
-                  : <><span className="font-semibold uppercase tracking-wider text-tt-green">Paid</span>{' '}{formatApprovedMinutes(hoursToMinutes(punch.hours))}</>}
-              {punch.breakMinutes > 0 && ` · ${punch.breakMinutes}m break`}
-            </div>
+            {approvedApplies ? (
+              <div className="text-[10.5px] tabular-nums text-tt-muted">
+                {punch.isOpen ? 'in progress' : formatApprovedMinutes(hoursToMinutes(punch.clockedHours))}
+                {punch.breakMinutes > 0 && ` · ${punch.breakMinutes}m break`}
+              </div>
+            ) : punch.isOpen ? (
+              <div className="text-[10.5px] text-tt-muted">in progress</div>
+            ) : (
+              <>
+                <div className="mt-1.5 text-[9px] font-bold uppercase tracking-wider text-tt-muted">Break</div>
+                <div className="text-[12.5px] font-medium tabular-nums text-tt-text">{punch.breakMinutes} min</div>
+                <div className="mt-1.5 text-[9px] font-bold uppercase tracking-wider text-tt-muted">Paid hours</div>
+                <div className="text-[12.5px] font-semibold tabular-nums text-tt-green">{fmtPaidHours(punch.hours)}</div>
+              </>
+            )}
           </>
         ) : (
           <div className="text-[12.5px] font-medium text-tt-muted">No punch</div>

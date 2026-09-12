@@ -148,36 +148,134 @@ console.log('\n2. THE WRITE GATE — minutes cannot reach the RPC without an aut
     !files.some((f) => /\.update\(\s*\{[^}]*approved_minutes/.test(strip(readFileSync(f, 'utf8')))));
 }
 
-console.log('\n3. THE FULFILLMENT TILE — no input, no override control, confirm sends NULL');
+console.log('\n3. THE FULFILLMENT TILE — the manager is NEVER asked to approve anything');
 {
   check('the tile computes the team once and gates on approvedHoursApply',
     /const team = teamOfRole\(person\.role\);/.test(CARD_CODE)
     && /const approvedApplies = approvedHoursApply\(team\);/.test(CARD_CODE));
-  // THE INPUT. approvedInputs is the JSX holding both number boxes; it renders behind the gate.
-  check('the hrs/min inputs render ONLY when approved hours apply',
+
+  // ── NOTHING THAT ASKS FOR A NUMBER MAY RENDER ────────────────────────────────────────────────
+  // Each of the four affordances is counted, then shown to sit behind the gate. Counting first is
+  // what makes the gate assertions meaningful: a second, ungated copy would change the count.
+  eq('there are exactly two approved-hours number inputs in the file',
+    (CARD_CODE.match(/aria-label="Approved (hours|minutes)"/g) ?? []).length, 2);
+  eq('…both inside the single `approvedInputs` block', (CARD_CODE.match(/const approvedInputs = \(/g) ?? []).length, 1);
+  check('…which renders ONLY when approved hours apply',
     /\{approvedApplies && punch && !punch\.isOpen && punch\.confirmable && \(!punch\.confirmed \|\| adjusting\) && approvedInputs\}/.test(CARD_CODE));
-  check('…and approvedInputs is the only thing that renders those two boxes',
-    (CARD_CODE.match(/aria-label="Approved (hours|minutes)"/g) ?? []).length === 2
-    && (CARD_CODE.match(/\{approvedApplies && [^}]*approvedInputs\}/g) ?? []).length === 1);
-  // THE OVERRIDE. "Adjust approved hours" is the other way a figure can be entered.
-  check('the "Adjust approved hours" control renders ONLY when approved hours apply',
+  eq('…and is referenced nowhere else', (CARD_CODE.match(/approvedInputs/g) ?? []).length, 2);
+
+  eq('there is exactly one "Adjust approved hours" control', (CARD_CODE.match(/Adjust approved hours/g) ?? []).length, 1);
+  check('…and it renders ONLY when approved hours apply',
     /\{approvedApplies && punch && !punch\.isOpen && punch\.confirmed && onApprovedMinutes && \(/.test(CARD_CODE));
-  eq('…and there is exactly one such control in the tile',
-    (CARD_CODE.match(/Adjust approved hours/g) ?? []).length, 1);
-  // CONFIRM. Nothing is parsed when there are no boxes; an explicit null goes out instead.
-  check('confirm skips the parser and sends null when approved hours do not apply',
+  eq('there is exactly one "Approved hours" label and one "Approved" read-out heading',
+    [(CARD_CODE.match(/>Approved hours<\/div>/g) ?? []).length, (CARD_CODE.match(/>Approved<\/div>/g) ?? []).length], [1, 1]);
+  check('…and the read-out is gated too', /\{approvedApplies && punch && !punch\.isOpen && punch\.approvedMinutes != null/.test(CARD_CODE));
+
+  // ── NO VALIDATION MAY FIRE ───────────────────────────────────────────────────────────────────
+  // Both parseApprovedInput calls sit behind approvedApplies, so APPROVED_INPUT_MESSAGES — MISSING
+  // included — is unreachable for a fulfillment shift. There is no path to "enter the approved
+  // hours for this shift" on a tile that never offered a box.
+  eq('parseApprovedInput is called exactly twice', (CARD_CODE.match(/parseApprovedInput\(/g) ?? []).length, 2);
+  check('…once behind the ternary in confirm',
     /const parsed = approvedApplies\s*\?\s*parseApprovedInput\(approved\.hours, approved\.minutes, mustApprove\)\s*:\s*\(\{ ok: true, minutes: null \} as const\);/
-      .test(CARD_CODE.replace(/\s+/g, ' ').replace(/ /g, ' ')) || /approvedApplies\s*\?[\s\S]{0,120}\{ ok: true, minutes: null \}/.test(CARD_CODE));
-  check('every confirm call carries the team', (CARD_CODE.match(/onConfirm\(punch\.id, (?:false|true), team/g) ?? []).length === 2);
-  check('the override call carries the team too', /onApprovedMinutes\(punch\.id, team, parsed\.minutes\)/.test(CARD_CODE));
-  check('saveApproved refuses outright for a team without approved hours',
+      .test(CARD_CODE));
+  check('…and once in saveApproved, which returns early for a team without approved hours',
     /if \(!punch \|\| !onApprovedMinutes \|\| !approvedApplies\) return;/.test(CARD_CODE));
-  // The prefill that created the 37 rows is gone: no clocked figure is seeded for a non-host.
-  check('no clocked figure is seeded into the boxes for a team without approved hours',
-    /const defaultMinutes = approvedApplies && punch/.test(CARD_CODE));
-  // The CLOCKED block, Edit and Confirm are untouched — the mock's "only the worked shift info".
-  check('the tile still shows the CLOCKED span and its duration', />Clocked<\/div>/.test(CARD) && /punch\.clockedHours/.test(CARD_CODE));
-  check('Edit and Confirm are still offered', />Edit<\/button>/.test(CARD) && /'Confirm'/.test(CARD_CODE));
+  eq('APPROVED_INPUT_MESSAGES is only ever read from a parse result',
+    (CARD_CODE.match(/APPROVED_INPUT_MESSAGES\[parsed\.code\]/g) ?? []).length, 2);
+  check('…and there is no other way to set an approved-hours error on the tile',
+    (CARD_CODE.match(/APPROVED_INPUT_MESSAGES/g) ?? []).length === 3);
+
+  // ── CONFIRM IS ONE CLICK ─────────────────────────────────────────────────────────────────────
+  check('confirm skips the parser and sends an explicit null when approved hours do not apply',
+    /approvedApplies\s*\?[\s\S]{0,120}\{ ok: true, minutes: null \}/.test(CARD_CODE));
+  eq('every confirm call carries the team', (CARD_CODE.match(/onConfirm\(punch\.id, (?:false|true), team/g) ?? []).length, 2);
+  check('the override call carries the team too', /onApprovedMinutes\(punch\.id, team, parsed\.minutes\)/.test(CARD_CODE));
+  check('there is no second confirmation step, modal or state between the button and onConfirm',
+    /onClick=\{\(\) => run\(true\)\}/.test(CARD_CODE) && !/setStep|setPendingConfirm|confirmStage/.test(CARD_CODE));
+  // …and what that click sends really is NULL, through the real write gate.
+  eq('a fulfillment confirm writes NULL no matter what figure is in hand',
+    [480, 0, 1421, null].map((m) => A.approvedMinutesForTeam('fulfillment', m)), [null, null, null, null]);
+
+  // ── WHAT THE TILE DOES SHOW ──────────────────────────────────────────────────────────────────
+  // CLOCKED span, BREAK, PAID HOURS — the arithmetic, and nothing to decide.
+  check('a non-host tile shows the CLOCKED range', /range\(punch\.start_time, punch\.end_time\)/.test(CARD_CODE));
+  check('…a BREAK line, always, so the deduction is visible even at 0 min',
+    />Break<\/div>[\s\S]{0,200}\{punch\.breakMinutes\} min/.test(CARD_CODE));
+  check('…and a PAID HOURS line read from punch.hours, the payable figure',
+    />Paid hours<\/div>[\s\S]{0,200}fmtPaidHours\(punch\.hours\)/.test(CARD_CODE));
+  check('…printed in decimal hours, the unit Pay Details and the PDF use',
+    /return `\$\{hours\.toFixed\(2\)\} hr`;/.test(CARD_CODE));
+  check('…and it is NOT re-derived from clockedHours on that branch',
+    !/approvedApplies[\s\S]{0,80}:[\s\S]{0,300}hoursToMinutes\(punch\.clockedHours\)[\s\S]{0,40}Paid/.test(CARD_CODE));
+  check('an OPEN punch says "in progress" rather than printing a paid figure',
+    /punch\.isOpen \? \(\s*<div className="text-\[10\.5px\] text-tt-muted">in progress<\/div>/.test(CARD_CODE));
+  check('Edit and Confirm are still the only two actions', />Edit<\/button>/.test(CARD) && /'Confirm'/.test(CARD_CODE));
+  // The HOST branch of the same block is untouched.
+  check('a host tile still shows its clocked duration and inline break, as before',
+    /approvedApplies \? \(\s*<div className="text-\[10\.5px\] tabular-nums text-tt-muted">\s*\{punch\.isOpen \? 'in progress' : formatApprovedMinutes\(hoursToMinutes\(punch\.clockedHours\)\)\}/.test(CARD_CODE));
+}
+
+console.log('\n3b. ONE TILE, EVERY CONFIRMATION SURFACE — so the rule cannot be missed anywhere');
+{
+  // The rule lives in PersonCard. That is only sufficient if PersonCard is the ONLY thing a
+  // manager can confirm worked time from, so this sweeps for a second one rather than assuming.
+  const { readdirSync, statSync } = await import('node:fs');
+  const root = fileURLToPath(new URL('../..', import.meta.url));
+  const files = [];
+  (function walk(d) {
+    for (const n of readdirSync(d)) {
+      if (n === 'node_modules' || n === '.next') continue;
+      const p2 = join(d, n);
+      if (statSync(p2).isDirectory()) walk(p2);
+      else if (/\.tsx$/.test(n)) files.push(p2);
+    }
+  })(root);
+
+  // A manager confirmation surface is one that renders an approved-hours input, or an
+  // Unconfirm control, or calls the confirm callback with a shift id.
+  const surfaces = files.filter((f) => {
+    const src = strip(readFileSync(f, 'utf8'));
+    return /aria-label="Approved (hours|minutes)"/.test(src)
+      || />Unconfirm</.test(src)
+      || /onConfirm\(punch\.id/.test(src);
+  }).map((f) => f.slice(root.length).replace(/^\//, ''));
+  eq('exactly one component renders manager shift confirmation', surfaces,
+    ['components/employees/weekly/PersonCard.tsx']);
+
+  // Everything that mounts it passes the callbacks straight through, so each surface inherits the
+  // gate rather than re-deciding it. (Previews included — they mount the production tile.)
+  const mounts = files.filter((f) => /<PersonCard\b/.test(readFileSync(f, 'utf8')))
+    .map((f) => f.slice(root.length).replace(/^\//, '')).sort();
+  eq('and these are every surface that mounts it — the day modal, the confirm queue, one preview',
+    mounts, [
+      'app/preview/employee-portal/PortalPreview.tsx',
+      'components/employees/weekly/DayPeopleModal.tsx',
+      'components/employees/weekly/PendingConfirmModal.tsx',
+    ]);
+  // The approved-hours review route mounts the two MODALS rather than the tile directly, which is
+  // the point: it exercises the same path a manager takes, not a shortcut around it.
+  const ahPreview = read('../../app/preview/approved-hours/ApprovedHoursPreview.tsx');
+  check('the review route reaches the tile through the real day modal and confirm queue',
+    /<DayPeopleModal/.test(ahPreview) && /<PendingConfirmModal/.test(ahPreview) && !/<PersonCard/.test(ahPreview));
+  for (const m of mounts) {
+    const src = strip(readFileSync(join(root, m), 'utf8'));
+    check(`${m}: passes onConfirm through without adding an approved-hours step`,
+      /onConfirm=\{/.test(src) && !/aria-label="Approved/.test(src) && !/parseApprovedInput/.test(src));
+  }
+  // The day modal and the confirm queue — the two production ones — declare the team-carrying
+  // signature, so neither can be handed a stale three-argument callback.
+  for (const m of ['components/employees/weekly/DayPeopleModal.tsx', 'components/employees/weekly/PendingConfirmModal.tsx']) {
+    const src = readFileSync(join(root, m), 'utf8');
+    check(`${m}: declares the team-carrying confirm signature`,
+      /onConfirm: \(shiftId: string, confirmed: boolean, team: ApprovedTeam, approvedMinutes\?: number \| null\) => Promise<void>;/.test(src)
+      && /onApprovedMinutes\?: \(shiftId: string, team: ApprovedTeam, approvedMinutes: number \| null\) => Promise<void>;/.test(src));
+  }
+  // And the month calendar — the one production container — forwards the team to useShifts.
+  const cal = strip(read('../../components/employees/weekly/ScheduleMonthCalendar.tsx'));
+  check('the calendar container forwards the team to both mutations',
+    /confirmShift\.mutateAsync\(\{ id: shiftId, confirmed, team, approvedMinutes \}\)/.test(cal)
+    && /setApprovedMinutes\.mutateAsync\(\{ id: shiftId, team, approvedMinutes \}\)/.test(cal));
 }
 
 console.log('\n4. A LEGACY FULFILLMENT FIGURE IS NOT SHOWN — because it no longer pays anything');
@@ -188,12 +286,24 @@ console.log('\n4. A LEGACY FULFILLMENT FIGURE IS NOT SHOWN — because it no lon
   // therefore gated on the TEAM, not merely on the presence of a stored value.
   check('the read-only Approved line renders only where approved hours apply',
     /\{approvedApplies && punch && !punch\.isOpen && punch\.approvedMinutes != null && !adjusting && \(/.test(CARD_CODE));
-  // …and the duration a non-host tile shows is the PAYABLE figure, sourced from punch.hours
-  // (calendarModel's paidShiftHours call), not re-derived from the punch here.
-  check('a non-host tile labels its duration "Paid" and reads it from punch.hours',
-    /approvedApplies\s*\?\s*formatApprovedMinutes\(hoursToMinutes\(punch\.clockedHours\)\)\s*:\s*<>[\s\S]{0,200}?formatApprovedMinutes\(hoursToMinutes\(punch\.hours\)\)/.test(CARD_CODE));
-  check('…and the clock-in → clock-out range and the break are still both on the tile',
-    /range\(punch\.start_time, punch\.end_time\)/.test(CARD_CODE) && /punch\.breakMinutes > 0 &&/.test(CARD_CODE));
+  // …and the PAID HOURS the tile prints is punch.hours, which for that row is the punch — so the
+  // 1421 is invisible on screen precisely because it is invisible to payroll.
+  check('the non-host branch prints punch.hours and never punch.approvedMinutes',
+    />Paid hours<\/div>[\s\S]{0,200}fmtPaidHours\(punch\.hours\)/.test(CARD_CODE));
+  // punch.approvedMinutes is read on exactly four lines, and every one of them sits on a path a
+  // non-host cannot reach. Enumerated rather than counted, so a fifth read has to be classified.
+  const amLines = CARD_CODE.split('\n').map((l) => l.trim()).filter((l) => l.includes('punch.approvedMinutes'));
+  eq('punch.approvedMinutes is read on exactly four lines', amLines.length, 4);
+  check('1/4 — the input prefill, behind `approvedApplies &&` on the same expression',
+    /const defaultMinutes = approvedApplies && punch/.test(CARD_CODE) && amLines[0].startsWith('? (punch.approvedMinutes'));
+  check('2/4 — the read-out gate, which begins with approvedApplies',
+    amLines[1].startsWith('{approvedApplies && punch'));
+  check('3/4 — the read-out itself, inside that gate', amLines[2].includes('formatApprovedMinutes(punch.approvedMinutes)'));
+  check('4/4 — the Cancel reset, inside the host-gated adjust block',
+    amLines[3].includes('setApproved(splitApprovedMinutes(punch.approvedMinutes'));
+  check('…and that adjust block is itself gated on approvedApplies',
+    CARD_CODE.indexOf('{approvedApplies && punch && !punch.isOpen && punch.confirmed && onApprovedMinutes')
+      < CARD_CODE.indexOf('setApproved(splitApprovedMinutes(punch.approvedMinutes'));
   // A row confirmed under THIS build has approved_minutes null anyway.
   eq('a fulfillment row confirmed under this build carries no figure at all',
     A.approvedMinutesForTeam('fulfillment', E.hoursToMinutes(E.clockedShiftHours(JUAN))), null);
@@ -516,6 +626,13 @@ console.log('\n10. THE SERVER ENFORCES IT TOO — migration 149');
     /POST-APPLY VERIFICATION/.test(M) && /or the comparison is\n--     vacuous/.test(M));
   check('…and states plainly that no historical value is modified',
     /NO DATA IS MODIFIED/.test(M) && /separately-approved change/.test(M));
+  // The DB has no migration ledger, so the file is where the owner's two decisions are recorded.
+  check('…and records the owner-approved CODE-FIRST release sequence',
+    /CODE-FIRST ORDER EXPLICITLY APPROVED BY THE OWNER, 2026-09-11/.test(M)
+    && /read-only production smoke test/.test(M) && /only then apply this migration/.test(M));
+  check('…and records the owner-approved decision to KEEP the 40 historical rows',
+    /HISTORICAL ROWS: KEEP, EXPLICITLY DECIDED BY THE OWNER, 2026-09-11/.test(M)
+    && /NOT to be bulk\n--      cleared/.test(M));
 }
 
 console.log(`\n${passed} checks passed`);

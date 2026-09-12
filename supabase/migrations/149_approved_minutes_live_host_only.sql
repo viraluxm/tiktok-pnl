@@ -22,6 +22,18 @@
 --   ➜ Applying it early is not a data hazard — nothing is written that would not have been — it
 --     is a UI hazard on one button. Do it in the right order anyway.
 --
+--   ✅ CODE-FIRST ORDER EXPLICITLY APPROVED BY THE OWNER, 2026-09-11. The agreed release sequence:
+--        1. merge + deploy the application code through the normal repo/Vercel workflow;
+--        2. read-only production smoke test (Fulfillment shows no Approved Hours and pays clocked
+--           time; Live Host unchanged; multi-shift intact; no runtime errors) — NO payroll edits;
+--        3. only then apply this migration, then re-verify the RPC behaviour.
+--
+--   ✅ HISTORICAL ROWS: KEEP, EXPLICITLY DECIDED BY THE OWNER, 2026-09-11. The 40 fulfillment
+--      `approved_minutes` values stay in the database as legacy/audit data and are NOT to be bulk
+--      cleared. They are already inert: paidShiftHours() ignores the column for a non-host, so
+--      every one of those rows pays its punch on the Pay tab, in Pay Details and on the PDF. This
+--      migration must not, and does not, touch them.
+--
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- WHY
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
