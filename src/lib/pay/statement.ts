@@ -331,28 +331,87 @@ export function totalOwedOf(workedPay: number, bonusTotal: number): number {
 }
 
 /**
- * HOW A BONUS LINE SHOWS ITS WORKING: 'Flat', or '$2.00/hr x 72.50 hr'.
+ * THE CANONICAL PAYABLE DURATION AS A READABLE TIME BASIS: '30h 28m', '7h 40m 23s', '8h'.
  *
- * Shared by the Pay Details panel and the PDF so a manager reading the screen and an employee
- * reading the paper are told the same thing in the same words — and so nobody has to multiply the
- * rate by the hours themselves to check the figure beside it.
+ * Used ONLY inside an hourly bonus's working. The statement's own "Total Hours" / "Payable hours"
+ * figures are untouched and still read 30.47 — this is not a new way of stating hours, it is a way
+ * of stating the MULTIPLICAND in an expression a reader may try to check.
  *
- * THE HOURS HERE ARE ROUNDED FOR DISPLAY; THE MONEY IS NOT. `eligiblePaidHours` is the canonical
- * payable figure at full precision, and that is what was multiplied. A live host on 30.4666 payable
- * hours at $3.00/hr is owed $91.40, while the 30.47 printed beside it multiplies out to $91.41.
+ * `unit` is the granularity the label is rounded to: 60 for whole minutes, 3600 for whole seconds.
+ * The caller picks it by checking which one actually reconciles (see formatBonusBasis).
+ */
+export function formatPayableDuration(hours: number, unit: 60 | 3600 = 60): string {
+  const total = Math.max(0, Math.round(hours * unit)); // whole minutes, or whole seconds
+  const seconds = unit === 3600 ? total % 60 : 0;
+  const totalMinutes = unit === 3600 ? Math.floor(total / 60) : total;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h}h`);
+  // A bare '0m' for a zero duration, rather than an empty string.
+  if (m > 0 || (h === 0 && seconds === 0)) parts.push(`${m}m`);
+  if (seconds > 0) parts.push(`${seconds}s`);
+  return parts.join(' ');
+}
+
+/** The duration `formatPayableDuration(hours, unit)` actually names, back in hours. */
+function durationAtUnit(hours: number, unit: 60 | 3600): number {
+  return Math.max(0, Math.round(hours * unit)) / unit;
+}
+
+/**
+ * HOW A BONUS LINE SHOWS ITS WORKING: 'Flat', or '$3.00/hr x 30h 28m payable'.
  *
- * That one cent is deliberate, and rounding the hours before multiplying would be the worse of the
- * two answers: "+$2 per payable hour" has to mean the same hour payroll pays, or the incentive is
- * quietly paid on time nobody worked — the second definition of an hour this feature exists not to
- * introduce. It is also not a new property of the document. The printed statement has ALWAYS shown
- * "Total Hours 30.47 / Hourly Rate $25.00 / Gross Pay $761.67", where the first two multiply to
- * $761.75; base pay is computed from the same unrounded hours for the same reason. The bonus line
- * is consistent with the line above it, and its discrepancy is the smaller of the two.
+ * Shared by the Pay Details panel, the bonus form, the delete dialog and the PDF, so a manager
+ * reading the screen and an employee reading the paper are told the same thing in the same words,
+ * and nobody has to work the figure out themselves to check it.
+ *
+ * ── WHY A DURATION AND NOT A DECIMAL NUMBER OF HOURS ────────────────────────────────────────────
+ *
+ * This used to read '$3.00/hr x 30.47 hr'. The money was right — a live host on 1828 approved
+ * minutes is owed exactly $91.40 — but 30.47 x 3.00 is $91.41, so a CORRECT payroll figure was
+ * printed beside an expression that made it look like a penny short. An arithmetic a reader can do
+ * in their head has to come out right, or it is worse than showing no working at all.
+ *
+ * The money is unchanged: `calculatedBonusCents` is still rate x the EXACT canonical payable hours,
+ * rounded once. Nothing here feeds back into a total. Only the multiplicand's PRESENTATION changed.
+ *
+ * ── WHY THE PRECISION IS CHOSEN BY CHECKING, NOT BY PICKING ONE ─────────────────────────────────
+ *
+ * Whole minutes is not automatically exact either, and it was verified against the live database
+ * rather than assumed: of 522 confirmed payable punches, 512 carry SUB-SECOND precision (the punch
+ * instants come from now()), and only 10 land on a whole minute. `approved_minutes`, by contrast,
+ * is whole minutes in all 62 rows — which is why a LIVE HOST, the case that exposed this, always
+ * reconciles at minute granularity.
+ *
+ * So the label is not a fixed format; it is the coarsest readable one whose OWN arithmetic
+ * reproduces the stored cents:
+ *
+ *   1. whole minutes   '$3.00/hr x 30h 28m payable'        — exact for every live host, and for a
+ *                                                             punch whose payable time is whole
+ *   2. whole seconds   '$2.00/hr x 7h 40m 23s payable'     — the ordinary clocked case
+ *   3. neither         '$900.00/hr x ~7h 40m 23s payable'  — the '~' says the figure is rounded,
+ *                                                             which is the honest thing to print
+ *                                                             rather than an expression that lies
+ *
+ * Tier 3 needs a rate high enough that half a second of it crosses a cent (about $72/hr), so it is
+ * unreachable at any real incentive rate — but the CHECK is what makes tiers 1 and 2 trustworthy,
+ * so it is a real branch with a real test rather than an assumption.
+ *
+ * '~' and not '≈': the PDF draws in Helvetica's WinAnsi encoding, which has no U+2248.
  */
 export function formatBonusBasis(item: BonusItem): string {
   if (item.calculationType !== 'hourly') return 'Flat';
-  const rate = formatMoney(centsToDollars(item.rateCentsPerHour ?? 0));
-  return `${rate}/hr \u00d7 ${(item.eligiblePaidHours ?? 0).toFixed(2)} hr`;
+  const rateCents = item.rateCentsPerHour ?? 0;
+  const rate = formatMoney(centsToDollars(rateCents));
+  const hours = item.eligiblePaidHours ?? 0;
+
+  for (const unit of [60, 3600] as const) {
+    if (hourlyBonusCents(rateCents, durationAtUnit(hours, unit)) === item.calculatedBonusCents) {
+      return `${rate}/hr \u00d7 ${formatPayableDuration(hours, unit)} payable`;
+    }
+  }
+  return `${rate}/hr \u00d7 ~${formatPayableDuration(hours, 3600)} payable`;
 }
 
 export interface StatementTotals {

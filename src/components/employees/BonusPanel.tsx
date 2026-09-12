@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { fmt } from '@/lib/calculations';
-import { formatBonusBasis, type BonusItem } from '@/lib/pay/statement';
+import { formatBonusBasis, formatPayableDuration, type BonusItem } from '@/lib/pay/statement';
 import {
   BONUS_DESCRIPTION_MAX,
   centsToInput,
@@ -315,9 +315,13 @@ export function BonusFormModal({
           <p className="mt-2 text-[11px] leading-relaxed text-tt-muted">
             {hourly ? (
               <>
-                Paid on every payable hour in this pay period — {paidHours.toFixed(2)} hr so far. It
-                is separate from the base hourly rate and changes nothing about it; if worked hours
-                are corrected later, this bonus follows them on its own.
+                {/* The SAME duration basis the saved line will show, so the figure a manager sees
+                    while choosing a rate is the figure they see afterwards. Stated as a duration
+                    rather than 72.50 hr for the reason formatBonusBasis explains: this number is
+                    about to be multiplied by the rate above it, and it has to come out right. */}
+                Paid on every payable hour in this pay period — {formatPayableDuration(paidHours)} so
+                far. It is separate from the base hourly rate and changes nothing about it; if worked
+                hours are corrected later, this bonus follows them on its own.
               </>
             ) : (
               <>A bonus is paid on top of worked time. It adds no hours and changes no shift, rate or clock-in.</>

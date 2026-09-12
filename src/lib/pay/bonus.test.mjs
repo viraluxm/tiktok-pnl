@@ -56,7 +56,8 @@ const punchUrl = transpile('../shifts/punchEdit.ts', 'punchEdit.mjs', {
 
 const {
   buildPayStatement, bonusItemsFor, bonusSummaryFor, sumBonusCents, centsToDollars, totalOwedOf,
-  hourlyBonusCents, formatBonusBasis, formatMoney, payPeriodWeeks, BONUS_FALLBACK_LABEL,
+  hourlyBonusCents, formatBonusBasis, formatPayableDuration, formatMoney, payPeriodWeeks,
+  BONUS_FALLBACK_LABEL,
 } = await import(stmtUrl);
 const { computePay, paidShiftHours, payrollTeamOfRole, PAY_ANCHOR, payPeriodFor } = await import(employeesUrl);
 const { parseBonusAmount, centsToInput, normalizeBonusDescription, BONUS_MAX_CENTS, BONUS_MAX_RATE_CENTS } =
@@ -189,7 +190,8 @@ console.log('\n§3 HOURLY — a rate times the CANONICAL payable hours');
   check('the eligible hours ARE the statement\'s payable hours — not a second definition',
     item.eligiblePaidHours === s.totals.paidHours && item.eligiblePaidHours.toFixed(2) === '72.50');
   check('72.50 hr x $2.00/hr = $145.00', item.calculatedBonusCents === 14500, formatMoney(item.amount));
-  check('it shows its working', formatBonusBasis(item) === '$2.00/hr × 72.50 hr', formatBonusBasis(item));
+  check('it shows its working as a duration that multiplies out correctly',
+    formatBonusBasis(item) === '$2.00/hr × 72h 30m payable', formatBonusBasis(item));
   check('bonus pay is $145.00', formatMoney(s.totals.bonusTotal) === '$145.00');
   check('...all of it hourly', cents(s.totals.hourlyBonusTotal) === 14500 && s.totals.flatBonusTotal === 0);
   check('TOTAL OWED is $1,740.00', formatMoney(s.totals.totalOwed) === '$1,740.00');
@@ -224,7 +226,8 @@ console.log('\n§4 WHICH HOURS — the payroll rule, per team, unchanged');
   const bS = stmt([hourly('e-b', 200, 'Incentive')], bEmp, PERIOD, brk);
   check('a 9-hour punch with a 60-minute break is 8.00 payable hours', bS.totals.paidHours.toFixed(2) === '8.00');
   check('...so a $2.00/hr incentive pays $16.00, not $18.00', bS.totals.bonusCents === 1600, formatMoney(bS.totals.bonusTotal));
-  check('...the working says 8.00 hr, not 9.00', formatBonusBasis(bS.bonusItems[0]) === '$2.00/hr × 8.00 hr');
+  check('...the working says 8h, not 9h', formatBonusBasis(bS.bonusItems[0]) === '$2.00/hr × 8h payable',
+    formatBonusBasis(bS.bonusItems[0]));
 
   // MULTI-SHIFT: two clock sessions on one day are two records and 8 payable hours between them.
   const split = [punch('e-s', '2026-08-25', '06:00', '10:00'), punch('e-s', '2026-08-25', '14:00', '18:00')];
@@ -314,7 +317,8 @@ console.log('\n§5 HOURS CAN CHANGE — and the incentive follows, with nobody e
     incentive.rate_cents_per_hour === 200 && incentive.amount_cents === null &&
       !Object.keys(incentive).some((k) => /calculated|total/i.test(k)),
     Object.keys(incentive).join(','));
-  check('...its stated working moved too', formatBonusBasis(after.bonusItems[0]) === '$2.00/hr × 74.00 hr');
+  check('...its stated working moved too', formatBonusBasis(after.bonusItems[0]) === '$2.00/hr × 74h payable',
+    formatBonusBasis(after.bonusItems[0]));
   check('...worked pay moved by the hour and a half as well',
     cents(after.totals.gross) - cents(before.totals.gross) === cents(1.5 * 22));
   check('...and total owed moved by both', cents(after.totals.totalOwed) - cents(before.totals.totalOwed) === 3300 + 300);
@@ -507,6 +511,114 @@ console.log('\n§9 THE PAY TILE reads the same numbers the statement does — bo
   const rosterWorked = pay.reduce((a, p) => a + p.pay, 0);
   check('the roster total exceeds worked pay by exactly the bonuses',
     cents(rosterTotal) - cents(rosterWorked) === 29500);
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+console.log('\n§9b THE PRINTED WORKING MUST MULTIPLY OUT TO THE PRINTED MONEY');
+{
+  // THE CASE THAT PROMPTED THIS. A live host on 1828 approved minutes at $3.00/hr is owed exactly
+  // $91.40. Stated as '30.47 hr' the expression read 30.47 x 3.00 = $91.41, so a CORRECT payroll
+  // figure was printed beside arithmetic that made it look a penny short.
+  const oddHost = EMP({ id: 'e-odd', role: 'host', hourly_rate: 25 });
+  const oddShift = [punch('e-odd', '2026-08-24', '06:00', '14:00', { approved_minutes: 1828 })];
+  const oddS = stmt([hourly('e-odd', 300, 'Live show incentive')], oddHost, PERIOD, oddShift);
+  const oddItem = oddS.bonusItems[0];
+
+  check('the exact payable duration is still 30.4666… hours',
+    Math.abs(oddItem.eligiblePaidHours - 1828 / 60) < 1e-12, String(oddItem.eligiblePaidHours));
+  check('the money is unchanged — still $91.40', oddItem.calculatedBonusCents === 9140);
+  check('the basis now reads as a duration', formatBonusBasis(oddItem) === '$3.00/hr × 30h 28m payable',
+    formatBonusBasis(oddItem));
+  check('...and 30h 28m x $3.00 IS $91.40 — the visible arithmetic reconciles',
+    Math.round(300 * (30 + 28 / 60)) === 9140);
+  check('...the misleading "30.47" appears nowhere in it', !formatBonusBasis(oddItem).includes('30.47'));
+  check('...nor any bare 2-decimal hour figure at all', !/\d+\.\d\d\s*hr/.test(formatBonusBasis(oddItem)));
+
+  // The clean case still reads cleanly.
+  const clean = stmt([hourly('e-carlos', 200, 'Productivity incentive')]).bonusItems[0];
+  check('72.50 payable hours reads as 72h 30m', formatBonusBasis(clean) === '$2.00/hr × 72h 30m payable',
+    formatBonusBasis(clean));
+  check('...and 72h 30m x $2.00 IS $145.00', Math.round(200 * 72.5) === 14500 && clean.calculatedBonusCents === 14500);
+
+  // ── THE PROPERTY ITSELF, not just two examples ───────────────────────────────────────────────
+  // Parse the rendered duration back out of the string and multiply it by the rendered rate. That
+  // is exactly what a reader checking the line by hand would do, so it must come out at the
+  // rendered money — unless the line carries the '~' that says the figure is rounded.
+  const parseBasis = (basis) => {
+    const m = /^\$([\d,]+\.\d\d)\/hr × (~?)((?:\d+h ?)?(?:\d+m ?)?(?:\d+s ?)?) payable$/.exec(basis);
+    if (!m) return null;
+    const rateCents = Math.round(Number(m[1].replace(/,/g, '')) * 100);
+    const d = /^(?:(\d+)h ?)?(?:(\d+)m ?)?(?:(\d+)s ?)?$/.exec(m[3].trim());
+    const hours = Number(d[1] || 0) + Number(d[2] || 0) / 60 + Number(d[3] || 0) / 3600;
+    return { rateCents, approx: m[2] === '~', hours };
+  };
+
+  // Rates a real incentive might carry, against durations of every shape: whole hours, whole
+  // minutes, whole seconds, and sub-second spans of the kind 512 of 522 production punches have.
+  const RATES = [1, 25, 100, 150, 200, 250, 300, 333, 500, 1000, 7199, 100000];
+  const HOURS = [
+    0, 0.25, 1, 7.5, 8, 30 + 28 / 60, 72.5, 1828 / 60, 1421 / 60, 242 / 60,
+    7 + 40 / 60 + 23 / 3600,                     // whole seconds
+    7.673055555555556 + 0.0000317,               // sub-second, like a real punch
+    23.684722222222224, 30.466666666666665, 12.345678901234,
+  ];
+  let examined = 0, exact = 0, approx = 0, unparsed = 0, mismatched = 0;
+  for (const rateCents of RATES) {
+    for (const h of HOURS) {
+      const item = {
+        calculationType: 'hourly', rateCentsPerHour: rateCents, eligiblePaidHours: h,
+        calculatedBonusCents: hourlyBonusCents(rateCents, h),
+      };
+      const basis = formatBonusBasis(item);
+      const parsed = parseBasis(basis);
+      examined++;
+      if (!parsed) { unparsed++; continue; }
+      if (parsed.rateCents !== rateCents) { mismatched++; continue; }
+      const asRead = Math.round(parsed.rateCents * parsed.hours);
+      if (asRead === item.calculatedBonusCents) exact++;
+      else if (parsed.approx) approx++;
+      else mismatched++;
+    }
+  }
+  check('every rendered basis parses back to a rate and a duration', unparsed === 0, `${examined} examined`);
+  check('NO line shows arithmetic that disagrees with the money beside it', mismatched === 0,
+    `${examined} combinations examined`);
+  check('...and the overwhelming majority reconcile EXACTLY, with no hedge',
+    exact >= examined - approx && exact > examined * 0.9, `${exact}/${examined} exact, ${approx} marked ~`);
+  // Anti-vacuity in both directions: the '~' tier must be reachable, and the old format must fail.
+  check('the "~" tier is reachable, so the check above is not passing by never firing', approx > 0,
+    `${approx} lines needed the marker`);
+  check('...and the OLD 2-decimal format would have failed this very property',
+    Math.round(300 * 30.47) !== 9140, `30.47 x $3.00 = ${(Math.round(300 * 30.47) / 100).toFixed(2)}`);
+
+  // The three tiers, named.
+  check('tier 1 — whole minutes, for an approved-hours host', formatBonusBasis(oddItem).includes('30h 28m'));
+  const secs = { calculationType: 'hourly', rateCentsPerHour: 200, eligiblePaidHours: 7 + 40 / 60 + 23 / 3600 };
+  secs.calculatedBonusCents = hourlyBonusCents(200, secs.eligiblePaidHours);
+  check('tier 2 — whole seconds, for an ordinary clocked punch',
+    formatBonusBasis(secs) === '$2.00/hr × 7h 40m 23s payable', formatBonusBasis(secs));
+  const wild = { calculationType: 'hourly', rateCentsPerHour: 90000, eligiblePaidHours: 7.6730872 };
+  wild.calculatedBonusCents = hourlyBonusCents(90000, wild.eligiblePaidHours);
+  check('tier 3 — a rate so high that even seconds cannot reconcile says so with "~"',
+    formatBonusBasis(wild).startsWith('$900.00/hr × ~'), formatBonusBasis(wild));
+
+  // Shapes of the duration itself.
+  check('a whole number of hours drops the minutes', formatPayableDuration(8) === '8h');
+  check('under an hour drops the hours', formatPayableDuration(0.75) === '45m');
+  check('zero is stated, not blank', formatPayableDuration(0) === '0m');
+  check('seconds only appear when asked for',
+    formatPayableDuration(7 + 40 / 60 + 23 / 3600) === '7h 40m' &&
+      formatPayableDuration(7 + 40 / 60 + 23 / 3600, 3600) === '7h 40m 23s');
+
+  // ── AND THE REST OF THE STATEMENT IS UNTOUCHED ───────────────────────────────────────────────
+  // This is a bonus-line presentation change only. The normal hours displays keep their decimals.
+  check('the statement\'s own payable-hours figure still reads 30.47',
+    oddS.totals.paidHours.toFixed(2) === '30.47');
+  check('...and Carlos\'s still reads 72.50', BASE.totals.paidHours.toFixed(2) === '72.50');
+  check('the week subtotals still carry 2-decimal hours',
+    payPeriodWeeks(BASE)[0].hours.toFixed(2) === '40.50');
+  check('a FLAT line still just says "Flat" — no duration anywhere near it',
+    formatBonusBasis(stmt([flat('e-carlos', 10000, 'Performance bonus')]).bonusItems[0]) === 'Flat');
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════

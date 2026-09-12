@@ -2,7 +2,7 @@
 // content streams inflated and read back. The three things it has to prove:
 //
 //   1. A bonus of EITHER type is ON the paper: its name, how it was arrived at ('Flat', or
-//      '$2.00/hr x 72.50 hr'), what it is worth, the subtotal and a TOTAL OWED.
+//      '$2.00/hr x 72h 30m payable'), what it is worth, the subtotal and a TOTAL OWED.
 //   2. That TOTAL OWED is the SAME NUMBER Pay Details shows — asserted against the model both
 //      surfaces read, and against the modal's own source, not against a second calculation here.
 //   3. WITH NO BONUSES THE DOCUMENT IS THE ONE THAT SHIPPED BEFORE — byte for byte, not "looks
@@ -58,7 +58,7 @@ const calcUrl = transpile('../calculations.ts', 'calculations.mjs', {
 writeFileSync(join(dir, 'types-stub.mjs'), 'export {};\n');
 
 const { PDFDocument: ProbeDoc } = await import(pathToFileURL(shim).href);
-const { buildPayStatement, formatMoney, formatBonusBasis } = await import(stmtUrl);
+const { buildPayStatement, formatMoney, formatBonusBasis, formatPayableDuration } = await import(stmtUrl);
 const { renderPayStatementPdf } = await import(pdfUrl);
 const { fmt } = await import(calcUrl);
 const { laWallTimeToUtc } = await import(tzUrl);
@@ -187,8 +187,10 @@ console.log('\n§3 WITH BONUSES — name, amount, subtotal, total');
 
   // THE HOURLY LINE — the one the paper has to explain rather than just assert.
   check('the hourly incentive is named', bonusText.includes('Productivity incentive'));
-  check('...it shows its RATE and its ELIGIBLE HOURS, so the figure can be checked by hand',
-    bonusText.includes('$2.00/hr') && bonusText.includes('72.50 hr'));
+  check('...it shows its RATE and its ELIGIBLE TIME, so the figure can be checked by hand',
+    bonusText.includes('$2.00/hr') && bonusText.includes('72h 30m payable'));
+  check('...as a DURATION, never a 2-decimal hour figure that would not multiply out',
+    !/\$2\.00\/hr [^\n]*72\.50/.test(bonusText));
   check('...through the SAME formatter the screen uses, character for character',
     bonusText.includes(formatBonusBasis(withBonus.bonusItems[2])),
     formatBonusBasis(withBonus.bonusItems[2]));
@@ -227,12 +229,14 @@ console.log('\n§4 The paper and the screen show the SAME total owed');
   // The hourly line is the one that could be re-derived and get a different answer. Every part of
   // it on paper must be the model's own field, not a recomputation.
   const hourlyItem = withBonus.bonusItems[2];
-  check('the PDF prints the model\'s rate, eligible hours and value — all three',
+  check('the PDF prints the model\'s rate, its eligible time and its value — all three',
     bonusText.includes(formatMoney(hourlyItem.rateCentsPerHour / 100)) &&
-      bonusText.includes(hourlyItem.eligiblePaidHours.toFixed(2)) &&
+      bonusText.includes(formatPayableDuration(hourlyItem.eligiblePaidHours)) &&
       bonusText.includes(fmt(hourlyItem.amount)));
-  check('...and those eligible hours ARE the statement\'s payable hours',
+  check('...and that eligible time IS the statement\'s payable hours, unrounded',
     hourlyItem.eligiblePaidHours === withBonus.totals.paidHours);
+  check('...while the summary\'s own Total Hours line is UNCHANGED, still 2 decimals',
+    bonusText.includes('Total Hours This Pay Period:') && bonusText.includes('72.50'));
 
   // And the renderer must still not be able to work a payroll figure out for itself.
   const pdfSrc = src('./statementPdf.ts');
@@ -246,6 +250,34 @@ console.log('\n§4 The paper and the screen show the SAME total owed');
   check('...it reads the model\'s own fields',
     /statement\.totals\.bonusTotal/.test(pdfSrc) && /statement\.totals\.totalOwed/.test(pdfSrc) &&
       /statement\.bonusItems/.test(pdfSrc));
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════
+console.log('\n§4b THE LIVE-HOST CASE THAT PROMPTED THE PRESENTATION FIX, ON PAPER');
+{
+  // 1828 approved minutes at $3.00/hr is exactly $91.40. Printed as '30.47 hr' the page showed
+  // arithmetic that came to $91.41 beside a figure of $91.40 — a correct payroll number made to
+  // look wrong by its own working.
+  const host = { ...CARLOS, id: 'e-carlos', name: 'Adriana Salas', role: 'host', hourly_rate: 25 };
+  const hostShift = [{ ...punch('2026-08-24', '06:00', '14:00'), approved_minutes: 1828 }];
+  const hostStatement = buildPayStatement({
+    employee: host, period: PERIOD, shifts: hostShift,
+    adjustments: [hourlyAdj('bh', 300, 'Live show incentive', 1)], generatedAtISO: GENERATED,
+  });
+  const hostText = textOf(await renderPayStatementPdf(hostStatement, { loadLogo }));
+
+  check('the host is paid the approved 30.4666… hours', hostStatement.totals.paidHours === 1828 / 60);
+  check('...and the incentive is exactly $91.40', hostStatement.totals.bonusCents === 9140);
+  check('the paper states the basis as a duration', hostText.includes('$3.00/hr × 30h 28m payable'),
+    formatBonusBasis(hostStatement.bonusItems[0]));
+  check('...and 30h 28m x $3.00 reconciles to the $91.40 printed beside it',
+    Math.round(300 * (30 + 28 / 60)) === 9140 && hostText.includes('$91.40'));
+  check('...the misleading "30.47 hr" multiplication is NOT on the page',
+    !/\$3\.00\/hr [^\n]*30\.47/.test(hostText));
+  check('...though Total Hours itself still reads 30.47, as it always has',
+    hostText.includes('30.47'));
+  check('screen and paper carry the IDENTICAL basis string — one helper, no drift',
+    hostText.includes(formatBonusBasis(hostStatement.bonusItems[0])));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════
@@ -287,7 +319,8 @@ console.log('\n§6 Edge cases on paper');
 
   // A DECIMAL rate, on paper.
   const decText = textOf(await renderPayStatementPdf(build([hourlyAdj('b6', 250, 'Productivity incentive', 1)]), { loadLogo }));
-  check('$2.50/hr x 72.50 hr prints as $181.25', decText.includes('$2.50/hr') && decText.includes('$181.25'));
+  check('$2.50/hr x 72h 30m prints as $181.25',
+    decText.includes('$2.50/hr') && decText.includes('72h 30m payable') && decText.includes('$181.25'));
 
   // AND THE POINT OF THE WHOLE DESIGN: fewer hours, a smaller incentive, same stored row.
   const fewerShifts = SHIFTS.slice(0, 8); // drop the last 8.00-hour day → 64.50 payable hours
@@ -298,7 +331,7 @@ console.log('\n§6 Edge cases on paper');
   const fewerText = textOf(await renderPayStatementPdf(fewer, { loadLogo }));
   check('with 64.50 payable hours the SAME $2.00/hr row prints $129.00 on paper',
     fewer.totals.paidHours.toFixed(2) === '64.50' && fewerText.includes('$129.00') &&
-      fewerText.includes('64.50 hr'),
+      fewerText.includes('64h 30m payable'),
     formatMoney(fewer.totals.bonusTotal));
   check('...and the document differs from the 72.50-hour one, so this is not a vacuous check',
     !fewerText.includes('$145.00'));
