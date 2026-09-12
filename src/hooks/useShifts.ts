@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client';
 import type { Shift } from '@/types';
 import { buildShiftEditPatch, type EditableShiftRow } from '@/lib/shifts/punchEdit';
 import { manualWorkedErrorMessage } from '@/lib/shifts/manualWorked';
+import { approvedMinutesForTeam, type ApprovedTeam } from '@/lib/shifts/approvedHours';
 import { useUser } from './useUser';
 
 export interface ShiftInput {
@@ -206,15 +207,26 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
   // so passing `approvedMinutes` straight through would send only p_shift_id — which resolves to
   // the LEGACY overload and confirms a live host with no approved duration at all, silently. An
   // explicit null keeps the call two-argument, and the new RPC then refuses the host shift.
+  //
+  // `team` IS REQUIRED, AND THAT IS THE POINT. Approved hours are a LIVE-HOST instrument: for
+  // anyone else the payable duration IS the punch, and an override box beside it only invites a
+  // number to be typed over an already-correct one. Hiding the input is not enough — this module
+  // issues the ONLY two calls that can set the column, so the rule is enforced HERE, on the way
+  // out, by approvedMinutesForTeam(). Making the team a required field rather than an optional one
+  // is what stops a future caller quietly omitting it: minutes cannot reach the RPC without the
+  // team that authorises them, and a non-host team collapses them to NULL — the value
+  // paidShiftHours() reads as "pay the canonical worked time".
   const confirmShift = useMutation({
-    mutationFn: async ({ id, confirmed, approvedMinutes }: { id: string; confirmed: boolean; approvedMinutes?: number | null }) => {
+    mutationFn: async ({ id, confirmed, team, approvedMinutes }: {
+      id: string; confirmed: boolean; team: ApprovedTeam; approvedMinutes?: number | null;
+    }) => {
       // rpc-grants: lensed_confirm_time_clock_shift, lensed_unconfirm_time_clock_shift
       // (dynamic .rpc(fn) — annotation lets check-rpc-grants.mjs verify both grants.)
       const fn = confirmed
         ? 'lensed_confirm_time_clock_shift'
         : 'lensed_unconfirm_time_clock_shift';
       const args = confirmed
-        ? { p_shift_id: id, p_approved_minutes: approvedMinutes ?? null }
+        ? { p_shift_id: id, p_approved_minutes: approvedMinutesForTeam(team, approvedMinutes ?? null) }
         : { p_shift_id: id };
       const { data, error } = await supabase.rpc(fn, args);
       if (error) throw new Error(error.message); // message is a stable token (see confirmErrorMessage)
@@ -229,12 +241,19 @@ export function useShifts(dateFrom: string | null, dateTo: string | null) {
   // deliberately different actions with different targets.
   //
   // Passing null withdraws the approval and returns the shift to the legacy calculation.
+  //
+  // Same team gate as confirmShift, for the same reason: this RPC is the OTHER way the column can
+  // change, so a correction path that skipped the rule would reopen exactly the hole the hidden
+  // input closed. For a non-host the call still runs and still sends NULL — which is the honest
+  // outcome, since "no override" is the correct value for them.
   const setApprovedMinutes = useMutation({
-    mutationFn: async ({ id, approvedMinutes }: { id: string; approvedMinutes: number | null }) => {
+    mutationFn: async ({ id, team, approvedMinutes }: {
+      id: string; team: ApprovedTeam; approvedMinutes: number | null;
+    }) => {
       // No `rpc-grants:` annotation needed — a literal name is collected directly by the checker.
       const { data, error } = await supabase.rpc('lensed_set_approved_minutes', {
         p_shift_id: id,
-        p_approved_minutes: approvedMinutes,
+        p_approved_minutes: approvedMinutesForTeam(team, approvedMinutes),
       });
       if (error) throw new Error(error.message);
       return data;

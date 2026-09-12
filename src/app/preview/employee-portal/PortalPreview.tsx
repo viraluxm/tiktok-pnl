@@ -135,8 +135,9 @@ export default function PortalPreview() {
 
             {/* SHIFT CONFIRMATION — the REAL PersonCard the Team → Shifts overlays mount, so the
                 approved-hours entry can be reviewed without a login. A LIVE HOST must be given a
-                figure before Confirm will submit; a FULFILLMENT tile is prefilled with the
-                canonical clocked duration. Both handlers mutate this preview's world only. */}
+                figure before Confirm will submit; a FULFILLMENT tile has NO approved-hours input
+                at all and confirms its worked time as clocked. Both handlers mutate this
+                preview's world only. */}
             <div className="rounded-[14px] border border-tt-border bg-tt-card/60 px-5 py-4">
               <p className="text-sm font-semibold">Shift confirmation · approved hours</p>
               <p className="mt-1 text-xs text-tt-muted">
@@ -149,8 +150,8 @@ export default function PortalPreview() {
                     key={key}
                     person={person}
                     dateLabel={fmtShortDate(dateLabel)}
-                    onConfirm={(shiftId, confirmed, approvedMinutes) => apply(act.confirmPunch(shiftId, confirmed, approvedMinutes ?? null))}
-                    onApprovedMinutes={(shiftId, approvedMinutes) => apply(act.confirmPunch(shiftId, true, approvedMinutes))}
+                    onConfirm={(shiftId, confirmed, team, approvedMinutes) => apply(act.confirmPunch(shiftId, confirmed, team, approvedMinutes ?? null))}
+                    onApprovedMinutes={(shiftId, team, approvedMinutes) => apply(act.confirmPunch(shiftId, true, team, approvedMinutes))}
                   />
                 ))}
               </div>

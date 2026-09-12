@@ -6,7 +6,8 @@ import { confirmErrorMessage, teamOfRole } from '@/lib/timeclock';
 import { canRemoveScheduled, formatDelta, type DayPerson } from '@/lib/schedule/calendarModel';
 import { canAddWorkedTimeAt } from '@/lib/shifts/manualWorked';
 import {
-  APPROVED_INPUT_MESSAGES, approvedMinutesRequired, formatApprovedMinutes, parseApprovedInput, splitApprovedMinutes,
+  APPROVED_INPUT_MESSAGES, approvedHoursApply, approvedMinutesRequired, formatApprovedMinutes,
+  parseApprovedInput, splitApprovedMinutes, type ApprovedTeam,
 } from '@/lib/shifts/approvedHours';
 import { hoursToMinutes } from '@/lib/employees';
 import PersonAvatar from './PersonAvatar';
@@ -52,10 +53,14 @@ export default function PersonCard({
    * Confirm / unconfirm. `approvedMinutes` is the FINAL PAYABLE duration (migration 137) and is
    * sent in the same call as the confirmation, because the two must land together: a confirm that
    * succeeded without its approval would pay a live host their clocked span.
+   *
+   * `team` travels WITH the minutes rather than being looked up downstream: approved hours are a
+   * live-host instrument, and useShifts collapses the figure to NULL for anyone else. This tile is
+   * the only place that knows the person's role, so it is the only place that can say.
    */
-  onConfirm: (shiftId: string, confirmed: boolean, approvedMinutes?: number | null) => Promise<void>;
+  onConfirm: (shiftId: string, confirmed: boolean, team: ApprovedTeam, approvedMinutes?: number | null) => Promise<void>;
   /** Change ONLY the payable duration on an already-confirmed shift. Absent → no adjust action. */
-  onApprovedMinutes?: (shiftId: string, approvedMinutes: number | null) => Promise<void>;
+  onApprovedMinutes?: (shiftId: string, team: ApprovedTeam, approvedMinutes: number | null) => Promise<void>;
   onEdit?: (shiftId: string) => void;
   /**
    * ASK to remove this person's one-off scheduled shift. The container owns the confirmation and
@@ -78,13 +83,23 @@ export default function PersonCard({
 
   // APPROVED HOURS (migration 137) — what payroll pays, kept apart from what the punch says.
   //
-  // A LIVE HOST must be given an explicit figure: their payable time is verified live time, and
-  // there is no authoritative shift→live-session link to read it from, so defaulting to the
-  // clocked span would quietly overpay. Everyone else defaults to the canonical clocked figure,
-  // which reproduces today's payroll exactly.
-  const isHost = teamOfRole(person.role) === 'host';
-  const mustApprove = approvedMinutesRequired(teamOfRole(person.role));
-  const defaultMinutes = punch && !punch.isOpen
+  // APPROVED HOURS ARE FOR LIVE HOSTS AND NOBODY ELSE. A host's payable time is verified live
+  // time, there is no authoritative shift→live-session link to read it from, and the clocked span
+  // over-reports it — so the manager must state a figure. FULFILLMENT worked time, by contrast, is
+  // fully determined by the punch: clock in → clock out − breaks, which is exactly what
+  // paidShiftHours() pays when approved_minutes is NULL. An input box beside that is not a second
+  // opinion, it is a chance to type a number over a correct one, which is what production did 37
+  // times in three days. So for a non-host this tile renders NO input and NO override control, and
+  // confirmation sends NULL.
+  //
+  // `team` is computed once and passed to every write, because it is what useShifts gates on.
+  const team = teamOfRole(person.role);
+  const isHost = team === 'host';
+  const approvedApplies = approvedHoursApply(team);
+  const mustApprove = approvedMinutesRequired(team);
+  // Only a team that HAS approved hours gets a prefilled box, and a host's is deliberately blank.
+  // For everyone else there is no box at all, so there is nothing to seed.
+  const defaultMinutes = approvedApplies && punch && !punch.isOpen
     ? (punch.approvedMinutes ?? (mustApprove ? null : hoursToMinutes(punch.clockedHours)))
     : null;
   const [approved, setApproved] = useState(() => splitApprovedMinutes(defaultMinutes));
@@ -118,15 +133,22 @@ export default function PersonCard({
     // Unconfirming withdraws the approval too (the RPC clears it), so no figure is read here.
     if (!confirmed) {
       setBusy(true); setErr(null);
-      try { await onConfirm(punch.id, false); } catch (e) { setErr(confirmErrorMessage((e as Error).message)); } finally { setBusy(false); }
+      try { await onConfirm(punch.id, false, team); } catch (e) { setErr(confirmErrorMessage((e as Error).message)); } finally { setBusy(false); }
       return;
     }
-    const parsed = parseApprovedInput(approved.hours, approved.minutes, mustApprove);
+    // NO APPROVED HOURS FOR THIS TEAM → confirm the worked-time row as it stands. Nothing is
+    // parsed (there were no boxes to read) and NULL is sent explicitly, which is what makes
+    // paidShiftHours() fall through to the canonical clock-in → clock-out − breaks figure.
+    // Deliberately not "send the clocked span as an approval": storing a copy of a number payroll
+    // can already derive is how a rounding artefact becomes a permanent override.
+    const parsed = approvedApplies
+      ? parseApprovedInput(approved.hours, approved.minutes, mustApprove)
+      : ({ ok: true, minutes: null } as const);
     if (!parsed.ok) { setErr(APPROVED_INPUT_MESSAGES[parsed.code]); return; }
     setBusy(true);
     setErr(null);
     try {
-      await onConfirm(punch.id, true, parsed.minutes);
+      await onConfirm(punch.id, true, team, parsed.minutes);
     } catch (e) {
       setErr(confirmErrorMessage((e as Error).message));
     } finally {
@@ -136,13 +158,16 @@ export default function PersonCard({
 
   /** Payroll-only correction on an already-confirmed shift. The punch is never touched. */
   async function saveApproved() {
-    if (!punch || !onApprovedMinutes) return;
+    // Unreachable for a team without approved hours — the control that calls this is not rendered
+    // — but the guard is stated rather than assumed, so the rule survives a future refactor of the
+    // JSX below.
+    if (!punch || !onApprovedMinutes || !approvedApplies) return;
     const parsed = parseApprovedInput(approved.hours, approved.minutes, mustApprove);
     if (!parsed.ok) { setErr(APPROVED_INPUT_MESSAGES[parsed.code]); return; }
     setBusy(true);
     setErr(null);
     try {
-      await onApprovedMinutes(punch.id, parsed.minutes);
+      await onApprovedMinutes(punch.id, team, parsed.minutes);
       setAdjusting(false);
     } catch (e) {
       setErr(confirmErrorMessage((e as Error).message));
@@ -201,7 +226,14 @@ export default function PersonCard({
         )}
       </div>
 
-      {/* APPROVED — what payroll pays. Only meaningful once a figure exists. */}
+      {/* APPROVED — what payroll pays. Only meaningful once a figure exists.
+          NOT gated on approvedApplies, on purpose. A fulfillment shift confirmed under this build
+          carries NULL here, so the block simply does not render and the tile reads exactly like
+          the mock: Clocked, then Edit / Confirm. But 37 rows confirmed BEFORE this build do carry
+          a value, and that value is still what payroll pays — one of them by 16 hours. Hiding it
+          would make the tile disagree with the pay statement in silence, which is worse than
+          showing a figure the manager can no longer edit here. It disappears on its own as those
+          rows are unconfirmed/reconfirmed or cleared. */}
       {punch && !punch.isOpen && punch.approvedMinutes != null && !adjusting && (
         <div className="mt-1.5 w-full">
           <div className="text-[9px] font-bold uppercase tracking-wider text-tt-muted">Approved</div>
@@ -258,8 +290,9 @@ export default function PersonCard({
       )}
 
       {/* The manager's payable figure. Shown while confirming (so it lands in the same call) and
-          while correcting an already-confirmed shift. */}
-      {punch && !punch.isOpen && punch.confirmable && (!punch.confirmed || adjusting) && approvedInputs}
+          while correcting an already-confirmed shift — and ONLY for a team that has approved hours
+          at all. For fulfillment there is no box, so there is nothing to type over the punch. */}
+      {approvedApplies && punch && !punch.isOpen && punch.confirmable && (!punch.confirmed || adjusting) && approvedInputs}
 
       {/* Actions. Edit is offered on ANY real punch — a 19h forgotten clock-out has to be
           correctable, and refusing to confirm it is not a fix. */}
@@ -288,8 +321,10 @@ export default function PersonCard({
       )}
 
       {/* PAYROLL-ONLY CORRECTION. Offered on a confirmed punch so a wrong payable duration is
-          fixed HERE rather than by rewriting the clock-in and clock-out. */}
-      {punch && !punch.isOpen && punch.confirmed && onApprovedMinutes && (
+          fixed HERE rather than by rewriting the clock-in and clock-out — for LIVE HOSTS only.
+          A fulfillment shift has no payable duration apart from its punch, so the correction for
+          one is an Edit to the punch itself, which is still offered above. */}
+      {approvedApplies && punch && !punch.isOpen && punch.confirmed && onApprovedMinutes && (
         adjusting ? (
           <div className="w-full">
             <div className="flex w-full gap-1.5 pt-2">

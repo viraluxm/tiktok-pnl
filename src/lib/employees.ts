@@ -102,24 +102,18 @@ export function hoursToMinutes(hours: number): number {
   return Math.max(0, Math.round(hours * 60));
 }
 
-/**
- * The approved duration a manager should be OFFERED as the default at confirmation.
- *
- * Fulfillment (and anyone who is not a live host): the existing canonical payable duration, so the
- * default reproduces today's payroll exactly — breaks already subtracted, instants preferred.
- *
- * A LIVE HOST gets NO default: null. Their payable time is verified live time, and there is no
- * authoritative shift→live-session link in this schema to read it from (live_sessions.host_id
- * attributes a session to a host, but liveHoursForHostDate clips to one Pacific day, which
- * under-reports every 6pm–2am host shift — and matching a session to a shift by time overlap would
- * be exactly the guesswork we refuse to put behind payroll). So the manager states it, and the
- * confirm RPC refuses the shift without it. Returning null here rather than the clocked span is
- * the point: a host must never be paid their punch span by default.
- */
-export function defaultApprovedMinutes(s: ShiftLike, isLiveHost: boolean): number | null {
-  if (isLiveHost) return null;
-  return hoursToMinutes(clockedShiftHours(s));
-}
+// defaultApprovedMinutes() USED TO LIVE HERE and is deliberately gone. It answered "what approved
+// duration should the manager be OFFERED as a default", and its only answer for a non-host was
+// `hoursToMinutes(clockedShiftHours(s))` — the clocked figure, rounded to whole minutes and then
+// stored back as an override of itself. That is what put 37 approved_minutes rows on fulfillment
+// shifts in three days: 33 of them the prefilled figure retyped, differing from the punch by the
+// rounding alone, and one a fat-finger 23h41m on a 7h40m shift.
+//
+// Approved hours are now a LIVE-HOST instrument only (approvedHoursApply in shifts/approvedHours),
+// and a live host's default was already null — so the function had no answer left to give. It had
+// no callers in the app either: PersonCard computed the same default inline. Payroll is unchanged
+// by its removal; paidShiftHours() below is untouched and still pays approved_minutes whenever a
+// host has one, and the canonical clocked figure whenever the column is NULL.
 
 // Per-employee hours + derived pay owed for the given set of shifts (already scoped to
 // the pay period by the caller). Accepts one-off shifts and/or generated recurring

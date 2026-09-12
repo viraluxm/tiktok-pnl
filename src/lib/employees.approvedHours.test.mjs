@@ -135,26 +135,51 @@ console.log('\n3. APPROVED HOURS DO NOT MAKE A SHIFT PAYABLE — isPayableShift 
   eq('an unconfirmed approved shift contributes ZERO to pay', unpaidRows[0].hours, 0);
 }
 
-console.log('\n4. FULFILLMENT DEFAULT — the existing canonical payable duration, breaks and all');
+console.log('\n4. FULFILLMENT HAS NO APPROVED HOURS — the punch is the whole answer');
 {
+  // defaultApprovedMinutes() is GONE. Its only non-null answer was the clocked figure rounded to
+  // whole minutes and stored back as an override of itself, which is what put 37 approved_minutes
+  // rows on fulfillment shifts in three days. See the note where it used to live in employees.ts.
+  eq('defaultApprovedMinutes is no longer exported — there is no fulfillment prefill to restore',
+    typeof E.defaultApprovedMinutes, 'undefined');
+  check('…and nothing in the app re-derives one from the clocked span',
+    !/hoursToMinutes\([^)]*clockedShiftHours/.test(strip(read('./employees.ts'))));
+
   const ful = { ...CARLOS, employee_id: 'emp-madison', break_minutes: 30 };
   near('canonical payable is 8h02m (8h32m span − 30m break)', E.clockedShiftHours(ful), 8 + 2 / 60);
-  eq('default approved minutes = 482 (the canonical figure, not the raw span)', E.defaultApprovedMinutes(ful, false), 482);
-  eq('a clean 8h30m span with a 30m break defaults to 480',
-    E.defaultApprovedMinutes({ ...CARLOS, clock_out_at: '2026-09-09T02:18:00-07:00', break_minutes: 30 }, false), 480);
-  // Confirming with that default must reproduce today's payroll exactly.
-  near('confirming at the default pays what the legacy path paid',
-    E.paidShiftHours({ ...ful, approved_minutes: E.defaultApprovedMinutes(ful, false) }), E.clockedShiftHours(ful));
-  eq('minutes conversion rounds to whole minutes', [E.hoursToMinutes(7.9666666), E.hoursToMinutes(8), E.hoursToMinutes(-1)], [478, 480, 0]);
+  // THE PAYROLL PROOF for removing the input: with the column NULL, paidShiftHours returns the
+  // canonical worked-time figure — the same number the old prefill was a rounded copy of.
+  near('a fulfillment shift with approved_minutes NULL pays its canonical worked time',
+    E.paidShiftHours({ ...ful, approved_minutes: null }), E.clockedShiftHours(ful));
+  // A REAL punch carries SECONDS, and that is where the old prefill lost precision. Production's
+  // 2026-09-10 fulfillment rows are all of this shape: clocked 7.6619h, stored 461, a difference
+  // of a third of a minute that then became a permanent override of the exact figure.
+  const seconds = { ...ful, break_minutes: 0, clock_in_at: '2026-09-10T16:55:12-07:00', clock_out_at: '2026-09-11T00:34:35-07:00' };
+  const exact = E.paidShiftHours({ ...seconds, approved_minutes: null });
+  const rounded = E.hoursToMinutes(E.clockedShiftHours(seconds)) / 60;
+  check('with NULL, payroll keeps the EXACT worked span — the old prefill rounded it away',
+    exact !== rounded && Math.abs(exact - rounded) > 0 && Math.abs(exact - rounded) < 1 / 60,
+    `exact ${exact} vs rounded ${rounded}`);
+  near('…and the exact span is the clock-out minus clock-in, to the second',
+    exact, (Date.parse(seconds.clock_out_at) - Date.parse(seconds.clock_in_at)) / 3_600_000);
+  eq('minutes conversion still rounds to whole minutes (the tile uses it to LABEL the punch)',
+    [E.hoursToMinutes(7.9666666), E.hoursToMinutes(8), E.hoursToMinutes(-1)], [478, 480, 0]);
 }
 
 console.log('\n5. LIVE HOST — no silent default, an explicit figure is required');
 {
-  eq('a live host gets NO default approved duration', E.defaultApprovedMinutes(CARLOS, true), null);
-  check('…and specifically NOT the clocked span (the bug this prevents)',
-    E.defaultApprovedMinutes(CARLOS, true) !== E.hoursToMinutes(E.clockedShiftHours(CARLOS)));
+  // A live host's boxes open BLANK. The tile states this directly: its default is the stored
+  // approval, and when there is none, `mustApprove ? null : …` chooses null for a host.
+  const card = strip(read('../components/employees/weekly/PersonCard.tsx'));
+  check('the host tile offers NO default figure — the boxes open blank',
+    /punch\.approvedMinutes \?\? \(mustApprove \? null :/.test(card), card.match(/const defaultMinutes[\s\S]{0,180}/)?.[0]?.replace(/\s+/g, ' '));
+  check('…so the clocked span can never become a host approval by default',
+    !/mustApprove \? hoursToMinutes/.test(card));
   eq('the requirement keys on the host team', [
     A.approvedMinutesRequired('host'), A.approvedMinutesRequired('fulfillment'), A.approvedMinutesRequired('other'),
+  ], [true, false, false]);
+  eq('…and it is DERIVED from approvedHoursApply, so the two cannot drift apart', [
+    A.approvedHoursApply('host'), A.approvedHoursApply('fulfillment'), A.approvedHoursApply('other'),
   ], [true, false, false]);
 
   // The SQL guard and the TS normalisation must recognise the same host vocabulary, or a host could
