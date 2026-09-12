@@ -11,11 +11,18 @@ import {
   fmtPayDate,
   fmtMonthDay,
 } from '@/lib/employees';
-import { buildPayStatement, type PayStatement } from '@/lib/pay/statement';
+import {
+  bonusSummaryFor,
+  buildPayStatement,
+  totalOwedOf,
+  type PayStatement,
+} from '@/lib/pay/statement';
 import { canDeleteRecord, deleteBlockedReasonFor } from '@/lib/pay/deleteEligibility';
 import { indexWeekCards, type WeekShiftCard } from '@/lib/weeklySchedule';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
+import { usePayAdjustments, type BonusFields } from '@/hooks/usePayAdjustments';
+import type { BonusDraft } from './BonusPanel';
 import type { Employee } from '@/types';
 import { fmtHours, titleCase } from './shared';
 import PayGrid, { type PayTile } from './PayGrid';
@@ -32,6 +39,19 @@ const PAY_ROLE_OPTIONS: { value: PayRole; label: string }[] = [
   { value: 'fulfillment', label: 'Fulfillment' },
   { value: 'host', label: 'Host' },
 ];
+
+/**
+ * The form's draft → the row's columns. One renaming, in one place, so the UI does not have to know
+ * the column names and the hook does not have to know the form's.
+ */
+function toBonusFields(draft: BonusDraft): BonusFields {
+  return {
+    calculation_type: draft.calculationType,
+    amount_cents: draft.amountCents,
+    rate_cents_per_hour: draft.rateCentsPerHour,
+    description: draft.description,
+  };
+}
 
 /** Which person's detail is open, and the timestamp the statement/PDF is stamped with. Captured
  *  at OPEN time rather than during render, so nothing here reads a clock while rendering. */
@@ -58,6 +78,11 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     deleteShift,
   } = useShifts(period.start, period.end);
   const { rules, exceptions, upsertException } = useShiftRules();
+
+  // BONUS / INCENTIVE PAY for this same period, for the whole roster. Scoped to exactly the pay
+  // period the selector is on, so the money a tile shows is the money that period owes — and so
+  // moving to another period refetches rather than carrying a bonus across.
+  const { adjustments, addBonus, updateBonus, deleteBonus } = usePayAdjustments(period.start, period.end);
 
   const periodMaterialized = useMemo(
     () => new Set(periodShifts.filter((s) => s.source_rule_id).map((s) => `${s.source_rule_id}|${s.date}`)),
@@ -98,10 +123,11 @@ export default function PayView({ employees }: { employees: Employee[] }) {
             employee: detail.employee,
             period: { start: period.start, end: period.end, payday },
             shifts: periodShifts,
+            adjustments,
             generatedAtISO: detail.generatedAtISO,
           })
         : null,
-    [detail, period.start, period.end, payday, periodShifts],
+    [detail, period.start, period.end, payday, periodShifts, adjustments],
   );
 
   // The editor's own card model, built by the SAME indexer the calendars use — never by hand, so
@@ -140,6 +166,35 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     },
     [deleteShift],
   );
+  // The canonical bonus writes. Each mutation invalidates and refetches (usePayAdjustments), so
+  // the statement and the tiles are rebuilt from what the database holds — never from a guess about
+  // what the totals should now be, which is the same discipline handleDeleteRow follows above.
+  //
+  // The employee and the period are bound HERE, from the open panel and the selected period, so the
+  // form never has to name either and cannot name the wrong one.
+  const bonusHandlers = useMemo(
+    () =>
+      detail
+        ? {
+            onAdd: async (draft: BonusDraft) => {
+              await addBonus.mutateAsync({
+                employee_id: detail.employee.id,
+                period_start: period.start,
+                period_end: period.end,
+                ...toBonusFields(draft),
+              });
+            },
+            onEdit: async (id: string, draft: BonusDraft) => {
+              await updateBonus.mutateAsync({ id, ...toBonusFields(draft) });
+            },
+            onDelete: async (id: string) => {
+              await deleteBonus.mutateAsync(id);
+            },
+          }
+        : undefined,
+    [detail, period.start, period.end, addBonus, updateBonus, deleteBonus],
+  );
+
   const openEditor = useCallback(
     (shiftId: string) => {
       const card = cardById.get(shiftId);
@@ -154,26 +209,39 @@ export default function PayView({ employees }: { employees: Employee[] }) {
     () => (payRole === 'all' ? pay : pay.filter((p) => p.employee.role?.toLowerCase() === payRole)),
     [pay, payRole],
   );
+  // WORKED PAY COMES FROM computePay AND IS NOT TOUCHED. The bonus is selected and summed by
+  // bonusSummaryFor() and added by totalOwedOf() — the same two functions buildPayStatement calls,
+  // so a tile and that person's Pay Details cannot disagree about either figure.
   const tiles = useMemo<PayTile[]>(
-    () => filteredPay.map((p) => ({
-      employee: p.employee,
-      hours: p.hours,
-      pay: p.pay,
-      scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
-    })),
-    [filteredPay, plannedHoursByEmployee],
+    () => filteredPay.map((p) => {
+      // p.hours IS the statement's paidHours — computePay and buildPayStatement sum the same
+      // per-row function over the same predicate (pinned in statement.test.mjs), which is what lets
+      // an hourly incentive be priced identically here and in the drawer.
+      const bonus = bonusSummaryFor(adjustments, p.employee.id, period, p.hours);
+      return {
+        employee: p.employee,
+        hours: p.hours,
+        bonusTotal: bonus.total,
+        totalOwed: totalOwedOf(p.pay, bonus.total),
+        scheduled: plannedHoursByEmployee.get(p.employee.id) ?? 0,
+      };
+    }),
+    [filteredPay, plannedHoursByEmployee, adjustments, period],
   );
+  // The roster total is the sum of the tiles, bonuses included — otherwise the headline figure the
+  // pay run is built around would be smaller than the tiles under it add up to.
   const totals = useMemo(
     () =>
-      filteredPay.reduce(
-        (acc, p) => ({
-          hours: acc.hours + p.hours,
-          scheduled: acc.scheduled + (plannedHoursByEmployee.get(p.employee.id) ?? 0),
-          pay: acc.pay + p.pay,
+      tiles.reduce(
+        (acc, t) => ({
+          hours: acc.hours + t.hours,
+          scheduled: acc.scheduled + t.scheduled,
+          pay: acc.pay + t.totalOwed,
+          bonus: acc.bonus + t.bonusTotal,
         }),
-        { hours: 0, scheduled: 0, pay: 0 },
+        { hours: 0, scheduled: 0, pay: 0, bonus: 0 },
       ),
-    [filteredPay, plannedHoursByEmployee],
+    [tiles],
   );
 
   return (
@@ -243,6 +311,11 @@ export default function PayView({ employees }: { employees: Employee[] }) {
               Total{payRole !== 'all' ? ` · ${titleCase(payRole)}` : ''} for {fmtMonthDay(period.start)} – {fmtMonthDay(period.end)}
             </div>
             <div className="mt-1 text-3xl font-bold tabular-nums text-tt-green">{fmt(totals.pay)}</div>
+            {totals.bonus > 0 && (
+              <div className="mt-0.5 text-[11px] tabular-nums text-tt-muted">
+                includes {fmt(totals.bonus)} in bonuses
+              </div>
+            )}
           </div>
           <div className="flex gap-6 text-right">
             <div>
@@ -281,6 +354,7 @@ export default function PayView({ employees }: { employees: Employee[] }) {
         onDeleteRow={handleDeleteRow}
         canDelete={canDeleteRecord}
         deleteBlockedReason={deleteBlockedReasonFor}
+        bonus={bonusHandlers}
       />
     )}
     {/* THE EDITOR MUST BE A BODY-LEVEL LAYER ABOVE THE PANEL THAT OPENED IT.

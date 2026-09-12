@@ -153,6 +153,50 @@ export interface Shift {
   updated_at: string;
 }
 
+// ─── Bonus / incentive pay (migration 150) ──────────────────────────────────
+// A PAYROLL LINE ITEM THAT IS NOT WORKED TIME. One row = one bonus owed to one employee for one
+// pay period. It references no shift and creates no hours: worked pay is still
+// `paid hours x hourly_rate` and is completely unaffected by this table's existence. Total owed
+// is worked pay PLUS the sum of these, and that addition happens in exactly one place
+// (buildPayStatement, src/lib/pay/statement.ts).
+//
+// TWO CALCULATION TYPES, ONE ROW SHAPE:
+//   'flat'   a fixed sum      → amount_cents is set, rate_cents_per_hour is NULL
+//   'hourly' a per-hour rate  → rate_cents_per_hour is set, amount_cents is NULL
+// The two are mutually exclusive and the database enforces it with a pair of CHECK constraints, so
+// the `| ` union below is a description of what can be stored, not just a hope.
+//
+// AN HOURLY BONUS STORES ITS RATE, NEVER ITS RESULT. Its dollar value is rate x the employee's
+// canonical payable hours for the period, worked out by buildPayStatement every time a statement is
+// built. Freezing the product into a column would make it a stale number the moment a manager
+// corrected a punch — which is exactly when a bonus most needs to be right. There is deliberately
+// no `calculated_cents` column anywhere.
+//
+// Money is INTEGER CENTS in both columns ($100.00 -> 10000; $2.50/hr -> 250). Never read either as
+// dollars directly; the statement model divides, once.
+//
+// `kind` exists so the table has an honest name and a future category needs no second table. Its
+// CHECK constraint admits 'bonus' and nothing else today, so the type says the same.
+export type PayAdjustmentCalculationType = 'flat' | 'hourly';
+
+export interface PayAdjustment {
+  id: string;
+  user_id: string;
+  employee_id: string;
+  /** Canonical pay-period window, per payPeriodFor() — CHECK-constrained to the cycle in SQL. */
+  period_start: string;
+  period_end: string;
+  kind: 'bonus';
+  calculation_type: PayAdjustmentCalculationType;
+  /** FLAT only: the whole bonus, in cents. NULL on an hourly row. */
+  amount_cents: number | null;
+  /** HOURLY only: cents per payable hour. NULL on a flat row. */
+  rate_cents_per_hour: number | null;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // A recurring-shift RULE. Instances are computed from the rule minus its
 // exceptions at read time — never materialized (see migration 047).
 export interface ShiftRule {

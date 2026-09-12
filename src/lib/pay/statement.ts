@@ -5,7 +5,7 @@ import {
   type ShiftLike,
 } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
-import type { Employee, Shift } from '@/types';
+import type { Employee, PayAdjustment, Shift } from '@/types';
 
 // ONE NORMALIZED PAY STATEMENT. This module is the single place a pay period is turned into
 // per-employee rows, hours and money. The Pay Detail screen and the PDF both
@@ -145,12 +145,302 @@ export interface RateLine {
   amount: number;
 }
 
+// ── Bonus / incentive pay ───────────────────────────────────────────────────────────────────
+//
+// A BONUS IS NOT WORKED TIME AND IS NOT MODELLED AS ANY. It creates no hours, touches no rate, no
+// approved duration, no punch and no shift row — it is money a manager attached to a PERSON and a
+// PAY PERIOD, and the only thing it does to payroll is get added at the end.
+//
+// TWO CALCULATION TYPES:
+//   FLAT    a fixed sum.                      $100.00                        → $100.00
+//   HOURLY  a rate per CANONICAL PAYABLE HOUR. $2.00/hr x 72.50 payable hr   → $145.00
+//
+// AN HOURLY BONUS IS DERIVED, NEVER STORED. The row holds the RATE; the dollar figure is worked out
+// here, from the very hours this statement just finished computing. That is the whole reason it is
+// built this way: when a manager fixes a forgotten clock-out and 72.50 payable hours become 74.00,
+// a $2/hr incentive becomes $148.00 by itself, with nobody having to remember to go and edit it. A
+// frozen total would have gone on paying $145.00 and nothing would ever have said so.
+//
+// AND IT IS THE SAME HOURS — not "hours" computed a second way. The multiplicand is `paidHours`,
+// the figure this module already summed from paidShiftHours() over isPayableShift() rows: the
+// clocked span minus unpaid breaks for fulfillment, the approved duration for a live host. There is
+// no second definition of an hour anywhere in this feature. Unpaid break time is not payable, so it
+// earns no incentive; an unconfirmed punch is not payable, so it earns none either.
+//
+// WHY IT LIVES IN THIS FILE. The premise of this module is that one object drives the Pay tile, the
+// Pay Details panel and the PDF, so none of them can disagree. A bonus total computed anywhere else
+// would be a second payroll calculation by another name. So the selector, the per-item calculation
+// and the sum live here, and the Pay tab's tiles call the SAME function buildPayStatement calls
+// internally (pinned in bonus.test.mjs), exactly as computePay and buildPayStatement already share
+// isPayableShift and paidShiftHours.
+//
+// MONEY IS SUMMED IN INTEGER CENTS AND DIVIDED ONCE. Summing dollars would put 0.1 + 0.2 into
+// somebody's cheque; summing cents cannot. The ONE unavoidable float is `rate x hours`, because
+// hours are genuinely fractional — it is rounded to the nearest cent immediately, once, per item,
+// and never compounded.
+
+/** One bonus line, normalized for display. `amount` is `calculatedBonusCents / 100`, nothing else. */
+export interface BonusItem {
+  id: string;
+  calculationType: 'flat' | 'hourly';
+  description: string | null;
+  /** What the line is called on screen and on paper. Never blank. */
+  label: string;
+  /** FLAT only — the entered sum. NULL on an hourly line. */
+  amountCents: number | null;
+  /** HOURLY only — the entered rate, cents per payable hour. NULL on a flat line. */
+  rateCentsPerHour: number | null;
+  /** HOURLY only — the canonical payable hours the rate was applied to. NULL on a flat line. */
+  eligiblePaidHours: number | null;
+  /** WHAT THIS LINE IS WORTH, integer cents. The only figure any total ever adds. */
+  calculatedBonusCents: number;
+  /** The same figure in dollars, so no renderer divides it its own way. */
+  amount: number;
+  createdAtISO: string;
+}
+
+/** Cents → dollars, in ONE place, so no surface can round it its own way. */
+export function centsToDollars(cents: number): number {
+  return cents / 100;
+}
+
+/** The default line label when a manager entered an amount and no reason. */
+export const BONUS_FALLBACK_LABEL = 'Bonus';
+
+/**
+ * WHAT ONE HOURLY BONUS IS WORTH, in integer cents. The single rounding step in the feature.
+ *
+ * `Math.round` to the nearest cent, per item, immediately — so a statement never carries a
+ * fractional cent forward and several incentives cannot drift against each other. Floored at 0
+ * because a period with no payable hours earns no incentive rather than a negative one.
+ */
+export function hourlyBonusCents(rateCentsPerHour: number, paidHours: number): number {
+  return Math.max(0, Math.round(rateCentsPerHour * paidHours));
+}
+
+/**
+ * The bonus lines belonging to ONE employee in ONE pay period, oldest first, each already worth
+ * what it is worth.
+ *
+ * `paidHours` MUST be the statement's own canonical payable hours for this employee and period —
+ * it is what an hourly line is multiplied by. Callers do not get to supply a different number:
+ * buildPayStatement passes the figure it just computed, and the Pay tab passes computePay's, which
+ * the suite proves is the same number.
+ *
+ * Filtering happens HERE, on the period's own canonical boundaries, so a caller may safely hand
+ * over a wider fetch — the same contract `shifts` has in BuildStatementInput. The match is on the
+ * row's OWN [period_start, period_end], not on created_at: a bonus entered in October for the
+ * September period belongs to September, and when it was typed is irrelevant to whose cheque it
+ * lands on.
+ */
+export function bonusItemsFor(
+  adjustments: ReadonlyArray<PayAdjustment>,
+  employeeId: string,
+  period: { start: string; end: string },
+  paidHours: number,
+): BonusItem[] {
+  return adjustments
+    .filter(
+      (a) =>
+        a.employee_id === employeeId &&
+        a.period_start === period.start &&
+        a.period_end === period.end,
+    )
+    .map((a) => {
+      const description = a.description?.trim() ? a.description.trim() : null;
+      const hourly = a.calculation_type === 'hourly';
+      // The database's CHECK constraints make exactly one of these columns non-null for each type
+      // (migration 150). `?? 0` is the belt-and-braces read for a row that somehow arrived from
+      // somewhere else — it yields a $0.00 line, which is visible, rather than a NaN that would
+      // silently poison a total.
+      const rateCentsPerHour = hourly ? a.rate_cents_per_hour ?? 0 : null;
+      const amountCents = hourly ? null : a.amount_cents ?? 0;
+      const calculatedBonusCents = hourly
+        ? hourlyBonusCents(rateCentsPerHour as number, paidHours)
+        : (amountCents as number);
+      return {
+        id: a.id,
+        calculationType: hourly ? 'hourly' : 'flat',
+        description,
+        label: description ?? BONUS_FALLBACK_LABEL,
+        amountCents,
+        rateCentsPerHour,
+        eligiblePaidHours: hourly ? paidHours : null,
+        calculatedBonusCents,
+        amount: centsToDollars(calculatedBonusCents),
+        createdAtISO: a.created_at,
+      } satisfies BonusItem;
+    })
+    // Entry order, with the id as a tiebreak so two bonuses saved in the same second still come
+    // out in a stable order on screen, on paper and in a test.
+    .sort((a, b) => a.createdAtISO.localeCompare(b.createdAtISO) || a.id.localeCompare(b.id));
+}
+
+/** Integer cents. The ONLY place bonus money is added up. */
+export function sumBonusCents(items: ReadonlyArray<BonusItem>): number {
+  let cents = 0;
+  for (const b of items) cents += b.calculatedBonusCents;
+  return cents;
+}
+
+/** One employee's bonus lines and their totals, selected and summed once. */
+export interface BonusSummary {
+  items: BonusItem[];
+  /** Flat lines only, integer cents. */
+  flatCents: number;
+  /** Hourly lines only, integer cents. */
+  hourlyCents: number;
+  /** flatCents + hourlyCents. */
+  cents: number;
+  /** cents / 100. */
+  total: number;
+}
+
+/**
+ * THE ONE BONUS CALCULATION. buildPayStatement calls this, and so does the Pay tab when it totals
+ * its tiles — so the bonus figure on a tile and the bonus figure in that person's Pay Details are
+ * the same number by construction, not by two functions that happen to agree.
+ */
+export function bonusSummaryFor(
+  adjustments: ReadonlyArray<PayAdjustment> | undefined,
+  employeeId: string,
+  period: { start: string; end: string },
+  paidHours: number,
+): BonusSummary {
+  const items = adjustments ? bonusItemsFor(adjustments, employeeId, period, paidHours) : [];
+  let flatCents = 0;
+  let hourlyCents = 0;
+  for (const b of items) {
+    if (b.calculationType === 'hourly') hourlyCents += b.calculatedBonusCents;
+    else flatCents += b.calculatedBonusCents;
+  }
+  const cents = sumBonusCents(items);
+  return { items, flatCents, hourlyCents, cents, total: centsToDollars(cents) };
+}
+
+/**
+ * TOTAL OWED = WORKED PAY + BONUS PAY. The entire feature, in one expression, in one place.
+ *
+ * It exists as a function rather than a `+` at each call site for the same reason paidShiftHours
+ * does: the Pay tile, the Pay Details panel and the PDF must not each own a copy of the rule. Both
+ * arguments are dollars — `workedPay` is the untouched payroll result (statement.totals.gross,
+ * identical to computePay's `pay`) and `bonusTotal` comes from bonusSummaryFor above.
+ */
+export function totalOwedOf(workedPay: number, bonusTotal: number): number {
+  return workedPay + bonusTotal;
+}
+
+/**
+ * THE CANONICAL PAYABLE DURATION AS A READABLE TIME BASIS: '30h 28m', '7h 40m 23s', '8h'.
+ *
+ * Used ONLY inside an hourly bonus's working. The statement's own "Total Hours" / "Payable hours"
+ * figures are untouched and still read 30.47 — this is not a new way of stating hours, it is a way
+ * of stating the MULTIPLICAND in an expression a reader may try to check.
+ *
+ * `unit` is the granularity the label is rounded to: 60 for whole minutes, 3600 for whole seconds.
+ * The caller picks it by checking which one actually reconciles (see formatBonusBasis).
+ */
+export function formatPayableDuration(hours: number, unit: 60 | 3600 = 60): string {
+  const total = Math.max(0, Math.round(hours * unit)); // whole minutes, or whole seconds
+  const seconds = unit === 3600 ? total % 60 : 0;
+  const totalMinutes = unit === 3600 ? Math.floor(total / 60) : total;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  const parts: string[] = [];
+  if (h > 0) parts.push(`${h}h`);
+  // A bare '0m' for a zero duration, rather than an empty string.
+  if (m > 0 || (h === 0 && seconds === 0)) parts.push(`${m}m`);
+  if (seconds > 0) parts.push(`${seconds}s`);
+  return parts.join(' ');
+}
+
+/** The duration `formatPayableDuration(hours, unit)` actually names, back in hours. */
+function durationAtUnit(hours: number, unit: 60 | 3600): number {
+  return Math.max(0, Math.round(hours * unit)) / unit;
+}
+
+/**
+ * HOW A BONUS LINE SHOWS ITS WORKING: 'Flat', or '$3.00/hr x 30h 28m payable'.
+ *
+ * Shared by the Pay Details panel, the bonus form, the delete dialog and the PDF, so a manager
+ * reading the screen and an employee reading the paper are told the same thing in the same words,
+ * and nobody has to work the figure out themselves to check it.
+ *
+ * ── WHY A DURATION AND NOT A DECIMAL NUMBER OF HOURS ────────────────────────────────────────────
+ *
+ * This used to read '$3.00/hr x 30.47 hr'. The money was right — a live host on 1828 approved
+ * minutes is owed exactly $91.40 — but 30.47 x 3.00 is $91.41, so a CORRECT payroll figure was
+ * printed beside an expression that made it look like a penny short. An arithmetic a reader can do
+ * in their head has to come out right, or it is worse than showing no working at all.
+ *
+ * The money is unchanged: `calculatedBonusCents` is still rate x the EXACT canonical payable hours,
+ * rounded once. Nothing here feeds back into a total. Only the multiplicand's PRESENTATION changed.
+ *
+ * ── WHY THE PRECISION IS CHOSEN BY CHECKING, NOT BY PICKING ONE ─────────────────────────────────
+ *
+ * Whole minutes is not automatically exact either, and it was verified against the live database
+ * rather than assumed: of 522 confirmed payable punches, 512 carry SUB-SECOND precision (the punch
+ * instants come from now()), and only 10 land on a whole minute. `approved_minutes`, by contrast,
+ * is whole minutes in all 62 rows — which is why a LIVE HOST, the case that exposed this, always
+ * reconciles at minute granularity.
+ *
+ * So the label is not a fixed format; it is the coarsest readable one whose OWN arithmetic
+ * reproduces the stored cents:
+ *
+ *   1. whole minutes   '$3.00/hr x 30h 28m payable'        — exact for every live host, and for a
+ *                                                             punch whose payable time is whole
+ *   2. whole seconds   '$2.00/hr x 7h 40m 23s payable'     — the ordinary clocked case
+ *   3. neither         '$900.00/hr x ~7h 40m 23s payable'  — the '~' says the figure is rounded,
+ *                                                             which is the honest thing to print
+ *                                                             rather than an expression that lies
+ *
+ * Tier 3 needs a rate high enough that half a second of it crosses a cent (about $72/hr), so it is
+ * unreachable at any real incentive rate — but the CHECK is what makes tiers 1 and 2 trustworthy,
+ * so it is a real branch with a real test rather than an assumption.
+ *
+ * '~' and not '≈': the PDF draws in Helvetica's WinAnsi encoding, which has no U+2248.
+ */
+export function formatBonusBasis(item: BonusItem): string {
+  if (item.calculationType !== 'hourly') return 'Flat';
+  const rateCents = item.rateCentsPerHour ?? 0;
+  const rate = formatMoney(centsToDollars(rateCents));
+  const hours = item.eligiblePaidHours ?? 0;
+
+  for (const unit of [60, 3600] as const) {
+    if (hourlyBonusCents(rateCents, durationAtUnit(hours, unit)) === item.calculatedBonusCents) {
+      return `${rate}/hr \u00d7 ${formatPayableDuration(hours, unit)} payable`;
+    }
+  }
+  return `${rate}/hr \u00d7 ~${formatPayableDuration(hours, 3600)} payable`;
+}
+
 export interface StatementTotals {
   paidHours: number;
+  /**
+   * WORKED PAY — `paidHours * rate`, and NOTHING ELSE. This is the field every existing surface
+   * already reads and its meaning is deliberately unchanged by the bonus feature: whatever payroll
+   * paid before, `gross` still is. Bonus money is never folded into it. (It keeps the name `gross`
+   * because that is what the printed statement calls it and what the suite already asserts; where
+   * this codebase says "worked pay", this is the number.)
+   */
   gross: number;
   /** Distinct calendar dates with at least one payable row. */
   workedDays: number;
   rowCount: number;
+  /** Bonus pay in integer cents — sumBonusCents(statement.bonusItems). 0 when there are none. */
+  bonusCents: number;
+  /** The flat lines' share of it, in dollars. Reported, never separately re-derived downstream. */
+  flatBonusTotal: number;
+  /** The hourly lines' share of it, in dollars. flatBonusTotal + hourlyBonusTotal === bonusTotal. */
+  hourlyBonusTotal: number;
+  /** The same figure in dollars. Exactly `bonusCents / 100`; never a sum of dollar amounts. */
+  bonusTotal: number;
+  /**
+   * TOTAL OWED = gross + bonusTotal. The one number the Pay tile, the Pay Details summary and the
+   * PDF all print, so none of them can add it up differently. With no bonuses it IS `gross`, which
+   * is why every pre-existing statement reads exactly as it did before.
+   */
+  totalOwed: number;
 }
 
 export interface PayStatement {
@@ -160,6 +450,8 @@ export interface PayStatement {
   rows: StatementRow[];
   excluded: ExcludedRow[];
   rateLines: RateLine[];
+  /** Bonus lines for THIS employee in THIS period, oldest first. Empty when there are none. */
+  bonusItems: BonusItem[];
   totals: StatementTotals;
   /** Passed in by the caller — this module never reads a clock. */
   generatedAtISO: string;
@@ -200,11 +492,21 @@ export interface BuildStatementInput {
    * safely pass a wider fetch.
    */
   shifts: Shift[];
+  /**
+   * `employee_pay_adjustments` rows (migration 150). Same contract as `shifts`: anything for
+   * another employee or another period is ignored here, so a caller may pass a wider fetch.
+   *
+   * OPTIONAL, AND THAT IS LOAD-BEARING. Omitting it yields a statement with no bonus lines, a
+   * bonusTotal of 0 and `totalOwed === totals.gross` — i.e. byte-for-byte the statement this
+   * module produced before bonuses existed. Every caller that has nothing to say about bonuses
+   * keeps its exact previous behaviour without having to say so.
+   */
+  adjustments?: ReadonlyArray<PayAdjustment>;
   generatedAtISO: string;
 }
 
 export function buildPayStatement(input: BuildStatementInput): PayStatement {
-  const { employee, period, shifts, generatedAtISO } = input;
+  const { employee, period, shifts, adjustments, generatedAtISO } = input;
   const rate = employee.hourly_rate;
 
   const mine = shifts.filter((s) => s.employee_id === employee.id);
@@ -266,6 +568,18 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
 
   const workedDays = new Set(rows.map((r) => r.dateISO)).size;
 
+  // BONUS PAY IS ADDED, NEVER MIXED IN. Everything above this line is the payroll calculation
+  // exactly as it was — the same rows, the same predicate, the same `paidHours * rate`. Nothing
+  // below it can reach back and change any of that; it can only append.
+  //
+  // The selector and the sum are the shared functions above, which is what makes the Pay tile's
+  // bonus figure and this one the same number rather than two numbers that agree today.
+  // `paidHours` — computed immediately above, from this statement's own payable rows — is what an
+  // HOURLY line is multiplied by. Passing it in rather than letting the selector find hours of its
+  // own is the mechanism that makes "the incentive uses canonical payable hours" true by
+  // construction instead of by convention.
+  const bonus = bonusSummaryFor(adjustments, employee.id, period, paidHours);
+
   return {
     employee: { id: employee.id, name: employee.name, role: employee.role },
     period,
@@ -274,8 +588,25 @@ export function buildPayStatement(input: BuildStatementInput): PayStatement {
     excluded,
     // One line, because one rate is all the product stores. Kept as a list so a real rate history
     // would extend this rather than force a second total somewhere else.
+    //
+    // AN HOURLY BONUS IS NOT A RATE LINE, even though it too is money per hour. This list is what
+    // the employee is PAID PER HOUR OF WORK — their base rate — and its `hours` column is the hours
+    // payroll paid. An incentive listed here would read as a second wage and would double the hours
+    // in that column. It belongs in bonusItems, priced but separate, which is where it is.
     rateLines: rows.length > 0 ? [{ rate, hours: paidHours, amount: gross }] : [],
-    totals: { paidHours, gross, workedDays, rowCount: rows.length },
+    bonusItems: bonus.items,
+    totals: {
+      paidHours,
+      gross,
+      workedDays,
+      rowCount: rows.length,
+      bonusCents: bonus.cents,
+      flatBonusTotal: centsToDollars(bonus.flatCents),
+      hourlyBonusTotal: centsToDollars(bonus.hourlyCents),
+      bonusTotal: bonus.total,
+      // The one addition in the whole feature, and the Pay tab's tiles call the same function.
+      totalOwed: totalOwedOf(gross, bonus.total),
+    },
     generatedAtISO,
   };
 }
