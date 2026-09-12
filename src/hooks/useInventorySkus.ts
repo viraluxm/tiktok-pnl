@@ -1,5 +1,6 @@
 'use client';
 
+import type { BatchCostStatus } from '@/lib/inventory/batchMutations';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useUser } from './useUser';
 
@@ -12,6 +13,16 @@ export interface SkuBatch {
   // recorded. Used ONLY to decide whether Delete is offered (untouched ⇔
   // qty_remaining === qty_added); the server RPC enforces the rule regardless.
   qty_added: number | null;
+  // ── migration 149 ──
+  // true ⇒ qty_added is the ORIGINAL QUANTITY RECEIVED into this layer, stamped at
+  // creation and never re-based by a stock correction. Only then is
+  // Consumed = qty_added − qty_remaining a real number; see deriveBatchQuantities.
+  // Absent on a payload served before 149 ships, hence optional.
+  qty_added_authoritative?: boolean | null;
+  // 'final' = cost is known (INCLUDING a genuine 0) · 'pending' = not entered yet
+  // (unit_cost_cents is null) · 'legacy' = pre-149 row, meaning deliberately not
+  // asserted. Optional for the same reason.
+  cost_status?: BatchCostStatus | null;
 }
 
 export interface InventorySku {

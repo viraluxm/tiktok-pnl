@@ -16,6 +16,7 @@ import {
   type SkuBatch,
 } from '@/hooks/useInventorySkus';
 import { code128ToSvg } from '@/lib/barcode/code128';
+import { deriveBatchQuantities } from '@/lib/inventory/batchMutations';
 import MobileDataCard from '@/components/ui/MobileDataCard';
 import SkuThumb from '@/components/common/SkuThumb';
 import {
@@ -802,6 +803,27 @@ export default function InventorySection() {
                     // (prevents overlapping/double submissions on shared stock).
                     const mutating = editBatch.isPending || deleteBatch.isPending || settleBatch.isPending;
                     const qtyClass = `tabular-nums ${b.qty_remaining < 0 ? 'text-tt-red font-semibold' : 'text-tt-text'}`;
+                    // 149: Received/Consumed are DERIVED, never stored, and shown only when
+                    // qty_added is provably this layer's original quantity. A legacy layer
+                    // renders exactly as it did before — remaining @ cost — rather than a
+                    // plausible-looking number we cannot stand behind. "Consumed", not
+                    // "Sold": without an inventory-movement ledger these units may also be
+                    // damage, samples or corrections.
+                    const q = deriveBatchQuantities(b);
+                    const qtyCells = q.received == null ? (
+                      <span className={`${qtyClass} w-16 text-right`}>{b.qty_remaining}</span>
+                    ) : (
+                      <span className="flex items-baseline gap-2 text-[11px] tabular-nums">
+                        <span className="text-tt-muted">Received <span className="text-tt-text">{q.received}</span></span>
+                        <span className="text-tt-muted">Remaining <span className={b.qty_remaining < 0 ? 'text-tt-red font-semibold' : 'text-tt-text'}>{b.qty_remaining}</span></span>
+                        <span className="text-tt-muted">Consumed <span className="text-tt-text">{q.consumed}</span></span>
+                      </span>
+                    );
+                    // 'pending' is the ONE state that must not render as a number: a blank
+                    // cost and a genuine $0 are different facts as of 149.
+                    const costCell = b.cost_status === 'pending'
+                      ? <span className="text-tt-yellow">Cost pending</span>
+                      : <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>;
                     return (
                       <div key={b.id} className="flex flex-wrap items-center gap-2 text-sm">
                         <span className="text-tt-muted tabular-nums w-8 shrink-0">#{b.sequence}</span>
@@ -847,8 +869,8 @@ export default function InventorySection() {
                           </>
                         ) : isConfirmingDelete ? (
                           <>
-                            <span className={`${qtyClass} w-16 text-right`}>{b.qty_remaining}</span>
-                            <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>
+                            {qtyCells}
+                            {costCell}
                             <span className="ml-auto text-[11px] text-tt-muted">Delete this layer?</span>
                             <button
                               type="button"
@@ -869,8 +891,8 @@ export default function InventorySection() {
                           </>
                         ) : (
                           <>
-                            <span className={`${qtyClass} w-16 text-right`}>{b.qty_remaining}</span>
-                            <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>
+                            {qtyCells}
+                            {costCell}
                             <div className="ml-auto flex items-center gap-1.5">
                               <button
                                 type="button"
@@ -920,6 +942,7 @@ export default function InventorySection() {
                     <input
                       inputMode="decimal" placeholder="Unit cost $" value={batchCost}
                       onChange={(e) => setBatchCost(e.target.value)}
+                      title="Leave blank if the cost is not known yet — the layer is recorded as Cost pending. Enter 0 only if the stock genuinely was free."
                       className="w-28 rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-sm text-tt-text outline-none tabular-nums"
                     />
                     <button

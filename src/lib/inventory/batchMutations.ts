@@ -86,22 +86,75 @@ export interface SeedBatchArgs {
 // starting qty) so a still-untouched seed layer is later deletable — consistent with
 // lensed_add_batch and the ViewTrack admin path. org_id is stamped by the
 // zz_set_org_id trigger; a brand-new SKU has no prior layers, so sequence is always 1.
+//
+// Migration 149/150 adds two facts this row must now assert, because it is the ONLY
+// direct INSERT into sku_batches in the whole application:
+//   • qty_added_authoritative: true — the layer is created here and now with nothing yet
+//     drawn from it, so qty_added IS the quantity that entered it. (For a SKU created
+//     from an existing shelf count that quantity is an opening count rather than a
+//     purchase receipt; either way it is the truthful starting quantity of THIS layer,
+//     which is what Consumed = qty_added - qty_remaining needs.) Marking it authoritative
+//     is also what stops lensed_edit_batch re-basing it on the first stock correction.
+//   • cost_status — a blank cost is 'pending' (not yet known), any number INCLUDING 0 is
+//     'final'. This is the whole point of 149: a genuine $0 and an unentered cost stop
+//     being the same row.
 export function buildSeedBatchRow(args: SeedBatchArgs): {
   user_id: string;
   sku_id: string;
   qty_remaining: number;
   qty_added: number;
+  qty_added_authoritative: boolean;
   unit_cost_cents: number | null;
+  cost_status: BatchCostStatus;
   sequence: number;
 } {
   const qty = args.qtyOnHand ?? 0;
+  const cost = args.unitCostCents ?? null;
   return {
     user_id: args.userId,
     sku_id: args.skuId,
     qty_remaining: qty,
     qty_added: qty,
-    unit_cost_cents: args.unitCostCents ?? null,
+    qty_added_authoritative: true,
+    unit_cost_cents: cost,
+    cost_status: cost === null ? 'pending' : 'final',
     sequence: 1,
+  };
+}
+
+// ── Cost state + received-quantity derivation (migration 149) ────────────────────────
+// Mirrors sku_batches_cost_status_chk. 'legacy' exists so pre-149 rows are not falsely
+// asserted to be finalized; see 149's header for why that is a state and not a NULL.
+export type BatchCostStatus = 'pending' | 'final' | 'legacy';
+
+export interface BatchQuantityInput {
+  qty_remaining: number;
+  qty_added: number | null;
+  qty_added_authoritative?: boolean | null;
+}
+
+export interface BatchQuantityView {
+  // Original quantity that entered this layer. null when we cannot prove it.
+  received: number | null;
+  // Current remaining quantity in this FIFO layer (may be negative on oversell).
+  remaining: number;
+  // Units drawn out of this layer so far. Deliberately labelled CONSUMED, not SOLD:
+  // Lensed has no inventory-movement ledger yet, so this figure cannot distinguish a
+  // sale from damage, shrinkage, a sample or a manual correction. null when `received`
+  // is not provable, because a subtraction from an unknown is not a number.
+  consumed: number | null;
+}
+
+// Derived, never stored. `received - remaining` is only meaningful when qty_added is
+// KNOWN to be this layer's original quantity — i.e. a post-149 row. A legacy row's
+// qty_added may be NULL, or may have been re-based by a pre-150 edit, so we report
+// null rather than a plausible-looking wrong number.
+export function deriveBatchQuantities(b: BatchQuantityInput): BatchQuantityView {
+  const trustworthy = b.qty_added_authoritative === true && b.qty_added != null;
+  return {
+    received: trustworthy ? (b.qty_added as number) : null,
+    remaining: b.qty_remaining,
+    consumed: trustworthy ? (b.qty_added as number) - b.qty_remaining : null,
   };
 }
 

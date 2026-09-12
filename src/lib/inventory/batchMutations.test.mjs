@@ -24,7 +24,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'batchmut-')), 'batchMutations.mjs');
 writeFileSync(outFile, outputText);
-const { parseBatchEdit, buildSeedBatchRow, mapBatchRpcError } = await import(pathToFileURL(outFile).href);
+const { parseBatchEdit, buildSeedBatchRow, mapBatchRpcError, deriveBatchQuantities } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -78,6 +78,57 @@ const check = (name, cond, extra = '') => {
   const zero = buildSeedBatchRow({ userId: 'u', skuId: 's', qtyOnHand: null, unitCostCents: null });
   check('null starting qty ⇒ 0 (and qty_added 0)', zero.qty_remaining === 0 && zero.qty_added === 0);
   check('null cost ⇒ null', zero.unit_cost_cents === null);
+
+  // ── migration 149: the seed layer must assert both new facts ──
+  check('seed marks qty_added authoritative', row.qty_added_authoritative === true);
+  check('seed with a cost ⇒ cost_status final', row.cost_status === 'final');
+  check('seed with NO cost ⇒ cost_status pending', zero.cost_status === 'pending');
+  check('pending seed leaves unit_cost_cents null (149 CHECK invariant)',
+    zero.cost_status === 'pending' && zero.unit_cost_cents === null);
+  const free = buildSeedBatchRow({ userId: 'u', skuId: 's', qtyOnHand: 3, unitCostCents: 0 });
+  check('GENUINE $0 seed ⇒ final, not pending — the 149 distinction',
+    free.cost_status === 'final' && free.unit_cost_cents === 0);
+}
+
+// ── deriveBatchQuantities — Received / Remaining / Consumed (migration 149) ─────
+// Consumed is DERIVED (qty_added − qty_remaining) and is only a number when qty_added
+// is provably the layer's original quantity. These cases mirror the SQL harness's
+// Tests I/K/L so both ends of the seam agree.
+{
+  const auth = (qty_added, qty_remaining) =>
+    deriveBatchQuantities({ qty_added, qty_remaining, qty_added_authoritative: true });
+
+  const a = auth(500, 380);
+  check('authoritative: received survives consumption', a.received === 500);
+  check('authoritative: remaining is current stock', a.remaining === 380);
+  check('authoritative: consumed = received − remaining', a.consumed === 120);
+
+  const fresh = auth(400, 400);
+  check('untouched layer ⇒ consumed 0', fresh.consumed === 0 && fresh.received === 400);
+
+  const empty = auth(500, 0);
+  check('fully drawn layer ⇒ consumed = received', empty.consumed === 500 && empty.remaining === 0);
+
+  const over = auth(10, -4);
+  check('oversold layer ⇒ consumed exceeds received', over.consumed === 14 && over.remaining === -4);
+
+  // Legacy rows: qty_added may be NULL, or may have been re-based by a pre-150 edit.
+  // Report null rather than a plausible-looking wrong number.
+  const legacyNull = deriveBatchQuantities({ qty_added: null, qty_remaining: 12, qty_added_authoritative: false });
+  check('legacy NULL qty_added ⇒ received/consumed null', legacyNull.received === null && legacyNull.consumed === null);
+  check('legacy still reports remaining', legacyNull.remaining === 12);
+
+  const legacyNumeric = deriveBatchQuantities({ qty_added: 50, qty_remaining: 12, qty_added_authoritative: false });
+  check('legacy NUMERIC qty_added is NOT trusted as a receipt',
+    legacyNumeric.received === null && legacyNumeric.consumed === null);
+
+  const preFlag = deriveBatchQuantities({ qty_added: 50, qty_remaining: 12 });
+  check('absent flag (pre-149 payload) is treated as legacy',
+    preFlag.received === null && preFlag.consumed === null);
+
+  const flaggedButNull = deriveBatchQuantities({ qty_added: null, qty_remaining: 5, qty_added_authoritative: true });
+  check('authoritative but NULL qty_added ⇒ null, never NaN',
+    flaggedButNull.received === null && flaggedButNull.consumed === null);
 }
 
 // ── mapBatchRpcError ────────────────────────────────────────────────────────────
