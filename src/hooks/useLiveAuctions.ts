@@ -101,10 +101,14 @@ export function useAuctionBoard(sessionId: string | null) {
       const res = await fetch(`/api/live/sessions/${sessionId}/board`);
       if (!res.ok) throw new Error('Failed to load auction log');
       const json = await res.json();
+      // This is an explicit allow-list, not a spread: a new field on the response is
+      // INVISIBLE to the UI until it is named here. (That is how the host band shipped
+      // broken the first time — the route returned `hosts`, this dropped it silently.)
       return {
         items: json.items ?? [],
         session_skus: json.session_skus ?? [],
         live_categories: json.live_categories ?? [],
+        hosts: json.hosts ?? [],
         warning: json.warning ?? null,
       };
     },
