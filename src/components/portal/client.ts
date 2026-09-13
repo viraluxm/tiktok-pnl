@@ -38,6 +38,10 @@ export interface PortalClient {
   pickup(instanceId: string, offerId: string | null): Promise<void>;
   /** Claim (legacy open board) — assigns at once, or files an OT approval over 40h. */
   claim(instanceId: string): Promise<{ result: 'claimed' | 'pending_approval' }>;
+  /** Request Shift (capacity) — files a pending request against a staffing block. Assigns nobody. */
+  requestShift(blockId: string, date: string): Promise<void>;
+  /** Withdraw my own still-pending capacity request. */
+  withdrawShiftRequest(requestId: string): Promise<void>;
   requestTrade(mineInstanceId: string, theirsInstanceId: string): Promise<void>;
   respondTrade(tradeId: string, response: 'accept' | 'decline'): Promise<void>;
   cancelTrade(tradeId: string): Promise<void>;
@@ -85,6 +89,8 @@ export function createFetchPortalClient(token: string): PortalClient {
       const r = await postJson<{ result?: string }>(`${base}/claim`, { instanceId });
       return { result: r.result === 'pending_approval' ? 'pending_approval' : 'claimed' };
     },
+    requestShift: async (blockId, date) => { await postJson(`${base}/request-shift`, { blockId, date }); },
+    withdrawShiftRequest: async (requestId) => { await postJson(`${base}/request-shift`, { requestId }, 'DELETE'); },
     requestTrade: async (mineInstanceId, theirsInstanceId) => { await postJson(`${base}/trade`, { mineInstanceId, theirsInstanceId }); },
     respondTrade: async (tradeId, response) => { await postJson(`${base}/trade/respond`, { tradeId, response }); },
     cancelTrade: async (tradeId) => { await postJson(`${base}/trade/cancel`, { tradeId }); },

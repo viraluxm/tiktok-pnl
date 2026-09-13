@@ -31,8 +31,11 @@ function routeFiles(dir) {
 
 console.log('\n1. ROUTES — identity comes from the token, never from the request');
 {
-  const routes = [...routeFiles(here), ...routeFiles(join(here, '..', 'trade'))];
-  check('found the portal + trade routes', routes.length >= 7, `${routes.length}`);
+  // request-shift is included deliberately: a capacity request is a WRITE on the public token
+  // surface, so it must satisfy the same four invariants as every other one.
+  const routes = [...routeFiles(here), ...routeFiles(join(here, '..', 'trade')), ...routeFiles(join(here, '..', 'request-shift'))];
+  check('found the portal + trade + request-shift routes', routes.length >= 8, `${routes.length}`);
+  check('request-shift is among them', routes.some((p) => p.includes('request-shift')));
   for (const p of routes) {
     const src = strip(read(p));
     const name = p.split('/s/[token]/')[1];
@@ -47,7 +50,7 @@ console.log('\n1. ROUTES — identity comes from the token, never from the reque
 console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
 {
   const lib = join(here, '..', '..', '..', '..', 'lib', 'schedule');
-  for (const f of ['portalSnapshot.ts', 'timecard.ts', 'trade.ts']) {
+  for (const f of ['portalSnapshot.ts', 'timecard.ts', 'trade.ts', 'capacityBoard.ts']) {
     const src = strip(read(join(lib, f)));
     // Split into individual query chains: from('table') ... up to the next statement end.
     const chains = [...src.matchAll(/\.from\('([a-z_]+)'\)([\s\S]*?);/g)];
@@ -83,6 +86,40 @@ console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
   check('trade: cancel CAS re-asserts requester_employee_id = employee.id', /\.eq\('requester_employee_id', employee\.id\)[\s\S]*?\.in\('status', LIVE\)/.test(tr));
   check('trade: approval goes ONLY through the atomic RPC', /rpc\('lensed_approve_shift_trade'/.test(tr) && !/from\('shift_instances'\)\s*\.update/.test(tr));
   check('trade: no direct write to shift_instances anywhere in the module', !/from\('shift_instances'\)[\s\S]{0,120}?\.(update|insert|delete)\(/.test(tr));
+
+  // CAPACITY (156). The team boundary is a QUERY PREDICATE, so another team's blocks, capacities
+  // and staffing counts never reach the browser to be hidden there.
+  const cb = strip(read(join(lib, 'capacityBoard.ts')));
+  check('capacityBoard: the team derives from the TOKEN employee\'s role', /payrollTeamOfRole\(employee\.role\)/.test(cb));
+  check('capacityBoard: blocks are filtered to that team server-side', /blockQ\.eq\('team', team\)/.test(cb));
+  check('capacityBoard: settings are filtered to that team server-side', /settingQ\.eq\('team', team\)/.test(cb));
+  check('capacityBoard: an unrecognised role gets NO board at all', /if \(!team\) return \[\];/.test(cb));
+  check('capacityBoard: the request insert takes employee_id from the token employee, never the body',
+    /employee_id: employee\.id/.test(cb) && !/employee_id: (body|input)\./.test(cb));
+  check('capacityBoard: the request insert takes the owner from the token employee', /user_id: owner/.test(cb));
+  check('capacityBoard: the team written on a request is derived, never accepted', /const team = capacityTeamOf\(employee\)/.test(cb));
+  check('capacityBoard: the span is recomputed from the block, never accepted from the client',
+    /starts_at: opp\.starts_at/.test(cb) && /ends_at: opp\.ends_at/.test(cb));
+  check('capacityBoard: withdraw is scoped to the token employee AND the owner',
+    /\.eq\('user_id', owner\)[\s\S]{0,120}?\.eq\('employee_id', employee\.id\)/.test(cb));
+  check('capacityBoard: never writes shift_instances — only an approval may',
+    !/from\('shift_instances'\)[\s\S]{0,160}?\.(update|insert|delete)\(/.test(cb));
+
+  // THE STAFFED COUNT MUST NOT EXCLUDE OFFERED SHIFTS. Carlos still owns a shift he dropped, so
+  // excluding it would advertise an 11th spot on a 10-setup floor.
+  const cap = strip(read(join(lib, 'capacity.ts')));
+  check('capacity: the staffed count has no offer_state clause', !/offer_state/.test(cap));
+  check('capacity: only scheduled/claimed count as staffed', /STAFFING_STATUSES = new Set\(\['scheduled', 'claimed'\]\)/.test(cap));
+  check('capacity: availability is clamped at zero', /Math\.max\(0, capacity - staffed\)/.test(cap));
+
+  // MANAGER WRITES. The owner is the session uid; nothing is taken from the body.
+  const ca = strip(read(join(lib, 'capacityAdmin.ts')));
+  for (const [, table, chain] of ca.matchAll(/\.from\('([a-z_]+)'\)([\s\S]*?);/g)) {
+    const scoped = /\.eq\('user_id', (input\.)?ownerId\)/.test(chain) || /user_id: (input\.)?ownerId/.test(chain);
+    check(`capacityAdmin: ${table} statement carries an explicit owner filter`, scoped);
+  }
+  check('capacityAdmin: approval goes ONLY through the atomic RPC',
+    /rpc\('lensed_approve_shift_request'/.test(ca) && !/from\('shift_instances'\)/.test(ca));
 }
 
 console.log('\n3. WIRE TYPES — nothing private can be typed onto the client payload');

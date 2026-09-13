@@ -396,17 +396,34 @@ export function buildAlerts(snap: PortalSnapshot, nowMs: number): Alert[] {
       });
     }
   }
-  const openCount = snap.available.filter((a) => !a.refusal && !a.requested).length;
+  const openCount = availableCountThisWeek(snap);
   if (openCount > 0) {
     out.push({
       id: 'open-shifts',
       kind: 'open_shifts',
-      title: `${openCount} open shift${openCount === 1 ? '' : 's'} available`,
+      title: `${openCount} shift${openCount === 1 ? '' : 's'} available this week`,
       actionable: false,
       go: { tab: 'schedule', seg: 'open' },
     });
   }
   return out;
+}
+
+/**
+ * How many shifts the viewer could take THIS WEEK.
+ *
+ * SCOPED TO THE WEEK ON PURPOSE. `snap.available` reaches four weeks forward now that capacity
+ * blocks publish a rolling horizon, so an unscoped count reads "31 shifts available" on a quiet
+ * Tuesday — a number nobody can act on and which drowns out the alerts beside it. The week is the
+ * unit the rest of Home already speaks in.
+ *
+ * "shift", never "open shift": the list mixes a coworker's offered shift with a capacity-derived
+ * one, and only the first is "open" in the legacy sense.
+ */
+export function availableCountThisWeek(snap: PortalSnapshot): number {
+  return snap.available.filter(
+    (a) => !a.refusal && !a.requested && a.shift_date >= snap.thisWeek.start && a.shift_date <= snap.thisWeek.end,
+  ).length;
 }
 
 // ── Requests screen grouping ─────────────────────────────────────────────────────────────────

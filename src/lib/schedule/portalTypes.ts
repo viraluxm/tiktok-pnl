@@ -63,13 +63,22 @@ export interface PortalWeek {
 }
 
 /**
- * Something the viewer could pick up. Two kinds exist in Lensed and both are "available":
- *   'offer' — Phase 2 Drop Shift: still owned by someone; a request goes to a manager.
- *   'open'  — the legacy board: a released or admin-posted open shift; claiming assigns it right
- *             away (or files an OT approval when it would push the week over 40h).
+ * Something the viewer could take. THREE kinds exist in Lensed and all three are "available":
+ *   'offer'    — Phase 2 Drop Shift: still owned by a coworker; a request goes to a manager, and
+ *                that coworker stays responsible until the manager approves.
+ *   'open'     — the legacy board: a released or admin-posted open shift; claiming assigns it
+ *                right away (or files an OT approval when it would push the week over 40h).
+ *   'capacity' — NOBODY owns it. The business has room for another person in this shift block
+ *                (migration 156), so the shift is DERIVED from capacity minus who is scheduled.
+ *                Requesting it creates a pending shift_requests row and assigns nothing.
+ *
+ * The three are presented under one heading ("Available") but their ownership semantics are
+ * different and are deliberately NOT merged: an offered shift is somebody's, a capacity shift is
+ * nobody's, and only a manager approval turns either into an assignment.
  */
 export interface AvailableItem {
-  kind: 'offer' | 'open';
+  kind: 'offer' | 'open' | 'capacity';
+  /** shift_instances id for 'offer'/'open'; a namespaced `cap:<block>:<date>` for 'capacity'. */
   id: string;
   offer_id: string | null;
   shift_date: string;
@@ -80,8 +89,14 @@ export interface AvailableItem {
   offered_by_name: string | null;
   /** Employee-facing reason the viewer cannot take it (renders as a label). null = can request. */
   refusal: string | null;
-  /** The viewer already has a pending pickup request on this shift. */
+  /** The viewer already has a pending request on this shift. */
   requested: boolean;
+  /** 'capacity' only: the staffing block this opportunity comes from. */
+  block_id: string | null;
+  /** 'capacity' only: how many shifts remain available in this block. Never a capacity or a setup count. */
+  available: number | null;
+  /** 'capacity' only: the viewer's own pending shift_requests id, for withdrawing it. */
+  request_id: string | null;
 }
 
 export interface PickupRequestView {

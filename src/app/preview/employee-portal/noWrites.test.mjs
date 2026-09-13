@@ -47,13 +47,14 @@ check('PortalRoot (the production client boundary) is not used', !/PortalRoot/.t
 
 // 5. No VALUE import of any server-side schedule module (type-only is fine).
 for (const m of ['schedule/offer', 'schedule/adminShifts', 'schedule/teamSchedule', 'schedule/mySchedule', 'schedule/release', 'schedule/claim',
-                 'schedule/trade', 'schedule/timecard', 'schedule/portalSnapshot', 'schedule/board', 'schedule/tokens', 'schedule/publicRoute']) {
+                 'schedule/trade', 'schedule/timecard', 'schedule/portalSnapshot', 'schedule/board', 'schedule/tokens', 'schedule/publicRoute',
+                 'schedule/capacityBoard', 'schedule/capacityAdmin']) {
   const bad = new RegExp(`from\\s+['"][^'"]*${m}['"]`);
   const typeOnly = new RegExp(`import\\s+type[^;]*from\\s+['"][^'"]*${m}['"]`);
   check(`${m} not imported for VALUES`, !bad.test(all) || typeOnly.test(all));
 }
 // The modules it DOES import must themselves be client-safe (no 'server-only').
-for (const rel of ['../../../lib/schedule/timecardModel.ts', '../../../lib/schedule/tradePlan.ts', '../../../lib/schedule/hours.ts', '../../../lib/schedule/timezone.ts', '../../../lib/employees.ts', '../../../lib/labor.ts', '../../../lib/schedule/portalModel.ts', '../../../components/portal/client.ts']) {
+for (const rel of ['../../../lib/schedule/timecardModel.ts', '../../../lib/schedule/tradePlan.ts', '../../../lib/schedule/hours.ts', '../../../lib/schedule/timezone.ts', '../../../lib/employees.ts', '../../../lib/labor.ts', '../../../lib/schedule/portalModel.ts', '../../../components/portal/client.ts', '../../../lib/schedule/capacity.ts', '../../../lib/schedule/eligibility.ts']) {
   check(`${rel.split('/').pop()} carries no 'server-only'`, !/['"]server-only['"]/.test(strip(read(rel))));
 }
 
@@ -62,6 +63,18 @@ for (const rel of ['../../../lib/schedule/timecardModel.ts', '../../../lib/sched
 check('PortalProvider receives the in-memory client', /<PortalProvider[^>]*client=\{client\}/.test(view));
 check('PickupRequestsPanel gets both preview props', /<PickupRequestsPanel[\s\S]{0,200}?previewRequests=[\s\S]{0,200}?onPreviewAct=/.test(view));
 check('TradeRequestsPanel gets both preview props', /<TradeRequestsPanel[\s\S]{0,200}?previewTrades=[\s\S]{0,200}?onPreviewAct=/.test(view));
+check('ShiftRequestsPanel gets both preview props', /<ShiftRequestsPanel[\s\S]{0,200}?previewRequests=[\s\S]{0,200}?onPreviewAct=/.test(view));
+check('StaffingCapacityPanel gets both preview props', /<StaffingCapacityPanel[\s\S]{0,400}?previewData=[\s\S]{0,400}?onPreviewMutate=/.test(view));
+const shiftReq = strip(read('../../../components/employees/ShiftRequestsPanel.tsx'));
+check('ShiftRequestsPanel act(): onPreviewAct returns before fetch', /if\s*\(onPreviewAct\)\s*\{[^}]*return;\s*\}/.test(shiftReq) && shiftReq.indexOf('onPreviewAct') < shiftReq.indexOf("fetch('/api/admin/schedule/shift-requests'"));
+check('ShiftRequestsPanel load(): previewRequests returns before fetch', /if\s*\(previewRequests\)\s*\{[\s\S]{0,200}?return;\s*\}/.test(shiftReq));
+// The capacity panel fetches through a HOOK, so returning early is not available to it — the
+// query must be DISABLED instead, or the preview would issue a network request on mount.
+const capPanel = strip(read('../../../components/employees/StaffingCapacityPanel.tsx'));
+check('StaffingCapacityPanel disables its query in preview', /useCapacity\(\{[^}]*enabled:\s*!previewData/.test(capPanel));
+check('StaffingCapacityPanel routes every write through onPreviewMutate', /if\s*\(onPreviewMutate\)\s*\{[^}]*return;\s*\}/.test(capPanel));
+const capHook = strip(read('../../../hooks/useCapacity.ts'));
+check('useCapacity honours enabled:false', /enabled:\s*opts\.enabled\s*!==\s*false/.test(capHook));
 const trades = strip(read('../../../components/employees/TradeRequestsPanel.tsx'));
 check('TradeRequestsPanel act(): onPreviewAct returns before fetch', /if\s*\(onPreviewAct\)\s*\{[^}]*return;\s*\}/.test(trades) && trades.indexOf('onPreviewAct') < trades.indexOf("fetch('/api/admin/schedule/trades'"));
 check('TradeRequestsPanel load(): previewTrades returns before fetch', /if\s*\(previewTrades\)\s*\{[\s\S]{0,200}?return;\s*\}/.test(trades));
@@ -70,6 +83,8 @@ check('TradeRequestsPanel load(): previewTrades returns before fetch', /if\s*\(p
 const shiftsView = strip(read('../../../components/employees/ShiftsView.tsx'));
 check('production mounts PickupRequestsPanel with no props', /<PickupRequestsPanel\s*\/>/.test(shiftsView));
 check('production mounts TradeRequestsPanel with no props', /<TradeRequestsPanel\s*\/>/.test(shiftsView));
+check('production mounts ShiftRequestsPanel with no props', /<ShiftRequestsPanel\s*\/>/.test(shiftsView));
+check('production mounts StaffingCapacityPanel with no props', /<StaffingCapacityPanel\s*\/>/.test(shiftsView));
 const root = strip(read('../../../components/portal/PortalRoot.tsx'));
 check('production PortalRoot builds the fetch client from the token', /createFetchPortalClient\(token\)/.test(root));
 

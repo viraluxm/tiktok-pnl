@@ -31,6 +31,11 @@ const SERVICE_ROLE_ONLY = new Set([
   // `authenticated` would let any signed-in user swap another owner's shifts. Called ONLY via
   // createAdminClient from /api/admin/schedule/trades.
   'lensed_approve_shift_trade',
+  // Capacity shift-request approval (156) — same posture as the trade RPC: it takes p_owner
+  // explicitly and has no auth.uid() to trust, so granting `authenticated` would let any signed-in
+  // user create a shift inside another tenant. Called ONLY via createAdminClient from
+  // /api/admin/schedule/shift-requests. NOT APPLIED to production yet.
+  'lensed_approve_shift_request',
   // Service-role-only `_as` variants, invoked ONLY via createAdminClient in member routes (owner
   // passed explicitly; revoked from authenticated by 084/087). Were unregistered → the check was
   // already red on main before the kiosk PR.

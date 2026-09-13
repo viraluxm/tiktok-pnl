@@ -6,6 +6,7 @@ import {
   greetingFor, laHourOf, fmtLongDate, pickNextShift, nextShiftHint, relativeDayLabel, fmtRangeLA, fmtHours, roleLabel,
   buildAlerts, inClockWindow, fmtTimeLA, fmtShortDate, crossesMidnightLA, fmtMonthDay, defaultSelectedDay, mondayOf,
   fmtPayday, fmtPeriodRange, type Alert,
+  availableCountThisWeek,
 } from '@/lib/schedule/portalModel';
 import { ClockControls } from '@/app/s/[token]/ClockControls';
 import { WeekStrip } from './WeekStrip';
@@ -111,7 +112,7 @@ export function HomeScreen({
   const actionable = alerts.filter((a) => a.actionable);
   const updates = alerts.filter((a) => !a.actionable);
   const onGo = (a: Alert) => (a.go.tab === 'requests' ? go({ tab: 'requests' }) : go({ tab: 'schedule', seg: a.go.seg }));
-  const openCount = snap.available.filter((a) => !a.refusal && !a.requested).length;
+  const openCount = availableCountThisWeek(snap);
 
   return (
     <div className="lg:grid lg:grid-cols-[1.1fr_1fr] lg:gap-10">
@@ -173,9 +174,9 @@ export function HomeScreen({
               <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-tt-muted">Next shift</p>
               <p className="mt-2 text-lg font-medium text-tt-text">Nothing scheduled yet</p>
               <p className="mt-1 text-[13px] text-tt-muted">
-                {openCount > 0 ? `${openCount} open shift${openCount === 1 ? '' : 's'} you could pick up.` : 'Your manager has not scheduled your next shift.'}
+                {openCount > 0 ? `${openCount} shift${openCount === 1 ? '' : 's'} available this week.` : 'Your manager has not scheduled your next shift.'}
               </p>
-              {openCount > 0 && <div className="mt-3"><Button variant="tinted" size="sm" onClick={onOpenAvailable}>See open shifts</Button></div>}
+              {openCount > 0 && <div className="mt-3"><Button variant="tinted" size="sm" onClick={onOpenAvailable}>See what&apos;s available</Button></div>}
             </div>
           )}
         </section>
@@ -251,7 +252,7 @@ export function HomeScreen({
                     <p className="text-lg font-medium text-tt-text">{selected === today ? "You're off today." : selected < today ? 'You were off.' : "You're off."}</p>
                     {openCount > 0 && selected >= today && (
                       <button type="button" onClick={onOpenAvailable} className="mt-1 inline-flex items-center gap-1 text-[13px] font-semibold text-tt-cyan hover:underline">
-                        {openCount} open shift{openCount === 1 ? '' : 's'} available <ChevronRight size={14} />
+                        {openCount} shift{openCount === 1 ? '' : 's'} available this week <ChevronRight size={14} />
                       </button>
                     )}
                   </div>

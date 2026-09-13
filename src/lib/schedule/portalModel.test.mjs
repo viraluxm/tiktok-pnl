@@ -178,8 +178,23 @@ console.log('\n7. ALERTS — only real conditions, actionable first, recent deci
   check('incoming trade names the coworker', a[0].title === 'Juan sent you a trade request', a[0].title);
   check('offered alert says still responsible', a[1].body.includes('still responsible'), a[1].body);
   check('old denial (7+ days) is NOT an alert', !a.some((x) => x.id === 'timeoff-to2'));
-  eq('open shift count excludes refused ones', a.at(-1).title, '1 open shift available');
+  eq('available count excludes refused ones, and is scoped to THIS WEEK', a.at(-1).title, '1 shift available this week');
   eq('offered alert routes to Schedule → My Shifts', a[1].go, { tab: 'schedule', seg: 'mine' });
+
+  // THE CAPACITY HORIZON MUST NOT LEAK INTO THE HOME COUNT. Capacity blocks publish four weeks
+  // forward, so an unscoped count reads "31 shifts available" on a quiet week.
+  const far = M.buildAlerts(snap({
+    available: [
+      { kind: 'capacity', id: 'cap:b1:2026-09-12', offer_id: null, shift_date: '2026-09-12', starts_at: '', ends_at: '', role: 'host', hours: 8, offered_by_name: null, refusal: null, requested: false, block_id: 'b1', available: 3, request_id: null },
+      { kind: 'capacity', id: 'cap:b1:2026-10-02', offer_id: null, shift_date: '2026-10-02', starts_at: '', ends_at: '', role: 'host', hours: 8, offered_by_name: null, refusal: null, requested: false, block_id: 'b1', available: 5, request_id: null },
+      { kind: 'capacity', id: 'cap:b1:2026-09-13', offer_id: null, shift_date: '2026-09-13', starts_at: '', ends_at: '', role: 'host', hours: 8, offered_by_name: null, refusal: null, requested: true, block_id: 'b1', available: 2, request_id: 'r1' },
+    ],
+  }), NOW);
+  eq('a capacity shift three weeks out is NOT counted on Home', far.at(-1).title, '1 shift available this week');
+  eq('a shift the viewer already requested is not counted either',
+    M.availableCountThisWeek(snap({ available: [
+      { kind: 'capacity', id: 'cap:b1:2026-09-12', offer_id: null, shift_date: '2026-09-12', starts_at: '', ends_at: '', role: 'host', hours: 8, offered_by_name: null, refusal: null, requested: true, block_id: 'b1', available: 2, request_id: 'r1' },
+    ] })), 0);
 }
 
 console.log('\n8. REQUESTS GROUPING — action / pending / history');

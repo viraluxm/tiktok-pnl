@@ -168,13 +168,21 @@ function TeamDay({ date, shifts, today, availableById, onCoworker }: {
 
 function AvailableDay({ date, items, today, onPick }: { date: string; items: AvailableItem[]; today: string; onPick: (a: AvailableItem) => void }) {
   return (
-    <section aria-label={`Open shifts on ${dowLong(date)}`}>
+    <section aria-label={`Shifts available on ${dowLong(date)}`}>
       <DayHeading date={date} today={today} />
       {items.length === 0
-        ? <p className="mt-3 text-[15px] text-tt-text">No open shifts {dowLong(date)}.</p>
+        ? <p className="mt-3 text-[15px] text-tt-text">No shifts available {dowLong(date)}.</p>
         : <AvailableList items={items} onPick={onPick} />}
     </section>
   );
+}
+
+// The meta line under the time: who it comes from. A CAPACITY shift comes from nobody — it exists
+// because the floor has room — so it says the role and the length and stops there.
+function availableSource(a: AvailableItem): string {
+  if (a.kind === 'capacity') return '';
+  if (a.offered_by_name) return ` · ${a.kind === 'offer' ? 'offered' : 'released'} by ${a.offered_by_name}`;
+  return a.kind === 'open' ? ' · posted by a manager' : '';
 }
 
 function AvailableList({ items, onPick }: { items: AvailableItem[]; onPick: (a: AvailableItem) => void }) {
@@ -182,6 +190,9 @@ function AvailableList({ items, onPick }: { items: AvailableItem[]; onPick: (a: 
     <ul className="-mx-2 mt-2 divide-y divide-white/[0.05]">
       {items.map((a) => {
         const can = !a.refusal && !a.requested;
+        // A requested CAPACITY shift stays tappable so the employee can withdraw it; a requested
+        // coworker offer does not, because withdrawing a pickup is not a thing they can do.
+        const tappable = can || (a.kind === 'capacity' && a.requested);
         const inner = (
           <>
             <span className="min-w-0 flex-1">
@@ -190,17 +201,30 @@ function AvailableList({ items, onPick }: { items: AvailableItem[]; onPick: (a: 
                 {crossesMidnightLA(a.starts_at, a.ends_at) && <MoonIcon size={14} className="text-tt-muted" aria-label="overnight" />}
               </span>
               <span className="block text-[12px] text-tt-muted">
-                {roleLabel(a.role)}{a.role ? ' · ' : ''}{fmtHours(a.hours)}{a.offered_by_name ? ` · ${a.kind === 'offer' ? 'offered' : 'released'} by ${a.offered_by_name}` : a.kind === 'open' ? ' · posted by a manager' : ''}
+                {roleLabel(a.role)}{a.role ? ' · ' : ''}{fmtHours(a.hours)}{availableSource(a)}
               </span>
-              {a.requested && <span className="block text-[12px] font-medium text-tt-yellow">Pickup requested · waiting for manager approval</span>}
+              {a.kind === 'capacity' && !a.requested && a.available != null && a.available > 0 && (
+                <span className="block text-[12px] font-medium text-tt-text">
+                  {a.available} shift{a.available === 1 ? '' : 's'} available
+                </span>
+              )}
+              {a.requested && (
+                <span className="block text-[12px] font-medium text-tt-yellow">
+                  {a.kind === 'capacity' ? 'Shift Requested · waiting for manager approval' : 'Pickup requested · waiting for manager approval'}
+                </span>
+              )}
               {a.refusal && <span className="block text-[12px] text-tt-muted">{a.refusal}</span>}
             </span>
-            {can && <span className="shrink-0 rounded-lg bg-tt-cyan/15 px-3 py-1.5 text-xs font-semibold text-tt-cyan">Pick Up</span>}
+            {can && (
+              <span className="shrink-0 rounded-lg bg-tt-cyan/15 px-3 py-1.5 text-xs font-semibold text-tt-cyan">
+                {a.kind === 'capacity' ? 'Request Shift' : 'Pick Up'}
+              </span>
+            )}
           </>
         );
         return (
           <li key={a.id}>
-            {can ? (
+            {tappable ? (
               <button type="button" onClick={() => onPick(a)} className="flex w-full items-center gap-3 rounded-xl px-2 py-3 text-left transition-colors hover:bg-white/[0.04] focus:outline-none focus-visible:ring-2 focus-visible:ring-tt-cyan/70">{inner}</button>
             ) : (
               <div className="flex items-center gap-3 px-2 py-3 opacity-90">{inner}</div>
@@ -212,50 +236,93 @@ function AvailableList({ items, onPick }: { items: AvailableItem[]; onPick: (a: 
   );
 }
 
+// ONE sheet, THREE kinds — because they are genuinely three different asks:
+//   'offer'    Request Pickup   → a coworker's shift; they stay responsible until a manager decides
+//   'open'     Pick Up Shift    → the legacy board; yours immediately (or an OT approval)
+//   'capacity' Request Shift    → nobody's shift; the floor has room. A manager approval CREATES it.
 export function PickupSheet({ item, today, open, onClose }: { item: AvailableItem | null; today: string; open: boolean; onClose: () => void }) {
   const [err, setErr] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<'requested' | 'claimed' | 'pending_approval' | null>(null);
+  const [outcome, setOutcome] = useState<'requested' | 'claimed' | 'pending_approval' | 'withdrawn' | null>(null);
   const pickup = usePortalAction((c, id: string, offerId: string | null) => c.pickup(id, offerId));
   const claim = usePortalAction((c, id: string) => c.claim(id));
+  const request = usePortalAction((c, blockId: string, date: string) => c.requestShift(blockId, date));
+  const withdraw = usePortalAction((c, requestId: string) => c.withdrawShiftRequest(requestId));
   const close = () => { setErr(null); setOutcome(null); onClose(); };
   if (!item) return null;
-  const busy = pickup.isPending || claim.isPending;
+  const busy = pickup.isPending || claim.isPending || request.isPending || withdraw.isPending;
+  const isCapacity = item.kind === 'capacity';
+  // A capacity shift the viewer has already asked for: the sheet becomes a status + withdraw.
+  const pendingMine = isCapacity && item.requested;
 
   async function submit() {
     if (!item) return;
     setErr(null);
     try {
-      if (item.kind === 'offer') { await pickup.mutateAsync([item.id, item.offer_id]); setOutcome('requested'); }
+      if (item.kind === 'capacity') { await request.mutateAsync([item.block_id as string, item.shift_date]); setOutcome('requested'); }
+      else if (item.kind === 'offer') { await pickup.mutateAsync([item.id, item.offer_id]); setOutcome('requested'); }
       else { const r = await claim.mutateAsync([item.id]); setOutcome(r.result); }
     } catch (e) { setErr((e as Error).message); }
   }
 
+  async function cancelRequest() {
+    if (!item?.request_id) return;
+    setErr(null);
+    try { await withdraw.mutateAsync([item.request_id]); setOutcome('withdrawn'); }
+    catch (e) { setErr((e as Error).message); }
+  }
+
+  const title = outcome
+    ? outcome === 'claimed' ? "It's yours"
+      : outcome === 'withdrawn' ? 'Request withdrawn'
+        : isCapacity ? 'Shift Requested' : 'Request sent'
+    : pendingMine ? 'Shift Requested'
+      : isCapacity ? 'Request this shift?' : 'Pick up this shift?';
+
   return (
-    <Sheet open={open} onClose={close} title={outcome ? (outcome === 'claimed' ? "It's yours" : 'Request sent') : 'Pick up this shift?'}>
+    <Sheet open={open} onClose={close} title={title}>
       <FactBox>
         <p className="text-[11px] font-semibold uppercase tracking-wider text-tt-muted">{relativeDayLabel(item.shift_date, today)} · {fmtShortDate(item.shift_date)}</p>
         <p className="mt-0.5 text-2xl font-semibold tabular-nums tracking-tight text-tt-text">{fmtRangeLA(item.starts_at, item.ends_at)}</p>
         <p className="mt-0.5 text-[13px] text-tt-muted">{roleLabel(item.role)}{item.role ? ' · ' : ''}{fmtHours(item.hours)}{item.offered_by_name ? ` · from ${item.offered_by_name}` : ''}</p>
+        {isCapacity && !pendingMine && item.available != null && item.available > 0 && (
+          <p className="mt-1 text-[13px] font-medium text-tt-text">{item.available} shift{item.available === 1 ? '' : 's'} available</p>
+        )}
       </FactBox>
-      {!outcome ? (
+      {outcome ? (
         <>
           <p className="text-sm leading-snug text-tt-text">
-            {item.kind === 'offer'
-              ? `A manager must approve before this shift becomes yours. Until then it stays ${item.offered_by_name ? firstNameOf(item.offered_by_name) + "'s" : 'with its current owner'}.`
-              : 'This shift is open. It becomes yours right away, unless it would put your week over 40 hours, in which case a manager approves it first.'}
+            {outcome === 'claimed' ? 'The shift is on your schedule.'
+              : outcome === 'withdrawn' ? 'That request is gone. You can request the shift again while it is still available.'
+                : outcome === 'requested' ? 'Waiting for manager approval. It is not on your schedule until a manager approves it.'
+                  : 'Over 40 hours this week, so a manager has to approve it. It is not yours yet.'}
           </p>
+          <div className="mt-5"><Button variant="primary" size="lg" full onClick={close}>Done</Button></div>
+        </>
+      ) : pendingMine ? (
+        <>
+          <p className="text-sm leading-snug text-tt-text">Waiting for manager approval. It is not on your schedule until a manager approves it.</p>
           {err && <div className="mt-3"><InlineError>{err}</InlineError></div>}
           <div className="mt-5 flex gap-2">
-            <Button variant="quiet" size="lg" className="flex-1" onClick={close} disabled={busy}>Not now</Button>
-            <Button variant="primary" size="lg" className="flex-1" busy={busy} onClick={submit}>{item.kind === 'offer' ? 'Request Pickup' : 'Pick Up Shift'}</Button>
+            <Button variant="quiet" size="lg" className="flex-1" onClick={close} disabled={busy}>Close</Button>
+            <Button variant="quiet" size="lg" className="flex-1" busy={busy} onClick={cancelRequest}>Withdraw request</Button>
           </div>
         </>
       ) : (
         <>
           <p className="text-sm leading-snug text-tt-text">
-            {outcome === 'claimed' ? 'The shift is on your schedule.' : outcome === 'requested' ? 'Waiting for manager approval. It is not yours until a manager approves it.' : 'Over 40 hours this week, so a manager has to approve it. It is not yours yet.'}
+            {item.kind === 'capacity'
+              ? 'A manager approves shift requests. It is not on your schedule until they do.'
+              : item.kind === 'offer'
+                ? `A manager must approve before this shift becomes yours. Until then it stays ${item.offered_by_name ? firstNameOf(item.offered_by_name) + "'s" : 'with its current owner'}.`
+                : 'This shift is open. It becomes yours right away, unless it would put your week over 40 hours, in which case a manager approves it first.'}
           </p>
-          <div className="mt-5"><Button variant="primary" size="lg" full onClick={close}>Done</Button></div>
+          {err && <div className="mt-3"><InlineError>{err}</InlineError></div>}
+          <div className="mt-5 flex gap-2">
+            <Button variant="quiet" size="lg" className="flex-1" onClick={close} disabled={busy}>Not now</Button>
+            <Button variant="primary" size="lg" className="flex-1" busy={busy} onClick={submit}>
+              {item.kind === 'capacity' ? 'Request Shift' : item.kind === 'offer' ? 'Request Pickup' : 'Pick Up Shift'}
+            </Button>
+          </div>
         </>
       )}
     </Sheet>
@@ -285,9 +352,14 @@ export function ScheduleScreen({
   );
   const shiftsByDate = useMemo(() => new Map(weekShifts.map((s) => [s.shift_date, s])), [weekShifts]);
   const availableById = useMemo(() => new Map(snap.available.map((a) => [a.id, a])), [snap.available]);
-  const openCount = snap.available.filter((a) => !a.refusal && !a.requested).length;
-  const next = pickNextShift(snap.upcoming, nowMs, today);
   const weekEnd = addDaysISO(weekStart, 6);
+  // BADGE = what is available in the WEEK THE STRIP IS SHOWING. Unscoped it would count the whole
+  // rolling capacity horizon (four weeks), which reads as a meaningless "31" beside a strip that
+  // only shows seven days.
+  const openCount = snap.available.filter(
+    (a) => !a.refusal && !a.requested && a.shift_date >= weekStart && a.shift_date <= weekEnd,
+  ).length;
+  const next = pickNextShift(snap.upcoming, nowMs, today);
   const releasedInWeek = snap.releasedByMe.filter((r) => r.shift_date >= weekStart && r.shift_date <= weekEnd);
   const seg: Segment = nav.seg;
 
@@ -333,7 +405,7 @@ export function ScheduleScreen({
           onSelect={(d) => go({ day: d }, 'replace')}
           onWeek={(w) => go({ week: w === mondayOf(today) ? null : w, day: null }, 'replace')}
         />
-        {seg === 'open' && (
+        {seg === 'open' && openToday.some((a) => a.kind !== 'capacity') && (
           <p className="mt-3 text-[12px] text-tt-muted">A coworker&apos;s offered shift stays theirs until a manager approves you.</p>
         )}
         <div className="mt-5">{body}</div>
