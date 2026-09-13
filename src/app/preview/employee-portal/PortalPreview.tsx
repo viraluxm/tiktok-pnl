@@ -132,7 +132,7 @@ export default function PortalPreview() {
       {manager ? (
         <main className="mx-auto max-w-3xl px-4 py-6">
           <h1 className="text-xl font-semibold">Manager queue</h1>
-          <p className="mt-1 mb-5 text-sm text-tt-muted">The same PickupRequestsPanel and TradeRequestsPanel the Team → Shifts tab mounts, driven by this preview&apos;s world.</p>
+          <p className="mt-1 mb-5 text-sm text-tt-muted">The same approval panels the Team → Shifts tab mounts (pickups, shift requests, trades and staffing capacity), driven by this preview&apos;s world.</p>
           <div className="space-y-4">
             <PickupRequestsPanel previewRequests={pendingPickups} onPreviewAct={(id, action) => void apply(act.decidePickup(id, action))} />
             <ShiftRequestsPanel previewRequests={pendingShiftRequests} onPreviewAct={(id, action) => void apply(act.decideShiftRequest(id, action))} />

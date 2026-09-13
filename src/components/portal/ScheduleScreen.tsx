@@ -203,7 +203,10 @@ function AvailableList({ items, onPick }: { items: AvailableItem[]; onPick: (a: 
               {/* HOW MANY, directly under the time and above the role. This is the fact the whole
                   feature exists to publish; below the meta line it read as a fourth detail. Not
                   cyan: the cyan chip on the right is what to TAP, and one accent cannot mean both. */}
-              {a.kind === 'capacity' && !a.requested && a.available != null && a.available > 0 && (
+              {/* Only when the viewer can actually take it. On a row they cannot ("You're already
+                  scheduled that day."), the count is a true number above a reason they can't act
+                  on, which reads as a tease. */}
+              {a.kind === 'capacity' && can && a.available != null && a.available > 0 && (
                 <span className="block text-[13px] font-semibold text-tt-text">
                   {a.available} shift{a.available === 1 ? '' : 's'} available
                 </span>

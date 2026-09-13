@@ -7,7 +7,7 @@ import { instanceHours, weekBoundsMonSun } from './hours';
 import { getBoard, getMyPendingClaims, getCurrentPeriodDrops } from './board';
 import { getAvailableShifts } from './offer';
 import { PICKUP_REFUSAL_MESSAGES } from './offerPlan';
-import { getCapacityAvailability, capacityItemId } from './capacityBoard';
+import { getCapacityAvailability, getMyShiftRequests, capacityItemId } from './capacityBoard';
 import { SHIFT_REQUEST_REFUSAL_MESSAGES } from './capacity';
 import { getWeekSchedule } from './mySchedule';
 import { getTeamSchedule } from './teamSchedule';
@@ -127,7 +127,7 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
   const todayISO = laTodayISO(now);
   const week = weekBoundsMonSun(todayISO);
 
-  const [mine, released, trades, offers, board, capacity, pickups, otClaims, timeOff, { drops }, timecard, open] = await Promise.all([
+  const [mine, released, trades, offers, board, capacity, shiftRequests, pickups, otClaims, timeOff, { drops }, timecard, open] = await Promise.all([
     // My plan from this week's Monday forward (the week total needs the days already behind us).
     admin.from('shift_instances').select(INSTANCE_COLS)
       .eq('user_id', owner).eq('employee_id', employee.id)
@@ -142,6 +142,8 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
     // Capacity-derived availability (migration 156). Owner- AND team-scoped inside; an employee
     // whose role maps to no staffing team gets [] rather than another team's numbers.
     getCapacityAvailability(employee, now),
+    // MY capacity requests, for the Requests tab. Owner- AND employee-scoped inside.
+    getMyShiftRequests(employee, now),
     getMyPickups(admin, employee, now),
     getMyPendingClaims(employee),
     getMyTimeOff(admin, employee, todayISO),
@@ -246,6 +248,7 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
     otClaims: otClaims.map((c) => ({
       claim_id: c.claim_id, shift_date: c.shift_date, starts_at: c.starts_at, ends_at: c.ends_at, projected_week_hours: c.projected_week_hours,
     })),
+    shiftRequests,
     timeOff,
     timeOffEarliest: earliestRequestableDate(todayISO, payPeriodStartFor),
     trades,

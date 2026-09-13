@@ -104,6 +104,13 @@ console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
     /\.eq\('user_id', owner\)[\s\S]{0,120}?\.eq\('employee_id', employee\.id\)/.test(cb));
   check('capacityBoard: a pending request survives its block being paused, so it stays withdrawable',
     /ORPHANED REQUESTS/.test(read(join(lib, 'capacityBoard.ts'))) && /for \(const r of myRequestRows\)/.test(cb));
+  // The Requests tab reads MY requests and nobody else's, and carries no capacity configuration.
+  check('capacityBoard: the Requests read is scoped to the token employee AND the owner',
+    /from\('shift_requests'\)[\s\S]{0,400}?\.eq\('user_id', owner\)[\s\S]{0,200}?\.eq\('employee_id', employee\.id\)/.test(cb));
+  check('capacityBoard: the Requests read selects no capacity, block config or manager note',
+    !/from\('shift_requests'\)\s*\.select\([^)]*(capacity|closed|decision_note)/.test(cb));
+  check('portalTypes: a shift request exposes no capacity configuration',
+    !/capacity|staffed|setup/.test(strip(read(join(lib, 'portalTypes.ts'))).match(/interface ShiftRequestView \{[^}]*\}/)?.[0] ?? ''));
   check('capacityBoard: never writes shift_instances — only an approval may',
     !/from\('shift_instances'\)[\s\S]{0,160}?\.(update|insert|delete)\(/.test(cb));
 
@@ -122,6 +129,27 @@ console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
   }
   check('capacityAdmin: approval goes ONLY through the atomic RPC',
     /rpc\('lensed_approve_shift_request'/.test(ca) && !/from\('shift_instances'\)/.test(ca));
+
+  // ── THE WRITE GUARD (157). Every manager write path that can ADD staffing goes through a
+  //    locked, recounting SQL function; the fallback is narrow and only fires when it is absent.
+  const bs = strip(read(join(lib, 'bulkSchedule.ts')));
+  check('bulkSchedule: the write goes through the locked batch function',
+    /rpc\('lensed_apply_schedule_batch'/.test(bs));
+  check('bulkSchedule: the unguarded sequence runs ONLY when the function is missing',
+    /if \(!isMissingFunction\(guarded\.error\)\) throw/.test(bs));
+  check('bulkSchedule: capacity refusals are per-row, not a whole-batch failure',
+    /refusals/.test(bs) && /ok: true[\s\S]{0,400}?refusals/.test(bs));
+  const as2 = strip(read(join(lib, 'adminShifts.ts')));
+  check('adminShifts: an ASSIGNED one-time shift goes through the same batch function',
+    /if \(input\.employeeId\)[\s\S]{0,400}?rpc\('lensed_apply_schedule_batch'/.test(as2));
+  const cg = strip(read(join(lib, 'capacityGuard.ts')));
+  check('capacityGuard: the legacy board assignment goes through the locked function',
+    /rpc\('lensed_assign_released_shift'/.test(cg));
+  check('capacityGuard: the missing-function test is narrow (a real error must surface)',
+    /PGRST202/.test(cg) && /42883/.test(cg) && /if \(!isMissingFunction\(guarded\.error\)\) return/.test(cg));
+  const cl = strip(read(join(lib, 'claim.ts')));
+  check('claim: the auto-approve flip no longer writes shift_instances directly',
+    /assignReleasedShift\(/.test(cl) && !/from\('shift_instances'\)[\s\S]{0,200}?\.update\(\{ status: 'claimed'/.test(cl));
 }
 
 console.log('\n3. WIRE TYPES — nothing private can be typed onto the client payload');

@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 P2="$SCRIPT_DIR/../schedule_phase2"
 MIGDIR="$SCRIPT_DIR/../../migrations"
 MIG156="$MIGDIR/156_shift_capacity_blocks.sql"
+MIG157="$MIGDIR/157_schedule_capacity_write_guard.sql"
 CONTAINER="lensed_capacity_test_$$"
 IMAGE="postgres:16-alpine"
 DB="db"
@@ -29,6 +30,7 @@ psqlf(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=
 psqlq(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA "$@"; }
 
 [ -f "$MIG156" ] || { echo "✗ migration not found: $MIG156"; exit 1; }
+[ -f "$MIG157" ] || { echo "✗ migration not found: $MIG157"; exit 1; }
 
 echo "▶ starting $IMAGE ..."
 docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=postgres "$IMAGE" >/dev/null || {
@@ -76,6 +78,14 @@ else
 fi
 [ "$FAILED" -eq 0 ] || { echo "❌ migration did not apply — aborting"; exit 1; }
 
+echo "── apply migration 157 VERBATIM (the capacity WRITE guard; depends on 156) ──"
+if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG157" >/tmp/cap_apply157.$$ 2>&1; then
+  echo "  ✓ applied — ended with $(tail -1 /tmp/cap_apply157.$$)"
+else
+  echo "  ✗ MIGRATION 157 FAILED TO APPLY:"; sed 's/^/    /' /tmp/cap_apply157.$$; FAILED=1
+fi
+[ "$FAILED" -eq 0 ] || { echo "❌ migration 157 did not apply — aborting"; exit 1; }
+
 echo "── catalog: 156 must be purely ADDITIVE (nothing dropped or narrowed) ──"
 psqlf -q -f - < "$CATALOG_SQL" > /tmp/cap_after.$$ 2>&1
 REMOVED=$(diff /tmp/cap_before.$$ /tmp/cap_after.$$ | grep '^<' || true)
@@ -89,7 +99,9 @@ for want in 'COL shift_capacity_blocks.days_of_week' 'COL shift_capacity_setting
             'idx_shift_requests_one_pending_per_day' 'idx_shift_instances_owner_span' \
             'RLS shift_capacity_blocks t' 'RLS shift_capacity_settings t' 'RLS shift_requests t' \
             'POL shift_requests shift_requests_own_rows' \
-            'lensed_approve_shift_request(uuid,uuid,smallint) sec=definer cfg=search_path=public'; do
+            'lensed_approve_shift_request(uuid,uuid,smallint) sec=definer cfg=search_path=public' \
+            'lensed_apply_schedule_batch(uuid,jsonb,uuid[],uuid[],jsonb) sec=definer cfg=search_path=public' \
+            'lensed_assign_released_shift(uuid,uuid,uuid,smallint) sec=definer cfg=search_path=public'; do
   grep -qF "$want" /tmp/cap_after.$$ || { echo "  ✗ MISSING from catalog: $want"; FAILED=1; }
 done
 echo "  ✓ all expected objects present"
@@ -111,6 +123,8 @@ echo "── 156 constraints ──"
 psqlf -q < "$SCRIPT_DIR/test_constraints.sql" 2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
 echo "── RPC: happy path, replay, capacity, overrides, refusals, owner isolation ──"
 psqlf -q < "$SCRIPT_DIR/test_rpc.sql"         2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
+echo "── 157 write guard: batch, partial refusal, over-capacity, overlap, legacy board ──"
+psqlf -q < "$SCRIPT_DIR/test_write_guard.sql" 2>&1 | sed 's/^psql:[^ ]* NOTICE:  //;s/^/  /' || FAILED=1
 
 # ── GRANTS ─────────────────────────────────────────────────────────────────────────────────────
 echo "── grants: service_role ONLY ──"
@@ -173,18 +187,101 @@ APPROVED=$(psqlq -c "select count(*) from public.shift_requests where status='ap
 [ "$AFTER" = "3" ]  && echo "  ✓ final staffing is 3 of 3 — never 4 of 3" || { echo "  ✗ final staffing is $AFTER, expected 3"; FAILED=1; }
 [ "$APPROVED" = "1" ] && echo "  ✓ exactly one request is approved" || { echo "  ✗ $APPROVED approved requests"; FAILED=1; }
 
+# ── CONCURRENCY 2 — APPROVAL vs BULK SCHEDULE, on the last remaining setup ─────────────────────
+# The residual 156 documented. One session approves a shift request while the other bulk-schedules
+# somebody into the same block at the same instant. Exactly one may win.
+echo "── concurrency: an approval and a bulk schedule race for the final shift ──"
+psqlf -q >/dev/null 2>&1 <<SQL || FAILED=1
+delete from public.shift_requests; delete from public.shift_instances;
+truncate race_ids;
+insert into race_ids(k,v) values
+  ('a', mkspan('e1111111-0000-4000-8000-000000000001', date '2027-07-21', time '18:00', time '02:00')),
+  ('b', mkspan('e2222222-0000-4000-8000-000000000002', date '2027-07-21', time '18:00', time '02:00')),
+  ('r1', mkreq('e3333333-0000-4000-8000-000000000003','$NIGHT', date '2027-07-21'));
+SQL
+BEFORE=$(psqlq -c "select staffed_in('$OWNER_A'::uuid,'$NIGHT'::uuid, date '2027-07-21')")
+[ "$BEFORE" = "2" ] && echo "  ✓ start state: 2 of 3 scheduled, one shift available" \
+  || { echo "  ✗ start state is $BEFORE, expected 2"; FAILED=1; }
+
+approve_race(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA <<SQL
+begin;
+select 'approve -> '||public.lensed_approve_shift_request('$OWNER_A'::uuid,(select v from race_ids where k='r1'), 3::smallint)::text;
+select pg_sleep(1.5);
+commit;
+SQL
+}
+batch_race(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA <<SQL
+begin;
+select 'batch -> '||public.lensed_apply_schedule_batch('$OWNER_A'::uuid,
+  jsonb_build_array(jsonb_build_object(
+    'employee_id','e7777777-0000-4000-8000-000000000007','shift_date',date '2027-07-21',
+    'starts_at',(date '2027-07-21' + time '18:00') at time zone 'America/Los_Angeles',
+    'ends_at',(date '2027-07-22' + time '02:00') at time zone 'America/Los_Angeles',
+    'status','scheduled','source','admin_open','shift_rule_id',null,'store_id',null,'role','host')),
+  '{}', '{}', '{"host":3}'::jsonb)::text;
+select pg_sleep(1.5);
+commit;
+SQL
+}
+approve_race > /tmp/cap_ap.$$ 2>&1 & P1=$!
+sleep 1
+batch_race  > /tmp/cap_ba.$$ 2>&1 & P2=$!
+wait "$P1" "$P2" 2>/dev/null || true
+grep -hE '^(approve|batch) ->' /tmp/cap_ap.$$ /tmp/cap_ba.$$ | cut -c1-160 | sed 's/^/    /'
+AFTER=$(psqlq -c "select staffed_in('$OWNER_A'::uuid,'$NIGHT'::uuid, date '2027-07-21')")
+APPROVED=$(psqlq -c "select count(*) from public.shift_requests where status='approved'")
+REFUSED=$(cat /tmp/cap_ap.$$ /tmp/cap_ba.$$ | grep -c -E 'NO_CAPACITY|OVER_CAPACITY' || true)
+[ "$AFTER" = "3" ]   && echo "  ✓ final staffing is 3 of 3 — never 4 of 3" || { echo "  ✗ final staffing is $AFTER"; FAILED=1; }
+[ "$REFUSED" = "1" ] && echo "  ✓ exactly one of the two was refused" || { echo "  ✗ $REFUSED refusals"; FAILED=1; }
+
+# ── CONCURRENCY 3 — TWO SIMULTANEOUS BULK WRITES into the same block ──────────────────────────
+echo "── concurrency: two bulk schedules race for the final shift ──"
+psqlf -q >/dev/null 2>&1 <<SQL || FAILED=1
+delete from public.shift_requests; delete from public.shift_instances;
+select mkspan('e1111111-0000-4000-8000-000000000001', date '2027-07-28', time '18:00', time '02:00');
+select mkspan('e2222222-0000-4000-8000-000000000002', date '2027-07-28', time '18:00', time '02:00');
+SQL
+bw(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA <<SQL
+begin;
+select '$1 -> '||public.lensed_apply_schedule_batch('$OWNER_A'::uuid,
+  jsonb_build_array(jsonb_build_object(
+    'employee_id','$2','shift_date',date '2027-07-28',
+    'starts_at',(date '2027-07-28' + time '18:00') at time zone 'America/Los_Angeles',
+    'ends_at',(date '2027-07-29' + time '02:00') at time zone 'America/Los_Angeles',
+    'status','scheduled','source','admin_open','shift_rule_id',null,'store_id',null,'role','host')),
+  '{}', '{}', '{"host":3}'::jsonb)::text;
+select pg_sleep(1.5);
+commit;
+SQL
+}
+bw w1 e3333333-0000-4000-8000-000000000003 > /tmp/cap_w1.$$ 2>&1 & P1=$!
+sleep 1
+bw w2 e7777777-0000-4000-8000-000000000007 > /tmp/cap_w2.$$ 2>&1 & P2=$!
+wait "$P1" "$P2" 2>/dev/null || true
+grep -hE '^w[12] ->' /tmp/cap_w1.$$ /tmp/cap_w2.$$ | cut -c1-160 | sed 's/^/    /'
+AFTER2=$(psqlq -c "select staffed_in('$OWNER_A'::uuid,'$NIGHT'::uuid, date '2027-07-28')")
+CREATED=$(cat /tmp/cap_w1.$$ /tmp/cap_w2.$$ | grep -o '"created": 1' | wc -l | tr -d ' ')
+OVER=$(cat /tmp/cap_w1.$$ /tmp/cap_w2.$$ | grep -c 'OVER_CAPACITY' || true)
+[ "$AFTER2" = "3" ]  && echo "  ✓ final staffing is 3 of 3 — never 4 of 3" || { echo "  ✗ final staffing is $AFTER2"; FAILED=1; }
+[ "$CREATED" = "1" ] && echo "  ✓ exactly one batch created a shift" || { echo "  ✗ $CREATED batches created a shift"; FAILED=1; }
+[ "$OVER" = "1" ]    && echo "  ✓ the loser got OVER_CAPACITY, and its OTHER rows would still have saved" || { echo "  ✗ $OVER OVER_CAPACITY refusals"; FAILED=1; }
+
 # ── IDEMPOTENCE ────────────────────────────────────────────────────────────────────────────────
-echo "── idempotence: re-apply 156 on top of itself ──"
-if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG156" >/dev/null 2>&1; then
+echo "── idempotence: re-apply 156 + 157 on top of themselves ──"
+if docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG156" >/dev/null 2>&1 \
+   && docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$MIG157" >/dev/null 2>&1; then
   psqlf -q -f - < "$CATALOG_SQL" > /tmp/cap_after2.$$ 2>&1
   if diff -q /tmp/cap_after.$$ /tmp/cap_after2.$$ >/dev/null; then echo "  ✓ re-apply clean; catalog byte-identical"
   else echo "  ✗ catalog DRIFTED on re-apply:"; diff /tmp/cap_after.$$ /tmp/cap_after2.$$ | sed 's/^/    /'; FAILED=1; fi
 else echo "  ✗ re-apply FAILED"; FAILED=1; fi
 
 # ── ROLLBACK ───────────────────────────────────────────────────────────────────────────────────
-echo "── rollback: 156_rollback.sql restores the pre-156 catalog ──"
+echo "── rollback: 157 then 156 restores the pre-156 catalog ──"
 ROLLBACK="$SCRIPT_DIR/../../rollbacks/156_rollback.sql"
-if [ -f "$ROLLBACK" ] && docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$ROLLBACK" >/dev/null 2>&1; then
+ROLLBACK157="$SCRIPT_DIR/../../rollbacks/157_rollback.sql"
+if [ -f "$ROLLBACK" ] && [ -f "$ROLLBACK157" ] \
+   && docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$ROLLBACK157" >/dev/null 2>&1 \
+   && docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -v ON_ERROR_STOP=1 < "$ROLLBACK" >/dev/null 2>&1; then
   psqlf -q -f - < "$CATALOG_SQL" > /tmp/cap_rolled.$$ 2>&1
   if diff -q /tmp/cap_before.$$ /tmp/cap_rolled.$$ >/dev/null; then echo "  ✓ catalog is byte-identical to pre-156"
   else echo "  ✗ rollback left drift:"; diff /tmp/cap_before.$$ /tmp/cap_rolled.$$ | sed 's/^/    /'; FAILED=1; fi

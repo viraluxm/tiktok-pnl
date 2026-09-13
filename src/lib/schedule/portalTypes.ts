@@ -110,6 +110,24 @@ export interface PickupRequestView {
   decided_at: string | null;
 }
 
+/**
+ * A capacity SHIFT REQUEST the viewer filed (migration 156). Carries the span it was filed against
+ * so Requests can render it with no capacity block to look up — and deliberately carries NO
+ * capacity, staffed count, setup number or manager note. The employee's mental model is one shift.
+ */
+export interface ShiftRequestView {
+  id: string;
+  block_id: string;
+  shift_date: string;
+  starts_at: string;
+  ends_at: string;
+  hours: number;
+  role: PortalRole | null;
+  status: 'pending' | 'approved' | 'declined' | 'withdrawn' | 'superseded';
+  requested_at: string;
+  decided_at: string | null;
+}
+
 export interface OtClaimView {
   claim_id: string;
   shift_date: string;
@@ -206,6 +224,8 @@ export interface PortalSnapshot {
   available: AvailableItem[];
   pickups: PickupRequestView[];
   otClaims: OtClaimView[];
+  /** MY capacity shift requests — pending first, plus recent decisions. Never anyone else's. */
+  shiftRequests: ShiftRequestView[];
   timeOff: TimeOffView[];
   /** earliest date a new time-off request may cover */
   timeOffEarliest: string;

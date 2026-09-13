@@ -36,6 +36,11 @@ const SERVICE_ROLE_ONLY = new Set([
   // user create a shift inside another tenant. Called ONLY via createAdminClient from
   // /api/admin/schedule/shift-requests. NOT APPLIED to production yet.
   'lensed_approve_shift_request',
+  // Capacity write guard (157) — same posture again: both take p_owner explicitly and have no
+  // auth.uid() to trust, so a grant to `authenticated` would let any signed-in user write shifts
+  // inside another tenant. Called ONLY via createAdminClient from bulkSchedule/adminShifts/claim.
+  // NOT APPLIED to production yet.
+  'lensed_apply_schedule_batch', 'lensed_assign_released_shift',
   // Service-role-only `_as` variants, invoked ONLY via createAdminClient in member routes (owner
   // passed explicitly; revoked from authenticated by 084/087). Were unregistered → the check was
   // already red on main before the kiosk PR.

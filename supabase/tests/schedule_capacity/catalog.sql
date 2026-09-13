@@ -19,10 +19,14 @@ select 'POL '||tablename||' '||policyname||' '||cmd||' '||coalesce(qual,'-') fro
 select 'FN  '||p.oid::regprocedure||' sec='||case when p.prosecdef then 'definer' else 'invoker' end
        ||' cfg='||coalesce(array_to_string(p.proconfig,','),'-')
   from pg_proc p join pg_namespace n on n.oid=p.pronamespace
- where n.nspname='public' and p.proname='lensed_approve_shift_request' order by 1;
+ where n.nspname='public'
+   and p.proname in ('lensed_approve_shift_request','lensed_apply_schedule_batch','lensed_assign_released_shift')
+ order by 1;
 select 'ACL '||p.oid::regprocedure||' '||coalesce(array_to_string(p.proacl::text[],' | '),'DEFAULT')
   from pg_proc p join pg_namespace n on n.oid=p.pronamespace
- where n.nspname='public' and p.proname='lensed_approve_shift_request' order by 1;
+ where n.nspname='public'
+   and p.proname in ('lensed_approve_shift_request','lensed_apply_schedule_batch','lensed_assign_released_shift')
+ order by 1;
 -- THE PRE-EXISTING TABLES 156 MUST NOT NARROW. A removed line here is a regression in the
 -- shipped scheduling system, which is the whole reason this projection is diffed before/after.
 select 'PRE '||conrelid::regclass||' '||conname from pg_constraint

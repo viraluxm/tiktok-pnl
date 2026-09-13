@@ -5,7 +5,7 @@ import type { Employee } from '@/types';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
-import { useScheduleBulk, ScheduleRefusedError } from '@/hooks/useScheduleBulk';
+import { useScheduleBulk, ScheduleRefusedError, summariseRefusals } from '@/hooks/useScheduleBulk';
 import type { ScheduleEntry } from '@/lib/schedule/schedulePlan';
 import { PAY_ANCHOR } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
@@ -210,7 +210,10 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           : `${dry.updated} of these people already have a shift that day — update their times?`;
         if (!window.confirm(msg)) return;
       }
-      await applySchedule.mutateAsync({ entries });
+      const result = await applySchedule.mutateAsync({ entries });
+      // Capacity refusals (157) come back on a successful save — the people who fit were scheduled.
+      // Surface the rest through the caller's existing error path.
+      if (result.refusals.length > 0) throw new Error(summariseRefusals(result.refusals));
     } catch (e) {
       throw new Error(e instanceof ScheduleRefusedError ? e.message : (e as Error).message);
     }

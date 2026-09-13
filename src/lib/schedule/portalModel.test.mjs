@@ -147,7 +147,7 @@ const snap = (o = {}) => ({
   thisWeek: { start: '2026-09-07', end: '2026-09-13', scheduledHours: 40, workedHours: 31.5, pendingHours: 0 },
   payPeriod: { start: '2026-08-31', end: '2026-09-13', workedHours: 72, pendingHours: 0 },
   clock: { state: 'clocked_out', clockedInAt: null },
-  available: [], pickups: [], otClaims: [], timeOff: [], timeOffEarliest: '2026-09-14', trades: [],
+  available: [], pickups: [], otClaims: [], shiftRequests: [], timeOff: [], timeOffEarliest: '2026-09-14', trades: [],
   drops: { used: 0, cap: 2, excused: 0 }, ...o,
 });
 const trade = (o = {}) => ({
@@ -195,6 +195,41 @@ console.log('\n7. ALERTS — only real conditions, actionable first, recent deci
     M.availableCountThisWeek(snap({ available: [
       { kind: 'capacity', id: 'cap:b1:2026-09-12', offer_id: null, shift_date: '2026-09-12', starts_at: '', ends_at: '', role: 'host', hours: 8, offered_by_name: null, refusal: null, requested: true, block_id: 'b1', available: 2, request_id: 'r1' },
     ] })), 0);
+}
+
+console.log('\n7b. SHIFT REQUESTS reach the Requests tab (156/157)');
+{
+  const sr = (o = {}) => ({
+    id: 'sr1', block_id: 'blk-night', shift_date: '2026-09-16',
+    starts_at: '2026-09-16T18:00:00-07:00', ends_at: '2026-09-17T02:00:00-07:00',
+    hours: 8, role: 'host', status: 'pending', requested_at: '2026-09-07T10:00:00-07:00', decided_at: null, ...o,
+  });
+  // A filed request must have a HOME. Before this it existed only as a yellow line on one day of
+  // one week in Schedule → Available, and the tab literally called "Requests" did not have it.
+  const g = M.groupRequests(snap({ shiftRequests: [sr()] }));
+  eq('a pending shift request is grouped under Pending', g.pending.map((x) => x.kind), ['shift_request']);
+  eq('…and never under Needs your action (nobody is waiting on the employee)', g.action.length, 0);
+  eq('…keyed so it cannot collide with a pickup or a trade', g.pending[0].key, 'sr-sr1');
+
+  for (const [status, words] of [
+    ['pending', 'Waiting for manager approval'],
+    ['approved', 'Approved'],
+    ['declined', 'Declined'],
+    ['withdrawn', 'Withdrawn'],
+    ['superseded', 'You took another shift that day'],
+  ]) {
+    eq(`status words: ${status}`, M.shiftRequestStatusWords(sr({ status })), words);
+    const gg = M.groupRequests(snap({ shiftRequests: [sr({ status, decided_at: status === 'pending' ? null : '2026-09-08T10:00:00-07:00' })] }));
+    eq(`${status} sits in ${status === 'pending' ? 'pending' : 'history'}`,
+      status === 'pending' ? gg.pending.length : gg.history.length, 1);
+  }
+  // A decided request sorts by WHEN IT WAS DECIDED, like every other history row.
+  const decided = M.groupRequests(snap({ shiftRequests: [sr({ status: 'approved', decided_at: '2026-09-09T10:00:00-07:00' })] }));
+  eq('history rows carry the decision time', decided.history[0].at, '2026-09-09T10:00:00-07:00');
+  // The employee payload carries no capacity configuration — only the shift.
+  const keys = Object.keys(sr()).sort();
+  check('a shift request exposes no capacity, staffed count or manager note',
+    !keys.some((k) => /capacity|staffed|setup|note|available/.test(k)), keys.join(','));
 }
 
 console.log('\n8. REQUESTS GROUPING — action / pending / history');

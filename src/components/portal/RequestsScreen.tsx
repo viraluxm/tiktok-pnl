@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import type { PortalSnapshot, TimeOffView, TradeView } from '@/lib/schedule/portalTypes';
+import type { PortalSnapshot, ShiftRequestView, TimeOffView, TradeView } from '@/lib/schedule/portalTypes';
 import {
-  groupRequests, tradeStatusWords, timeOffStatusWords, pickupStatusWords, fmtShortDate, fmtRangeLA, fmtMonthDay, firstNameOf,
+  groupRequests, tradeStatusWords, timeOffStatusWords, pickupStatusWords, shiftRequestStatusWords,
+  fmtShortDate, fmtRangeLA, fmtMonthDay, firstNameOf, roleLabel,
   crossesMidnightLA, type RequestItem, fmtHours,
 } from '@/lib/schedule/portalModel';
 import TimeOffCalendar from '@/app/s/[token]/TimeOffCalendar';
@@ -18,6 +19,7 @@ import { usePortalAction } from './PortalProvider';
 const TONE: Record<string, string> = {
   pending: 'text-tt-yellow', pending_coworker: 'text-tt-yellow', pending_manager: 'text-tt-yellow',
   approved: 'text-tt-green', declined: 'text-tt-muted', denied: 'text-tt-muted', cancelled: 'text-tt-muted', rejected: 'text-tt-muted', superseded: 'text-tt-muted',
+  withdrawn: 'text-tt-muted',
 };
 
 function dateRange(a: string, b: string): string {
@@ -34,6 +36,11 @@ function Row({ item, onOpen }: { item: RequestItem; onOpen: (item: RequestItem) 
     const r = item.request;
     kind = 'Time off'; title = dateRange(r.start_date, r.end_date); status = timeOffStatusWords(r); tone = TONE[r.status];
     sub = r.reason;
+  } else if (item.kind === 'shift_request') {
+    const r = item.request;
+    kind = 'Shift request'; title = `${fmtShortDate(r.shift_date)} · ${fmtRangeLA(r.starts_at, r.ends_at)}`;
+    status = shiftRequestStatusWords(r); tone = TONE[r.status];
+    sub = `${roleLabel(r.role)}${r.role ? ' · ' : ''}${fmtHours(r.hours)}`;
   } else if (item.kind === 'pickup') {
     const p = item.pickup;
     kind = 'Shift pickup'; title = `${fmtShortDate(p.shift_date)} · ${fmtRangeLA(p.starts_at, p.ends_at)}`; status = pickupStatusWords(p); tone = TONE[p.status];
@@ -179,6 +186,51 @@ function TimeOffDetail({ r, open, onClose }: { r: TimeOffView | null; open: bool
   );
 }
 
+// ── Shift request detail ──────────────────────────────────────────────────────────────────────
+//
+// Withdraw goes through `c.withdrawShiftRequest`, the SAME PortalClient action the Available sheet
+// calls. One mutation, one route, one invalidation — Available and Requests cannot disagree about
+// whether a request is still live, because they refetch from the same snapshot query.
+
+function ShiftRequestDetail({ r, open, onClose }: { r: ShiftRequestView | null; open: boolean; onClose: () => void }) {
+  const [err, setErr] = useState<string | null>(null);
+  const withdraw = usePortalAction((c, id: string) => c.withdrawShiftRequest(id));
+  const close = () => { setErr(null); onClose(); };
+  if (!r) return null;
+  return (
+    <Sheet open={open} onClose={close} title="Shift request">
+      <FactBox>
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-tt-muted">{fmtShortDate(r.shift_date)}</p>
+        <p className="text-xl font-semibold tabular-nums tracking-tight text-tt-text">
+          {fmtRangeLA(r.starts_at, r.ends_at)}{crossesMidnightLA(r.starts_at, r.ends_at) && <span className="ml-1 text-sm text-tt-muted">+1d</span>}
+        </p>
+        <p className="mt-0.5 text-[13px] text-tt-muted">{roleLabel(r.role)}{r.role ? ' · ' : ''}{fmtHours(r.hours)}</p>
+      </FactBox>
+      <p className={`text-sm font-medium ${TONE[r.status]}`}>{shiftRequestStatusWords(r)}</p>
+      {r.status === 'pending' && (
+        <p className="mt-1 text-[13px] text-tt-muted">It is not on your schedule until a manager approves it.</p>
+      )}
+      {r.status === 'approved' && (
+        <p className="mt-1 text-[13px] text-tt-muted">It is on your schedule. You will find it under My Shifts.</p>
+      )}
+      {err && <div className="mt-3"><InlineError>{err}</InlineError></div>}
+      <div className="mt-5">
+        {r.status === 'pending'
+          ? (
+            <div className="flex gap-2">
+              <Button variant="quiet" size="lg" className="flex-1" onClick={close} disabled={withdraw.isPending}>Close</Button>
+              <Button
+                variant="danger" size="lg" className="flex-1" busy={withdraw.isPending}
+                onClick={async () => { setErr(null); try { await withdraw.mutateAsync([r.id]); close(); } catch (e) { setErr((e as Error).message); } }}
+              >Withdraw</Button>
+            </div>
+          )
+          : <Button variant="quiet" size="lg" full onClick={close}>Close</Button>}
+      </div>
+    </Sheet>
+  );
+}
+
 // ── Screen ────────────────────────────────────────────────────────────────────────────────────
 
 function Group({ label, items, onOpen }: { label: string; items: RequestItem[]; onOpen: (i: RequestItem) => void }) {
@@ -204,7 +256,7 @@ export function RequestsScreen({ snap }: { snap: PortalSnapshot }) {
         <Button variant="tinted" size="sm" onClick={() => setTimeOffOpen(true)}>Request time off</Button>
       </div>
       {empty ? (
-        <EmptyState title="Nothing here yet" body="Time off, shift pickups and trades you ask for show up here, along with anything a coworker asks of you." />
+        <EmptyState title="Nothing here yet" body="Shifts you ask for, time off, pickups and trades all show up here, along with anything a coworker asks of you." />
       ) : (
         <>
           <Group label="Needs your action" items={groups.action} onOpen={setOpenItem} />
@@ -215,6 +267,7 @@ export function RequestsScreen({ snap }: { snap: PortalSnapshot }) {
 
       <TradeSheet trade={openItem?.kind === 'trade' ? openItem.trade : null} open={openItem?.kind === 'trade'} onClose={() => setOpenItem(null)} />
       <TimeOffDetail r={openItem?.kind === 'time_off' ? openItem.request : null} open={openItem?.kind === 'time_off'} onClose={() => setOpenItem(null)} />
+      <ShiftRequestDetail r={openItem?.kind === 'shift_request' ? openItem.request : null} open={openItem?.kind === 'shift_request'} onClose={() => setOpenItem(null)} />
       <Sheet open={openItem?.kind === 'pickup' || openItem?.kind === 'ot_claim'} onClose={() => setOpenItem(null)} title={openItem?.kind === 'ot_claim' ? 'Shift claim' : 'Shift pickup'}>
         {openItem?.kind === 'pickup' && (
           <>

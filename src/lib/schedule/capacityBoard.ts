@@ -281,6 +281,48 @@ export async function requestShift(input: {
   return { request_id: data.id as string };
 }
 
+/**
+ * MY shift requests, for the portal's Requests tab: everything still pending plus anything decided
+ * recently, newest activity first.
+ *
+ * SCOPED TWICE — owner AND employee. Nobody else's request can be selected, and nothing about the
+ * capacity that produced it (the number of setups, the block's configuration, a manager note) is
+ * read at all, so it cannot reach the payload by accident. The span comes off the request row,
+ * which stores it, so this needs no block lookup.
+ */
+export async function getMyShiftRequests(employee: Employee, now: Date = new Date()): Promise<{
+  id: string; block_id: string; shift_date: string; starts_at: string; ends_at: string;
+  hours: number; role: CapacityTeam | null; status: 'pending' | 'approved' | 'declined' | 'withdrawn' | 'superseded';
+  requested_at: string; decided_at: string | null;
+}[]> {
+  const owner = ownerOf(employee);
+  const admin = createAdminClient();
+  const todayISO = laTodayISO(now);
+  const { data, error } = await admin
+    .from('shift_requests')
+    .select('id, block_id, shift_date, starts_at, ends_at, team, status, created_at, decided_at')
+    .eq('user_id', owner)
+    .eq('employee_id', employee.id)
+    .gte('shift_date', addDaysISO(todayISO, -SHIFT_REQUEST_HISTORY_DAYS))
+    .order('shift_date', { ascending: true });
+  if (error) throw new CapacityError('READ_FAILED', error.message);
+  return (data ?? []).map((r) => ({
+    id: r.id as string,
+    block_id: r.block_id as string,
+    shift_date: r.shift_date as string,
+    starts_at: r.starts_at as string,
+    ends_at: r.ends_at as string,
+    hours: Math.round(((Date.parse(r.ends_at as string) - Date.parse(r.starts_at as string)) / 3_600_000) * 10) / 10,
+    role: (r.team === 'fulfillment' ? 'fulfillment' : 'host') as CapacityTeam,
+    status: r.status as 'pending' | 'approved' | 'declined' | 'withdrawn' | 'superseded',
+    requested_at: r.created_at as string,
+    decided_at: (r.decided_at as string | null) ?? null,
+  }));
+}
+
+/** How far back a decided request keeps showing under Requests. Matches the pickup history window. */
+const SHIFT_REQUEST_HISTORY_DAYS = 30;
+
 /** Withdraw my own pending request. Scoped by employee AND owner; decided requests are untouched. */
 export async function withdrawShiftRequest(employee: Employee, requestId: string): Promise<void> {
   const owner = ownerOf(employee);

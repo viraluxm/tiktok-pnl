@@ -349,6 +349,14 @@ export function snapshotFor(w: DemoWorld): PortalSnapshot {
     available: available(w, meId),
     pickups: w.pickups.filter((p) => p.claimed_by === meId).map((p): PickupRequestView => { const i = w.instances.find((x) => x.id === p.shift_instance_id)!; return { claim_id: p.claim_id, shift_instance_id: i.id, shift_date: i.shift_date, starts_at: i.starts_at, ends_at: i.ends_at, status: p.status, requested_at: p.requested_at, decided_at: p.decided_at }; }),
     otClaims: [],
+    // MY capacity requests, for the Requests tab. Filtered to the viewer, exactly as the server is.
+    shiftRequests: w.shiftRequests
+      .filter((r) => r.employee_id === meId)
+      .map((r) => ({
+        id: r.id, block_id: r.block_id, shift_date: r.shift_date, starts_at: r.starts_at, ends_at: r.ends_at,
+        hours: instanceHours(r.starts_at, r.ends_at), role: r.team, status: r.status,
+        requested_at: r.created_at, decided_at: r.decided_at,
+      })),
     timeOff: w.timeOff.filter((r) => r.employee_id === meId).map((r): TimeOffView => ({ id: r.id, start_date: r.start_date, end_date: r.end_date, reason: r.reason, status: r.status, decision_note: r.decision_note, created_at: r.created_at, decided_at: r.decided_at })),
     timeOffEarliest: addDaysISO(payPeriodContaining(d(3)).start, 14),
     trades: w.trades.filter((t) => t.requester_employee_id === meId || t.target_employee_id === meId).map((t) => tradeView(w, t, meId)),

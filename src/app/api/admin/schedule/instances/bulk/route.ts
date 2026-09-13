@@ -10,9 +10,14 @@ export const dynamic = 'force-dynamic';
 //   { entries: [{ employeeId, date, startTime, endTime } | { employeeId, date, off: true }, …],
 //     dryRun?: boolean }
 //
-// Writes `shift_instances` only (never `shifts`). All-or-nothing at the planning level: if any day
+// Writes `shift_instances` only (never `shifts`). All-or-nothing at the PLANNING level: if any day
 // is refused the response is 409 with every refusal and NOTHING is written, so the manager fixes
-// the day and saves again. Admin-gated with the same inline pattern as the sibling routes.
+// the day and saves again.
+//
+// CAPACITY refusals (157) are different and come back on the 200: they are decided inside the
+// write transaction, under the lane lock, so the days that fit are already saved by the time the
+// full day is known to be full. Failing the whole week over one full night would help nobody.
+// Admin-gated with the same inline pattern as the sibling routes.
 async function requireAdmin() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
@@ -49,6 +54,7 @@ export async function POST(req: Request) {
       ...result.counts,
       updatedDates: result.updatedDates,
       removedDates: result.removedDates,
+      refusals: result.refusals,
     });
   } catch (e) {
     if (e instanceof ScheduleBatchError) {

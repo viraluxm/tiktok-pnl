@@ -47,7 +47,21 @@ const release     = transpile('./release.ts', 'release.mjs', {
   "'@/lib/employees'": `'${employees}'`, "'./timezone'": `'${timezone}'`,
   "'./drops'": `'${dropsStub}'`, "'./board'": `'${boardStub}'`,
 });
+// 157 — the capacity write guard. `capacityGuard` is transpiled so the module under test can import
+// it; `__RPC` below decides what the guard's RPC replies. It defaults to "function does not exist",
+// which is the state until migrations 156/157 are hand-applied, so every assertion in this file
+// keeps exercising the SAME pre-157 statement sequence it always did. The guarded path gets its own
+// tests in capacityWriteGuard.test.mjs.
+const capacity = transpile('./capacity.ts', '__cap.mjs', {
+  "'@/lib/employees'": `'${employees}'`, "'./timezone'": `'${timezone}'`, "'./eligibility'": `'${eligibility}'`,
+});
+const capacityGuard = transpile('./capacityGuard.ts', '__capGuard.mjs', {
+  "'server-only'": `'${serverOnly}'`, "'./capacity'": `'${capacity}'`,
+});
+globalThis.__RPC = async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } });
+
 const adminShiftsUrl = transpile('./adminShifts.ts', 'adminShifts.mjs', {
+  "'./capacityGuard'": `'${capacityGuard}'`,
   "'server-only'": `'${serverOnly}'`, "'@/lib/supabase/admin'": `'${adminStub}'`,
   "'@/lib/employees'": `'${employees}'`, "'./timezone'": `'${timezone}'`,
   "'./release'": `'${release}'`, "'./eligibility'": `'${eligibility}'`,
