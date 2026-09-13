@@ -24,7 +24,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'batchmut-')), 'batchMutations.mjs');
 writeFileSync(outFile, outputText);
-const { parseBatchEdit, buildSeedBatchRow, mapBatchRpcError, deriveBatchQuantities, parseFinalizeCost } = await import(pathToFileURL(outFile).href);
+const { parseBatchEdit, buildSeedBatchRow, mapBatchRpcError, deriveBatchQuantities, parseFinalizeCost, isLegacyPlaceholderZero } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -150,6 +150,35 @@ const check = (name, cond, extra = '') => {
   check('finalize REJECTS non-numeric', parseFinalizeCost('abc').ok === false);
   check('blank-cost message points at pending, not at an error',
     /pending/i.test(parseFinalizeCost('').error));
+}
+
+// ── isLegacyPlaceholderZero — migration 155 (Test H: don't confuse a REAL $0) ────
+{
+  check('legacy + 0 IS a placeholder',
+    isLegacyPlaceholderZero({ cost_status: 'legacy', unit_cost_cents: 0 }) === true);
+
+  // The distinction migration 152 exists for: a post-152 genuine free batch is a deliberate,
+  // real cost and must never be swept into the legacy reconciliation.
+  check('final + 0 is a GENUINE free cost, NOT a placeholder',
+    isLegacyPlaceholderZero({ cost_status: 'final', unit_cost_cents: 0 }) === false);
+  check('pending + null is not a placeholder-zero',
+    isLegacyPlaceholderZero({ cost_status: 'pending', unit_cost_cents: null }) === false);
+  check('legacy + NULL cost is out of scope (not zero)',
+    isLegacyPlaceholderZero({ cost_status: 'legacy', unit_cost_cents: null }) === false);
+  check('legacy + positive cost is out of scope',
+    isLegacyPlaceholderZero({ cost_status: 'legacy', unit_cost_cents: 125 }) === false);
+  check('final + positive is out of scope',
+    isLegacyPlaceholderZero({ cost_status: 'final', unit_cost_cents: 340 }) === false);
+  check('missing cost_status (pre-152 payload) is not a placeholder',
+    isLegacyPlaceholderZero({ unit_cost_cents: 0 }) === false);
+
+  // After promotion the layer is (null, pending, authoritative) — it must stop reading as
+  // legacy so the UI shows Cost pending / Enter cost instead of the review state.
+  check('a PROMOTED batch no longer reads as a placeholder',
+    isLegacyPlaceholderZero({ cost_status: 'pending', unit_cost_cents: null }) === false);
+  const promoted = deriveBatchQuantities({ qty_added: 500, qty_remaining: 380, qty_added_authoritative: true });
+  check('a promoted batch derives Added/Remaining/Consumed like any post-152 batch',
+    promoted.added === 500 && promoted.remaining === 380 && promoted.consumed === 120);
 }
 
 // ── mapBatchRpcError ────────────────────────────────────────────────────────────

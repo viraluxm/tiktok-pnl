@@ -148,6 +148,21 @@ export interface BatchQuantityView {
   consumed: number | null;
 }
 
+// A legacy layer whose cost is exactly 0 is a PLACEHOLDER, not a real price: before
+// migration 152 there was no way to record "cost not known yet", so 0 was what people typed.
+// Migration 155 promotes these into the pending model wherever their historical attribution
+// can be PROVEN; the ones it cannot prove stay legacy and must not offer a cost action that
+// would silently reprice nothing. This predicate is what the UI keys that state off.
+//
+// It deliberately does NOT match a post-152 genuine free batch — that is
+// (0, 'final'), a deliberate real cost — nor a legacy NULL-cost layer.
+export function isLegacyPlaceholderZero(b: {
+  cost_status?: BatchCostStatus | null;
+  unit_cost_cents: number | null;
+}): boolean {
+  return b.cost_status === 'legacy' && b.unit_cost_cents === 0;
+}
+
 // Derived, never stored. `received - remaining` is only meaningful when qty_added is
 // KNOWN to be this layer's original quantity — i.e. a post-152 row. A legacy row's
 // qty_added may be NULL, or may have been re-based by a pre-153 edit, so we report
