@@ -39,6 +39,26 @@ begin
   -- H: out-of-scope layers must not appear at all
   select count(*) into v_n from public.lensed_legacy_zero_cost_reconcile(false) where sku_number in (904,905);
   if v_n <> 0 then raise exception 'H: % out-of-scope legacy layer(s) were picked up', v_n; end if;
+
+  -- GROUP 2: the two layers already priced through the inline editor are candidates, and they
+  -- are reported as RECOVER_FINAL carrying the cost the user already typed.
+  for v in select * from public.lensed_legacy_zero_cost_reconcile(false) where sku_number in (906,907) loop
+    if v.grp <> 'RECOVER_FINAL' then raise exception 'G2: SKU % classified % (expect RECOVER_FINAL)', v.sku_number, v.grp; end if;
+    if v.verdict <> 'RECONSTRUCTABLE' then raise exception 'G2: SKU % verdict % — %', v.sku_number, v.verdict, v.detail; end if;
+    if v.cost_to_apply <> 125 then raise exception 'G2: SKU % cost_to_apply % (expect 125)', v.sku_number, v.cost_to_apply; end if;
+  end loop;
+  select count(*) into v_n from public.lensed_legacy_zero_cost_reconcile(false) where sku_number in (906,907);
+  if v_n <> 2 then raise exception 'G2: expected 2 RECOVER_FINAL candidates, got %', v_n; end if;
+  -- D reprices all 40 stranded lines; E reprices 9 of 10 — the $0.90 line is real history.
+  select lines_to_reprice into v_n from public.lensed_legacy_zero_cost_reconcile(false) where sku_number=906;
+  if v_n <> 40 then raise exception 'G2-D: lines_to_reprice % (expect 40)', v_n; end if;
+  select lines_to_reprice into v_n from public.lensed_legacy_zero_cost_reconcile(false) where sku_number=907;
+  if v_n <> 9 then raise exception 'G2-E: lines_to_reprice % (expect 9 — the $0.90 line is NOT a placeholder)', v_n; end if;
+
+  -- A genuine post-152 finalized $0 (authoritative) and a post-cutoff final/non-authoritative
+  -- row must BOTH fall outside the widened scope.
+  select count(*) into v_n from public.lensed_legacy_zero_cost_reconcile(false) where sku_number in (908,909);
+  if v_n <> 0 then raise exception 'SCOPE: % out-of-scope layer(s) entered the widened candidate set', v_n; end if;
   select count(*) into v_n from public.lensed_legacy_zero_cost_reconcile(false);
   raise notice '✓ VERDICTS: A+B reconstructable, G ambiguous(qty_added NULL), positive/NULL-cost legacy ignored (% total rows)', v_n;
 end $$;
@@ -49,8 +69,8 @@ declare v_applied int; v_total int;
 begin
   select count(*) filter (where applied), count(*) into v_applied, v_total
     from public.lensed_legacy_zero_cost_reconcile(true);
-  if v_applied <> 2 then raise exception 'APPLY: expected 2 promotions, got % of %', v_applied, v_total; end if;
-  raise notice '✓ APPLY: % of % legacy $0 layers promoted', v_applied, v_total;
+  if v_applied <> 4 then raise exception 'APPLY: expected 4 reconciliations, got % of %', v_applied, v_total; end if;
+  raise notice '✓ APPLY: % of % candidate layers reconciled (2 PROMOTE_PENDING + 2 RECOVER_FINAL)', v_applied, v_total;
 end $$;
 
 -- ══ TEST A — simple legacy $0: 120 historical lines attributed, promoted, then priced ══
@@ -223,6 +243,96 @@ begin
    where s.barcode in ('LZ-H','LZ-H2') and (b.cost_status <> 'legacy' or b.qty_added_authoritative);
   if v_n <> 0 then raise exception 'H: % out-of-scope legacy layer(s) were modified', v_n; end if;
   raise notice '✓ H: positive-cost and NULL-cost legacy layers untouched';
+end $$;
+
+-- ══ TEST G2-D — already-edited legacy layer: attribution recovered, typed cost KEPT ════
+do $$
+declare SK uuid; B uuid; v_n int; v_units int; v_add int; v_rem int; a record; r record;
+begin
+  select id into SK from public.inventory_skus where barcode='LZ-D';
+  select id into B  from public.sku_batches where sku_id=SK;
+
+  -- the cost the user typed is preserved exactly; the layer is now attributable
+  if (select unit_cost_cents from public.sku_batches where id=B) <> 125 then
+    raise exception 'G2-D: the typed cost was changed'; end if;
+  if (select cost_status from public.sku_batches where id=B) <> 'final' then
+    raise exception 'G2-D: cost_status left final state'; end if;
+  if not (select qty_added_authoritative from public.sku_batches where id=B) then
+    raise exception 'G2-D: layer not made attributable'; end if;
+
+  select count(*), coalesce(sum(qty),0) into v_n, v_units
+    from public.live_auction_item_skus where source_batch_id = B;
+  if v_n <> 40 then raise exception 'G2-D: % lines attributed (expect 40)', v_n; end if;
+
+  -- every stranded $0 historical line now carries the layer's real cost
+  if (select count(*) from public.live_auction_item_skus where source_batch_id=B and unit_cost_cents_snapshot <> 125) <> 0 then
+    raise exception 'G2-D: some historical lines are still stranded off 125'; end if;
+
+  select qty_added, qty_remaining into v_add, v_rem from public.sku_batches where id=B;
+  if v_add <> 200 or v_rem <> 160 then raise exception 'G2-D: quantities moved %/% (expect 200/160)', v_add, v_rem; end if;
+
+  -- the audit row carries the full COGS arithmetic
+  select * into a from public.sku_batch_legacy_reconciliations where batch_id=B;
+  if a.mode <> 'RECOVER_FINAL' then raise exception 'G2-D: audit mode %', a.mode; end if;
+  if a.applied_cost_cents <> 125 or a.lines_repriced <> 40 or a.units_repriced <> 40
+     or a.cogs_delta_cents <> 40*125 then
+    raise exception 'G2-D: audit arithmetic wrong — cost=% lines=% units=% delta=%',
+      a.applied_cost_cents, a.lines_repriced, a.units_repriced, a.cogs_delta_cents; end if;
+
+  -- reconciliation must NOT have invented a batch cost revision: the batch cost never changed
+  if (select count(*) from public.sku_batch_cost_revisions where batch_id=B) <> 0 then
+    raise exception 'G2-D: reconciliation wrote a cost revision for an unchanged batch cost'; end if;
+
+  -- and the ONE cost path now works on it: $1.25 -> $1.30 reprices all 40 units
+  select * into r from public.lensed_finalize_batch_cost(SK, B, 130);
+  if r.old_unit_cost_cents <> 125 or r.units_repriced <> 40 then
+    raise exception 'G2-D: finalize saw old=% repriced=% (expect 125/40)', r.old_unit_cost_cents, r.units_repriced; end if;
+  if (select count(*) from public.live_auction_item_skus where source_batch_id=B and unit_cost_cents_snapshot <> 130) <> 0 then
+    raise exception 'G2-D: not every line reached 130'; end if;
+  raise notice '✓ G2-D: 40 historical units recovered at the typed $1.25, then corrected to $1.30 via finalize; qty 200/160 untouched';
+end $$;
+
+-- ══ TEST G2-E — a real non-zero snapshot is history, not a placeholder ════════════════
+do $$
+declare SK uuid; B uuid; v_n int; a record; r record;
+begin
+  select id into SK from public.inventory_skus where barcode='LZ-E';
+  select id into B  from public.sku_batches where sku_id=SK;
+
+  select count(*) into v_n from public.live_auction_item_skus where source_batch_id=B;
+  if v_n <> 10 then raise exception 'G2-E: % lines attributed (expect 10)', v_n; end if;
+
+  -- 9 placeholders moved to 125; the $0.90 line was drawn when the layer really held that cost
+  -- and must survive reconciliation byte-identical.
+  select count(*) into v_n from public.live_auction_item_skus where source_batch_id=B and unit_cost_cents_snapshot=125;
+  if v_n <> 9 then raise exception 'G2-E: % lines repriced to 125 (expect 9)', v_n; end if;
+  select count(*) into v_n from public.live_auction_item_skus where source_batch_id=B and unit_cost_cents_snapshot=90;
+  if v_n <> 1 then raise exception 'G2-E: the $0.90 line was overwritten by reconciliation'; end if;
+
+  select * into a from public.sku_batch_legacy_reconciliations where batch_id=B;
+  if a.lines_repriced <> 9 or a.cogs_delta_cents <> 9*125 then
+    raise exception 'G2-E: audit says lines=% delta=% (expect 9 / %)', a.lines_repriced, a.cogs_delta_cents, 9*125; end if;
+
+  -- a deliberate finalize DOES reach it — that is a human asserting the cost, not a migration
+  select * into r from public.lensed_finalize_batch_cost(SK, B, 200);
+  if r.units_repriced <> 10 then raise exception 'G2-E: finalize repriced % units (expect all 10)', r.units_repriced; end if;
+  raise notice '✓ G2-E: 9 placeholders recovered, the $0.90 line untouched by the migration but reachable by an explicit finalize';
+end $$;
+
+-- ══ TEST SCOPE — a genuine $0 final cost and a post-cutoff row are never touched ══════
+do $$
+declare v_n int;
+begin
+  select count(*) into v_n from public.sku_batches b join public.inventory_skus s on s.id=b.sku_id
+   where s.barcode='LZ-F' and (b.unit_cost_cents <> 0 or b.cost_status <> 'final' or not b.qty_added_authoritative);
+  if v_n <> 0 then raise exception 'SCOPE: a genuine post-152 $0 final cost was modified'; end if;
+  select count(*) into v_n from public.sku_batches b join public.inventory_skus s on s.id=b.sku_id
+   where s.barcode='LZ-I' and (b.unit_cost_cents <> 300 or b.cost_status <> 'final' or b.qty_added_authoritative);
+  if v_n <> 0 then raise exception 'SCOPE: a post-cutoff final/non-authoritative row was modified'; end if;
+  if (select count(*) from public.sku_batch_legacy_reconciliations a
+        join public.inventory_skus s on s.id=a.sku_id where s.barcode in ('LZ-F','LZ-I')) <> 0 then
+    raise exception 'SCOPE: an audit row was written for an out-of-scope layer'; end if;
+  raise notice '✓ SCOPE: deliberate $0 final cost and post-cutoff rows untouched — cost was never used to infer membership';
 end $$;
 
 -- ══ P&L PROPAGATION ══════════════════════════════════════════════════════════════════

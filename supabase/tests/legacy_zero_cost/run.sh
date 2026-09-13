@@ -34,11 +34,18 @@ psqlf -1 < "$FIFO/pnl_order_grain.prodview.sql" >/dev/null || FAILED=1
 echo "── seed the PRE-152 legacy world (real binds through the OLD RPC) ──"
 psqlf < "$SCRIPT_DIR/seed_legacy_zero.sql" >/dev/null || FAILED=1
 
-echo "── apply 152 + 153 + 154 + 155 ──"
+echo "── apply 152 + 153 + 154 ──"
 for m in 152_fifo_batch_cost_state_and_attribution 153_fifo_record_source_batch \
-         154_fifo_finalize_batch_cost 155_legacy_zero_cost_reconciliation; do
+         154_fifo_finalize_batch_cost; do
   psqlf -1 < "$MIGS/$m.sql" >/dev/null || { echo "  ✗ failed to apply $m"; FAILED=1; }
 done
+
+echo "── the GROUP 2 window: a user prices a legacy layer through the inline editor ──"
+psqlf -1 < "$SCRIPT_DIR/post152_edit.sql" >/dev/null || FAILED=1
+
+echo "── apply 155 ──"
+psqlf -1 < "$MIGS/155_legacy_zero_cost_reconciliation.sql" >/dev/null \
+  || { echo "  ✗ failed to apply 155"; FAILED=1; }
 echo "── idempotency: re-apply 155 ──"
 psqlf -1 < "$MIGS/155_legacy_zero_cost_reconciliation.sql" >/dev/null \
   && echo "  ✓ 155 re-applies cleanly" || { echo "  ✗ 155 not idempotent"; FAILED=1; }

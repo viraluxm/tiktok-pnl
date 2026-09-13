@@ -76,5 +76,35 @@ begin
     values (A,ORG1,s,40,40,null,1, now() - interval '9 days');
   update public.inventory_skus set qty_on_hand = 40 where barcode in ('LZ-H','LZ-H2');
 
+  -- ══ CASE D — legacy $0 layer that WILL be edited to a positive cost after 152 (GROUP 2) ══
+  -- 200 added, 40 sold at $0 snapshot. post152_edit.sql then prices it at $1.25 through
+  -- lensed_edit_batch, exactly as the inline editor does, producing ('final', authoritative=false).
+  insert into public.inventory_skus (user_id, org_id, sku_number, barcode, title, unit_cost_cents, qty_on_hand)
+    values (A,ORG1,906,'LZ-D','Case D edited-to-final',0,0) returning id into s;
+  insert into public.sku_batches (user_id,org_id,sku_id,qty_remaining,qty_added,unit_cost_cents,sequence,created_at)
+    values (A,ORG1,s,200,200,0,1, now() - interval '9 days') returning id into b;
+  update public.inventory_skus set qty_on_hand = 200 where id = s;
+  for i in 1..40 loop
+    perform * from public.lensed_log_auction(SESS,'sold',
+      jsonb_build_array(jsonb_build_object('sku_id',s,'qty',1)), 'D-'||i, true, false);
+    insert into public.capture_events (user_id, order_id, selling_price_cents, ordered_at)
+      values (A,'D-'||i, 1000, now() - interval '8 days');
+  end loop;
+
+  -- ══ CASE E — same as D, but one sale was drawn while the layer genuinely held a cost ══
+  -- post152_edit.sql marks one line's snapshot non-zero before pricing the layer. That line must
+  -- be ATTRIBUTED but NOT repriced: its snapshot is real history, not a $0 placeholder.
+  insert into public.inventory_skus (user_id, org_id, sku_number, barcode, title, unit_cost_cents, qty_on_hand)
+    values (A,ORG1,907,'LZ-E','Case E mixed snapshots',0,0) returning id into s;
+  insert into public.sku_batches (user_id,org_id,sku_id,qty_remaining,qty_added,unit_cost_cents,sequence,created_at)
+    values (A,ORG1,s,100,100,0,1, now() - interval '9 days') returning id into b;
+  update public.inventory_skus set qty_on_hand = 100 where id = s;
+  for i in 1..10 loop
+    perform * from public.lensed_log_auction(SESS,'sold',
+      jsonb_build_array(jsonb_build_object('sku_id',s,'qty',1)), 'E-'||i, true, false);
+    insert into public.capture_events (user_id, order_id, selling_price_cents, ordered_at)
+      values (A,'E-'||i, 1000, now() - interval '8 days');
+  end loop;
+
   raise notice '✓ pre-152 legacy world seeded';
 end $$;
