@@ -27,6 +27,12 @@ const SRC = path.join(ROOT, 'src');
 // ungranted. Keep this list tiny and reviewed; add here when you add a service-role-only RPC.
 const SERVICE_ROLE_ONLY = new Set([
   'lensed_add_batch_admin', 'lensed_void_batch',
+  // One-time legacy $0 cost reconciliation (155). Never called from app code — it is an admin
+  // operation run once against production — so it is not app-COLLECTED and would otherwise be
+  // invisible to this check entirely. Registered here so the EXISTS + stays-UNGRANTED half of
+  // the check guards it: a future grant to anon or authenticated would hand any signed-in user
+  // a function that rewrites historical cost attribution.
+  'lensed_legacy_zero_cost_reconcile',
   // Shift-trade approval (136) — bypasses auth.uid() and takes the owner explicitly, so a grant to
   // `authenticated` would let any signed-in user swap another owner's shifts. Called ONLY via
   // createAdminClient from /api/admin/schedule/trades.
