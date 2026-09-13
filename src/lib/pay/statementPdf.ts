@@ -1,4 +1,5 @@
 import {
+  formatBonusBasis,
   formatBreak,
   formatClock12,
   formatMoney,
@@ -20,6 +21,21 @@ import {
 // two-column identity block, then the whole 14-day period as Week 1 and Week 2 tables with EVERY
 // calendar day present — a day nobody worked reads "Off / Off / — / 0.00", which is information,
 // not an omission — each week subtotalled, and a summary of total hours, rate and gross pay.
+//
+// BONUSES SIT IN THE SUMMARY AND NOWHERE ELSE. A bonus is not worked time, so it never appears in
+// a week table, never adds a row to a date and never touches an Hours column — printing it beside
+// clock-in/clock-out would state that somebody worked for it. It is listed under the pay summary
+// as its own named lines, subtotalled, and added to a TOTAL OWED. WITH NO BONUSES THE DOCUMENT IS
+// THE ONE THAT SHIPPED BEFORE, to the byte: the summary keeps its three rows and its "Gross Pay"
+// label, and nothing is emitted for a section that has no content (asserted in bonusPdf.test.mjs).
+//
+// The bonus numbers come off statement.bonusItems and statement.totals, exactly as every other
+// number here does. This file still queries nothing and still adds nothing up — AND IT DOES NOT
+// MULTIPLY EITHER. An hourly incentive's dollar value was worked out once, in buildPayStatement,
+// from that statement's own payable hours; the '$2.00/hr x 72.50 hr' printed beside it is
+// formatBonusBasis() from the same model — the identical string the Pay Details panel shows.
+// Re-deriving `rate x hours` here is exactly the second calculation that would eventually disagree
+// with the screen, and there is nowhere in this file that could.
 //
 // WHY pdf-lib AND NOT A PRINTED WEB PAGE. pdf-lib is already a production dependency (shipping
 // labels), so this adds nothing to install. It writes 612x792 into the MediaBox, which IS 8.5x11 —
@@ -112,6 +128,27 @@ const COLS: Col[] = [
 const ROW_H = 16;
 const HEAD_H = 17;
 const FOOTER_RESERVE = 22;
+
+// Rows inside the BONUSES / INCENTIVES block. Two points shorter than a worked-time row, and only
+// there: a bonus line is one line of 9.5pt text in a summary, not a row of a data table that has to
+// scan against thirteen others. Those two points, across a heading + several lines + a subtotal,
+// are most of what keeps a statement carrying three incentives on a single sheet. The TOTAL OWED
+// row stays full height — it is the figure the page exists for.
+const BONUS_ROW_H = 14;
+
+/** One row of the pay summary. A layout description, not a calculation — every number in it has
+ *  already been computed by the statement model. */
+interface SummaryRow {
+  label: string;
+  /** Empty on a heading row. */
+  value: string;
+  /** How a bonus line was arrived at: 'Flat', or '$2.00/hr x 72.50 hr'. Absent on every other row. */
+  basis?: string | null;
+  /** Filled ground and a heavier border — the total owed, and nothing else. */
+  emphasis?: boolean;
+  /** 14pt instead of 16pt. The bonus block only; see BONUS_ROW_H. */
+  compact?: boolean;
+}
 
 // Minimal structural types for the bits of pdf-lib this file touches. Local so the module can be
 // transpiled and unit-tested without resolving the package.
@@ -295,10 +332,29 @@ export async function renderPayStatementPdf(
     thickness: 1.6,
     color: C(INK),
   });
-  y -= 18;
 
   // ── Week tables ────────────────────────────────────────────────────────────────────────────
   const weeks: PeriodWeek[] = payPeriodWeeks(statement);
+
+  // ONE PAGE IS STILL THE TARGET, AND BONUSES ARE NOT ALLOWED TO COST IT.
+  //
+  // The summary grows by a heading, one row per bonus, a subtotal and a total. Two bonuses — the
+  // ordinary case — pushed the signature block onto a second sheet, which is a worse payroll
+  // document than a slightly tighter one. So a statement that CARRIES bonuses closes the gaps
+  // between its blocks; there is ample white space in them and nothing is made harder to read.
+  //
+  // A STATEMENT WITH NO BONUSES IS UNTOUCHED: every gap below keeps its original value, which is
+  // why the no-bonus PDF is still byte-identical to the one that shipped (asserted in
+  // bonusPdf.test.mjs by comparing the two documents, not by eye).
+  //
+  // This buys room for roughly three bonus lines. A genuinely long list still paginates — properly,
+  // with numbered pages — because at that point a second sheet IS the honest answer.
+  const hasBonus = statement.bonusItems.length > 0;
+  const HEAD_GAP = hasBonus ? 10 : 18; // identity block → first week table
+  const WEEK_GAP = hasBonus ? 6 : 16;  // after each week's subtotal
+  const SIG_GAP = hasBonus ? 6 : 20;   // summary block → signature lines
+
+  y -= HEAD_GAP;
 
   function drawTableHead(): void {
     page.drawRectangle({
@@ -381,30 +437,69 @@ export async function renderPayStatementPdf(
       color: C(RULE),
     });
     centred(week.hours.toFixed(2), hoursColX + COLS[5].w / 2, y - ROW_H + 5.5, 9, bold, INK);
-    y -= ROW_H + 16;
+    y -= ROW_H + WEEK_GAP;
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────────────────────
-  const SUM_ROWS: [string, string][] = [
-    ['Total Hours This Pay Period:', statement.totals.paidHours.toFixed(2)],
-    ['Hourly Rate:', formatMoney(statement.rate)],
-    ['Gross Pay:', formatMoney(statement.totals.gross)],
+  //
+  // WITH NO BONUSES this is the three-row block it has always been, ending at "Gross Pay". With
+  // bonuses, that row is named "Hourly Pay" — because it is no longer the whole of the gross — and
+  // the bonus lines, their subtotal and TOTAL OWED follow it. Every figure is read off the
+  // statement; the `[label, value, emphasis]` triples below are a layout list, not a calculation.
+  //
+  // A bonus line carries TWO pieces of text on the label side — its name, in bold, and how it was
+  // arrived at ('Flat', or '$2.00/hr x 72.50 hr') in lighter type beside it. They share ONE row
+  // rather than taking two: a payroll sheet that spills onto a second page for three incentives is
+  // worse paperwork than one that sets the working in smaller type.
+  const SUM_ROWS: SummaryRow[] = [
+    { label: 'Total Hours This Pay Period:', value: statement.totals.paidHours.toFixed(2) },
+    { label: 'Hourly Rate:', value: formatMoney(statement.rate) },
+    { label: hasBonus ? 'Hourly Pay:' : 'Gross Pay:', value: formatMoney(statement.totals.gross) },
   ];
-  need(ROW_H * (SUM_ROWS.length + 1) + 6);
+  if (hasBonus) {
+    // A heading row with no value, then one row per bonus, then the subtotal and the total.
+    SUM_ROWS.push({ label: 'BONUSES / INCENTIVES', value: '', compact: true });
+    for (const item of statement.bonusItems) {
+      SUM_ROWS.push({
+        label: item.label,
+        value: formatMoney(item.amount),
+        basis: formatBonusBasis(item),
+        compact: true,
+      });
+    }
+    SUM_ROWS.push({ label: 'Bonus Pay:', value: formatMoney(statement.totals.bonusTotal), compact: true });
+    SUM_ROWS.push({ label: 'TOTAL OWED:', value: formatMoney(statement.totals.totalOwed), emphasis: true });
+  }
+  // The summary and the signature block are reserved TOGETHER when there are bonuses, so a long
+  // list moves the whole block to a second sheet rather than splitting the signatures away from
+  // the total they are signing for. Without bonuses the reservation is the one it always was.
+  const sumH = SUM_ROWS.reduce((h, r) => h + (r.compact ? BONUS_ROW_H : ROW_H), 0) + ROW_H; // + Notes
+  need(sumH + 6 + (hasBonus ? SIG_GAP + 40 : 0));
   const SPLIT = MARGIN + 288;
-  for (const [label, value] of SUM_ROWS) {
+  for (const { label, value, basis, emphasis, compact } of SUM_ROWS) {
+    const h = compact ? BONUS_ROW_H : ROW_H;
+    const baseline = y - h + (compact ? 4.5 : 5.5);
     page.drawRectangle({
       x: MARGIN,
-      y: y - ROW_H,
+      y: y - h,
       width: CONTENT_W,
-      height: ROW_H,
+      height: h,
+      // The total owed gets a filled ground rather than a bigger typeface: it has to be findable
+      // at arm's length on a printed sheet, and this page is designed to read in grayscale.
+      ...(emphasis ? { color: C(HEAD_BG) } : {}),
       borderColor: C(RULE),
-      borderWidth: 0.7,
+      borderWidth: emphasis ? 1.1 : 0.7,
     });
-    page.drawLine({ start: { x: SPLIT, y }, end: { x: SPLIT, y: y - ROW_H }, thickness: 0.7, color: C(RULE) });
-    text(label, MARGIN + 8, y - ROW_H + 5.5, 9.5, bold, INK);
-    text(value, SPLIT + 8, y - ROW_H + 5.5, 9.5, bold, INK);
-    y -= ROW_H;
+    page.drawLine({ start: { x: SPLIT, y }, end: { x: SPLIT, y: y - h }, thickness: 0.7, color: C(RULE) });
+    // A bonus line's own name is the one piece of free text in this block, so it is the one thing
+    // that could run into the money column — fitText truncates it rather than letting it overlap.
+    // The basis is bounded by construction ('Flat', or a rate and an hours figure), so it is
+    // measured first, the name gets whatever is left, and the two can never collide.
+    const basisW = basis ? regular.widthOfTextAtSize(basis, 8) : 0;
+    text(fitText(label, bold, 9.5, 288 - 16 - basisW - 10), MARGIN + 8, baseline, 9.5, bold, INK);
+    if (basis) text(basis, SPLIT - 8 - basisW, baseline, 8, regular, MUTED);
+    if (value) text(value, SPLIT + 8, baseline, 9.5, bold, INK);
+    y -= h;
   }
   // Notes row — a writable space on a printed sheet, kept because it costs one line.
   page.drawRectangle({
@@ -417,7 +512,7 @@ export async function renderPayStatementPdf(
   });
   page.drawLine({ start: { x: SPLIT, y }, end: { x: SPLIT, y: y - ROW_H }, thickness: 0.7, color: C(RULE) });
   text('Notes:', MARGIN + 8, y - ROW_H + 5.5, 9.5, bold, INK);
-  y -= ROW_H + 20;
+  y -= ROW_H + SIG_GAP;
 
   // ── Signatures ─────────────────────────────────────────────────────────────────────────────
   need(40);
