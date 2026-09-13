@@ -6,6 +6,7 @@ import { validateShiftTimes } from '@/lib/weeklySchedule';
 import { assertBreakShape, assertBreakFitsSpan, wallClockSpanMinutes } from '@/lib/shifts/punchEdit';
 import PersonAvatar from './PersonAvatar';
 import HoverCard, { type HoverPayload } from './HoverCard';
+import { TIME_OFF_LABEL, type TimeOffMark } from '@/lib/schedule/timeOffConflict';
 
 // Add people to ONE day, opened by clicking that day. The date is already known, so it is a
 // heading rather than a field, and the employee picker is a multi-select icon grid — a crew that
@@ -35,6 +36,17 @@ import HoverCard, { type HoverPayload } from './HoverCard';
 
 type Mode = 'scheduled' | 'worked';
 
+/**
+ * Thrown by a create handler when the MANAGER backed out at a confirmation (time off, or the
+ * "already has a shift — update their times?" preview), as opposed to something failing.
+ *
+ * Without it, an aborted confirm returned normally and `save()` could not tell the difference
+ * from a successful write: it closed the modal and silently threw away the crew the manager had
+ * just picked. Backing out of a question must leave them exactly where they were, with the
+ * selection intact, so they can deselect the person and save the rest.
+ */
+export const CREATE_ABORTED = 'lensed:create-aborted';
+
 function titleCaseRole(role: string | null | undefined): string {
   const r = (role ?? '').trim();
   return r ? r.charAt(0).toUpperCase() + r.slice(1).toLowerCase() : 'No role set';
@@ -42,13 +54,22 @@ function titleCaseRole(role: string | null | undefined): string {
 
 // The picker shows initials only, so the card is the only place a name appears — build it the
 // same way for pointer and keyboard.
-function hoverFor(el: HTMLElement, name: string, role: string | null | undefined, selected: boolean): HoverPayload {
+function hoverFor(
+  el: HTMLElement, name: string, role: string | null | undefined, selected: boolean,
+  mark: TimeOffMark | null,
+): HoverPayload {
   const r = el.getBoundingClientRect();
   return {
     x: r.left + r.width / 2,
     y: r.top,
     head: name,
-    lines: [titleCaseRole(role), selected ? 'Selected — click to remove' : 'Click to add'],
+    lines: [
+      titleCaseRole(role),
+      // The picker shows initials only, so this card is where a time-off request has to be
+      // readable — the ring alone says "something", not what.
+      ...(mark ? [TIME_OFF_LABEL[mark]] : []),
+      selected ? 'Selected — click to remove' : 'Click to add',
+    ],
   };
 }
 
@@ -62,6 +83,7 @@ export default function DayAddShiftModal({
   initialEmployeeIds,
   initialStart,
   initialEnd,
+  timeOffByEmployee,
 }: {
   dateLabel: string;
   employees: Employee[];
@@ -78,6 +100,11 @@ export default function DayAddShiftModal({
   initialEmployeeIds?: string[];
   initialStart?: string;
   initialEnd?: string;
+  /**
+   * employee_id -> pending/approved time off ON THIS DATE, from the shared time-off query. Absent
+   * on surfaces that do not load it, in which case the picker behaves exactly as it always did.
+   */
+  timeOffByEmployee?: Map<string, TimeOffMark> | null;
 }) {
   const [mode, setMode] = useState<Mode>(initialMode ?? 'scheduled');
   const [picked, setPicked] = useState<Set<string>>(() => new Set(initialEmployeeIds ?? []));
@@ -142,6 +169,8 @@ export default function DayAddShiftModal({
       else await onCreateWorked(ids, start, isOpen ? null : end, brk);
       onClose();
     } catch (e) {
+      // Backing out of a confirmation is not an error: stay open, say nothing, keep the picks.
+      if ((e as Error).message === CREATE_ABORTED) return;
       setError((e as Error).message);
     } finally {
       setBusy(false);
@@ -185,21 +214,33 @@ export default function DayAddShiftModal({
               <div className="flex flex-wrap gap-2">
                 {g.list.map((e) => {
                   const on = picked.has(e.id);
+                  const mark = timeOffByEmployee?.get(e.id) ?? null;
                   return (
                     <button
                       key={e.id} type="button" onClick={() => toggle(e.id)} aria-pressed={on}
-                      aria-label={e.name}
+                      aria-label={mark ? `${e.name} — ${TIME_OFF_LABEL[mark]}` : e.name}
                       // Pointer and keyboard get the SAME card — a keyboard user picking from 41
                       // initials needs the name at least as much as a mouse user does.
-                      onMouseEnter={(ev) => setHover(hoverFor(ev.currentTarget, e.name, e.role, on))}
+                      onMouseEnter={(ev) => setHover(hoverFor(ev.currentTarget, e.name, e.role, on, mark))}
                       onMouseLeave={() => setHover(null)}
-                      onFocus={(ev) => setHover(hoverFor(ev.currentTarget, e.name, e.role, on))}
+                      onFocus={(ev) => setHover(hoverFor(ev.currentTarget, e.name, e.role, on, mark))}
                       onBlur={() => setHover(null)}
-                      className={`rounded-full p-0.5 transition-transform hover:scale-110 focus:outline-none ${
+                      // SELECTION still owns the ring — it is the thing the manager is actively
+                      // changing. Time off gets a corner dot instead, so a person who is both
+                      // selected and off shows both facts rather than one overwriting the other.
+                      className={`relative rounded-full p-0.5 transition-transform hover:scale-110 focus:outline-none ${
                         on ? 'ring-2 ring-tt-cyan' : 'ring-1 ring-transparent'
                       }`}
                     >
                       <PersonAvatar name={e.name} state={on ? 'confirmed' : 'scheduled'} size="lg" title={null} />
+                      {mark && (
+                        <span
+                          aria-hidden
+                          className={`absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-tt-card ${
+                            mark === 'approved' ? 'bg-tt-red' : 'bg-tt-yellow'
+                          }`}
+                        />
+                      )}
                     </button>
                   );
                 })}

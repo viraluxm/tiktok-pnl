@@ -1,84 +1,29 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { Employee } from '@/types';
+import type { TimeOffRow } from '@/hooks/useTimeOffRequests';
 import PersonAvatar from './PersonAvatar';
 import { titleCase } from '../shared';
 
-// Manager queue for time-off requests, and the chip that opens it.
+// Manager queue for time-off requests — the modal itself and nothing else.
 //
 // Deciding here records the decision only — it never creates or deletes a shift. The point of a
 // request is to be visible BEFORE the period is built, so the schedule is made around it. Handing
 // back a shift that already exists is the release/claim flow, which is separate and keeps its own
 // allowance (see src/lib/schedule/drops.ts).
+//
+// The row TYPE now lives in @/hooks/useTimeOffRequests and the date/status rules in
+// @/lib/schedule/timeOffConflict, because the schedule builder needs both and a modal is the
+// wrong place to own them. Nothing about this queue's behaviour changed in the move.
 
-export interface TimeOffRow {
-  id: string;
-  employee_id: string;
-  start_date: string;
-  end_date: string;
-  reason: string | null;
-  status: 'pending' | 'approved' | 'denied';
-  decision_note: string | null;
-  created_at: string;
-  /** planned (scheduled/claimed) shifts inside the requested range — approving does NOT remove them */
-  conflicts?: number;
-}
+export type { TimeOffRow };
 
 function fmt(iso: string): string {
   const [y, m, d] = iso.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', {
     weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC',
   });
-}
-
-/** Inclusive [start, end] expanded to the individual days it covers. */
-export function timeOffDays(r: Pick<TimeOffRow, 'start_date' | 'end_date'>): string[] {
-  const out: string[] = [];
-  const [y, m, d] = r.start_date.split('-').map(Number);
-  const cur = new Date(Date.UTC(y, m - 1, d));
-  while (cur.toISOString().slice(0, 10) <= r.end_date) {
-    out.push(cur.toISOString().slice(0, 10));
-    cur.setUTCDate(cur.getUTCDate() + 1);
-    if (out.length > 60) break; // a request cannot legally span this far; guard a bad row
-  }
-  return out;
-}
-
-/**
- * date -> requests touching it. Only PENDING and APPROVED are mapped: a denied request means the
- * person is working, so marking their day would say the opposite of what happened.
- */
-export function indexTimeOffByDate(rows: TimeOffRow[]): Map<string, TimeOffRow[]> {
-  const m = new Map<string, TimeOffRow[]>();
-  for (const r of rows) {
-    if (r.status === 'denied') continue;
-    for (const d of timeOffDays(r)) {
-      const arr = m.get(d);
-      if (arr) arr.push(r); else m.set(d, [r]);
-    }
-  }
-  return m;
-}
-
-export function useTimeOff() {
-  const [rows, setRows] = useState<TimeOffRow[]>([]);
-  // A bump forces a refetch after a decision. setRows lands in the promise callback, not in the
-  // effect body, so this subscribes to an external system rather than cascading a render
-  // (react-hooks/set-state-in-effect). `alive` drops a response that resolves after unmount.
-  const [nonce, setNonce] = useState(0);
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    let alive = true;
-    fetch('/api/admin/time-off')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((j) => { if (alive && j) setRows(j.requests ?? []); })
-      .catch(() => { /* the chip simply stays hidden */ });
-    return () => { alive = false; };
-  }, [nonce]);
-
-  return { rows, reload, pending: rows.filter((r) => r.status === 'pending') };
 }
 
 export default function TimeOffQueue({
