@@ -8,7 +8,8 @@ import {
 import { WEEKDAY_LABELS, isInMonth, parseYMD, formatTime12 } from '@/lib/weeklySchedule';
 import PersonAvatar from './PersonAvatar';
 import HoverCard, { type HoverPayload } from './HoverCard';
-import type { TimeOffRow } from './TimeOffQueue';
+import type { TimeOffRow } from '@/hooks/useTimeOffRequests';
+import { TIME_OFF_LABEL, type TimeOffMark } from '@/lib/schedule/timeOffConflict';
 
 // PRESENTATION ONLY — takes an already-built day model and draws it. Split from
 // ScheduleMonthCalendar (which owns the queries) so the grid can be rendered from fixtures.
@@ -36,6 +37,11 @@ export const DENSITY_BG = [
 
 function dayNum(iso: string): number {
   return parseYMD(iso).getUTCDate();
+}
+
+/** The strongest mark among a day's requests — approved outranks pending. */
+function dayMark(rows: TimeOffRow[]): TimeOffMark {
+  return rows.some((r) => r.status === 'approved') ? 'approved' : 'pending';
 }
 
 // What the hover card says about one person. Returned as lines so the card can style them.
@@ -104,14 +110,20 @@ function DayCell({
           {timeOff && timeOff.length > 0 && (
             // Its own click target: opening the queue from the day is the whole point of showing
             // it here, and it must not fall through to "open this day" / "add a shift".
+            //
+            // One badge stands for the whole day, so it takes the STRONGEST mark on it — an
+            // approved day reads red even when a softer pending request shares it, because the
+            // approved one is the harder constraint on scheduling.
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onOpenTimeOff?.(); }}
-              title={timeOff.map((r) => `${r.status === 'pending' ? 'Requested off' : 'Off'} · ${r.reason ?? 'no reason given'}`).join('\n')}
+              title={timeOff
+                .map((r) => `${TIME_OFF_LABEL[r.status === 'approved' ? 'approved' : 'pending']} · ${r.reason ?? 'no reason given'}`)
+                .join('\n')}
               className={`rounded px-1 text-[9px] font-bold tabular-nums ${
-                timeOff.some((r) => r.status === 'pending')
-                  ? 'bg-tt-cyan/20 text-tt-cyan hover:bg-tt-cyan/35'
-                  : 'bg-white/10 text-tt-muted hover:bg-white/20'
+                dayMark(timeOff) === 'approved'
+                  ? 'bg-tt-red/20 text-tt-red hover:bg-tt-red/35'
+                  : 'bg-tt-yellow/20 text-tt-yellow hover:bg-tt-yellow/35'
               }`}
             >🌴{timeOff.length > 1 ? timeOff.length : ''}</button>
           )}

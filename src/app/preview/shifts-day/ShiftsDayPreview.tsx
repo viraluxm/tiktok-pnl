@@ -37,6 +37,18 @@ const SCENARIOS: { key: Scenario; label: string; blurb: string }[] = [
 
 const CONFIRMED_AT = '2026-09-16T01:00:00.000Z';
 
+// TIME OFF on this day — the three states a manager reads off a built day. Approving time off has
+// never removed a shift, so "approved AND scheduled" is a real, expected state: the banner states
+// both facts and changes nothing, leaving the call to the manager.
+//   Juan   — approved, and scheduled that day       -> "Approved time off · Shift scheduled"
+//   Haley  — pending, with no scheduled shift       -> "Time off requested"
+//   Marcus — approved, scheduled, never clocked in   -> "Approved time off · Shift scheduled"
+const TIME_OFF_TODAY: { employeeId: string; name: string; mark: 'pending' | 'approved' }[] = [
+  { employeeId: 'e-juan', name: 'Juan Reyes', mark: 'approved' },
+  { employeeId: 'e-haley', name: 'Haley Nguyen', mark: 'pending' },
+  { employeeId: 'e-marcus', name: 'Marcus Bell', mark: 'approved' },
+];
+
 function seedFor(s: Scenario): PreviewPunch[] {
   switch (s) {
     case 'both-pending':
@@ -195,6 +207,7 @@ export default function ShiftsDayPreview() {
           onConfirm={onConfirm}
           onEdit={onEdit}
           onAddShift={() => setNote('Add shift is out of scope for this review.')}
+          timeOffToday={TIME_OFF_TODAY}
         />
       )}
 
