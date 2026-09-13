@@ -41,6 +41,27 @@ export interface AuctionItem {
   // the board can be replayed in lot order and an unbound lot can borrow the SKU of its
   // nearest bound lots as a hint. Numeric for auction shows; absent/text for catalog stores.
   seller_sku_hint?: string | null;
+  // Which host was live when this auction sold, resolved SERVER-SIDE by
+  // pnl_show_auction_hosts (migration 158) on the sale anchor. Never derive this from
+  // `logged_at` above — that is the close/flip instant and diverges from the sale anchor by
+  // more than 5 minutes on 7.3% of rows, which would misfile rows across a host switch.
+  host_id?: string | null;
+  // true = matched no host segment. Shown as "Unattributed"; never folded into a host.
+  host_unattributed?: boolean;
+}
+
+// One host's slice of a show. `minutes` is AIR TIME — the denominator for that host's
+// units/hr and net/hr, and the basis of their pay. It is NOT the show's duration.
+export interface HostRollup {
+  host_id: string | null;
+  host_name: string;
+  segment_count: number;
+  minutes: number;
+  auctions: number;
+  units: number;
+  revenue_cents: number;
+  cogs_cents: number;
+  net_profit_cents: number;
 }
 
 const KEY = 'auction-board';
@@ -61,6 +82,9 @@ export interface BoardResponse {
   items: AuctionItem[];
   session_skus: SessionSku[];
   live_categories: string[];
+  // Per-host roll-up for the show, air-time descending. Empty when the show has no host
+  // segments, or when migration 158 is not yet applied — the UI then hides the host band.
+  hosts?: HostRollup[];
   // Set when the board loaded but a non-fatal enrichment join failed (e.g. the skus
   // join degraded). The rows/sale value are still real — cost/units may be incomplete.
   // Distinguishes a degraded load from a genuine no-sales show; surfaced in the UI.
@@ -77,10 +101,14 @@ export function useAuctionBoard(sessionId: string | null) {
       const res = await fetch(`/api/live/sessions/${sessionId}/board`);
       if (!res.ok) throw new Error('Failed to load auction log');
       const json = await res.json();
+      // This is an explicit allow-list, not a spread: a new field on the response is
+      // INVISIBLE to the UI until it is named here. (That is how the host band shipped
+      // broken the first time — the route returned `hosts`, this dropped it silently.)
       return {
         items: json.items ?? [],
         session_skus: json.session_skus ?? [],
         live_categories: json.live_categories ?? [],
+        hosts: json.hosts ?? [],
         warning: json.warning ?? null,
       };
     },

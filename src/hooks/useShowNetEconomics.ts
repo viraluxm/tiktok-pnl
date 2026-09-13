@@ -58,6 +58,17 @@ export interface ShowNetEconomicsResponse {
   host_name: string | null;
   host_rate_known: boolean;
   host_pay_cents: number | null;
+  // Per-host pay, air-time descending. Pay is multiplied SERVER-SIDE: minutes and cents cross
+  // the wire, never an hourly_rate. pay_cents is null (never 0) when a host's rate is unknown,
+  // and the show-level host_pay_cents above is null if ANY host is unpriced — an unknown total,
+  // not a smaller one. Empty for shows with no host segments.
+  hosts?: Array<{
+    host_id: string | null;
+    host_name: string | null;
+    minutes: number;
+    rate_known: boolean;
+    pay_cents: number | null;
+  }>;
 }
 
 export function useShowNetEconomics(sessionId: string | null) {
