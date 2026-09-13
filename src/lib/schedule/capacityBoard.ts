@@ -56,7 +56,7 @@ const SETTING_COLS = 'id, team, block_id, date, capacity, closed, note';
 
 function ownerOf(employee: Employee): string {
   const owner = employee.user_id;
-  if (!owner) throw new CapacityError('NO_OWNER', 'This employee has no account — refusing an unscoped query.');
+  if (!owner) throw new CapacityError('NO_OWNER', 'This employee has no account. Refusing an unscoped query.');
   return owner;
 }
 
@@ -134,7 +134,7 @@ export async function getCapacityAvailability(employee: Employee, now: Date = ne
   const [inputs, myRequests] = await Promise.all([
     loadStaffingInputs(admin, owner, team, todayISO, toISO),
     admin.from('shift_requests')
-      .select('id, block_id, shift_date')
+      .select('id, block_id, shift_date, starts_at, ends_at, team')
       .eq('user_id', owner)
       .eq('employee_id', employee.id)
       .eq('status', 'pending')
@@ -142,9 +142,8 @@ export async function getCapacityAvailability(employee: Employee, now: Date = ne
   ]);
   if (myRequests.error) throw new CapacityError('READ_FAILED', myRequests.error.message);
 
-  const requestByKey = new Map(
-    (myRequests.data ?? []).map((r) => [`${r.block_id as string}|${r.shift_date as string}`, r.id as string]),
-  );
+  const myRequestRows = (myRequests.data ?? []) as { id: string; block_id: string; shift_date: string; starts_at: string; ends_at: string; team: string }[];
+  const requestByKey = new Map(myRequestRows.map((r) => [`${r.block_id}|${r.shift_date}`, r.id]));
   // UNIQUE(employee_id, shift_date): one shift per person per day, so any instance I already hold
   // on a date rules that date out entirely.
   const myDatesInUse = new Set(
@@ -195,7 +194,29 @@ export async function getCapacityAvailability(employee: Employee, now: Date = ne
       refusal: code,
     });
   }
-  return out;
+
+  // ORPHANED REQUESTS. A manager can pause a block, or take a weekday off it, AFTER someone has
+  // asked for a shift in it. The block then produces no occurrence, the request produces no row,
+  // and the employee's pending request disappears from their portal with no way to withdraw it —
+  // while the manager's queue still shows it. That is the one untruthful state this board can
+  // reach, so the request is carried on its own stored span instead. `available: 0` because there
+  // is nothing to advertise; `requested` is what the row is for.
+  const shown = new Set(out.map((o) => `${o.block_id}|${o.shift_date}`));
+  for (const r of myRequestRows) {
+    if (shown.has(`${r.block_id}|${r.shift_date}`)) continue;
+    out.push({
+      block_id: r.block_id,
+      shift_date: r.shift_date,
+      starts_at: r.starts_at,
+      ends_at: r.ends_at,
+      hours: Math.round(((Date.parse(r.ends_at) - Date.parse(r.starts_at)) / 3_600_000) * 10) / 10,
+      team: r.team === 'fulfillment' ? 'fulfillment' : 'host',
+      available: 0,
+      request_id: r.id,
+      refusal: null,
+    });
+  }
+  return out.sort((a, b) => (a.starts_at < b.starts_at ? -1 : a.starts_at > b.starts_at ? 1 : 0));
 }
 
 /**

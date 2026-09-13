@@ -200,26 +200,33 @@ function AvailableList({ items, onPick }: { items: AvailableItem[]; onPick: (a: 
                 {fmtRangeLA(a.starts_at, a.ends_at)}
                 {crossesMidnightLA(a.starts_at, a.ends_at) && <MoonIcon size={14} className="text-tt-muted" aria-label="overnight" />}
               </span>
-              <span className="block text-[12px] text-tt-muted">
-                {roleLabel(a.role)}{a.role ? ' · ' : ''}{fmtHours(a.hours)}{availableSource(a)}
-              </span>
+              {/* HOW MANY, directly under the time and above the role. This is the fact the whole
+                  feature exists to publish; below the meta line it read as a fourth detail. Not
+                  cyan: the cyan chip on the right is what to TAP, and one accent cannot mean both. */}
               {a.kind === 'capacity' && !a.requested && a.available != null && a.available > 0 && (
-                <span className="block text-[12px] font-medium text-tt-text">
+                <span className="block text-[13px] font-semibold text-tt-text">
                   {a.available} shift{a.available === 1 ? '' : 's'} available
                 </span>
               )}
+              <span className="block text-[12px] text-tt-muted">
+                {roleLabel(a.role)}{a.role ? ' · ' : ''}{fmtHours(a.hours)}{availableSource(a)}
+              </span>
               {a.requested && (
                 <span className="block text-[12px] font-medium text-tt-yellow">
-                  {a.kind === 'capacity' ? 'Shift Requested · waiting for manager approval' : 'Pickup requested · waiting for manager approval'}
+                  {a.kind === 'capacity' ? 'Shift Requested · Waiting for manager approval' : 'Pickup requested · waiting for manager approval'}
                 </span>
               )}
               {a.refusal && <span className="block text-[12px] text-tt-muted">{a.refusal}</span>}
             </span>
-            {can && (
+            {can ? (
               <span className="shrink-0 rounded-lg bg-tt-cyan/15 px-3 py-1.5 text-xs font-semibold text-tt-cyan">
                 {a.kind === 'capacity' ? 'Request Shift' : 'Pick Up'}
               </span>
-            )}
+            ) : tappable ? (
+              // A requested capacity row can still be opened (to withdraw). Without a trailing
+              // affordance that is invisible on a phone, where there is no hover to discover it.
+              <ChevronRight size={16} className="shrink-0 text-tt-muted/70" />
+            ) : null}
           </>
         );
         return (
@@ -284,7 +291,10 @@ export function PickupSheet({ item, today, open, onClose }: { item: AvailableIte
         <p className="text-[11px] font-semibold uppercase tracking-wider text-tt-muted">{relativeDayLabel(item.shift_date, today)} · {fmtShortDate(item.shift_date)}</p>
         <p className="mt-0.5 text-2xl font-semibold tabular-nums tracking-tight text-tt-text">{fmtRangeLA(item.starts_at, item.ends_at)}</p>
         <p className="mt-0.5 text-[13px] text-tt-muted">{roleLabel(item.role)}{item.role ? ' · ' : ''}{fmtHours(item.hours)}{item.offered_by_name ? ` · from ${item.offered_by_name}` : ''}</p>
-        {isCapacity && !pendingMine && item.available != null && item.available > 0 && (
+        {/* `!outcome` matters: after a successful request the count in `item` is the PRE-SUBMIT
+            number, and printing it under the words "Shift Requested" states a number that is no
+            longer true and reads as an invitation to ask again. */}
+        {isCapacity && !pendingMine && !outcome && item.available != null && item.available > 0 && (
           <p className="mt-1 text-[13px] font-medium text-tt-text">{item.available} shift{item.available === 1 ? '' : 's'} available</p>
         )}
       </FactBox>
@@ -304,7 +314,10 @@ export function PickupSheet({ item, today, open, onClose }: { item: AvailableIte
           {err && <div className="mt-3"><InlineError>{err}</InlineError></div>}
           <div className="mt-5 flex gap-2">
             <Button variant="quiet" size="lg" className="flex-1" onClick={close} disabled={busy}>Close</Button>
-            <Button variant="quiet" size="lg" className="flex-1" busy={busy} onClick={cancelRequest}>Withdraw request</Button>
+            {/* `danger`, not `quiet`: two identical buttons side by side, one of which undoes what
+                she just asked for, is a bad thirty seconds in a parking lot. Short label so it
+                never wraps at 320. */}
+            <Button variant="danger" size="lg" className="flex-1" busy={busy} onClick={cancelRequest}>Withdraw</Button>
           </div>
         </>
       ) : (
@@ -372,7 +385,14 @@ export function ScheduleScreen({
   }, [snap.available, weekStart, weekEnd]);
   const dotMap: ReadonlyMap<string, Pick<PortalShift, 'offer_state'>> =
     seg === 'mine' ? shiftsByDate : seg === 'team' ? new Map([...teamDates].map((d) => [d, { offer_state: null }])) : openByDate;
-  const selected = nav.day ?? defaultSelectedDay(weekStart, today, new Set(dotMap.keys()));
+  // DAY SELECTION. On My Shifts and Team, landing on today is right — that is the day she is
+  // living in. On Available it is wrong: the badge can read 3 while today has nothing, so the
+  // screen contradicts itself at the exact moment of hope. Prefer the first day in this week that
+  // actually has something, from today forward.
+  const firstOpenDay = seg === 'open'
+    ? [...dotMap.keys()].filter((d) => d >= today).sort()[0] ?? null
+    : null;
+  const selected = nav.day ?? firstOpenDay ?? defaultSelectedDay(weekStart, today, new Set(dotMap.keys()));
   const teamDay = (week.data?.team ?? []).find((d) => d.date === selected);
   const openToday = snap.available.filter((a) => a.shift_date === selected);
 

@@ -102,6 +102,8 @@ console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
     /starts_at: opp\.starts_at/.test(cb) && /ends_at: opp\.ends_at/.test(cb));
   check('capacityBoard: withdraw is scoped to the token employee AND the owner',
     /\.eq\('user_id', owner\)[\s\S]{0,120}?\.eq\('employee_id', employee\.id\)/.test(cb));
+  check('capacityBoard: a pending request survives its block being paused, so it stays withdrawable',
+    /ORPHANED REQUESTS/.test(read(join(lib, 'capacityBoard.ts'))) && /for \(const r of myRequestRows\)/.test(cb));
   check('capacityBoard: never writes shift_instances — only an approval may',
     !/from\('shift_instances'\)[\s\S]{0,160}?\.(update|insert|delete)\(/.test(cb));
 

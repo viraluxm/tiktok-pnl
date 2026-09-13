@@ -358,7 +358,8 @@ export const SHIFT_REQUEST_REFUSAL_MESSAGES: Record<ShiftRequestRefusal, string>
   ALREADY_STARTED: 'That shift has already started.',
   BLOCK_UNAVAILABLE: 'This shift is no longer available.',
   AVAILABILITY_CLOSED: 'No more shifts are being taken for this day.',
-  NO_CAPACITY: 'Fully staffed',
+  // Employee vocabulary, not the manager's "Fully staffed" — this map is read by the portal.
+  NO_CAPACITY: 'No shifts available.',
   ALREADY_SCHEDULED_THAT_DAY: "You're already scheduled that day.",
   ALREADY_REQUESTED: 'Shift Requested',
 };

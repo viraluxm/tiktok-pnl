@@ -16,7 +16,7 @@ import CapacityPreview from './CapacityPreview';
 // closed on anything unrecognised.
 export const dynamic = 'force-dynamic';
 
-export const metadata = { title: 'Staffing Capacity — Preview', robots: { index: false, follow: false } };
+export const metadata = { title: 'Staffing Capacity Preview', robots: { index: false, follow: false } };
 
 export default function PreviewStaffingCapacityPage() {
   if (!isPreviewRouteAllowed()) notFound();
