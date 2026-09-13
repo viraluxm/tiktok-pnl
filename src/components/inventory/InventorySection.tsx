@@ -563,60 +563,34 @@ export default function InventorySection() {
   }
 
   const saving = createSku.isPending || updateSku.isPending;
-  const showForm = adding || editingId !== null;
+  // `editingId` is still the single source of truth for WHICH SKU is being edited;
+  // these two only decide WHERE its form renders. The form lives inside that SKU's
+  // own row/card so clicking Edit never moves the page, and falls back to the panel
+  // above the list when the row isn't on screen (search/status/category hid it, or
+  // the list isn't rendered at all) so an open editor can never become unreachable.
+  const editingRowVisible = editingId !== null && displayedSkus.some((s) => s.id === editingId);
+  const showTopPanel = adding || (editingId !== null && !editingRowVisible);
 
-  return (
-    <div>
-      {/* Summary + primary action */}
-      <div className="flex items-end justify-between gap-4 mb-6">
-        <div>
-          <div className="text-sm text-tt-muted">Inventory value (active)</div>
-          <div className="text-2xl font-bold tabular-nums">{fmtCents(totalValueCents)}</div>
-          <div className="text-xs text-tt-muted mt-1">
-            {activeSkus.length} active {activeSkus.length === 1 ? 'SKU' : 'SKUs'}
-            {visibleSkus.length > activeSkus.length ? ` · ${visibleSkus.length - activeSkus.length} inactive` : ''}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs text-tt-muted">
-            Label
-            <select
-              value={labelSize}
-              onChange={(e) => setLabelSize(e.target.value as LabelSize)}
-              className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1.5 text-xs text-tt-text cursor-pointer outline-none"
-            >
-              <option value="2x1">2×1 (product)</option>
-              <option value="6x4">6×4 (pallet rack)</option>
-            </select>
-          </label>
-          {selectedSkus.length > 0 && (
-            <button
-              onClick={() => printSkuLabels(selectedSkus, labelSize)}
-              className="px-4 py-2.5 rounded-lg border border-tt-border text-sm font-semibold text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors"
-            >
-              Print labels ({selectedSkus.length})
-            </button>
-          )}
-          {!showForm && (
-            <button
-              onClick={openAdd}
-              className="px-5 py-2.5 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 transition-opacity"
-            >
-              Add SKU
-            </button>
-          )}
-        </div>
-      </div>
+  const errorBanner = error ? (
+    <div className="mb-4 rounded-lg border border-tt-red/40 bg-tt-red/10 px-4 py-2.5 text-sm text-tt-red">
+      {error}
+    </div>
+  ) : null;
 
-      {error && (
-        <div className="mb-4 rounded-lg border border-tt-red/40 bg-tt-red/10 px-4 py-2.5 text-sm text-tt-red">
-          {error}
-        </div>
-      )}
-
-      {/* Inline add/edit form (not a modal) */}
-      {showForm && (
-        <div className="mb-6 rounded-2xl border border-tt-border bg-tt-card p-5">
+  // The add/edit form body — ONE definition, rendered either as the panel above the
+  // list ('panel') or inside the edited SKU's row/card ('inline'). A plain function
+  // rather than a nested component so React reconciles the fields in place and
+  // typing never loses focus.
+  function skuFormPanel(variant: 'panel' | 'inline') {
+    return (
+        <div
+          className={
+            variant === 'panel'
+              ? 'mb-6 rounded-2xl border border-tt-border bg-tt-card p-5'
+              : 'rounded-2xl border border-tt-cyan/50 bg-tt-card p-4 md:p-5'
+          }
+        >
+          {variant === 'inline' && errorBanner}
           <div className="text-sm font-semibold mb-4">
             {editingId ? `Edit SKU ${form.sku_number}` : 'Add SKU'}
           </div>
@@ -633,13 +607,6 @@ export default function InventorySection() {
                   <span className="text-tt-muted text-xs">No image</span>
                 )}
               </div>
-              <input
-                ref={fileRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                onChange={onPickImage}
-                className="hidden"
-              />
               <div className="flex flex-col gap-1.5 mt-2">
                 <button
                   type="button"
@@ -1132,7 +1099,68 @@ export default function InventorySection() {
             }
           `}</style>
         </div>
-      )}
+    );
+  }
+
+  return (
+    <div>
+      {/* Summary + primary action */}
+      <div className="flex items-end justify-between gap-4 mb-6">
+        <div>
+          <div className="text-sm text-tt-muted">Inventory value (active)</div>
+          <div className="text-2xl font-bold tabular-nums">{fmtCents(totalValueCents)}</div>
+          <div className="text-xs text-tt-muted mt-1">
+            {activeSkus.length} active {activeSkus.length === 1 ? 'SKU' : 'SKUs'}
+            {visibleSkus.length > activeSkus.length ? ` · ${visibleSkus.length - activeSkus.length} inactive` : ''}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1.5 text-xs text-tt-muted">
+            Label
+            <select
+              value={labelSize}
+              onChange={(e) => setLabelSize(e.target.value as LabelSize)}
+              className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1.5 text-xs text-tt-text cursor-pointer outline-none"
+            >
+              <option value="2x1">2×1 (product)</option>
+              <option value="6x4">6×4 (pallet rack)</option>
+            </select>
+          </label>
+          {selectedSkus.length > 0 && (
+            <button
+              onClick={() => printSkuLabels(selectedSkus, labelSize)}
+              className="px-4 py-2.5 rounded-lg border border-tt-border text-sm font-semibold text-tt-text cursor-pointer hover:bg-tt-card-hover transition-colors"
+            >
+              Print labels ({selectedSkus.length})
+            </button>
+          )}
+          {!showTopPanel && (
+            <button
+              onClick={openAdd}
+              className="px-5 py-2.5 rounded-lg bg-tt-cyan text-black text-sm font-semibold cursor-pointer hover:opacity-90 transition-opacity"
+            >
+              Add SKU
+            </button>
+          )}
+        </div>
+      </div>
+
+      {!editingRowVisible && errorBanner}
+
+      {/* Add form panel. An edit renders inline in the SKU's own row/card instead;
+          this stays the fallback spot for an edit whose row isn't on screen. */}
+      {showTopPanel && skuFormPanel('panel')}
+
+      {/* The form's image picker, hoisted to the top level and rendered once, so
+          `fileRef` points at exactly one element no matter which layout (desktop
+          row or mobile card) is currently rendering the form. */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        onChange={onPickImage}
+        className="hidden"
+      />
 
       {/* Toolbar: category filter (existing, unchanged) + search / status / sort
           (new). Search, status, and sort only narrow/reorder the rows shown
@@ -1265,93 +1293,105 @@ export default function InventorySection() {
               </tr>
             </thead>
             <tbody>
-              {displayedSkus.map((s) => (
-                <tr
-                  key={s.id}
-                  className={`border-b border-tt-border last:border-0 ${s.is_active ? '' : 'opacity-50'}`}
-                >
-                  <td className="px-4 py-3 w-px">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(s.id)}
-                      onChange={() => toggleSelected(s.id)}
-                      aria-label={`Select SKU ${s.sku_number}`}
-                      className="accent-tt-cyan align-middle cursor-pointer"
-                    />
-                  </td>
-                  <td className="px-4 py-3 font-mono text-tt-muted">{s.sku_number}</td>
-                  <td className="px-4 py-3">
-                    {s.shortcut_letter ? (
-                      <span className="inline-flex items-center justify-center min-w-6 h-6 px-1.5 rounded-md bg-tt-cyan/15 text-tt-cyan text-xs font-bold">
-                        {s.shortcut_letter}
-                      </span>
-                    ) : (
-                      <span className="text-tt-muted">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <SkuThumb url={s.thumbnail_url} />
-                      <span className="min-w-0 truncate">
-                        {s.title || <span className="text-tt-muted">Untitled</span>}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    {/* Inline category tag — writes immediately (optimistic), no modal. */}
-                    <select
-                      value={s.category ?? ''}
-                      onChange={(e) =>
-                        setCategory.mutate({ id: s.id, category: e.target.value ? (e.target.value as Category) : null })
-                      }
-                      aria-label={`Category for SKU ${s.sku_number}`}
-                      className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text cursor-pointer outline-none focus:border-tt-input-focus"
-                    >
-                      <option value="">—</option>
-                      {CATEGORY_OPTIONS.map((c) => (
-                        <option key={c.value} value={c.value}>{c.label}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums">{fmtCents(s.unit_cost_cents)}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">
-                    {(() => {
-                      const negative = (s.qty_on_hand ?? 0) < 0 || s.batches.some((b) => b.qty_remaining < 0);
-                      return (
-                        <span className={negative ? 'text-tt-red font-semibold' : 'text-tt-text'}>
-                          {s.qty_on_hand ?? 0}
-                          <span className="ml-1.5 text-[10px] font-normal text-tt-muted" title="cost layers — manage in Edit">{s.batches.length}L</span>
+              {displayedSkus.map((s) => {
+                // Edit in place: this SKU's own row becomes the editor.
+                if (editingId === s.id) {
+                  return (
+                    <tr key={s.id} className="border-b border-tt-border last:border-0">
+                      <td colSpan={9} className="px-4 py-4">
+                        {skuFormPanel('inline')}
+                      </td>
+                    </tr>
+                  );
+                }
+                return (
+                  <tr
+                    key={s.id}
+                    className={`border-b border-tt-border last:border-0 ${s.is_active ? '' : 'opacity-50'}`}
+                  >
+                    <td className="px-4 py-3 w-px">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(s.id)}
+                        onChange={() => toggleSelected(s.id)}
+                        aria-label={`Select SKU ${s.sku_number}`}
+                        className="accent-tt-cyan align-middle cursor-pointer"
+                      />
+                    </td>
+                    <td className="px-4 py-3 font-mono text-tt-muted">{s.sku_number}</td>
+                    <td className="px-4 py-3">
+                      {s.shortcut_letter ? (
+                        <span className="inline-flex items-center justify-center min-w-6 h-6 px-1.5 rounded-md bg-tt-cyan/15 text-tt-cyan text-xs font-bold">
+                          {s.shortcut_letter}
                         </span>
-                      );
-                    })()}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    <button
-                      onClick={() => toggleActive.mutate({ id: s.id, is_active: !s.is_active })}
-                      className="text-xs font-medium cursor-pointer hover:underline"
-                      title={s.is_active ? 'Click to deactivate' : 'Click to activate'}
-                    >
-                      <span className={s.is_active ? 'text-tt-green' : 'text-tt-muted'}>
-                        {s.is_active ? 'Active' : 'Inactive'}
-                      </span>
-                    </button>
-                  </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap">
-                    {confirmDeleteId === s.id ? (
-                      <span className="inline-flex items-center gap-2">
-                        <span className="text-xs text-tt-muted">Delete?</span>
-                        <button onClick={() => onDelete(s.id)} className="text-xs text-tt-red font-medium cursor-pointer hover:underline">Yes</button>
-                        <button onClick={() => setConfirmDeleteId(null)} className="text-xs text-tt-muted cursor-pointer hover:underline">No</button>
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-3">
-                        <button onClick={() => openEdit(s)} className="text-xs text-tt-cyan cursor-pointer hover:underline">Edit</button>
-                        <button onClick={() => setConfirmDeleteId(s.id)} className="text-xs text-tt-muted cursor-pointer hover:underline">Delete</button>
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                      ) : (
+                        <span className="text-tt-muted">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <SkuThumb url={s.thumbnail_url} />
+                        <span className="min-w-0 truncate">
+                          {s.title || <span className="text-tt-muted">Untitled</span>}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      {/* Inline category tag — writes immediately (optimistic), no modal. */}
+                      <select
+                        value={s.category ?? ''}
+                        onChange={(e) =>
+                          setCategory.mutate({ id: s.id, category: e.target.value ? (e.target.value as Category) : null })
+                        }
+                        aria-label={`Category for SKU ${s.sku_number}`}
+                        className="rounded-lg border border-tt-border bg-tt-input-bg px-2 py-1 text-xs text-tt-text cursor-pointer outline-none focus:border-tt-input-focus"
+                      >
+                        <option value="">—</option>
+                        {CATEGORY_OPTIONS.map((c) => (
+                          <option key={c.value} value={c.value}>{c.label}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums">{fmtCents(s.unit_cost_cents)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums">
+                      {(() => {
+                        const negative = (s.qty_on_hand ?? 0) < 0 || s.batches.some((b) => b.qty_remaining < 0);
+                        return (
+                          <span className={negative ? 'text-tt-red font-semibold' : 'text-tt-text'}>
+                            {s.qty_on_hand ?? 0}
+                            <span className="ml-1.5 text-[10px] font-normal text-tt-muted" title="cost layers — manage in Edit">{s.batches.length}L</span>
+                          </span>
+                        );
+                      })()}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <button
+                        onClick={() => toggleActive.mutate({ id: s.id, is_active: !s.is_active })}
+                        className="text-xs font-medium cursor-pointer hover:underline"
+                        title={s.is_active ? 'Click to deactivate' : 'Click to activate'}
+                      >
+                        <span className={s.is_active ? 'text-tt-green' : 'text-tt-muted'}>
+                          {s.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                      {confirmDeleteId === s.id ? (
+                        <span className="inline-flex items-center gap-2">
+                          <span className="text-xs text-tt-muted">Delete?</span>
+                          <button onClick={() => onDelete(s.id)} className="text-xs text-tt-red font-medium cursor-pointer hover:underline">Yes</button>
+                          <button onClick={() => setConfirmDeleteId(null)} className="text-xs text-tt-muted cursor-pointer hover:underline">No</button>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-3">
+                          <button onClick={() => openEdit(s)} className="text-xs text-tt-cyan cursor-pointer hover:underline">Edit</button>
+                          <button onClick={() => setConfirmDeleteId(s.id)} className="text-xs text-tt-muted cursor-pointer hover:underline">Delete</button>
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1370,6 +1410,10 @@ export default function InventorySection() {
           </label>
           {displayedSkus.map((s) => {
             const negativeQty = (s.qty_on_hand ?? 0) < 0 || s.batches.some((b) => b.qty_remaining < 0);
+            // Edit in place: this SKU's own card becomes the editor.
+            if (editingId === s.id) {
+              return <div key={s.id}>{skuFormPanel('inline')}</div>;
+            }
             return (
               <MobileDataCard
                 key={s.id}
