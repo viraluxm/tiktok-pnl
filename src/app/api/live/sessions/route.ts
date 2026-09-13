@@ -54,8 +54,53 @@ async function attachDisplayNames(
       storeById.set(st.id, st.name);
     }
   }
+  // ── Whose show was this? ────────────────────────────────────────────────────────────────
+  // NOT live_sessions.host_id. That scalar is OVERWRITTEN by the extension on every host
+  // switch, so it names whoever hosted LAST — a stand-in who covered the final twenty minutes
+  // would own the whole row. The label is the host with the MOST AIR TIME, with `other_hosts`
+  // counting the rest so a multi-host show is visible without opening it.
+  //
+  // Air time here is raw segment duration, not the effective windows pnl_show_host_segments
+  // computes (113's head-of-show reclaim). That reclaim moves a first segment's start by
+  // seconds in the ordinary case, so it can only change WHICH host leads when two are already
+  // within that margin — and doing it properly would mean one RPC per listed row. The detail
+  // page remains authoritative; this is a label.
+  const sessionIds = [...new Set(rows.map((r) => r.id).filter((v): v is string => typeof v === 'string'))];
+  const segMinutesBySession = new Map<string, Map<string, number>>();
+  if (sessionIds.length > 0) {
+    const { data: segs, error: segErr } = await supabase
+      .from('live_session_host_segments')
+      .select('session_id, host_id, started_at, ended_at')
+      .in('session_id', sessionIds)
+      .is('superseded_by', null);
+    // Non-fatal: without segments the list falls back to the session scalar below.
+    if (segErr) console.error('[live/sessions] host segments error (falling back to scalar):', segErr);
+    for (const sg of (segs ?? []) as Array<Record<string, unknown>>) {
+      const sid = String(sg.session_id);
+      const hid = typeof sg.host_id === 'string' ? sg.host_id : null;
+      if (!hid) continue; // unattributed stretches are a gap, never a label
+      const start = Date.parse(String(sg.started_at));
+      // An open segment (live show) is credited up to now, so a running show still labels.
+      const end = sg.ended_at ? Date.parse(String(sg.ended_at)) : Date.now();
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+      if (!segMinutesBySession.has(sid)) segMinutesBySession.set(sid, new Map());
+      const m = segMinutesBySession.get(sid)!;
+      m.set(hid, (m.get(hid) ?? 0) + (end - start) / 60_000);
+    }
+  }
+
+  const leadBySession = new Map<string, { host_id: string; minutes: number; others: number }>();
+  for (const [sid, m] of segMinutesBySession) {
+    let bestId: string | null = null, bestMin = -1;
+    for (const [hid, mins] of m) if (mins > bestMin) { bestId = hid; bestMin = mins; }
+    if (bestId) leadBySession.set(sid, { host_id: bestId, minutes: bestMin, others: m.size - 1 });
+  }
+
   const hostIds = [
-    ...new Set(rows.map((r) => r.host_id).filter((v): v is string => typeof v === 'string')),
+    ...new Set([
+      ...rows.map((r) => r.host_id).filter((v): v is string => typeof v === 'string'),
+      ...[...leadBySession.values()].map((v) => v.host_id),
+    ]),
   ];
   const hostById = new Map<string, string>();
   if (hostIds.length > 0) {
@@ -64,11 +109,18 @@ async function attachDisplayNames(
       hostById.set(e.id, e.name);
     }
   }
-  return rows.map((r) => ({
-    ...r,
-    store_name: typeof r.store_id === 'string' ? storeById.get(r.store_id) ?? null : null,
-    host_name: typeof r.host_id === 'string' ? hostById.get(r.host_id) ?? null : null,
-  }));
+  return rows.map((r) => {
+    const lead = typeof r.id === 'string' ? leadBySession.get(r.id) ?? null : null;
+    // Fall back to the scalar only when the show has no segments at all (pre-segment history).
+    const labelId = lead?.host_id ?? (typeof r.host_id === 'string' ? r.host_id : null);
+    return {
+      ...r,
+      store_name: typeof r.store_id === 'string' ? storeById.get(r.store_id) ?? null : null,
+      host_name: labelId ? hostById.get(labelId) ?? null : null,
+      // How many OTHER hosts were on this show — drives the "+N" badge. 0 = single-host.
+      other_hosts: lead?.others ?? 0,
+    };
+  });
 }
 
 export async function GET(req: Request) {

@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { UNATTRIBUTED_HOST, filterItemsByHost, hostKey, hostAirTimeMs } from '@/lib/shows/hostFilter';
 import { createPortal } from 'react-dom';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -541,7 +542,7 @@ function ShowRow({ session, onOpen }: { session: LiveSession; onOpen: (id: strin
             store" when null (the Part-D flag, now inline); date always present. */}
         <div className="text-xs text-tt-muted mt-0.5">
           {[
-            session.host_name ? <span key="h" className="text-tt-text/70">{session.host_name}</span> : null,
+            session.host_name ? <HostLabel key="h" session={session} /> : null,
             session.store_name
               ? <span key="s" className="text-tt-text/70">{session.store_name}</span>
               : <span key="s" className="font-semibold text-tt-red">Unmapped store</span>,
@@ -574,7 +575,7 @@ function ShowCardMobile({ session, onOpen }: { session: LiveSession; onOpen: (id
 
   // host · store · date — identical wording/tone to the desktop row.
   const subtitle = [
-    session.host_name ? <span key="h" className="text-tt-text/70">{session.host_name}</span> : null,
+    session.host_name ? <HostLabel key="h" session={session} /> : null,
     session.store_name
       ? <span key="s" className="text-tt-text/70">{session.store_name}</span>
       : <span key="s" className="font-semibold text-tt-red">Unmapped store</span>,
@@ -636,7 +637,23 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
   }, [lightbox, closeLightbox]);
 
   const { data: boardData, isLoading } = useAuctionBoard(session.id);
-  const items = useMemo(() => boardData?.items ?? [], [boardData]);
+  const allItems = useMemo(() => boardData?.items ?? [], [boardData]);
+  // ── Host filter ────────────────────────────────────────────────────────────────────────
+  // null = "All hosts". Otherwise a host_id (or UNATTRIBUTED_HOST for sales that matched no
+  // segment). Every figure below derives from `items`, so narrowing this array is what makes
+  // the whole page speak for one host — there is no second, parallel set of per-host maths to
+  // drift out of agreement with the first.
+  const [hostFilter, setHostFilter] = useState<string | null>(null);
+  const hostRollups = useMemo(() => boardData?.hosts ?? [], [boardData]);
+  // Only worth a band when the show actually changed hands. One host (the case for every show
+  // before break-switching starts) renders nothing rather than a pointless single chip.
+  const showHostBand = hostRollups.length > 1;
+  useEffect(() => { if (!showHostBand) setHostFilter(null); }, [showHostBand, session.id]);
+  const items = useMemo(() => filterItemsByHost(allItems, hostFilter), [allItems, hostFilter]);
+  const selectedHost = useMemo(
+    () => (hostFilter ? hostRollups.find((h) => hostKey(h) === hostFilter) ?? null : null),
+    [hostFilter, hostRollups],
+  );
   const sessionSkus = useMemo(() => boardData?.session_skus ?? [], [boardData]);
   const sum = useMemo(() => summarize(items), [items]);
   const rates = useMemo(() => showRates(items), [items]);
@@ -666,10 +683,14 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     },
     staleTime: 60_000,
   });
-  const durationLabel = fmtDuration(duration?.duration_ms);
+  // When a host is selected, every RATE must be over THAT HOST'S AIR TIME, not the show's.
+  // Dividing one host's units by the whole show's 7h53m would understate them by however long
+  // they were off-mic — the exact distortion this band exists to remove.
+  const effectiveDurationMs = hostAirTimeMs(selectedHost) ?? (selectedHost ? null : duration?.duration_ms ?? null);
+  const durationLabel = fmtDuration(effectiveDurationMs);
   // Units / hr = units sold ÷ active-selling hours. Null when duration unknown.
-  const unitsPerHr = duration?.duration_ms && duration.duration_ms > 0
-    ? sum.unitsSold / (duration.duration_ms / 3_600_000)
+  const unitsPerHr = effectiveDurationMs && effectiveDurationMs > 0
+    ? sum.unitsSold / (effectiveDurationMs / 3_600_000)
     : null;
   // Whether any sold row has a payout figure → the Profit column/card upgrades
   // from provisional (won−cost) to net (payout−cost, after fees). Works on a
@@ -694,10 +715,15 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
     baseProfitCents: anyPayout ? netProfitTotal : sum.profitCents,
     baseIsNetOfFees: anyPayout,
     unitsSold: sum.unitsSold,
-    durationMs: showEcon?.duration_ms ?? duration?.duration_ms ?? null,
-    hostPayCents: showEcon?.host_pay_cents ?? null,
+    durationMs: selectedHost ? effectiveDurationMs : showEcon?.duration_ms ?? duration?.duration_ms ?? null,
+    // Filtered: THIS host's pay (their air time × their rate, multiplied server-side). null —
+    // never 0 — when their rate is unknown, so the card withholds instead of printing a
+    // net-net that silently omits a real cost.
+    hostPayCents: selectedHost
+      ? showEcon?.hosts?.find((h) => (h.host_id ?? UNATTRIBUTED_HOST) === hostFilter)?.pay_cents ?? null
+      : showEcon?.host_pay_cents ?? null,
     pickCentsPerUnit: pickRate?.cents_per_unit_projected ?? null,
-  }), [anyPayout, netProfitTotal, sum.profitCents, sum.unitsSold, showEcon, duration?.duration_ms, pickRate]);
+  }), [anyPayout, netProfitTotal, sum.profitCents, sum.unitsSold, showEcon, duration?.duration_ms, pickRate, selectedHost, effectiveDurationMs, hostFilter]);
 
   // Why a net-net card is blank, in the card's own sub-line. Never silently blank, and never
   // a claim about the data while the data is still in flight.
@@ -1062,7 +1088,7 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
             {/* host · store · date. Host omitted when none; store → red "Unmapped store" when null. */}
             <span className="text-tt-text/70">
               {[
-                session.host_name ? <span key="h">{session.host_name}</span> : null,
+                session.host_name ? <HostLabel key="h" session={session} plain /> : null,
                 session.store_name
                   ? <span key="s">{session.store_name}</span>
                   : <span key="s" className="font-semibold text-tt-red">Unmapped store</span>,
@@ -1335,6 +1361,51 @@ function ShowDetail({ session, onBack }: { session: LiveSession; onBack: () => v
           />
         </div>
       </div>
+
+      {/* ── HOST ────────────────────────────────────────────────────────────────────────
+          Only rendered when the show actually changed hands. Selecting a host narrows the
+          item array, and because every figure on this page derives from that array, the
+          cards, rates and sales list all speak for that host at once. */}
+      {showHostBand && (
+        <div className="mb-6">
+          <BandLabel>Host</BandLabel>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Filter this show by host">
+            <HostChip
+              label="All hosts"
+              active={hostFilter === null}
+              onClick={() => setHostFilter(null)}
+              sub={fmtDuration(duration?.duration_ms) ?? undefined}
+            />
+            {hostRollups.map((h) => {
+              const key = hostKey(h);
+              return (
+                <HostChip
+                  key={key}
+                  label={h.host_name}
+                  active={hostFilter === key}
+                  onClick={() => setHostFilter(hostFilter === key ? null : key)}
+                  sub={`${fmtDuration(h.minutes * 60_000) ?? '—'} · ${h.auctions} sold`}
+                  muted={h.host_id == null}
+                />
+              );
+            })}
+          </div>
+          {selectedHost && (
+            <div className="mt-2 text-xs text-tt-muted">
+              Showing <span className="text-tt-text/80">{selectedHost.host_name}</span> only —
+              {' '}{selectedHost.auctions} auctions over {fmtDuration(selectedHost.minutes * 60_000) ?? '—'} on air.
+              {' '}Every figure above and the sales below are theirs alone; rates are over their
+              {' '}air time, not the show&apos;s.
+              {selectedHost.segment_count > 1 && (
+                <> They hosted in <span className="text-tt-text/80">{selectedHost.segment_count} separate stretches</span>, summed here.</>
+              )}
+              {selectedHost.host_id == null && (
+                <> These sales matched no host segment — a gap in the switch log, not someone&apos;s work.</>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* The allocation, stated in full. A reader who sees a negative net-net is owed the
           basis: which trailing window, what the crew rate was, whose air time was charged,
@@ -1962,6 +2033,47 @@ function CoveragePanel({ sessionId }: { sessionId: string }) {
 
 // Band heading over each group of summary cards. Quiet on purpose — it orders the cards
 // without competing with them for attention.
+// The show's host label: whoever was on air LONGEST, plus "+N" when others hosted too.
+// The badge is what makes a multi-host show legible without opening it — without it a show
+// split three ways looks identical to one host's show.
+function HostLabel({ session, plain = false }: { session: LiveSession; plain?: boolean }) {
+  const others = session.other_hosts ?? 0;
+  return (
+    <span className={plain ? undefined : 'text-tt-text/70'}>
+      {session.host_name}
+      {others > 0 && (
+        <span
+          className="ml-1 text-[10px] text-tt-muted"
+          title={`${others + 1} hosts on this show — open it to see each one's sales`}
+        >
+          +{others}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function HostChip({ label, sub, active, onClick, muted = false }: {
+  label: string; sub?: string; active: boolean; onClick: () => void; muted?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={[
+        'rounded-lg border px-3 py-2 text-left transition-colors',
+        active
+          ? 'border-tt-accent/60 bg-tt-accent/10 text-tt-text'
+          : 'border-tt-border bg-tt-card text-tt-text/80 hover:border-tt-border/80 hover:text-tt-text',
+      ].join(' ')}
+    >
+      <div className={`text-sm font-medium ${muted && !active ? 'text-tt-muted italic' : ''}`}>{label}</div>
+      {sub ? <div className="text-[11px] text-tt-muted mt-0.5">{sub}</div> : null}
+    </button>
+  );
+}
+
 function BandLabel({ children }: { children: React.ReactNode }) {
   return <div className="text-[11px] font-semibold uppercase tracking-wider text-tt-muted mb-2">{children}</div>;
 }
