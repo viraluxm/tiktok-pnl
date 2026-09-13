@@ -1,0 +1,13 @@
+-- VERBATIM SNAPSHOT of cron.job in production, 2026-09-11. NOT a migration.
+--
+--  jobid | jobname                      | schedule      | command                                        | active
+--  ------+------------------------------+---------------+------------------------------------------------+-------
+--    1   | ac_box_snapshot_30m           | */30 * * * *  | select public.snapshot_ac_boxes();              | t
+--    2   | sku_cost_scalar_recompute_1m  | * * * * *     | select public.lensed_recompute_sku_cost_scalar();| t
+--
+-- Both run as `postgres` on database `postgres` at localhost:5432.
+-- Neither job, nor either function, appears anywhere in supabase/migrations/.
+--
+-- Reproduction (DO NOT RUN against production — it is already scheduled):
+--   select cron.schedule('sku_cost_scalar_recompute_1m', '* * * * *',
+--                        $$select public.lensed_recompute_sku_cost_scalar();$$);

@@ -87,7 +87,7 @@ export async function GET() {
   // breakdown and the bind flow can detect Option-X oversell client-side.
   const { data: batchRows } = await supabase
     .from('sku_batches')
-    .select('id, sku_id, sequence, qty_remaining, unit_cost_cents, qty_added')
+    .select('id, sku_id, sequence, qty_remaining, unit_cost_cents, qty_added, qty_added_authoritative, cost_status')
     .order('sequence', { ascending: true });
   const batchesBySku = new Map<string, Record<string, unknown>[]>();
   for (const b of batchRows ?? []) {
@@ -99,6 +99,13 @@ export async function GET() {
       // qty_added: original inserted qty (NULL for legacy layers). The UI uses it
       // ONLY to decide whether Delete is offered; the RPC enforces the rule.
       qty_added: b.qty_added,
+      // 152: qty_added_authoritative gates whether qty_added may be read as the
+      // ORIGINAL QUANTITY RECEIVED (and therefore whether Consumed is derivable at
+      // all); cost_status distinguishes a genuine $0 from a cost nobody has entered
+      // yet. Both are raw passthroughs — Received/Consumed are derived client-side by
+      // deriveBatchQuantities so there is no second, redundant source of truth.
+      qty_added_authoritative: b.qty_added_authoritative,
+      cost_status: b.cost_status,
     });
   }
   return NextResponse.json({
@@ -196,7 +203,7 @@ export async function POST(req: Request) {
       qtyOnHand: (created.qty_on_hand as number | null) ?? null,
       unitCostCents: (created.unit_cost_cents as number | null) ?? null,
     }),
-  ).select('id, sequence, qty_remaining, unit_cost_cents, qty_added').single();
+  ).select('id, sequence, qty_remaining, unit_cost_cents, qty_added, qty_added_authoritative, cost_status').single();
   if (batchErr || !firstBatch) {
     await supabase.from('inventory_skus').delete().eq('id', created.id as string).eq('user_id', user.id);
     console.error('[inventory/skus] initial batch insert failed:', batchErr);

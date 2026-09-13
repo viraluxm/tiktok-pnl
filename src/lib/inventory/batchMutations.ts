@@ -86,23 +86,98 @@ export interface SeedBatchArgs {
 // starting qty) so a still-untouched seed layer is later deletable — consistent with
 // lensed_add_batch and the ViewTrack admin path. org_id is stamped by the
 // zz_set_org_id trigger; a brand-new SKU has no prior layers, so sequence is always 1.
+//
+// Migration 152/153 adds two facts this row must now assert, because it is the ONLY
+// direct INSERT into sku_batches in the whole application:
+//   • qty_added_authoritative: true — the layer is created here and now with nothing yet
+//     drawn from it, so qty_added IS the quantity that entered it. (For a SKU created
+//     from an existing shelf count that quantity is an opening count rather than a
+//     purchase receipt; either way it is the truthful starting quantity of THIS layer,
+//     which is what Consumed = qty_added - qty_remaining needs.) Marking it authoritative
+//     is also what stops lensed_edit_batch re-basing it on the first stock correction.
+//   • cost_status — a blank cost is 'pending' (not yet known), any number INCLUDING 0 is
+//     'final'. This is the whole point of 152: a genuine $0 and an unentered cost stop
+//     being the same row.
 export function buildSeedBatchRow(args: SeedBatchArgs): {
   user_id: string;
   sku_id: string;
   qty_remaining: number;
   qty_added: number;
+  qty_added_authoritative: boolean;
   unit_cost_cents: number | null;
+  cost_status: BatchCostStatus;
   sequence: number;
 } {
   const qty = args.qtyOnHand ?? 0;
+  const cost = args.unitCostCents ?? null;
   return {
     user_id: args.userId,
     sku_id: args.skuId,
     qty_remaining: qty,
     qty_added: qty,
-    unit_cost_cents: args.unitCostCents ?? null,
+    qty_added_authoritative: true,
+    unit_cost_cents: cost,
+    cost_status: cost === null ? 'pending' : 'final',
     sequence: 1,
   };
+}
+
+// ── Cost state + received-quantity derivation (migration 152) ────────────────────────
+// Mirrors sku_batches_cost_status_chk. 'legacy' exists so pre-152 rows are not falsely
+// asserted to be finalized; see 152's header for why that is a state and not a NULL.
+export type BatchCostStatus = 'pending' | 'final' | 'legacy';
+
+export interface BatchQuantityInput {
+  qty_remaining: number;
+  qty_added: number | null;
+  qty_added_authoritative?: boolean | null;
+}
+
+export interface BatchQuantityView {
+  // Original quantity that entered this layer. null when we cannot prove it.
+  // Called ADDED, not Received: the same field is written by a manual add, a SKU's
+  // opening stock, a ViewTrack receipt, an unbind restock and a settled oversell
+  // deficit. "Added" is true of all five; "Received" implies a purchase receipt.
+  added: number | null;
+  // Current remaining quantity in this FIFO layer (may be negative on oversell).
+  remaining: number;
+  // Units drawn out of this layer so far. Deliberately labelled CONSUMED, not SOLD:
+  // Lensed has no inventory-movement ledger yet, so this figure cannot distinguish a
+  // sale from damage, shrinkage, a sample or a manual correction. null when `received`
+  // is not provable, because a subtraction from an unknown is not a number.
+  consumed: number | null;
+}
+
+// Derived, never stored. `received - remaining` is only meaningful when qty_added is
+// KNOWN to be this layer's original quantity — i.e. a post-152 row. A legacy row's
+// qty_added may be NULL, or may have been re-based by a pre-153 edit, so we report
+// null rather than a plausible-looking wrong number.
+export function deriveBatchQuantities(b: BatchQuantityInput): BatchQuantityView {
+  const trustworthy = b.qty_added_authoritative === true && b.qty_added != null;
+  return {
+    added: trustworthy ? (b.qty_added as number) : null,
+    remaining: b.qty_remaining,
+    consumed: trustworthy ? (b.qty_added as number) - b.qty_remaining : null,
+  };
+}
+
+// ── Finalize / correct a batch's true unit cost (migration 154) ──────────────────────
+// The ONE way an attributable layer's cost may change. Unlike parseBatchEdit, a cost is
+// REQUIRED here: "finalize" means asserting a number, and blanking a cost is not a
+// correction. 0 is valid and means genuinely free — the whole point of cost_status.
+export type FinalizeCostParse =
+  | { ok: true; value: { unit_cost_cents: number } }
+  | { ok: false; error: string };
+
+export function parseFinalizeCost(raw: unknown): FinalizeCostParse {
+  if (raw === null || raw === undefined || raw === '') {
+    return { ok: false, error: 'Enter a unit cost. Leave the layer pending instead if the cost is still unknown.' };
+  }
+  const c = toIntStrict(raw);
+  if (c === null || c < 0) {
+    return { ok: false, error: 'Unit cost must be a whole number of cents, 0 or more' };
+  }
+  return { ok: true, value: { unit_cost_cents: c } };
 }
 
 export interface BatchRpcErrorResponse {
@@ -117,6 +192,39 @@ export interface BatchRpcErrorResponse {
 export function mapBatchRpcError(message: string | null | undefined): BatchRpcErrorResponse {
   const m = message ?? '';
   if (m.includes('BATCH_NOT_FOUND')) return { status: 404, error: 'Batch not found' };
+  // 154: the friendly answer to what the 152 FK would otherwise raise as a raw 23503.
+  if (m.includes('BATCH_HAS_CONSUMPTION')) {
+    return {
+      status: 409,
+      error:
+        "This batch has inventory already used in sales and can't be deleted. Edit its remaining quantity to 0 instead.",
+    };
+  }
+  // 154: one cost path. The generic edit may not move an attributable layer's cost,
+  // because only the finalize path also reprices that layer's recorded sales.
+  if (m.includes('COST_EDIT_REQUIRES_FINALIZE')) {
+    return {
+      status: 409,
+      error: "Use Enter cost to change this layer's unit cost — that also corrects the sales it supplied.",
+    };
+  }
+  if (m.includes('BATCH_NOT_ATTRIBUTABLE')) {
+    return {
+      status: 409,
+      error:
+        "This layer pre-dates cost tracking, so its own past sales can't be identified and can't be repriced. Edit its unit cost directly instead.",
+    };
+  }
+  if (m.includes('COST_REQUIRED')) {
+    return { status: 400, error: 'Enter a unit cost. Leave the layer pending instead if the cost is still unknown.' };
+  }
+  // The FK itself, if anything ever reaches a DELETE without the pre-check above.
+  if (m.includes('foreign key') || m.includes('23503') || m.includes('source_batch_id_fkey')) {
+    return {
+      status: 409,
+      error: "This batch has inventory already used in sales and can't be deleted. Edit its remaining quantity to 0 instead.",
+    };
+  }
   if (m.includes('INVALID_QTY')) return { status: 400, error: 'Remaining quantity must be a whole number of at least 0' };
   if (m.includes('INVALID_COST')) return { status: 400, error: 'Unit cost must be empty or an amount of at least 0' };
   if (m.includes('BATCH_NOT_DELETABLE')) {

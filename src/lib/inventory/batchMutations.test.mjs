@@ -24,7 +24,7 @@ const { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
 });
 const outFile = join(mkdtempSync(join(tmpdir(), 'batchmut-')), 'batchMutations.mjs');
 writeFileSync(outFile, outputText);
-const { parseBatchEdit, buildSeedBatchRow, mapBatchRpcError } = await import(pathToFileURL(outFile).href);
+const { parseBatchEdit, buildSeedBatchRow, mapBatchRpcError, deriveBatchQuantities, parseFinalizeCost } = await import(pathToFileURL(outFile).href);
 
 let passed = 0;
 const check = (name, cond, extra = '') => {
@@ -78,6 +78,78 @@ const check = (name, cond, extra = '') => {
   const zero = buildSeedBatchRow({ userId: 'u', skuId: 's', qtyOnHand: null, unitCostCents: null });
   check('null starting qty ⇒ 0 (and qty_added 0)', zero.qty_remaining === 0 && zero.qty_added === 0);
   check('null cost ⇒ null', zero.unit_cost_cents === null);
+
+  // ── migration 152: the seed layer must assert both new facts ──
+  check('seed marks qty_added authoritative', row.qty_added_authoritative === true);
+  check('seed with a cost ⇒ cost_status final', row.cost_status === 'final');
+  check('seed with NO cost ⇒ cost_status pending', zero.cost_status === 'pending');
+  check('pending seed leaves unit_cost_cents null (152 CHECK invariant)',
+    zero.cost_status === 'pending' && zero.unit_cost_cents === null);
+  const free = buildSeedBatchRow({ userId: 'u', skuId: 's', qtyOnHand: 3, unitCostCents: 0 });
+  check('GENUINE $0 seed ⇒ final, not pending — the 152 distinction',
+    free.cost_status === 'final' && free.unit_cost_cents === 0);
+}
+
+// ── deriveBatchQuantities — Received / Remaining / Consumed (migration 152) ─────
+// Consumed is DERIVED (qty_added − qty_remaining) and is only a number when qty_added
+// is provably the layer's original quantity. These cases mirror the SQL harness's
+// Tests I/K/L so both ends of the seam agree.
+{
+  const auth = (qty_added, qty_remaining) =>
+    deriveBatchQuantities({ qty_added, qty_remaining, qty_added_authoritative: true });
+
+  const a = auth(500, 380);
+  check('authoritative: ADDED survives consumption', a.added === 500);
+  check('authoritative: remaining is current stock', a.remaining === 380);
+  check('authoritative: consumed = added − remaining', a.consumed === 120);
+
+  const fresh = auth(400, 400);
+  check('untouched layer ⇒ consumed 0', fresh.consumed === 0 && fresh.added === 400);
+
+  const empty = auth(500, 0);
+  check('fully drawn layer ⇒ consumed = added', empty.consumed === 500 && empty.remaining === 0);
+
+  const over = auth(10, -4);
+  check('oversold layer ⇒ consumed exceeds added', over.consumed === 14 && over.remaining === -4);
+
+  // Legacy rows: qty_added may be NULL, or may have been re-based by a pre-153 edit.
+  // Report null rather than a plausible-looking wrong number.
+  const legacyNull = deriveBatchQuantities({ qty_added: null, qty_remaining: 12, qty_added_authoritative: false });
+  check('legacy NULL qty_added ⇒ added/consumed null', legacyNull.added === null && legacyNull.consumed === null);
+  check('legacy still reports remaining', legacyNull.remaining === 12);
+
+  const legacyNumeric = deriveBatchQuantities({ qty_added: 50, qty_remaining: 12, qty_added_authoritative: false });
+  check('legacy NUMERIC qty_added is NOT trusted as a receipt',
+    legacyNumeric.added === null && legacyNumeric.consumed === null);
+
+  const preFlag = deriveBatchQuantities({ qty_added: 50, qty_remaining: 12 });
+  check('absent flag (pre-152 payload) is treated as legacy',
+    preFlag.added === null && preFlag.consumed === null);
+
+  const flaggedButNull = deriveBatchQuantities({ qty_added: null, qty_remaining: 5, qty_added_authoritative: true });
+  check('authoritative but NULL qty_added ⇒ null, never NaN',
+    flaggedButNull.added === null && flaggedButNull.consumed === null);
+}
+
+// ── parseFinalizeCost — the ONE cost-change input (migration 154) ───────────────
+// Unlike parseBatchEdit, a cost is REQUIRED: "finalize" means asserting a number.
+{
+  const ok = parseFinalizeCost(340);
+  check('finalize accepts cents', ok.ok === true && ok.value.unit_cost_cents === 340);
+  const zero = parseFinalizeCost(0);
+  check('finalize accepts a GENUINE 0 (free inventory is a real cost)',
+    zero.ok === true && zero.value.unit_cost_cents === 0);
+  const str = parseFinalizeCost('355');
+  check('finalize accepts a numeric string', str.ok === true && str.value.unit_cost_cents === 355);
+
+  check('finalize REJECTS blank — that is what leaving it pending means', parseFinalizeCost('').ok === false);
+  check('finalize REJECTS null', parseFinalizeCost(null).ok === false);
+  check('finalize REJECTS undefined', parseFinalizeCost(undefined).ok === false);
+  check('finalize REJECTS negative', parseFinalizeCost(-1).ok === false);
+  check('finalize REJECTS fractional cents', parseFinalizeCost(3.5).ok === false);
+  check('finalize REJECTS non-numeric', parseFinalizeCost('abc').ok === false);
+  check('blank-cost message points at pending, not at an error',
+    /pending/i.test(parseFinalizeCost('').error));
 }
 
 // ── mapBatchRpcError ────────────────────────────────────────────────────────────
@@ -91,6 +163,23 @@ const check = (name, cond, extra = '') => {
   check('CANNOT_DELETE_LAST_BATCH → 409 + only-layer hint', last.status === 409 && /only cost layer/i.test(last.error));
   check('NO_ORG → 403', mapBatchRpcError('NO_ORG').status === 403);
   check('NOT_AUTHENTICATED → 401', mapBatchRpcError('NOT_AUTHENTICATED').status === 401);
+  // ── migration 154 tokens: no raw Postgres error may reach a user ──
+  const consumed = mapBatchRpcError('BATCH_HAS_CONSUMPTION');
+  check('BATCH_HAS_CONSUMPTION → 409, not 500', consumed.status === 409);
+  check('…and says the stock was used in sales', /used in sales/i.test(consumed.error));
+  const needsFinalize = mapBatchRpcError('COST_EDIT_REQUIRES_FINALIZE');
+  check('COST_EDIT_REQUIRES_FINALIZE → 409 pointing at Enter cost',
+    needsFinalize.status === 409 && /Enter cost/i.test(needsFinalize.error));
+  const notAttr = mapBatchRpcError('BATCH_NOT_ATTRIBUTABLE');
+  check('BATCH_NOT_ATTRIBUTABLE → 409 explaining legacy layers',
+    notAttr.status === 409 && /pre-dates/i.test(notAttr.error));
+  check('COST_REQUIRED → 400', mapBatchRpcError('COST_REQUIRED').status === 400);
+  // The FK is the last line of defence; if it ever fires, it must NOT surface as a 500.
+  const rawFk = mapBatchRpcError(
+    'insert or update on table "live_auction_item_skus" violates foreign key constraint "live_auction_item_skus_source_batch_id_fkey"');
+  check('raw 23503 FK text → 409, never a generic 500', rawFk.status === 409);
+  check('…with the same friendly wording', /used in sales/i.test(rawFk.error));
+
   check('unknown → 500', mapBatchRpcError('some random pg error').status === 500);
   check('null message → 500', mapBatchRpcError(null).status === 500);
 }
