@@ -5,7 +5,7 @@ import StaffingCapacityPanel from '@/components/employees/StaffingCapacityPanel'
 import ShiftRequestsPanel, { type ShiftRequestRow } from '@/components/employees/ShiftRequestsPanel';
 import { laTodayISO } from '@/lib/schedule/timezone';
 import { fmtCalendarDate, fmtTimeRangeLA } from '@/lib/schedule/format';
-import { staffingLabel } from '@/lib/schedule/capacity';
+import { staffedOfLabel, staffingLabel } from '@/lib/schedule/capacity';
 import { applyMutation, initialWorld, payloadFor, type Mutate, type PreviewWorld } from './fixtures';
 
 // The interactive half of /preview/staffing-capacity. ZERO NETWORK: the panel is rendered with its
@@ -18,6 +18,7 @@ export default function CapacityPreview() {
   const [world, setWorld] = useState<PreviewWorld>(() => initialWorld(today));
   const [decided, setDecided] = useState<Set<string>>(new Set());
   const data = useMemo(() => payloadFor(world, today), [world, today]);
+  const hostCapacity = data.teamDefaults.find((t) => t.team === 'host')?.capacity ?? null;
 
   // The two pending requests point at the first two nights that still have room, so approving one
   // in the preview visibly drops that block's availability by one.
@@ -43,9 +44,15 @@ export default function CapacityPreview() {
         <div className="mx-auto flex max-w-4xl flex-wrap items-center gap-2">
           <span className="mr-1 text-[10px] font-bold uppercase tracking-wider text-tt-magenta">Preview</span>
           <span className="text-[11px] text-tt-muted">Manager · Staffing capacity</span>
+          {/* Both states of the thing under review, one click apart. */}
+          <button
+            type="button"
+            onClick={() => setWorld((w) => applyMutation(w, { op: 'teamCapacity', team: 'host', capacity: hostCapacity == null ? 10 : null }))}
+            className="ml-auto rounded-full bg-white/[0.06] px-3 py-1.5 text-xs font-semibold text-tt-text transition-colors hover:bg-white/10"
+          >{hostCapacity == null ? 'Set Live Host capacity to 10' : 'Clear Live Host capacity'}</button>
           <button
             type="button" onClick={() => { setWorld(initialWorld(today)); setDecided(new Set()); }}
-            className="ml-auto rounded-full bg-white/[0.06] px-3 py-1.5 text-xs font-semibold text-tt-muted transition-colors hover:bg-white/10 hover:text-tt-text"
+            className="rounded-full bg-white/[0.06] px-3 py-1.5 text-xs font-semibold text-tt-muted transition-colors hover:bg-white/10 hover:text-tt-text"
           >Reset</button>
         </div>
       </div>
@@ -76,7 +83,7 @@ export default function CapacityPreview() {
                 <tr key={`${s.block_id}|${s.date}`} className="border-b border-[rgba(255,255,255,0.04)]">
                   <td className="whitespace-nowrap px-4 py-2 text-tt-muted">{fmtCalendarDate(s.date)}</td>
                   <td className="whitespace-nowrap px-4 py-2 tabular-nums text-tt-text">{fmtTimeRangeLA(s.starts_at, s.ends_at)}</td>
-                  <td className="whitespace-nowrap px-4 py-2 tabular-nums text-tt-text">{s.staffed} / {s.capacity}</td>
+                  <td className="whitespace-nowrap px-4 py-2 tabular-nums text-tt-text">{staffedOfLabel(s)}</td>
                   <td className="whitespace-nowrap px-4 py-2 text-tt-text">
                     {staffingLabel(s)}{s.custom ? <span className="ml-2 text-tt-muted">Custom capacity</span> : null}
                   </td>

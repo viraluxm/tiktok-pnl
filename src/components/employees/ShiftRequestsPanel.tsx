@@ -22,7 +22,8 @@ export interface ShiftRequestRow {
   starts_at: string;
   ends_at: string;
   staffed: number;
-  capacity: number;
+  /** null = this block has no configured capacity, so approval will refuse. */
+  capacity: number | null;
   available: number;
   closed: boolean;
 }
@@ -106,7 +107,9 @@ export default function ShiftRequestsPanel({
         {requests.map((r) => {
           // Full is not an error state in this list — the request is still real and still
           // declinable. It is labelled so the manager knows approving it will be refused.
-          const full = r.closed || r.available <= 0;
+          // An unconfigured block cannot be approved into at all; it is flagged like a full one so
+          // the manager sees why before they click, and the RPC refuses if they do.
+          const full = r.closed || r.capacity == null || r.available <= 0;
           return (
             <li key={r.request_id} className="rounded-lg border border-tt-border bg-tt-card/60 px-4 py-3">
               <p className="text-sm font-medium text-tt-text">
@@ -118,9 +121,11 @@ export default function ShiftRequestsPanel({
                 <div className="text-[13px]">
                   <p className="text-tt-text"><span className="font-semibold">{r.employee_name}</span> <span className="text-tt-muted">wants this shift</span></p>
                   <p className={full ? 'font-semibold text-tt-yellow' : 'text-tt-muted'}>
-                    <span className="tabular-nums">{r.staffed} / {r.capacity}</span> scheduled
+                    <span className="tabular-nums">{r.capacity == null ? r.staffed : `${r.staffed} / ${r.capacity}`}</span> scheduled
                     {' · '}
-                    {r.closed ? 'availability closed' : r.available > 0 ? `${r.available} shift${r.available === 1 ? '' : 's'} available` : 'fully staffed'}
+                    {r.capacity == null ? 'capacity not configured'
+                      : r.closed ? 'availability closed'
+                        : r.available > 0 ? `${r.available} shift${r.available === 1 ? '' : 's'} available` : 'fully staffed'}
                   </p>
                 </div>
                 <div className="flex shrink-0 gap-2">

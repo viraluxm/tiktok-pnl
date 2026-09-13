@@ -13,7 +13,7 @@
 //   Sun night     3 / 10 scheduled   Availability closed
 import { addDaysISO, laTodayISO, laWallTimeToUtc, weekdayOf } from '@/lib/schedule/timezone';
 import {
-  DEFAULT_TEAM_CAPACITY, blockInstants, staffingOutlook,
+  blockInstants, staffingOutlook,
   type CapacityBlock, type CapacitySetting, type StaffingOutlookPayload, type StaffedInstance,
 } from '@/lib/schedule/capacity';
 
@@ -85,8 +85,10 @@ export function initialWorld(todayISO = laTodayISO()): PreviewWorld {
 
   return {
     blocks: [MORNING, NIGHT],
+    // STARTS UNCONFIGURED on purpose: that is what a real account looks like before anyone sets a
+    // number, and it is the state the panel has to explain rather than paper over. The preview
+    // chrome flips it to 10 in one click so both states are a click apart.
     settings: [
-      { id: 'team-host', team: 'host', block_id: null, date: null, capacity: 10, closed: false, note: null },
       { id: 'ovr-fri', team: 'host', block_id: NIGHT.id, date: fri, capacity: 7, closed: false, note: null },
       { id: 'ovr-sun', team: 'host', block_id: NIGHT.id, date: sun, capacity: null, closed: true, note: null },
     ],
@@ -113,7 +115,7 @@ export function payloadFor(w: PreviewWorld, todayISO = laTodayISO()): StaffingOu
     from: todayISO, to, blocks: w.blocks, settings: w.settings, days,
     teamDefaults: (['host', 'fulfillment'] as const).map((team) => {
       const row = w.settings.find((s) => s.block_id == null && s.team === team) ?? null;
-      return { team, capacity: row?.capacity ?? DEFAULT_TEAM_CAPACITY[team], closed: Boolean(row?.closed), isDefault: row?.capacity == null };
+      return { team, capacity: row?.capacity ?? null, closed: Boolean(row?.closed) };
     }),
   };
 }

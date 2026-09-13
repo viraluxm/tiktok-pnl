@@ -21,11 +21,24 @@ const rqStub = write('rq.mjs', `
 export function useMutation(opts) { globalThis.__MUT = opts; return { opts }; }
 export function useQueryClient() { return { invalidateQueries: (arg) => globalThis.__INV.push(arg) }; }
 `);
+// The hook formats the partial-save sentence (157), so its date formatter comes along.
+const tsx = (rel, out, rw = {}) => {
+  let { outputText: o } = ts.transpileModule(readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  });
+  for (const [f, t] of Object.entries(rw)) o = o.split(f).join(t);
+  return write(out, o);
+};
+const tzUrl = tsx('../lib/schedule/timezone.ts', 'timezone.mjs');
+const fmtUrl = tsx('../lib/schedule/format.ts', 'format.mjs', { "'./timezone'": `'${tzUrl}'` });
 const srcPath = fileURLToPath(new URL('./useScheduleBulk.ts', import.meta.url));
 let { outputText } = ts.transpileModule(readFileSync(srcPath, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-outputText = outputText.split("'@tanstack/react-query'").join(`'${rqStub}'`).replace(/^'use client';\s*/m, '');
+outputText = outputText
+  .split("'@tanstack/react-query'").join(`'${rqStub}'`)
+  .split("'@/lib/schedule/format'").join(`'${fmtUrl}'`)
+  .replace(/^'use client';\s*/m, '');
 const H = await import(write('useScheduleBulk.mjs', outputText));
 
 let passed = 0;

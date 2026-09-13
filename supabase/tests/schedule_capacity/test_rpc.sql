@@ -32,7 +32,7 @@ do $$
 declare r uuid; res jsonb; si public.shift_instances;
 begin
   r := mkreq('e1111111-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001', date '2027-06-16');
-  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', r, 3::smallint);
+  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', r);
   perform t_eq('approve: ok', res->>'ok', 'true');
   perform t_eq('approve: reported the staffing it decided against', res->>'staffed_before', '0');
   perform t_eq('approve: reported the capacity it decided against', res->>'capacity', '3');
@@ -73,9 +73,9 @@ begin
   rc := mkreq('e3333333-0000-4000-8000-000000000003','b1000000-0000-4000-8000-000000000001', date '2027-06-16');
   perform t_eq('pending requests do NOT consume capacity — still 1 staffed of 3',
     staffed_in('a0000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001', date '2027-06-16')::text, '1');
-  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', rb, 3::smallint);
+  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', rb);
   perform t_eq('approve Bob: ok', res->>'ok', 'true');
-  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', rc, 3::smallint);
+  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', rc);
   perform t_eq('approve Carol: ok (the third and last)', res->>'ok', 'true');
   perform t_eq('the block is now full at 3 of 3',
     staffed_in('a0000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001', date '2027-06-16')::text, '3');
@@ -122,7 +122,7 @@ begin
   select id into rg from shift_requests where employee_id = 'e7777777-0000-4000-8000-000000000007' and status = 'pending' limit 1;
   update shift_requests set status = 'withdrawn' where id = rg;
   rg := mkreq('e7777777-0000-4000-8000-000000000007','b2000000-0000-4000-8000-000000000002', date '2027-06-16');
-  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', rg, 3::smallint);
+  res := lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', rg);
   perform t_eq('a full NIGHT block does not close the MORNING block', res->>'ok', 'true');
   perform t_eq('morning is now 1 of 3',
     staffed_in('a0000000-0000-4000-8000-000000000001','b2000000-0000-4000-8000-000000000002', date '2027-06-16')::text, '1');
@@ -212,6 +212,21 @@ begin
             date '2020-01-01','2020-01-02 02:00Z','2020-01-02 10:00Z','host');
   perform t_refuse_req('PAST_DATE: a day that has gone cannot be approved',
     'a0000000-0000-4000-8000-000000000001', 'dfaaaaaa-0000-4000-8000-0000000000aa', 'PAST_DATE');
+end $$;
+
+-- ── CAPACITY NOT CONFIGURED: a request cannot be approved against a number nobody chose ───────
+do $$
+declare r uuid;
+begin
+  delete from shift_capacity_settings where block_id is null and team = 'host';
+  r := mkreq('e1111111-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001', date '2027-06-26');
+  perform t_refuse_req('CAPACITY_NOT_CONFIGURED: no number means no approval, and nothing written',
+    'a0000000-0000-4000-8000-000000000001', r, 'CAPACITY_NOT_CONFIGURED');
+  -- Configure it and the same request goes through, with no other change.
+  insert into shift_capacity_settings(user_id, team, block_id, date, capacity)
+    values ('a0000000-0000-4000-8000-000000000001','host', null, null, 3);
+  perform t_eq('once a capacity exists, the same request is approvable',
+    (lensed_approve_shift_request('a0000000-0000-4000-8000-000000000001', r))->>'ok', 'true');
 end $$;
 
 -- ── 8. OWNER ISOLATION ────────────────────────────────────────────────────────────────────────

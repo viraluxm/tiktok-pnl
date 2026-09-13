@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useCapacity, type CapacityPayload } from '@/hooks/useCapacity';
 import { fmtCalendarDate, fmtTimeRangeLA, isOvernight } from '@/lib/schedule/format';
-import { DEFAULT_TEAM_CAPACITY, staffingLabel, type BlockStaffing, type CapacityBlock } from '@/lib/schedule/capacity';
+import { SUGGESTED_TEAM_CAPACITY, staffedOfLabel, staffingLabel, type BlockStaffing, type CapacityBlock } from '@/lib/schedule/capacity';
 import { daysLabel, inputCls, Field } from './shared';
 
 // STAFFING CAPACITY — the manager half of automatic Available Shifts (migration 156).
@@ -41,6 +41,7 @@ type Mutate =
 // "Over capacity by 2" and "Availability closed" no louder than their neighbours. Cyan is reserved
 // for what to tap. Exceptions keep their functional colour, and every one of them carries words.
 function toneOf(s: BlockStaffing): string {
+  if (!s.configured) return 'text-tt-yellow';
   if (s.over > 0) return 'text-tt-yellow';
   if (s.closed) return 'text-tt-yellow';
   if (s.available === 0) return 'text-tt-green';
@@ -103,7 +104,7 @@ function BlockEditor({ block, onSave, onCancel }: {
           <input
             type="number" min={0} inputMode="numeric" value={capacity}
             onChange={(e) => setCapacity(e.target.value)}
-            placeholder={`Uses default ${DEFAULT_TEAM_CAPACITY[team as 'host' | 'fulfillment']}`}
+            placeholder="Uses team capacity"
             className={inputCls}
           />
         </Field>
@@ -127,6 +128,84 @@ function BlockEditor({ block, onSave, onCancel }: {
           className="min-h-[44px] flex-1 rounded-xl bg-tt-cyan px-4 text-sm font-semibold text-black transition-colors hover:bg-tt-cyan/90 disabled:cursor-not-allowed disabled:opacity-40"
         >Save block</button>
       </div>
+    </div>
+  );
+}
+
+// ── Team capacity card ────────────────────────────────────────────────────────────────────────
+//
+// Two states, and the difference is the whole point of this change:
+//   NOT CONFIGURED  no number exists. Nothing is advertised to anyone. Says so, and offers the
+//                   one action that fixes it.
+//   CONFIGURED      "10 live setups", editable in place.
+// The editor PREFILLS a suggestion so the manager is not typing into a blank box, but automatic
+// availability starts only when they save — a suggestion on screen is not a configured number.
+
+function TeamCapacityCard({ team, capacity, busy, onSave }: {
+  team: string;
+  capacity: number | null;
+  busy: boolean;
+  onSave: (v: number | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState('');
+  const label = TEAM_LABEL[team] ?? team;
+  const unit = TEAM_UNIT[team] ?? 'stations';
+
+  if (capacity == null && !editing) {
+    return (
+      <div className="rounded-xl border border-tt-border bg-black/20 px-4 py-3">
+        <p className="text-[11px] uppercase tracking-wide text-tt-muted">{label}</p>
+        <p className="mt-1 text-sm font-medium text-tt-yellow">Not configured</p>
+        <p className="mt-1 max-w-[280px] text-xs text-tt-muted">
+          {/* The team is already named above; repeating it here produced "Live Host live setups". */}
+          Set the number of {unit} to automatically calculate available shifts.
+        </p>
+        <button
+          type="button" disabled={busy}
+          onClick={() => { setValue(String(SUGGESTED_TEAM_CAPACITY[team as 'host' | 'fulfillment'] ?? '')); setEditing(true); }}
+          className="mt-3 rounded-lg bg-tt-cyan/15 px-3 py-1.5 text-xs font-semibold text-tt-cyan transition-colors hover:bg-tt-cyan/25 disabled:opacity-50"
+        >Set capacity</button>
+      </div>
+    );
+  }
+
+  if (editing) {
+    return (
+      <div className="rounded-xl border border-tt-border bg-black/20 px-4 py-3">
+        <label htmlFor={`team-capacity-${team}`} className="mb-2 block text-[11px] uppercase tracking-wide text-tt-muted">{label}</label>
+        <div className="flex items-center gap-2">
+          <input
+            id={`team-capacity-${team}`}
+            type="number" min={0} inputMode="numeric" value={value} autoFocus
+            aria-label={`${label} ${unit}`}
+            onChange={(e) => setValue(e.target.value)}
+            className={`${inputCls} w-[110px]`}
+          />
+          <span className="text-[12px] text-tt-muted">{unit}</span>
+        </div>
+        <div className="mt-3 flex gap-2">
+          <button type="button" onClick={() => setEditing(false)}
+            className="min-h-[44px] rounded-xl bg-white/5 px-4 text-sm font-semibold text-tt-muted transition-colors hover:bg-white/10 hover:text-tt-text">Cancel</button>
+          <button
+            type="button" disabled={busy || value === ''}
+            onClick={() => { onSave(Number(value)); setEditing(false); }}
+            className="min-h-[44px] rounded-xl bg-tt-cyan px-4 text-sm font-semibold text-black transition-colors hover:bg-tt-cyan/90 disabled:cursor-not-allowed disabled:opacity-40"
+          >Save capacity</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-tt-border bg-black/20 px-4 py-3">
+      <p className="text-[11px] uppercase tracking-wide text-tt-muted">{label}</p>
+      <p className="mt-1 text-sm font-medium text-tt-text"><span className="tabular-nums">{capacity}</span> {unit}</p>
+      <button
+        type="button" disabled={busy}
+        onClick={() => { setValue(String(capacity)); setEditing(true); }}
+        className="mt-2 rounded-lg bg-white/5 px-3 py-1.5 text-[11px] font-semibold text-tt-muted transition-colors hover:bg-white/10 hover:text-tt-text disabled:opacity-50"
+      >Change</button>
     </div>
   );
 }
@@ -218,8 +297,9 @@ export default function StaffingCapacityPanel({
     if (!data) return null;
     const all = data.days.flatMap((d) => d.blocks);
     if (all.length === 0) return null;
-    const next = all.find((s) => s.over > 0) ?? all.find((s) => s.closed) ?? all.find((s) => s.available > 0) ?? all[0];
-    return `${fmtCalendarDate(next.date)} · ${next.staffed} / ${next.capacity} scheduled · ${staffingLabel(next)}`;
+    const next = all.find((s) => !s.configured)
+      ?? all.find((s) => s.over > 0) ?? all.find((s) => s.closed) ?? all.find((s) => s.available > 0) ?? all[0];
+    return `${fmtCalendarDate(next.date)} · ${staffedOfLabel(next)} · ${staffingLabel(next)}`;
   }, [data]);
 
   const teamsInUse = useMemo(
@@ -246,7 +326,9 @@ export default function StaffingCapacityPanel({
 
         {data && (
           <>
-            {/* ── Team defaults ─────────────────────────────────────────────────────────── */}
+            {/* ── Team capacity ─────────────────────────────────────────────────────────
+                NOT CONFIGURED IS A REAL STATE, not a zero and not a hidden ten. Until the
+                business says how many setups it runs, nothing is advertised and this says so. */}
             <section>
               <h3 className="text-sm font-semibold text-tt-text">Team capacity</h3>
               <p className="mt-1 text-xs text-tt-muted">
@@ -256,28 +338,10 @@ export default function StaffingCapacityPanel({
                 {data.teamDefaults
                   .filter((t) => teamsInUse.length === 0 || teamsInUse.includes(t.team))
                   .map((t) => (
-                    <div key={t.team} className="flex items-end gap-2 rounded-xl border border-tt-border bg-black/20 px-4 py-3">
-                      <div className="w-[110px]">
-                        <label htmlFor={`team-capacity-${t.team}`} className="mb-2 block text-[11px] uppercase tracking-wide text-tt-muted">
-                          {TEAM_LABEL[t.team] ?? t.team}
-                        </label>
-                        <input
-                          id={`team-capacity-${t.team}`}
-                          type="number" min={0} inputMode="numeric" defaultValue={t.capacity}
-                          aria-label={`${TEAM_LABEL[t.team] ?? t.team} ${TEAM_UNIT[t.team] ?? 'stations'}`}
-                          onBlur={(e) => {
-                            const v = e.target.value === '' ? null : Number(e.target.value);
-                            if (v !== t.capacity) void run({ op: 'teamCapacity', team: t.team, capacity: v });
-                          }}
-                          className={inputCls}
-                        />
-                      </div>
-                      {/* The unit lives next to the number, not in the label: a bare "10" with the
-                          label scrolled away says nothing. */}
-                      <span className="pb-3 text-[12px] text-tt-muted">
-                        {TEAM_UNIT[t.team] ?? 'stations'}{t.isDefault ? ' · default' : ''}
-                      </span>
-                    </div>
+                    <TeamCapacityCard
+                      key={t.team} team={t.team} capacity={t.capacity} busy={busy}
+                      onSave={(v) => void run({ op: 'teamCapacity', team: t.team, capacity: v })}
+                    />
                   ))}
               </div>
             </section>
@@ -317,9 +381,11 @@ export default function StaffingCapacityPanel({
                           <span className="ml-2 tabular-nums text-tt-muted">{b.start_time.slice(0, 5)}–{b.end_time.slice(0, 5)}</span>
                         </p>
                         <p className="text-xs text-tt-muted">
-                          {TEAM_LABEL[b.team] ?? b.team} · {daysLabel(b.days_of_week)} · {b.capacity == null
-                            ? `Uses default ${data.teamDefaults.find((t) => t.team === b.team)?.capacity ?? DEFAULT_TEAM_CAPACITY[b.team]}`
-                            : `Capacity ${b.capacity}`}
+                          {TEAM_LABEL[b.team] ?? b.team} · {daysLabel(b.days_of_week)} · {(() => {
+                            if (b.capacity != null) return `Capacity ${b.capacity}`;
+                            const team = data.teamDefaults.find((t) => t.team === b.team)?.capacity ?? null;
+                            return team == null ? 'Capacity not configured' : `Uses team capacity ${team}`;
+                          })()}
                         </p>
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
@@ -358,7 +424,7 @@ export default function StaffingCapacityPanel({
                                     {s.label && <span className="ml-2 text-tt-muted">{s.label}</span>}
                                   </p>
                                   <p className="text-xs">
-                                    <span className="tabular-nums text-tt-muted">{s.staffed} / {s.capacity} scheduled</span>
+                                    <span className="tabular-nums text-tt-muted">{staffedOfLabel(s)}</span>
                                     <span className={`ml-2 font-medium ${toneOf(s)}`}>{staffingLabel(s)}</span>
                                     {s.custom && <span className="ml-2 text-tt-muted">Custom capacity</span>}
                                   </p>

@@ -46,14 +46,14 @@ end $$;
 -- Assert the RPC REFUSES with p_expect, AND that it wrote NOTHING. The non-mutation half is the
 -- point: a refusal that created a shift_instance, or moved the request, is a torn state.
 create or replace function t_refuse_req(p_label text, p_owner uuid, p_request uuid,
-                                        p_expect text, p_default smallint default 3)
+                                        p_expect text)
 returns void language plpgsql as $$
 declare before_r public.shift_requests; after_r public.shift_requests;
         n_before int; n_after int; res jsonb;
 begin
   select * into before_r from public.shift_requests where id = p_request;
   select count(*) into n_before from public.shift_instances;
-  res := public.lensed_approve_shift_request(p_owner, p_request, p_default);
+  res := public.lensed_approve_shift_request(p_owner, p_request);
   select * into after_r from public.shift_requests where id = p_request;
   select count(*) into n_after from public.shift_instances;
 

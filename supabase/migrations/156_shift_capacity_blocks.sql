@@ -371,17 +371,19 @@ commit;
 -- the first write, so the caller can map it to a manager-readable sentence. Everything after the
 -- insert RAISES, so a late failure rolls the whole thing back rather than leaving a torn state.
 --
--- p_default_capacity is passed IN rather than hardcoded: the app constant lives in
--- src/lib/schedule/capacity.ts and is pinned equal to this call site by test, the same reason
--- 130 takes p_pay_period_start instead of re-deriving the pay anchor in PL/pgSQL.
+-- CAPACITY IS EXPLICIT OR IT DOES NOT EXIST. There is deliberately no p_default_capacity argument
+-- and no constant in this file: the chain ends at the owner's team default, and if that is unset
+-- the block is NOT CONFIGURED and this function refuses with CAPACITY_NOT_CONFIGURED. An account
+-- that never told Lensed how many setups it runs must not have shifts approved against a number
+-- nobody chose. (The employee board publishes no opportunity for such a block either, so this
+-- refusal is the server-side backstop rather than the common path.)
 -- ───────────────────────────────────────────────────────────────────────────────────────────────
 begin;
 set local lock_timeout = '3s';
 
 create or replace function public.lensed_approve_shift_request(
-  p_owner            uuid,
-  p_request_id       uuid,
-  p_default_capacity smallint
+  p_owner      uuid,
+  p_request_id uuid
 )
 returns jsonb
 language plpgsql
@@ -403,7 +405,7 @@ declare
   v_new_id     uuid;
   v_superseded integer := 0;
 begin
-  if p_owner is null or p_request_id is null or p_default_capacity is null then
+  if p_owner is null or p_request_id is null then
     raise exception 'INVALID_ARGS';
   end if;
 
@@ -488,7 +490,11 @@ begin
   if v_closed then
     return jsonb_build_object('ok', false, 'reason', 'AVAILABILITY_CLOSED');
   end if;
-  v_capacity := coalesce(v_ovr.capacity, v_block.capacity, v_team_def.capacity, p_default_capacity);
+  -- NO FINAL FALLBACK. null here means nobody has configured a capacity for this block.
+  v_capacity := coalesce(v_ovr.capacity, v_block.capacity, v_team_def.capacity);
+  if v_capacity is null then
+    return jsonb_build_object('ok', false, 'reason', 'CAPACITY_NOT_CONFIGURED');
+  end if;
 
   -- ── 5. The date must not already be in the past (LA business date). ──
   v_today := (now() at time zone 'America/Los_Angeles')::date;
@@ -598,8 +604,8 @@ $body$;
 -- function takes p_owner as an argument and has no auth.uid() to trust, so granting `authenticated`
 -- would let any signed-in user create a shift inside another tenant.
 -- (Registered in SERVICE_ROLE_ONLY in scripts/check-rpc-grants.mjs.)
-revoke execute on function public.lensed_approve_shift_request(uuid, uuid, smallint)
+revoke execute on function public.lensed_approve_shift_request(uuid, uuid)
   from public, anon, authenticated;
-grant execute on function public.lensed_approve_shift_request(uuid, uuid, smallint) to service_role;
+grant execute on function public.lensed_approve_shift_request(uuid, uuid) to service_role;
 
 commit;

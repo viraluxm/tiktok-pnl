@@ -1,6 +1,5 @@
 import 'server-only';
 import type { createAdminClient } from '@/lib/supabase/admin';
-import { DEFAULT_TEAM_CAPACITY } from './capacity';
 
 // THE CAPACITY WRITE GUARD SEAM (migration 157).
 //
@@ -37,11 +36,6 @@ export function isMissingFunction(error: { code?: string | null; message?: strin
   if (code === 'PGRST202' || code === '42883') return true;
   const msg = (error.message ?? '').toLowerCase();
   return msg.includes('could not find the function') || msg.includes('does not exist');
-}
-
-/** The app's capacity constant, marshalled for `p_default_capacity`. One definition, in TypeScript. */
-export function defaultCapacityJson(): Record<string, number> {
-  return { ...DEFAULT_TEAM_CAPACITY };
 }
 
 /** What `lensed_apply_schedule_batch` returns. */
@@ -90,9 +84,6 @@ export async function assignReleasedShift(
     p_owner: input.ownerId,
     p_instance_id: input.instanceId,
     p_employee_id: input.employeeId,
-    // The function resolves which team the employee is on; this is only the final fallback used
-    // when neither a date override, the block, nor a team default names a capacity.
-    p_default_capacity: DEFAULT_TEAM_CAPACITY.host,
   });
   if (!guarded.error) {
     const r = (guarded.data ?? {}) as AssignGuardResult;

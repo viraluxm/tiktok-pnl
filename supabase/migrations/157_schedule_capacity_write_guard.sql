@@ -40,7 +40,8 @@
 -- ONE ALGORITHM, NOT TWO
 -- ═══════════════════════════════════════════════════════════════════════════════════════════════
 -- Every capacity decision below is the SAME one 156 makes, character for character:
---   • effective capacity   coalesce(date override, block, team default, the app constant)
+--   • effective capacity   coalesce(date override, block, team default) — and NULL means NOT
+--                          CONFIGURED, which imposes no limit here and publishes nothing there
 --   • the staffed count    employee_id NOT NULL, status in ('scheduled','claimed'), team from
 --                          employees.role (never shift_instances.role), half-open interval overlap
 --   • the lane lock        pg_advisory_xact_lock on 'lensed_capacity:<owner>:<team>:<date>'
@@ -55,6 +56,8 @@
 --   • Any row on a team/date/span with no active capacity block. It takes no lock at all, so a
 --     fulfillment week and a host week never wait on each other, and an account with no blocks
 --     configured behaves exactly as it does today.
+--   • A block whose capacity is NOT CONFIGURED. No number exists, so there is no ceiling; the team
+--     schedules exactly as it did before this migration, and employees are offered nothing.
 --   • Removals. They only ever lower the count.
 --   • A row that ALREADY occupies that block. Editing the time of someone inside a block, or
 --     re-saving them unchanged, is not an addition. This is what makes "10 / 8 scheduled, over
@@ -80,19 +83,20 @@ set local lock_timeout = '3s';
 -- refused before this function is called and never reaches it; this function adds exactly one new
 -- refusal code, OVER_CAPACITY, which the planner cannot compute because it has no lock.
 --
--- p_default_capacity is the app constant DEFAULT_TEAM_CAPACITY, passed in as {"host":10,...} for
--- the same reason 156 takes p_default_capacity: one definition of "ten setups", in TypeScript.
+-- NO DEFAULT-CAPACITY ARGUMENT, matching 156. A block whose capacity chain resolves to NULL is
+-- NOT CONFIGURED, and an unconfigured block imposes NO LIMIT on a manager's own write: scheduling
+-- must behave for such a team exactly as it does today. (It publishes nothing to employees either,
+-- so there is no availability to protect.) The gate applies only where a number actually exists.
 --
 -- PARTIAL APPLICATION IS THE POINT. A week save that is fine on six days and full on the seventh
 -- writes the six and names the seventh. Planner refusals stay all-or-nothing (nothing is written
 -- and the caller never reaches here); capacity refusals are per-row.
 -- ───────────────────────────────────────────────────────────────────────────────────────────────
 create or replace function public.lensed_apply_schedule_batch(
-  p_owner            uuid,
-  p_upserts          jsonb,
-  p_delete_ids       uuid[],
-  p_cancel_ids       uuid[],
-  p_default_capacity jsonb
+  p_owner      uuid,
+  p_upserts    jsonb,
+  p_delete_ids uuid[],
+  p_cancel_ids uuid[]
 )
 returns jsonb
 language plpgsql
@@ -112,7 +116,6 @@ declare
   v_n            int;
   v_staffed      int;
   v_capacity     int;
-  v_default      int;
   v_already      boolean;
   v_blocked      jsonb;
   v_existing_id  uuid;
@@ -186,7 +189,6 @@ begin
      order by x.shift_date, x.employee_id
   loop
     v_blocked := null;
-    v_default := coalesce((p_default_capacity ->> u.team)::int, 0);
 
     -- Every ACTIVE block this proposed span would sit inside, on this date.
     for blk in
@@ -232,8 +234,11 @@ begin
           where s.user_id = p_owner and s.block_id = blk.id and s.date = u.shift_date),
         blk.capacity,
         (select s.capacity from public.shift_capacity_settings s
-          where s.user_id = p_owner and s.team = u.team and s.block_id is null),
-        v_default);
+          where s.user_id = p_owner and s.team = u.team and s.block_id is null));
+
+      -- NOT CONFIGURED ⇒ NO LIMIT. A team that has not set a number schedules exactly as it did
+      -- before this migration existed; there is no invisible ceiling to trip over.
+      if v_capacity is null then continue; end if;
 
       if v_staffed >= v_capacity then
         v_blocked := jsonb_build_object(
@@ -288,10 +293,9 @@ $body$;
 -- race" branch is unchanged, plus an explicit NO_CAPACITY refusal.
 -- ───────────────────────────────────────────────────────────────────────────────────────────────
 create or replace function public.lensed_assign_released_shift(
-  p_owner            uuid,
-  p_instance_id      uuid,
-  p_employee_id      uuid,
-  p_default_capacity smallint
+  p_owner       uuid,
+  p_instance_id uuid,
+  p_employee_id uuid
 )
 returns jsonb
 language plpgsql
@@ -359,8 +363,10 @@ begin
         where s.user_id = p_owner and s.block_id = blk.id and s.date = v_inst.shift_date),
       blk.capacity,
       (select s.capacity from public.shift_capacity_settings s
-        where s.user_id = p_owner and s.team = v_team and s.block_id is null),
-      p_default_capacity);
+        where s.user_id = p_owner and s.team = v_team and s.block_id is null));
+
+    -- NOT CONFIGURED ⇒ NO LIMIT, as above.
+    if v_capacity is null then continue; end if;
 
     if v_staffed >= v_capacity then
       return jsonb_build_object('ok', false, 'reason', 'NO_CAPACITY',
@@ -385,12 +391,12 @@ $body$;
 -- p_owner explicitly and have no auth.uid() to trust, so granting `authenticated` would let any
 -- signed-in user write shifts inside another tenant.
 -- (Both registered in SERVICE_ROLE_ONLY in scripts/check-rpc-grants.mjs.)
-revoke execute on function public.lensed_apply_schedule_batch(uuid, jsonb, uuid[], uuid[], jsonb)
+revoke execute on function public.lensed_apply_schedule_batch(uuid, jsonb, uuid[], uuid[])
   from public, anon, authenticated;
-grant execute on function public.lensed_apply_schedule_batch(uuid, jsonb, uuid[], uuid[], jsonb) to service_role;
+grant execute on function public.lensed_apply_schedule_batch(uuid, jsonb, uuid[], uuid[]) to service_role;
 
-revoke execute on function public.lensed_assign_released_shift(uuid, uuid, uuid, smallint)
+revoke execute on function public.lensed_assign_released_shift(uuid, uuid, uuid)
   from public, anon, authenticated;
-grant execute on function public.lensed_assign_released_shift(uuid, uuid, uuid, smallint) to service_role;
+grant execute on function public.lensed_assign_released_shift(uuid, uuid, uuid) to service_role;
 
 commit;

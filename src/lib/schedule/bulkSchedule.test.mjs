@@ -315,7 +315,9 @@ console.log('\n12. THE CAPACITY WRITE GUARD (157) — the seam, not the arithmet
   eq('the owner is the session uid, never a client value', rpcCalls[0].args.p_owner, USER);
   eq("the planner's upserts are handed over verbatim", rpcCalls[0].args.p_upserts.length, 1);
   eq('…with the row the planner built', rpcCalls[0].args.p_upserts[0].shift_date, '2026-09-11');
-  eq('the app constant is what SQL falls back to', rpcCalls[0].args.p_default_capacity.host, 10);
+  // CAPACITY IS EXPLICIT: nothing is handed to SQL as a default, so an unconfigured team cannot be
+  // gated against a number nobody chose.
+  check('no default capacity is handed to SQL', !('p_default_capacity' in rpcCalls[0].args), Object.keys(rpcCalls[0].args).join(','));
   eq('counts come from what the function actually wrote', res.counts.created, 1);
   eq('no refusals when nothing was full', res.refusals.length, 0);
 

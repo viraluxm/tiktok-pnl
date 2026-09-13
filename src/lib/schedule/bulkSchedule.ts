@@ -6,7 +6,7 @@ import {
   type ScheduleEntry, type ExistingInstance, type PlanEmployee, type ScheduleCounts, type ScheduleRefusal,
   type SchedulePlan,
 } from './schedulePlan';
-import { defaultCapacityJson, isMissingFunction, type BatchGuardResult } from './capacityGuard';
+import { isMissingFunction, type BatchGuardResult } from './capacityGuard';
 
 // THE bulk scheduling write path. Every new scheduling surface (the employee Schedule Builder,
 // the day/crew modal, anything later) funnels through applyScheduleBatch so there is exactly one
@@ -130,7 +130,6 @@ export async function applyScheduleBatch(input: {
     p_upserts: plan.upserts,
     p_delete_ids: plan.deleteIds,
     p_cancel_ids: plan.cancelIds,
-    p_default_capacity: defaultCapacityJson(),
   });
   if (!guarded.error) {
     const r = (guarded.data ?? {}) as BatchGuardResult;

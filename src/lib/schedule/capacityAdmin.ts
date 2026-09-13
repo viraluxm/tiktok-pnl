@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { addDaysISO, laTodayISO } from './timezone';
 import { CapacityError, loadOwnerStaffing } from './capacityBoard';
 import {
-  DEFAULT_TEAM_CAPACITY, blockInstants, CAPACITY_TEAMS,
+  blockInstants, CAPACITY_TEAMS,
   type BlockStaffing, type CapacityBlock, type CapacityTeam, type StaffingOutlookPayload,
 } from './capacity';
 
@@ -42,14 +42,11 @@ export async function getStaffingOutlook(ownerId: string, opts: { from?: string;
     blocks,
     settings,
     days,
+    // `capacity: null` means NOT CONFIGURED, and the panel says so in words. There is no constant
+    // standing in for a number the business never told us.
     teamDefaults: CAPACITY_TEAMS.map((team) => {
       const row = settings.find((s) => s.block_id == null && s.team === team) ?? null;
-      return {
-        team,
-        capacity: row?.capacity ?? DEFAULT_TEAM_CAPACITY[team],
-        closed: Boolean(row?.closed),
-        isDefault: row?.capacity == null,
-      };
+      return { team, capacity: row?.capacity ?? null, closed: Boolean(row?.closed) };
     }),
   };
 }
@@ -150,7 +147,8 @@ export async function setTeamCapacity(ownerId: string, team: string, capacity: n
   if (existing.error) throw new CapacityError('READ_FAILED', existing.error.message);
 
   // A row that names neither a number nor a closure has no meaning (the DB CHECK says so too), so
-  // clearing both DELETES the row and the team falls back to DEFAULT_TEAM_CAPACITY.
+  // clearing both DELETES the row and the team goes back to NOT CONFIGURED — which advertises
+  // nothing, rather than falling back to some number nobody chose.
   if (capacity == null && !closed) {
     if (existing.data) {
       const { error } = await admin.from('shift_capacity_settings').delete().eq('id', existing.data.id).eq('user_id', ownerId);
@@ -245,7 +243,8 @@ export interface ShiftRequestRow {
   requested_at: string;
   /** Staffing for that block+date AT READ TIME, so the manager decides against current numbers. */
   staffed: number;
-  capacity: number;
+  /** null = no configured capacity for that block; approval will refuse. */
+  capacity: number | null;
   available: number;
   closed: boolean;
 }
@@ -290,7 +289,7 @@ export async function listShiftRequests(ownerId: string): Promise<ShiftRequestRo
       ends_at: r.ends_at as string,
       requested_at: r.created_at as string,
       staffed: s?.staffed ?? 0,
-      capacity: s?.capacity ?? 0,
+      capacity: s?.capacity ?? null,
       available: s?.available ?? 0,
       closed: s?.closed ?? false,
     };
@@ -310,6 +309,7 @@ const APPROVE_MESSAGES: Record<string, string> = {
   EMPLOYEE_UNAVAILABLE: 'That employee is no longer active.',
   WRONG_TEAM: 'That employee is not on this block’s team.',
   NO_CAPACITY: 'That block is fully staffed — there is no room for another shift.',
+  CAPACITY_NOT_CONFIGURED: 'Set a capacity for this team before approving shift requests.',
   EMPLOYEE_DOUBLE_BOOKED: 'That employee is already scheduled that day.',
 };
 
@@ -322,7 +322,8 @@ const APPROVE_MESSAGES: Record<string, string> = {
  * NO_CAPACITY refusal rather than 11/10 scheduled. Nothing is trusted from this call site except
  * the owner, which is the session uid.
  *
- * p_default_capacity carries the app constant into SQL so there is one definition of "10 setups".
+ * The RPC takes NO default-capacity argument: capacity is explicit or it does not exist, and an
+ * unconfigured block refuses with CAPACITY_NOT_CONFIGURED rather than inventing a number.
  * rpc-grants: lensed_approve_shift_request
  */
 export async function approveShiftRequest(input: { ownerId: string; requestId: string }): Promise<{
@@ -330,18 +331,9 @@ export async function approveShiftRequest(input: { ownerId: string; requestId: s
 }> {
   if (!input.ownerId) throw new CapacityError('OWNER_REQUIRED', 'Owner scope is required.');
   const admin = createAdminClient();
-  // The default is per-team, and the request knows its team. Read it owner-scoped first so the
-  // constant handed to SQL matches the block being approved.
-  const req = await admin
-    .from('shift_requests').select('team').eq('id', input.requestId).eq('user_id', input.ownerId).maybeSingle();
-  if (req.error) throw new CapacityError('READ_FAILED', req.error.message);
-  if (!req.data) throw new CapacityError('REQUEST_NOT_FOUND', APPROVE_MESSAGES.REQUEST_NOT_FOUND);
-  const team = (req.data.team === 'fulfillment' ? 'fulfillment' : 'host') as CapacityTeam;
-
   const { data, error } = await admin.rpc('lensed_approve_shift_request', {
     p_owner: input.ownerId,
     p_request_id: input.requestId,
-    p_default_capacity: DEFAULT_TEAM_CAPACITY[team],
   });
   if (error) throw new CapacityError('APPROVE_FAILED', error.message);
   const r = (data ?? {}) as { ok?: boolean; reason?: string; shift_instance_id?: string; employee_id?: string; superseded?: number };

@@ -1,6 +1,7 @@
 'use client';
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { fmtCalendarDate } from '@/lib/schedule/format';
 import type { ScheduleEntry, ScheduleCounts, ScheduleRefusal } from '@/lib/schedule/schedulePlan';
 
 // The one client mutation for planned shifts. Shared by the employee Schedule Builder and the
@@ -38,6 +39,34 @@ export class ScheduleRefusedError extends Error {
     this.name = 'ScheduleRefusedError';
     this.refusals = refusals;
   }
+}
+
+/**
+ * THE PARTIAL-SAVE SENTENCE. Returns null when everything asked for was written.
+ *
+ * A capacity refusal (157) arrives on a SUCCESSFUL save: the days that fit are already in the
+ * database and the ones that did not are not. So the manager must never see a bare success, and
+ * must never see a bare failure either — both are lies about what is now on the schedule. This
+ * says what landed, how much did not, and enough about the first casualty to act on it: WHO and
+ * WHICH DAY. Anything more is a list nobody reads.
+ *
+ * `nameOf` is supplied by the caller because only it knows the crew it just scheduled. Without it
+ * the sentence still names the day, which is the minimum a manager needs to find the row again.
+ */
+export function summarisePartialSave(
+  result: Pick<ScheduleBulkResult, 'created' | 'updated' | 'refusals'>,
+  nameOf?: (employeeId: string) => string | undefined,
+): string | null {
+  const refusals = result.refusals ?? [];
+  if (refusals.length === 0) return null;
+  const saved = (result.created ?? 0) + (result.updated ?? 0);
+  const first = refusals[0];
+  const who = nameOf?.(first.employeeId);
+  const where = `${who ? `${who} on ` : ''}${fmtCalendarDate(first.date)}`;
+  const more = refusals.length - 1;
+  const head = saved > 0 ? `${saved} shift${saved === 1 ? '' : 's'} scheduled. ` : '';
+  const tail = more > 0 ? `, plus ${more} more.` : '.';
+  return `${head}${refusals.length} shift${refusals.length === 1 ? '' : 's'} could not be scheduled: ${where} is fully staffed${tail}`;
 }
 
 export function summariseRefusals(refusals: ScheduleRefusal[]): string {

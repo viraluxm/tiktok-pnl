@@ -17,7 +17,6 @@ import {
   capacityOutlook, CARLOS, JUAN, MADISON, confirmationTiles, type DemoWorld, type Mutation, type PortalClient,
 } from './fixtures';
 import { laTodayISO, addDaysISO } from '@/lib/schedule/timezone';
-import { DEFAULT_TEAM_CAPACITY } from '@/lib/schedule/capacity';
 
 // The interactive half of /preview/employee-portal. ZERO NETWORK: the PortalClient below resolves
 // every call from `world`, and every action is a pure DemoWorld → DemoWorld transition.
@@ -99,7 +98,7 @@ export default function PortalPreview() {
     days: Array.from({ length: 15 }, (_, n) => addDaysISO(today, n)).map((date) => ({ date, blocks: outlook.filter((s) => s.date === date) })),
     teamDefaults: (['host', 'fulfillment'] as const).map((team) => {
       const row = world.capacitySettings.find((c) => c.block_id == null && c.team === team) ?? null;
-      return { team, capacity: row?.capacity ?? DEFAULT_TEAM_CAPACITY[team], closed: Boolean(row?.closed), isDefault: row?.capacity == null };
+      return { team, capacity: row?.capacity ?? null, closed: Boolean(row?.closed) };
     }),
   };
 
@@ -125,6 +124,12 @@ export default function PortalPreview() {
           <button type="button" onClick={() => void apply(act.toggleClockedIn())} className={`${chip} bg-white/[0.06] text-tt-text hover:bg-white/10`}>
             {world.clockedInAt ? 'Clock Carlos out' : 'Clock Carlos in'}
           </button>
+          {/* Capacity is EXPLICIT: with no configured number the portal must offer nothing at all. */}
+          <button
+            type="button"
+            onClick={() => void apply(act.setTeamCapacity('host', world.capacitySettings.some((c) => c.block_id == null && c.team === 'host') ? null : 4))}
+            className={`${chip} bg-white/[0.06] text-tt-text hover:bg-white/10`}
+          >{world.capacitySettings.some((c) => c.block_id == null && c.team === 'host') ? 'Clear host capacity' : 'Set host capacity'}</button>
           <button type="button" onClick={() => void apply(act.reset())} className={`${chip} bg-white/[0.06] text-tt-muted hover:bg-white/10 hover:text-tt-text`}>Reset</button>
         </div>
       </div>

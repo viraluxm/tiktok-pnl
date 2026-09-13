@@ -94,6 +94,21 @@ console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
   check('capacityBoard: blocks are filtered to that team server-side', /blockQ\.eq\('team', team\)/.test(cb));
   check('capacityBoard: settings are filtered to that team server-side', /settingQ\.eq\('team', team\)/.test(cb));
   check('capacityBoard: an unrecognised role gets NO board at all', /if \(!team\) return \[\];/.test(cb));
+  // CAPACITY IS EXPLICIT. An unconfigured block publishes nothing — not a disabled row, nothing.
+  check('capacityBoard: an unconfigured block publishes no opportunity', /if \(!s\.configured\) continue;/.test(cb));
+  // …and that filter lives in the CAPACITY loop only, so a coworker's offered shift is untouched
+  // by whether anyone has configured a number. Offers come from getAvailableShifts, which knows
+  // nothing about capacity, and the snapshot concatenates the two lists.
+  const snapSrc = strip(read(join(lib, 'portalSnapshot.ts')));
+  check('portalSnapshot: offers and capacity are separate sources',
+    /getAvailableShifts\(employee, now\)/.test(snapSrc) && /getCapacityAvailability\(employee, now\)/.test(snapSrc));
+  check('portalSnapshot: the offer list is never filtered by capacity',
+    !/kind: 'offer'[\s\S]{0,400}?configured/.test(snapSrc));
+  const capSrc = strip(read(join(lib, 'capacity.ts')));
+  check('capacity: the resolution chain ends in null, not a constant',
+    /capacity: local \?\? t\?\.capacity \?\? null/.test(capSrc));
+  check('capacity: the suggested number is never read during resolution',
+    !/resolveCapacity[\s\S]{0,600}?SUGGESTED_TEAM_CAPACITY/.test(capSrc));
   check('capacityBoard: the request insert takes employee_id from the token employee, never the body',
     /employee_id: employee\.id/.test(cb) && !/employee_id: (body|input)\./.test(cb));
   check('capacityBoard: the request insert takes the owner from the token employee', /user_id: owner/.test(cb));

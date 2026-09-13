@@ -180,8 +180,12 @@ export async function getCapacityAvailability(employee: Employee, now: Date = ne
     // viewer has REQUESTED stays visible, because "Shift Requested" is the state they need to see.
     // Past / started / wrong-team / inactive opportunities are dropped rather than annotated: they
     // are not decisions the employee can act on.
+    // AN UNCONFIGURED BLOCK PUBLISHES NOTHING. Not "0 shifts available" — nothing at all. The
+    // business has not said how many setups it runs, so there is no shift to offer, and an
+    // employee must never see one invented from a default.
+    if (!s.configured) continue;
     if (code === 'PAST_DATE' || code === 'ALREADY_STARTED' || code === 'WRONG_TEAM' || code === 'INACTIVE_EMPLOYEE') continue;
-    if (!requestId && (code === 'NO_CAPACITY' || code === 'AVAILABILITY_CLOSED')) continue;
+    if (!requestId && (code === 'NO_CAPACITY' || code === 'AVAILABILITY_CLOSED' || code === 'CAPACITY_NOT_CONFIGURED')) continue;
     out.push({
       block_id: s.block_id,
       shift_date: s.date,

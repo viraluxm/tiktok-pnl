@@ -4,7 +4,7 @@ import { payPeriodStartFor } from '@/lib/employees';
 import { laWallTimeToUtc, addDaysISO, laTodayISO } from './timezone';
 import { ScheduleError } from './release';
 import { planAdminShift, crossesMidnight, planShiftRemoval, SHIFT_REMOVAL_MESSAGES } from './eligibility';
-import { assignReleasedShift, defaultCapacityJson, isMissingFunction, OVER_CAPACITY_MESSAGE, type BatchGuardResult } from './capacityGuard';
+import { assignReleasedShift, isMissingFunction, OVER_CAPACITY_MESSAGE, type BatchGuardResult } from './capacityGuard';
 
 // Admin one-time shifts (migration 090) + OT-claim approve/reject. Server-side; the routes gate on
 // app_metadata.role === 'admin'. Nothing here is payable — shift_instances never feed pay.
@@ -81,8 +81,7 @@ export async function postOneTimeShift(input: PostShiftInput): Promise<{ id: str
       }],
       p_delete_ids: [],
       p_cancel_ids: [],
-      p_default_capacity: defaultCapacityJson(),
-    });
+      });
     if (!guarded.error) {
       const r = (guarded.data ?? {}) as BatchGuardResult;
       if ((r.refusals ?? []).length > 0) throw new ScheduleError('OVER_CAPACITY', OVER_CAPACITY_MESSAGE);

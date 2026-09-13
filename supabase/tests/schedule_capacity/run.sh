@@ -99,9 +99,9 @@ for want in 'COL shift_capacity_blocks.days_of_week' 'COL shift_capacity_setting
             'idx_shift_requests_one_pending_per_day' 'idx_shift_instances_owner_span' \
             'RLS shift_capacity_blocks t' 'RLS shift_capacity_settings t' 'RLS shift_requests t' \
             'POL shift_requests shift_requests_own_rows' \
-            'lensed_approve_shift_request(uuid,uuid,smallint) sec=definer cfg=search_path=public' \
-            'lensed_apply_schedule_batch(uuid,jsonb,uuid[],uuid[],jsonb) sec=definer cfg=search_path=public' \
-            'lensed_assign_released_shift(uuid,uuid,uuid,smallint) sec=definer cfg=search_path=public'; do
+            'lensed_approve_shift_request(uuid,uuid) sec=definer cfg=search_path=public' \
+            'lensed_apply_schedule_batch(uuid,jsonb,uuid[],uuid[]) sec=definer cfg=search_path=public' \
+            'lensed_assign_released_shift(uuid,uuid,uuid) sec=definer cfg=search_path=public'; do
   grep -qF "$want" /tmp/cap_after.$$ || { echo "  ✗ MISSING from catalog: $want"; FAILED=1; }
 done
 echo "  ✓ all expected objects present"
@@ -128,7 +128,7 @@ psqlf -q < "$SCRIPT_DIR/test_write_guard.sql" 2>&1 | sed 's/^psql:[^ ]* NOTICE: 
 
 # ── GRANTS ─────────────────────────────────────────────────────────────────────────────────────
 echo "── grants: service_role ONLY ──"
-FN='public.lensed_approve_shift_request(uuid,uuid,smallint)'
+FN='public.lensed_approve_shift_request(uuid,uuid)'
 for role in service_role authenticated anon public; do
   got=$(psqlq -c "select has_function_privilege('$role','$FN','execute')")
   want=$([ "$role" = "service_role" ] && echo t || echo f)
@@ -137,12 +137,12 @@ for role in service_role authenticated anon public; do
 done
 for role in authenticated anon; do
   out=$(docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA -c \
-        "set role $role; select public.lensed_approve_shift_request('$OWNER_A'::uuid, gen_random_uuid(), 3::smallint);" 2>&1 || true)
+        "set role $role; select public.lensed_approve_shift_request('$OWNER_A'::uuid, gen_random_uuid());" 2>&1 || true)
   case "$out" in *"permission denied for function"*) echo "  ✓ SET ROLE $role → permission denied";;
                  *) echo "  ✗ SET ROLE $role was NOT blocked: $out"; FAILED=1;; esac
 done
 out=$(docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA -c \
-      "set role service_role; select public.lensed_approve_shift_request('$OWNER_A'::uuid, gen_random_uuid(), 3::smallint);" 2>&1 || true)
+      "set role service_role; select public.lensed_approve_shift_request('$OWNER_A'::uuid, gen_random_uuid());" 2>&1 || true)
 case "$out" in *REQUEST_NOT_FOUND*) echo "  ✓ SET ROLE service_role → executes under SECURITY DEFINER";;
                *) echo "  ✗ service_role call failed: $out"; FAILED=1;; esac
 
@@ -168,7 +168,7 @@ BEFORE=$(psqlq -c "select staffed_in('$OWNER_A'::uuid,'$NIGHT'::uuid, date '2027
 
 race(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA <<SQL
 begin;
-select '$1 -> '||public.lensed_approve_shift_request('$OWNER_A'::uuid,(select v from race_ids where k='$2'), 3::smallint)::text;
+select '$1 -> '||public.lensed_approve_shift_request('$OWNER_A'::uuid,(select v from race_ids where k='$2'))::text;
 select pg_sleep(1.5);
 commit;
 SQL
@@ -205,7 +205,7 @@ BEFORE=$(psqlq -c "select staffed_in('$OWNER_A'::uuid,'$NIGHT'::uuid, date '2027
 
 approve_race(){ docker exec -i "$CONTAINER" psql -U postgres -d "$DB" -tA <<SQL
 begin;
-select 'approve -> '||public.lensed_approve_shift_request('$OWNER_A'::uuid,(select v from race_ids where k='r1'), 3::smallint)::text;
+select 'approve -> '||public.lensed_approve_shift_request('$OWNER_A'::uuid,(select v from race_ids where k='r1'))::text;
 select pg_sleep(1.5);
 commit;
 SQL
@@ -218,7 +218,7 @@ select 'batch -> '||public.lensed_apply_schedule_batch('$OWNER_A'::uuid,
     'starts_at',(date '2027-07-21' + time '18:00') at time zone 'America/Los_Angeles',
     'ends_at',(date '2027-07-22' + time '02:00') at time zone 'America/Los_Angeles',
     'status','scheduled','source','admin_open','shift_rule_id',null,'store_id',null,'role','host')),
-  '{}', '{}', '{"host":3}'::jsonb)::text;
+  '{}', '{}')::text;
 select pg_sleep(1.5);
 commit;
 SQL
@@ -249,7 +249,7 @@ select '$1 -> '||public.lensed_apply_schedule_batch('$OWNER_A'::uuid,
     'starts_at',(date '2027-07-28' + time '18:00') at time zone 'America/Los_Angeles',
     'ends_at',(date '2027-07-29' + time '02:00') at time zone 'America/Los_Angeles',
     'status','scheduled','source','admin_open','shift_rule_id',null,'store_id',null,'role','host')),
-  '{}', '{}', '{"host":3}'::jsonb)::text;
+  '{}', '{}')::text;
 select pg_sleep(1.5);
 commit;
 SQL

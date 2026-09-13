@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import type { Employee } from '@/types';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
-import { useScheduleBulk, ScheduleRefusedError, summariseRefusals } from '@/hooks/useScheduleBulk';
+import { useScheduleBulk, ScheduleRefusedError, summarisePartialSave } from '@/hooks/useScheduleBulk';
 import { laTodayISO, addDaysISO } from '@/lib/schedule/timezone';
 import { fmtMonthDay } from '@/lib/schedule/format';
 import {
@@ -217,13 +217,11 @@ export default function EmployeeScheduleBuilder({
       }
       const result = await apply.mutateAsync({ entries });
       onSaved?.(result, weekCount);
-      // A capacity refusal (157) is not a failed save: the other days landed. Name the ones that
-      // did not, in the same error box a planner refusal uses, rather than showing an unqualified
+      // A capacity refusal (157) is not a failed save: the other days landed. Say what landed AND
+      // what did not, in the same box a planner refusal uses, rather than showing an unqualified
       // success step for a week that is not fully saved.
-      if (result.refusals.length > 0) {
-        setError(summariseRefusals(result.refusals));
-        return;
-      }
+      const partial = summarisePartialSave(result, () => employee.name);
+      if (partial) { setError(partial); return; }
       // Success step instead of an immediate close: the manager's next move is almost always to
       // send the person their link, and that link already exists — see handleCopyLink.
       setSaved({ scheduled: summariseWeek(state, week, today).scheduled, weekCount });

@@ -32,7 +32,7 @@ $$;
 create or replace function batch(p_ups jsonb, p_del uuid[] default '{}', p_can uuid[] default '{}')
 returns jsonb language sql as $$
   select public.lensed_apply_schedule_batch(
-    'a0000000-0000-4000-8000-000000000001'::uuid, p_ups, p_del, p_can, '{"host":3,"fulfillment":0}'::jsonb);
+    'a0000000-0000-4000-8000-000000000001'::uuid, p_ups, p_del, p_can);
 $$;
 
 -- ── 3. A TEAM WITH NO CAPACITY BLOCK IS UNAFFECTED ────────────────────────────────────────────
@@ -218,7 +218,7 @@ begin
     staffed_in('a0000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001', date '2027-08-18')::text, '3');
 
   res := lensed_assign_released_shift('a0000000-0000-4000-8000-000000000001', v_inst,
-                                      'e7777777-0000-4000-8000-000000000007', 3::smallint);
+                                      'e7777777-0000-4000-8000-000000000007');
   perform t_eq('assigning it into a full block is refused', res->>'reason', 'NO_CAPACITY');
   perform t_eq('…and the row is untouched', (select status from shift_instances where id = v_inst), 'released');
   perform t_eq('…and the floor is still 3 of 3',
@@ -228,7 +228,7 @@ begin
   perform batch('[]'::jsonb, array(select id from shift_instances
                   where shift_date = date '2027-08-18' and employee_id = 'e3333333-0000-4000-8000-000000000003'));
   res := lensed_assign_released_shift('a0000000-0000-4000-8000-000000000001', v_inst,
-                                      'e7777777-0000-4000-8000-000000000007', 3::smallint);
+                                      'e7777777-0000-4000-8000-000000000007');
   perform t_eq('with room, the assignment succeeds', res->>'ok', 'true');
   perform t_eq('…the row is claimed by that employee',
     (select employee_id::text from shift_instances where id = v_inst), 'e7777777-0000-4000-8000-000000000007');
@@ -237,13 +237,13 @@ begin
   -- Replay. ORDER MATTERS and this test pins it: capacity is checked BEFORE the CAS, exactly as
   -- 156's approval does, so with the block full again the replay reports NO_CAPACITY.
   res := lensed_assign_released_shift('a0000000-0000-4000-8000-000000000001', v_inst,
-                                      'e1111111-0000-4000-8000-000000000001', 3::smallint);
+                                      'e1111111-0000-4000-8000-000000000001');
   perform t_eq('a replay into a now-full block is refused for capacity first', res->>'reason', 'NO_CAPACITY');
   -- Free a setup so the CAS itself is what refuses: the row is no longer 'released'.
   perform batch('[]'::jsonb, array(select id from shift_instances
                   where shift_date = date '2027-08-18' and employee_id = 'e2222222-0000-4000-8000-000000000002'));
   res := lensed_assign_released_shift('a0000000-0000-4000-8000-000000000001', v_inst,
-                                      'e1111111-0000-4000-8000-000000000001', 3::smallint);
+                                      'e1111111-0000-4000-8000-000000000001');
   perform t_eq('with room, the replay loses the CAS instead of writing twice', res->>'reason', 'ALREADY_CLAIMED');
 end $$;
 
@@ -255,10 +255,51 @@ begin
   res := public.lensed_apply_schedule_batch(
     'a0000000-0000-4000-8000-000000000001'::uuid,
     jsonb_build_array(up('e5555555-0000-4000-8000-000000000005', date '2027-09-01', time '18:00', time '02:00')),
-    '{}', '{}', '{"host":3}'::jsonb);
+    '{}', '{}');
   perform t_eq('a foreign employee is silently not written', res->>'created', '0');
   perform t_eq('…and no row exists for them',
     (select count(*) from shift_instances where employee_id = 'e5555555-0000-4000-8000-000000000005')::text, '0');
+end $$;
+
+-- ── NOT CONFIGURED IMPOSES NO LIMIT ON A MANAGER WRITE ────────────────────────────────────────
+-- An account that never told Lensed how many setups it runs must schedule exactly as it did before
+-- any of this existed. No ceiling, no refusal, no lock that could surprise anyone.
+do $$
+declare res jsonb; n int;
+begin
+  delete from shift_instances where shift_date = date '2027-09-08';
+  delete from shift_capacity_settings where block_id is null and team = 'host';   -- unconfigure
+  res := batch(jsonb_build_array(
+    up('e1111111-0000-4000-8000-000000000001', date '2027-09-08', time '18:00', time '02:00'),
+    up('e2222222-0000-4000-8000-000000000002', date '2027-09-08', time '18:00', time '02:00'),
+    up('e3333333-0000-4000-8000-000000000003', date '2027-09-08', time '18:00', time '02:00'),
+    up('e7777777-0000-4000-8000-000000000007', date '2027-09-08', time '18:00', time '02:00')));
+  perform t_eq('unconfigured: all four are written, with no ceiling to trip over', res->>'created', '4');
+  perform t_eq('unconfigured: nothing is refused', jsonb_array_length(res->'refusals')::text, '0');
+  perform t_eq('unconfigured: four people really are on the floor',
+    staffed_in('a0000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001', date '2027-09-08')::text, '4');
+
+  -- The legacy board is unconstrained too while there is no number.
+  declare v_inst uuid; r2 jsonb;
+  begin
+    insert into shift_instances(user_id, employee_id, shift_date, starts_at, ends_at, status, source, released_at, role)
+    values ('a0000000-0000-4000-8000-000000000001', null, date '2027-09-08',
+            (date '2027-09-08' + time '18:00') at time zone 'America/Los_Angeles',
+            (date '2027-09-09' + time '02:00') at time zone 'America/Los_Angeles',
+            'released', 'admin_open', now(), 'host')
+    returning id into v_inst;
+    r2 := lensed_assign_released_shift('a0000000-0000-4000-8000-000000000001', v_inst,
+                                       'e6666666-0000-4000-8000-000000000006');
+    perform t_eq('unconfigured: the legacy board assigns with no capacity check', r2->>'ok', 'true');
+  end;
+
+  -- Configure it, and the ceiling appears immediately with no deploy.
+  insert into shift_capacity_settings(user_id, team, block_id, date, capacity)
+    values ('a0000000-0000-4000-8000-000000000001','host', null, null, 3);
+  res := batch(jsonb_build_array(up('e4444444-0000-4000-8000-000000000004', date '2027-09-08', time '18:00', time '02:00')));
+  perform t_eq('configuring a capacity turns the guard on at once', res->'refusals'->0->>'code', 'OVER_CAPACITY');
+  perform t_eq('…and nobody already scheduled was removed',
+    staffed_in('a0000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001', date '2027-09-08')::text, '4');
 end $$;
 
 -- ── HISTORICAL BEHAVIOUR ──────────────────────────────────────────────────────────────────────

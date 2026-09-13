@@ -19,7 +19,7 @@
 begin;
 set local lock_timeout = '3s';
 
-drop function if exists public.lensed_approve_shift_request(uuid, uuid, smallint);
+drop function if exists public.lensed_approve_shift_request(uuid, uuid);
 
 commit;
 

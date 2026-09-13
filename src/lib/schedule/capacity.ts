@@ -15,8 +15,16 @@
 // anywhere in this feature. For a block on a date:
 //
 //     effective_capacity = override.capacity ?? block.capacity ?? teamDefault.capacity
-//                                            ?? DEFAULT_TEAM_CAPACITY[block.team]
-//     available          = closed ? 0 : max(0, effective_capacity - staffed)
+//     available          = effective_capacity == null ? 0            // NOT CONFIGURED
+//                        : closed ? 0
+//                        : max(0, effective_capacity - staffed)
+//
+// ── CAPACITY IS EXPLICIT, NEVER IMPLIED ───────────────────────────────────────────────────────
+// There is deliberately NO final fallback constant. An account that has not told Lensed how many
+// Live Host setups it runs advertises NOTHING: publishing shifts off an invisible global default
+// would have every new tenant offering ten setups it may not own, and the first anyone hears of it
+// is an employee asking for a shift that does not exist. "Not configured" is a real state the
+// manager can see and fix, not a number quietly standing in for one.
 //
 // ── WHY OVERLAP, NOT EXACT (start,end) GROUPING ───────────────────────────────────────────────
 // Capacity means SIMULTANEOUS setups, and every scheduling input in the app is a free `<input
@@ -45,23 +53,17 @@ export type CapacityTeam = 'host' | 'fulfillment';
 export const CAPACITY_TEAMS: readonly CapacityTeam[] = ['host', 'fulfillment'] as const;
 
 /**
- * The FINAL fallback headcount, used only when neither the date override, nor the block, nor the
- * owner's team default names a number. Viralux runs ten Live Host setups.
+ * THE EDITOR'S PREFILL, AND NOTHING ELSE.
  *
- * Lives in TypeScript because that is where this repo keeps its business constants (BUSINESS_TZ,
- * DROP_CAP, PAY_ANCHOR) and because 085 explicitly rejected per-store configuration columns for the
- * same reason. It is NOT the manager-editable number — that is the team default row in
- * shift_capacity_settings, which a manager edits in the Staffing capacity panel. This constant is
- * only what a brand-new account falls back to before anyone has set one.
- *
- * lensed_approve_shift_request takes it as p_default_capacity rather than hardcoding it in SQL, so
- * there is exactly one definition.
+ * This number is what the "Set capacity" field starts at so a manager is not typing into a blank
+ * box. It is NOT part of resolveCapacity, it is NOT passed to any RPC, and it can never make a
+ * block advertise a shift: until someone opens that field and SAVES, the team has no capacity and
+ * publishes nothing. Renamed from DEFAULT_TEAM_CAPACITY precisely so it cannot drift back into the
+ * resolution chain — grep it and every hit should be a form default.
  */
-export const DEFAULT_TEAM_CAPACITY: Record<CapacityTeam, number> = {
+export const SUGGESTED_TEAM_CAPACITY: Record<CapacityTeam, number> = {
   host: 10,
-  // Fulfillment has no capacity-driven board until a manager configures one. A default of 0 means
-  // "nothing is advertised", never "unlimited" — availability must fail CLOSED.
-  fulfillment: 0,
+  fulfillment: 4,
 };
 
 /** The SQL role→team mapping in migration 156, restated. Pinned equal by capacity.test.mjs. */
@@ -78,7 +80,7 @@ export interface CapacityBlock {
   /** LA wall clock 'HH:MM' or 'HH:MM:SS'. */
   start_time: string;
   end_time: string;
-  /** null = inherit the team default, then DEFAULT_TEAM_CAPACITY. */
+  /** null = inherit the team default. If that is unset too, the block is NOT CONFIGURED. */
   capacity: number | null;
   active: boolean;
 }
@@ -140,7 +142,8 @@ export function spansOverlap(aStart: string, aEnd: string, bStart: string, bEnd:
 // ── Capacity resolution ───────────────────────────────────────────────────────────────────────
 
 export interface ResolvedCapacity {
-  capacity: number;
+  /** null = nobody has configured a number for this block. It advertises nothing. */
+  capacity: number | null;
   closed: boolean;
   /**
    * true when THIS block or THIS date names its own number — i.e. the manager deliberately set
@@ -156,9 +159,12 @@ export interface ResolvedCapacity {
 /**
  * Resolve the effective capacity for a block on a date.
  *
- * Precedence: date override → block → owner's team default → DEFAULT_TEAM_CAPACITY.
- * `closed` is the OR of the date override and the team default: closing a team closes it, and
- * closing one date closes that date, and neither can silently re-open the other.
+ * Precedence: date override → block → owner's team default → NOT CONFIGURED.
+ * The chain ends in null, never in a constant. See the header: an unconfigured team advertises
+ * nothing rather than guessing a number on the business's behalf.
+ *
+ * `closed` is the OR of the date override and the team default: closing a team closes it, closing
+ * one date closes that date, and neither can silently re-open the other.
  */
 export function resolveCapacity(input: {
   block: Pick<CapacityBlock, 'team' | 'capacity'>;
@@ -168,9 +174,8 @@ export function resolveCapacity(input: {
   const o = input.override ?? null;
   const t = input.teamDefault ?? null;
   const local = o?.capacity ?? input.block.capacity ?? null;      // set on this date or this block
-  const explicit = local ?? t?.capacity ?? null;
   return {
-    capacity: explicit ?? DEFAULT_TEAM_CAPACITY[input.block.team],
+    capacity: local ?? t?.capacity ?? null,
     closed: Boolean(o?.closed) || Boolean(t?.closed),
     custom: local != null,
   };
@@ -221,7 +226,10 @@ export interface BlockStaffing {
   ends_at: string;
   /** planned span in hours, to one decimal — never a pay figure. */
   hours: number;
-  capacity: number;
+  /** null = NOT CONFIGURED. The block exists and can be staffed; it just advertises nothing. */
+  capacity: number | null;
+  /** false when nobody has set a number for this block. Drives the manager's "Not configured". */
+  configured: boolean;
   staffed: number;
   /** max(0, capacity - staffed). NEVER negative — an over-staffed block advertises nothing. */
   available: number;
@@ -268,11 +276,14 @@ export function blockStaffingOn(input: {
     ends_at,
     hours: Math.round(((Date.parse(ends_at) - Date.parse(starts_at)) / 3_600_000) * 10) / 10,
     capacity,
+    configured: capacity != null,
     staffed,
-    // CLAMPED AT ZERO. Reducing capacity below current staffing must never surface as a negative
-    // number of shifts, and must never remove anybody — see `over` for the manager-side signal.
-    available: closed ? 0 : Math.max(0, capacity - staffed),
-    over: Math.max(0, staffed - capacity),
+    // NOT CONFIGURED ADVERTISES NOTHING. The staffed count is still real and still shown to the
+    // manager — knowing three people are on Wednesday night is useful before you set a number.
+    // CLAMPED AT ZERO otherwise: reducing capacity below current staffing must never surface as a
+    // negative number of shifts, and must never remove anybody (see `over`).
+    available: capacity == null || closed ? 0 : Math.max(0, capacity - staffed),
+    over: capacity == null ? 0 : Math.max(0, staffed - capacity),
     closed,
     custom,
   };
@@ -310,7 +321,8 @@ export interface StaffingOutlookPayload {
   blocks: CapacityBlock[];
   settings: CapacitySetting[];
   days: { date: string; blocks: BlockStaffing[] }[];
-  teamDefaults: { team: CapacityTeam; capacity: number; closed: boolean; isDefault: boolean }[];
+  /** `capacity: null` = this team has no configured capacity and advertises nothing. */
+  teamDefaults: { team: CapacityTeam; capacity: number | null; closed: boolean }[];
 }
 
 // ── Employee-facing copy ──────────────────────────────────────────────────────────────────────
@@ -325,10 +337,17 @@ export function shiftsAvailableLabel(available: number): string {
 
 /** The manager's one-line staffing summary for a block. Employees never see this string. */
 export function staffingLabel(s: Pick<BlockStaffing, 'staffed' | 'capacity' | 'available' | 'over' | 'closed'>): string {
+  // First, because it is the reason every other line would be meaningless.
+  if (s.capacity == null) return 'Capacity not configured';
   if (s.over > 0) return `Over capacity by ${s.over}`;
   if (s.closed) return 'Availability closed';
   if (s.available === 0) return 'Fully staffed';
   return shiftsAvailableLabel(s.available);
+}
+
+/** The manager's "x / y scheduled" figure, with an honest dash when y does not exist yet. */
+export function staffedOfLabel(s: Pick<BlockStaffing, 'staffed' | 'capacity'>): string {
+  return s.capacity == null ? `${s.staffed} scheduled` : `${s.staffed} / ${s.capacity} scheduled`;
 }
 
 // ── Request Shift: the employee-side decision kernel ──────────────────────────────────────────
@@ -340,6 +359,7 @@ export type ShiftRequestRefusal =
   | 'ALREADY_STARTED'
   | 'BLOCK_UNAVAILABLE'
   | 'AVAILABILITY_CLOSED'
+  | 'CAPACITY_NOT_CONFIGURED'
   | 'NO_CAPACITY'
   | 'ALREADY_SCHEDULED_THAT_DAY'
   | 'ALREADY_REQUESTED';
@@ -358,6 +378,9 @@ export const SHIFT_REQUEST_REFUSAL_MESSAGES: Record<ShiftRequestRefusal, string>
   ALREADY_STARTED: 'That shift has already started.',
   BLOCK_UNAVAILABLE: 'This shift is no longer available.',
   AVAILABILITY_CLOSED: 'No more shifts are being taken for this day.',
+  // Unreachable from the portal (an unconfigured block publishes no opportunity at all), and kept
+  // as the server-side refusal so a hand-built request cannot slip past the read path.
+  CAPACITY_NOT_CONFIGURED: 'This shift is not available.',
   // Employee vocabulary, not the manager's "Fully staffed" — this map is read by the portal.
   NO_CAPACITY: 'No shifts available.',
   ALREADY_SCHEDULED_THAT_DAY: "You're already scheduled that day.",
@@ -395,6 +418,7 @@ export function planShiftRequest(input: {
   if (!Number.isFinite(startsMs) || startsMs <= input.nowMs) return { ok: false, code: 'ALREADY_STARTED' };
   if (input.alreadyRequested) return { ok: false, code: 'ALREADY_REQUESTED' };
   if (input.myDatesInUse.has(s.date)) return { ok: false, code: 'ALREADY_SCHEDULED_THAT_DAY' };
+  if (s.capacity == null) return { ok: false, code: 'CAPACITY_NOT_CONFIGURED' };
   if (s.closed) return { ok: false, code: 'AVAILABILITY_CLOSED' };
   if (s.available <= 0) return { ok: false, code: 'NO_CAPACITY' };
   return { ok: true };

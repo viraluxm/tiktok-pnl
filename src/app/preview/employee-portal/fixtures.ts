@@ -319,8 +319,11 @@ function available(w: DemoWorld, meId: string): AvailableItem[] {
         myDatesInUse: myDates, alreadyRequested: mine != null, nowMs: Date.now(), todayISO: today,
       });
       const code = plan.ok ? null : plan.code;
+      // Mirrors capacityBoard.ts exactly: an UNCONFIGURED block publishes nothing at all — not a
+      // disabled row, not "0 shifts available", nothing.
+      if (!s.configured) return [];
       if (code === 'PAST_DATE' || code === 'ALREADY_STARTED' || code === 'WRONG_TEAM' || code === 'INACTIVE_EMPLOYEE') return [];
-      if (!mine && (code === 'NO_CAPACITY' || code === 'AVAILABILITY_CLOSED')) return [];
+      if (!mine && (code === 'NO_CAPACITY' || code === 'AVAILABILITY_CLOSED' || code === 'CAPACITY_NOT_CONFIGURED')) return [];
       return [{
         kind: 'capacity' as const, id: capacityItemId(s.block_id, s.date), offer_id: null,
         shift_date: s.date, starts_at: s.starts_at, ends_at: s.ends_at, role: s.team, hours: s.hours,

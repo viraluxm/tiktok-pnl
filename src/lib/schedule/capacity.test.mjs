@@ -82,7 +82,10 @@ const ROSTER = [
 ];
 const teamOf = C.teamOfEmployees(ROSTER);
 
-const staffing = (b, date, instances, settings = []) =>
+// CAPACITY IS EXPLICIT NOW. Every block below inherits this configured team default unless a test
+// overrides it; a test that passes no settings is testing the UNCONFIGURED state on purpose.
+const HOST_10 = { id: 'team-host', team: 'host', block_id: null, date: null, capacity: 10, closed: false, note: null };
+const staffing = (b, date, instances, settings = [HOST_10]) =>
   C.blockStaffingOn({ block: b, date, instances, teamOf, settings });
 
 console.log('\nSTAFFING CAPACITY — availability');
@@ -90,8 +93,9 @@ console.log('\nSTAFFING CAPACITY — availability');
 // 1. default host capacity = 10
 {
   const s = staffing(block(), WED, []);
-  eq('1. default Live Host capacity is 10', C.DEFAULT_TEAM_CAPACITY.host, 10);
-  eq('1. an empty night block advertises all 10', [s.capacity, s.staffed, s.available], [10, 0, 10]);
+  eq('1. the SUGGESTED Live Host capacity (the editor prefill) is 10', C.SUGGESTED_TEAM_CAPACITY.host, 10);
+  eq('1. once configured at 10, an empty night block advertises all 10', [s.capacity, s.staffed, s.available], [10, 0, 10]);
+  eq('1. and it is marked configured', s.configured, true);
 }
 
 // 2. morning 4 assigned → 6 available   /  3. night 8 assigned → 2 available
@@ -123,6 +127,7 @@ const nightEight = [4, 5, 6, 7, 8, 9, 10, 11].map((i) => shift(`h${i}`, WED, 18,
   eq('5. 12 scheduled against 10 → available clamps to 0, never -2', [s.staffed, s.available], [12, 0]);
   eq('5. the manager sees the overage instead', [s.over, C.staffingLabel(s)], [2, 'Over capacity by 2']);
   check('5. employee-facing label is never negative', !C.shiftsAvailableLabel(s.available).includes('-'));
+  eq('5. and the manager count reads honestly', C.staffedOfLabel(s), '12 / 10 scheduled');
 }
 
 // 7. same-team restriction  /  8. owner isolation is a query predicate (see portalSecurity)
@@ -208,7 +213,7 @@ const nightEight = [4, 5, 6, 7, 8, 9, 10, 11].map((i) => shift(`h${i}`, WED, 18,
 // 17. date-specific capacity override
 {
   const settings = [
-    { id: 's1', team: 'host', block_id: null, date: null, capacity: 10, closed: false, note: null },
+    HOST_10,
     { id: 's2', team: 'host', block_id: 'blk-night', date: WED, capacity: 7, closed: false, note: null },
   ];
   const six = Array.from({ length: 6 }, (_, i) => shift(`h${i}`, WED, 18, 2));
@@ -221,8 +226,9 @@ const nightEight = [4, 5, 6, 7, 8, 9, 10, 11].map((i) => shift(`h${i}`, WED, 18,
   eq('17. a plain team default is NOT custom', t.custom, false);
   eq('17. a block-level capacity IS custom',
     C.resolveCapacity({ block: { team: 'host', capacity: 6 }, override: null, teamDefault: { capacity: 9, closed: false } }).custom, true);
-  eq('17. falling all the way through to the constant is NOT custom',
-    C.resolveCapacity({ block: { team: 'host', capacity: null }, override: null, teamDefault: null }).custom, false);
+  eq('17. falling all the way through to NOTHING is not custom, and has no capacity',
+    C.resolveCapacity({ block: { team: 'host', capacity: null }, override: null, teamDefault: null }),
+    { capacity: null, closed: false, custom: false });
   eq('17. a CLOSED override with no number of its own is not a custom capacity',
     C.resolveCapacity({ block: { team: 'host', capacity: null }, override: { capacity: null, closed: true }, teamDefault: { capacity: 9, closed: false } }),
     { capacity: 9, closed: true, custom: false });
@@ -235,12 +241,12 @@ const nightEight = [4, 5, 6, 7, 8, 9, 10, 11].map((i) => shift(`h${i}`, WED, 18,
       C.resolveCapacity({ block: { team: 'host', capacity: null }, override: null, teamDefault: { capacity: 9, closed: false } }).capacity,
       C.resolveCapacity({ block: { team: 'host', capacity: null }, override: null, teamDefault: null }).capacity,
     ],
-    [7, 8, 9, 10]);
+    [7, 8, 9, null]);
 }
 
 // 18. Close availability
 {
-  const settings = [{ id: 's', team: 'host', block_id: 'blk-night', date: WED, capacity: null, closed: true, note: null }];
+  const settings = [HOST_10, { id: 's', team: 'host', block_id: 'blk-night', date: WED, capacity: null, closed: true, note: null }];
   const s = staffing(block(), WED, [shift('h0', WED, 18, 2)], settings);
   eq('18. closing availability zeroes the advertised count', s.available, 0);
   eq('18. but the capacity and the staffing are untouched', [s.capacity, s.staffed], [10, 1]);
@@ -276,6 +282,43 @@ const nightEight = [4, 5, 6, 7, 8, 9, 10, 11].map((i) => shift(`h${i}`, WED, 18,
   eq('21. a block that does not run that weekday yields nothing',
     staffing(block({ days_of_week: [1, 2] }), WED, []), null); // WED = 3
   eq('21. an empty weekday list yields nothing', staffing(block({ days_of_week: [] }), WED, []), null);
+}
+
+console.log('\nNOT CONFIGURED — an account that never set a number advertises nothing');
+{
+  // No settings at all: the block exists, people can be scheduled into it, and it offers NOTHING.
+  const s = C.blockStaffingOn({ block: block(), date: WED, instances: [shift('h0', WED, 18, 2)], teamOf, settings: [] });
+  eq('an unconfigured block still reports real staffing', s.staffed, 1);
+  eq('…but has no capacity', s.capacity, null);
+  eq('…is flagged unconfigured', s.configured, false);
+  eq('…advertises zero shifts', s.available, 0);
+  eq('…and is never "over capacity" against a number that does not exist', s.over, 0);
+  eq('…and the manager label says exactly that', C.staffingLabel(s), 'Capacity not configured');
+  eq('…and the count line does not print a phantom denominator', C.staffedOfLabel(s), '1 scheduled');
+  // An employee cannot request it, and the refusal names the real reason.
+  eq('an employee request is refused as not configured', C.planShiftRequest({
+    staffing: s, employeeTeam: 'host', employeeStatus: 'active', myDatesInUse: new Set(),
+    alreadyRequested: false, nowMs: Date.parse(utc(WED, 9)), todayISO: WED,
+  }), { ok: false, code: 'CAPACITY_NOT_CONFIGURED' });
+  // Saving a number is what turns it on — nothing else does.
+  const on = C.blockStaffingOn({ block: block(), date: WED, instances: [shift('h0', WED, 18, 2)], teamOf, settings: [HOST_10] });
+  eq('saving a team capacity is what starts automatic availability', [on.configured, on.capacity, on.available], [true, 10, 9]);
+  // A block-level number configures it on its own, with no team default.
+  const blockOnly = C.blockStaffingOn({ block: block({ capacity: 4 }), date: WED, instances: [], teamOf, settings: [] });
+  eq('a block-level capacity configures that block by itself', [blockOnly.configured, blockOnly.capacity, blockOnly.available], [true, 4, 4]);
+  // A date override does too, for that date only.
+  const ovr = [{ id: 'o', team: 'host', block_id: 'blk-night', date: WED, capacity: 2, closed: false, note: null }];
+  eq('a date override configures that date by itself',
+    [C.blockStaffingOn({ block: block(), date: WED, instances: [], teamOf, settings: ovr }).capacity,
+     C.blockStaffingOn({ block: block(), date: THU, instances: [], teamOf, settings: ovr }).capacity], [2, null]);
+  // THE CONSTANT IS A PREFILL, NOT A FALLBACK. Nothing in resolution may reach for it.
+  const src = readFileSync(fileURLToPath(new URL('./capacity.ts', import.meta.url)), 'utf8');
+  const resolveBody = src.slice(src.indexOf('export function resolveCapacity'), src.indexOf('// ── Staffed count'));
+  check('resolveCapacity never mentions the suggested constant', !resolveBody.includes('SUGGESTED_TEAM_CAPACITY'));
+  // The old name may survive in prose explaining the rename; what matters is that no CODE reads it.
+  const code = src.split('\n').filter((l) => !/^\s*(\*|\/\/)/.test(l)).join('\n');
+  check('no code path reads the old DEFAULT_TEAM_CAPACITY', !code.includes('DEFAULT_TEAM_CAPACITY'));
+  eq('the suggestion is exported only as a prefill', typeof C.SUGGESTED_TEAM_CAPACITY.host, 'number');
 }
 
 console.log('\nOVERLAP — capacity means SIMULTANEOUS, so exact (start,end) matching is not enough');
@@ -341,7 +384,7 @@ eq('a past date cannot be requested', plan({ todayISO: THU }), { ok: false, code
 eq('a shift already under way cannot be requested', plan({ nowMs: Date.parse(utc(WED, 20)) }), { ok: false, code: 'ALREADY_STARTED' });
 // Order matters: a closed day reads as closed, not as "fully staffed".
 {
-  const closed = staffing(block(), WED, [], [{ id: 'c', team: 'host', block_id: 'blk-night', date: WED, capacity: null, closed: true, note: null }]);
+  const closed = staffing(block(), WED, [], [HOST_10, { id: 'c', team: 'host', block_id: 'blk-night', date: WED, capacity: null, closed: true, note: null }]);
   eq('18. a closed day refuses with AVAILABILITY_CLOSED, not NO_CAPACITY',
     C.planShiftRequest({ staffing: closed, employeeTeam: 'host', employeeStatus: 'active', myDatesInUse: new Set(), alreadyRequested: false, nowMs: Date.parse(utc(WED, 9)), todayISO: WED }),
     { ok: false, code: 'AVAILABILITY_CLOSED' });
@@ -383,9 +426,21 @@ console.log('\nCOPY — shift language only, never seats or slots');
     !/offer_state/.test(mig.slice(mig.indexOf('select count(*) into v_staffed'), mig.indexOf('if v_staffed >='))));
   check('24. the migration refuses rather than oversubscribing', mig.includes("'NO_CAPACITY'"));
   check('24. the migration is still marked NOT APPLIED', /⚠️ NOT APPLIED/.test(mig));
-  // The default the RPC is handed must be the app constant, never a literal in SQL.
-  check('24. the RPC takes the default capacity as a parameter', mig.includes('p_default_capacity smallint'));
-  check('24. and SQL never hardcodes the number 10 as a capacity', !/coalesce\([^)]*\b10\b[^)]*\)/.test(mig));
+  // CAPACITY IS EXPLICIT: no default argument, no constant in SQL, and an unconfigured block is
+  // refused rather than approved against a number nobody chose.
+  // Assert the SIGNATURE, not the file: the header still explains why the argument is absent.
+  const sig = mig.slice(mig.indexOf('create or replace function public.lensed_approve_shift_request'), mig.indexOf('returns jsonb'));
+  check('24. the RPC signature takes NO default-capacity argument', !sig.includes('p_default_capacity'), sig.replace(/\s+/g, ' '));
+  check('24. and SQL never hardcodes a capacity number', !/coalesce\([^)]*\b10\b[^)]*\)/.test(mig));
+  check('24. an unconfigured block is refused at approval', mig.includes("'CAPACITY_NOT_CONFIGURED'"));
+  check('24. the capacity chain ends at the team default, not a constant',
+    mig.includes('coalesce(v_ovr.capacity, v_block.capacity, v_team_def.capacity)'));
+  const guard = readFileSync(fileURLToPath(new URL('../../../supabase/migrations/157_schedule_capacity_write_guard.sql', import.meta.url)), 'utf8');
+  const gsig = guard.slice(guard.indexOf('create or replace function public.lensed_apply_schedule_batch'), guard.indexOf('returns jsonb'));
+  check('24. the write guard signature takes none either', !gsig.includes('p_default_capacity'), gsig.replace(/\s+/g, ' '));
+  check('24. an unconfigured block imposes NO limit on a manager write',
+    /if v_capacity is null then continue; end if;/.test(guard));
+  check('24. the write guard is still marked NOT APPLIED', /⚠️ NOT APPLIED/.test(guard));
 }
 
 console.log(`\n${passed} checks passed`);

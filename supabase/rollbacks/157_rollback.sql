@@ -14,7 +14,7 @@
 begin;
 set local lock_timeout = '3s';
 
-drop function if exists public.lensed_apply_schedule_batch(uuid, jsonb, uuid[], uuid[], jsonb);
-drop function if exists public.lensed_assign_released_shift(uuid, uuid, uuid, smallint);
+drop function if exists public.lensed_apply_schedule_batch(uuid, jsonb, uuid[], uuid[]);
+drop function if exists public.lensed_assign_released_shift(uuid, uuid, uuid);
 
 commit;
