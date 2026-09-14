@@ -22,14 +22,14 @@ export const MAX_SHELVES = 5;
 
 /**
  * Most sections one shelf can present to a SINGLE side. Counted per side rather than per
- * shelf, so a shelf may hold up to six reachable from A and six from B — an 'AB' section
- * counts toward both, because it occupies a pickable position in each aisle.
+ * shelf, so a shelf may hold up to seven reachable from A and seven from B — an 'AB'
+ * section counts toward both, because it occupies a pickable position in each aisle.
  *
  * A UI constant, not a DB constraint: raising it is a one-line change rather than another
  * migration and another apply. There is deliberately no minimum — a new rack starts with no
  * sections and you add them by clicking, so zero is a normal state.
  */
-export const MAX_SECTIONS_PER_SIDE = 6;
+export const MAX_SECTIONS_PER_SIDE = 7;
 
 export const RACK_SIDES: RackSide[] = ['A', 'B'];
 export const SECTION_SIDES: SectionSide[] = ['A', 'B', 'AB'];
