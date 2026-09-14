@@ -34,7 +34,23 @@ const eligibility = transpile('./eligibility.ts', 'eligibility.mjs');
 const plan = transpile('./schedulePlan.ts', 'schedulePlan.mjs', {
   "'./timezone'": `'${timezone}'`, "'@/lib/weeklySchedule'": `'${weekly}'`, "'./eligibility'": `'${eligibility}'`,
 });
+const __employees = transpile('../employees.ts', '__emp.mjs');
+
+// 157 — the capacity write guard. `capacityGuard` is transpiled so the module under test can import
+// it; `__RPC` below decides what the guard's RPC replies. It defaults to "function does not exist",
+// which is the state until migrations 156/157 are hand-applied, so every assertion in this file
+// keeps exercising the SAME pre-157 statement sequence it always did. The guarded path gets its own
+// tests in capacityWriteGuard.test.mjs.
+const capacity = transpile('./capacity.ts', '__cap.mjs', {
+  "'@/lib/employees'": `'${__employees}'`, "'./timezone'": `'${timezone}'`, "'./eligibility'": `'${eligibility}'`,
+});
+const capacityGuard = transpile('./capacityGuard.ts', '__capGuard.mjs', {
+  "'server-only'": `'${serverOnly}'`, "'./capacity'": `'${capacity}'`,
+});
+globalThis.__RPC = async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } });
+
 const bulkUrl = transpile('./bulkSchedule.ts', 'bulkSchedule.mjs', {
+  "'./capacityGuard'": `'${capacityGuard}'`,
   "'server-only'": `'${serverOnly}'`, "'@/lib/supabase/admin'": `'${adminStub}'`,
   "'./timezone'": `'${timezone}'`, "'./schedulePlan'": `'${plan}'`,
 });
@@ -62,7 +78,7 @@ class Rec {
   }
   f(kind, key) { return this.filters.find(([k, kk]) => k === kind && kk === key)?.[2]; }
 }
-globalThis.__DB = { from: (t) => new Rec(t) };
+globalThis.__DB = { from: (t) => new Rec(t), rpc: (...a) => globalThis.__RPC(...a) };
 const reset = (script) => { globalThis.__LOG = []; globalThis.__SCRIPT = script; };
 const log = () => globalThis.__LOG;
 const writes = () => log().filter((r) => r.op !== 'select');
@@ -275,6 +291,89 @@ console.log('\n11. HARDENING — the ATOMICITY property survives the changes');
     { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
   ] }), (e) => e instanceof ScheduleBatchError);
   check('an upsert failure aborts before any delete/cancel — nothing removed', !writes().some((r) => r.op === 'delete' || r.op === 'update'));
+}
+
+console.log('\n12. THE CAPACITY WRITE GUARD (157) — the seam, not the arithmetic');
+{
+  // The arithmetic and the races are proven against a real Postgres in
+  // supabase/tests/schedule_capacity/. What is asserted HERE is the seam: what the app hands the
+  // function, what it does with the reply, and that the fallback is reached ONLY when the function
+  // is genuinely absent.
+  const MISSING = { data: null, error: { code: 'PGRST202', message: 'Could not find the function' } };
+  const rpcCalls = [];
+  const withRpc = (reply) => { rpcCalls.length = 0; globalThis.__RPC = async (fn, args) => { rpcCalls.push({ fn, args }); return reply; }; };
+  const restoreMissing = () => { globalThis.__RPC = async (fn, args) => { rpcCalls.push({ fn, args }); return MISSING; }; };
+
+  // ── The guarded path: the app issues NO shift_instances statements of its own.
+  withRpc({ data: { ok: true, created: 1, updated: 0, removed: 0, refusals: [] }, error: null });
+  reset(scriptWith({}));
+  let res = await applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] });
+  eq('the batch is written by the locked function', rpcCalls[0].fn, 'lensed_apply_schedule_batch');
+  check('and the app writes NO shift_instances statement itself', !writes().some((r) => r.table === 'shift_instances'));
+  eq('the owner is the session uid, never a client value', rpcCalls[0].args.p_owner, USER);
+  eq("the planner's upserts are handed over verbatim", rpcCalls[0].args.p_upserts.length, 1);
+  eq('…with the row the planner built', rpcCalls[0].args.p_upserts[0].shift_date, '2026-09-11');
+  // CAPACITY IS EXPLICIT: nothing is handed to SQL as a default, so an unconfigured team cannot be
+  // gated against a number nobody chose.
+  check('no default capacity is handed to SQL', !('p_default_capacity' in rpcCalls[0].args), Object.keys(rpcCalls[0].args).join(','));
+  eq('counts come from what the function actually wrote', res.counts.created, 1);
+  eq('no refusals when nothing was full', res.refusals.length, 0);
+
+  // ── Removals are handed over too, so a swap inside one batch frees its own setup.
+  withRpc({ data: { ok: true, created: 1, updated: 0, removed: 1, refusals: [] }, error: null });
+  reset(scriptWith({ instances: [existing({ id: 'del-me', source: 'admin_open' })] }));
+  res = await applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-10', off: true },
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] });
+  eq('the removals travel with the upserts, in ONE call', rpcCalls.length, 1);
+  eq('…as delete ids', rpcCalls[0].args.p_delete_ids, ['del-me']);
+  eq('…and the reported removal count is the function\'s', res.counts.removed, 1);
+
+  // ── A capacity refusal is PER ROW: the batch still succeeded for everything else.
+  withRpc({ data: { ok: true, created: 0, updated: 0, removed: 0, refusals: [
+    { employee_id: EMP.id, shift_date: '2026-09-11', code: 'OVER_CAPACITY', block_id: 'blk', staffed: 10, capacity: 10 },
+  ] }, error: null });
+  reset(scriptWith({}));
+  res = await applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] });
+  check('a full block does NOT fail the whole save', res.ok === true);
+  eq('it comes back as a per-row refusal', res.refusals.length, 1);
+  eq('…with the shared code', res.refusals[0].code, 'OVER_CAPACITY');
+  eq('…naming the day', res.refusals[0].date, '2026-09-11');
+  check('…and a manager-readable sentence', /fully staffed/i.test(res.refusals[0].message), res.refusals[0].message);
+  check('the refusal message has no em dash', !res.refusals[0].message.includes('\u2014'));
+
+  // ── A REAL error must surface, never silently downgrade to an unguarded write.
+  withRpc({ data: null, error: { code: '40001', message: 'serialization failure' } });
+  reset(scriptWith({}));
+  await assert.rejects(applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] }), (e) => e instanceof ScheduleBatchError && e.code === 'WRITE_FAILED');
+  check('a real RPC error throws instead of falling back unguarded', !writes().some((r) => r.table === 'shift_instances'));
+
+  // ── The fallback fires ONLY for a missing function, and reproduces the pre-157 sequence.
+  restoreMissing();
+  reset(scriptWith({}));
+  res = await applyScheduleBatch({ userId: USER, now: NOW, entries: [
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] });
+  eq('an absent function falls back to the upsert', writes()[0].op, 'upsert');
+  eq('…on shift_instances', writes()[0].table, 'shift_instances');
+  eq('…and reports no capacity refusals, because nothing was checked', res.refusals.length, 0);
+
+  // ── A dry run answers "what would change" and must not take a capacity lock to do it.
+  rpcCalls.length = 0;
+  reset(scriptWith({}));
+  res = await applyScheduleBatch({ userId: USER, now: NOW, dryRun: true, entries: [
+    { employeeId: EMP.id, date: '2026-09-11', startTime: '06:00', endTime: '14:00' },
+  ] });
+  eq('a dry run calls no function at all', rpcCalls.length, 0);
+  check('…and writes nothing', writes().length === 0);
+  eq('…and carries an empty refusal list', res.refusals.length, 0);
 }
 
 console.log(`\n${passed} checks passed`);

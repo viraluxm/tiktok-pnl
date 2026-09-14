@@ -8,6 +8,7 @@ import { weekBoundsMonSun, instanceHours } from './hours';
 import { ScheduleError } from './release';
 import { claimAutoApproves, OT_THRESHOLD_HOURS } from './otGate';
 import { effectiveShiftRole } from './eligibility';
+import { assignReleasedShift, OVER_CAPACITY_MESSAGE } from './capacityGuard';
 
 export { OT_THRESHOLD_HOURS };
 
@@ -111,17 +112,23 @@ export async function claimShift(employee: Employee, instanceId: string): Promis
     // released_by is deliberately KEPT: it is audit history (who originally dropped this shift), it
     // is inert once status leaves 'released' — getBoard and getMyShifts both gate on
     // status='released' before reading it — and it is the only record of the hand-off.
-    const { data: won, error: uErr } = await admin
-      .from('shift_instances')
-      .update({ status: 'claimed', employee_id: employee.id, source: 'claim', released_at: null })
-      .eq('id', instanceId)
-      .eq('user_id', employee.user_id)
-      .eq('status', 'released')
-      .is('employee_id', null)
-      .select('id, shift_date, user_id')
-      .maybeSingle();
-    if (uErr) throw new ScheduleError('CLAIM_FAILED', uErr.message);
-    if (!won) throw new ScheduleError('ALREADY_CLAIMED'); // lost the race
+    // CAPACITY GUARD (157). A released row is not staffed (no employee), so this flip ADDS one to
+    // every capacity block it overlaps — the same addition a manager makes by scheduling someone.
+    // assignReleasedShift runs the identical CAS inside lensed_assign_released_shift, which holds
+    // the (owner, team, date) lock across a recount, and falls back to the original statement while
+    // 157 is unapplied. `won` is the same three fields the CAS used to return, so everything below
+    // is unchanged. rpc-grants: lensed_assign_released_shift
+    const assigned = await assignReleasedShift(admin, {
+      ownerId: employee.user_id,
+      instanceId,
+      employeeId: employee.id,
+    });
+    if (!assigned.ok) {
+      if (assigned.reason === 'NO_CAPACITY') throw new ScheduleError('OVER_CAPACITY', OVER_CAPACITY_MESSAGE);
+      if (assigned.reason === 'FAILED') throw new ScheduleError('CLAIM_FAILED', assigned.message ?? 'CLAIM_FAILED');
+      throw new ScheduleError('ALREADY_CLAIMED'); // lost the race
+    }
+    const won = assigned.row;
 
     // BOOKKEEPING (post-flip, non-atomic tail). If either insert fails the instance is ALREADY
     // claimed, so log LOUDLY with the instance id — this is the money-adjacent silent-failure risk

@@ -54,7 +54,21 @@ const boardBase   = { "'server-only'": `'${serverOnly}'`, "'@/lib/supabase/admin
                       "'./drops'": `'${dropsStub}'`, "'./eligibility'": `'${eligibility}'` };
 const board       = transpile('./board.ts',   'board.mjs',   boardBase);
 const release     = transpile('./release.ts', 'release.mjs', { ...boardBase, "'./board'": `'${board}'` });
+// 157 — the capacity write guard. `capacityGuard` is transpiled so the module under test can import
+// it; `__RPC` below decides what the guard's RPC replies. It defaults to "function does not exist",
+// which is the state until migrations 156/157 are hand-applied, so every assertion in this file
+// keeps exercising the SAME pre-157 statement sequence it always did. The guarded path gets its own
+// tests in capacityWriteGuard.test.mjs.
+const capacity = transpile('./capacity.ts', '__cap.mjs', {
+  "'@/lib/employees'": `'${employees}'`, "'./timezone'": `'${timezone}'`, "'./eligibility'": `'${eligibility}'`,
+});
+const capacityGuard = transpile('./capacityGuard.ts', '__capGuard.mjs', {
+  "'server-only'": `'${serverOnly}'`, "'./capacity'": `'${capacity}'`,
+});
+globalThis.__RPC = async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } });
+
 const claimUrl    = transpile('./claim.ts',   'claim.mjs',   {
+  "'./capacityGuard'": `'${capacityGuard}'`,
   ...boardBase,
   "'./board'": `'${board}'`, "'./hours'": `'${hours}'`, "'./release'": `'${release}'`,
   "'./otGate'": `'${otGate}'`, "'./eligibility'": `'${eligibility}'`,
@@ -89,7 +103,9 @@ function makeDb(script) {
     };
     return api;
   };
-  return { db: { from }, calls };
+  // The capacity write guard (157) calls admin.rpc(). Answering "function does not exist" keeps
+  // every assertion in this file on the SAME pre-157 CAS statement it has always asserted.
+  return { db: { from, rpc: (...a) => globalThis.__RPC(...a) }, calls };
 }
 const has = (rec, kind, col, val) =>
   rec.filters.some(([k, c, v]) => k === kind && c === col && (val === undefined || v === val));

@@ -5,7 +5,7 @@ import type { Employee } from '@/types';
 import { useShifts } from '@/hooks/useShifts';
 import { useShiftRules } from '@/hooks/useShiftRules';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
-import { useScheduleBulk, ScheduleRefusedError } from '@/hooks/useScheduleBulk';
+import { useScheduleBulk, ScheduleRefusedError, summarisePartialSave } from '@/hooks/useScheduleBulk';
 import type { ScheduleEntry } from '@/lib/schedule/schedulePlan';
 import { PAY_ANCHOR } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
@@ -252,7 +252,12 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
         // which would close and discard the crew the manager just picked.
         if (!window.confirm(msg)) throw new Error(CREATE_ABORTED);
       }
-      await applySchedule.mutateAsync({ entries });
+      const result = await applySchedule.mutateAsync({ entries });
+      // Capacity refusals (157) come back on a SUCCESSFUL save: the people who fit were scheduled.
+      // The sentence names who was not, because this modal schedules a whole crew at once and a
+      // date alone would not tell the manager whose row to fix.
+      const partial = summarisePartialSave(result, (id) => employees.find((e) => e.id === id)?.name);
+      if (partial) throw new Error(partial);
     } catch (e) {
       if ((e as Error).message === CREATE_ABORTED) throw e;
       throw new Error(e instanceof ScheduleRefusedError ? e.message : (e as Error).message);

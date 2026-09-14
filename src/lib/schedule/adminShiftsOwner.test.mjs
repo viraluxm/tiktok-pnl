@@ -40,7 +40,21 @@ const release = transpile('./release.ts', 'release.mjs', {
   "'@/lib/employees'": `'${employees}'`, "'./timezone'": `'${timezone}'`,
   "'./drops'": `'${dropsStub}'`, "'./board'": `'${boardStub}'`,
 });
+// 157 — the capacity write guard. `capacityGuard` is transpiled so the module under test can import
+// it; `__RPC` below decides what the guard's RPC replies. It defaults to "function does not exist",
+// which is the state until migrations 156/157 are hand-applied, so every assertion in this file
+// keeps exercising the SAME pre-157 statement sequence it always did. The guarded path gets its own
+// tests in capacityWriteGuard.test.mjs.
+const capacity = transpile('./capacity.ts', '__cap.mjs', {
+  "'@/lib/employees'": `'${employees}'`, "'./timezone'": `'${timezone}'`, "'./eligibility'": `'${eligibility}'`,
+});
+const capacityGuard = transpile('./capacityGuard.ts', '__capGuard.mjs', {
+  "'server-only'": `'${serverOnly}'`, "'./capacity'": `'${capacity}'`,
+});
+globalThis.__RPC = async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function' } });
+
 const adminShifts = transpile('./adminShifts.ts', 'adminShifts.mjs', {
+  "'./capacityGuard'": `'${capacityGuard}'`,
   "'server-only'": `'${serverOnly}'`, "'@/lib/supabase/admin'": `'${adminStub}'`,
   "'@/lib/employees'": `'${employees}'`, "'./timezone'": `'${timezone}'`,
   "'./release'": `'${release}'`, "'./eligibility'": `'${eligibility}'`,
@@ -64,7 +78,7 @@ class Rec {
   then(res, rej) { globalThis.__LOG.push(this); try { res(globalThis.__SCRIPT(this)); } catch (e) { rej(e); } }
   f(kind, key) { return this.filters.find(([k, kk]) => k === kind && kk === key)?.[2]; }
 }
-globalThis.__DB = { from: (t) => new Rec(t) };
+globalThis.__DB = { from: (t) => new Rec(t), rpc: (...a) => globalThis.__RPC(...a) };
 const reset = (script) => { globalThis.__LOG = []; globalThis.__SCRIPT = script; };
 const log = () => globalThis.__LOG;
 

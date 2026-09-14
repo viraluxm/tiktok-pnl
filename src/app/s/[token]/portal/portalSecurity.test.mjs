@@ -31,8 +31,11 @@ function routeFiles(dir) {
 
 console.log('\n1. ROUTES — identity comes from the token, never from the request');
 {
-  const routes = [...routeFiles(here), ...routeFiles(join(here, '..', 'trade'))];
-  check('found the portal + trade routes', routes.length >= 7, `${routes.length}`);
+  // request-shift is included deliberately: a capacity request is a WRITE on the public token
+  // surface, so it must satisfy the same four invariants as every other one.
+  const routes = [...routeFiles(here), ...routeFiles(join(here, '..', 'trade')), ...routeFiles(join(here, '..', 'request-shift'))];
+  check('found the portal + trade + request-shift routes', routes.length >= 8, `${routes.length}`);
+  check('request-shift is among them', routes.some((p) => p.includes('request-shift')));
   for (const p of routes) {
     const src = strip(read(p));
     const name = p.split('/s/[token]/')[1];
@@ -47,7 +50,7 @@ console.log('\n1. ROUTES — identity comes from the token, never from the reque
 console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
 {
   const lib = join(here, '..', '..', '..', '..', 'lib', 'schedule');
-  for (const f of ['portalSnapshot.ts', 'timecard.ts', 'trade.ts']) {
+  for (const f of ['portalSnapshot.ts', 'timecard.ts', 'trade.ts', 'capacityBoard.ts']) {
     const src = strip(read(join(lib, f)));
     // Split into individual query chains: from('table') ... up to the next statement end.
     const chains = [...src.matchAll(/\.from\('([a-z_]+)'\)([\s\S]*?);/g)];
@@ -83,6 +86,85 @@ console.log('\n2. SERVER BUILDERS — every table read is owner-scoped');
   check('trade: cancel CAS re-asserts requester_employee_id = employee.id', /\.eq\('requester_employee_id', employee\.id\)[\s\S]*?\.in\('status', LIVE\)/.test(tr));
   check('trade: approval goes ONLY through the atomic RPC', /rpc\('lensed_approve_shift_trade'/.test(tr) && !/from\('shift_instances'\)\s*\.update/.test(tr));
   check('trade: no direct write to shift_instances anywhere in the module', !/from\('shift_instances'\)[\s\S]{0,120}?\.(update|insert|delete)\(/.test(tr));
+
+  // CAPACITY (156). The team boundary is a QUERY PREDICATE, so another team's blocks, capacities
+  // and staffing counts never reach the browser to be hidden there.
+  const cb = strip(read(join(lib, 'capacityBoard.ts')));
+  check('capacityBoard: the team derives from the TOKEN employee\'s role', /payrollTeamOfRole\(employee\.role\)/.test(cb));
+  check('capacityBoard: blocks are filtered to that team server-side', /blockQ\.eq\('team', team\)/.test(cb));
+  check('capacityBoard: settings are filtered to that team server-side', /settingQ\.eq\('team', team\)/.test(cb));
+  check('capacityBoard: an unrecognised role gets NO board at all', /if \(!team\) return \[\];/.test(cb));
+  // CAPACITY IS EXPLICIT. An unconfigured block publishes nothing — not a disabled row, nothing.
+  check('capacityBoard: an unconfigured block publishes no opportunity', /if \(!s\.configured\) continue;/.test(cb));
+  // …and that filter lives in the CAPACITY loop only, so a coworker's offered shift is untouched
+  // by whether anyone has configured a number. Offers come from getAvailableShifts, which knows
+  // nothing about capacity, and the snapshot concatenates the two lists.
+  const snapSrc = strip(read(join(lib, 'portalSnapshot.ts')));
+  check('portalSnapshot: offers and capacity are separate sources',
+    /getAvailableShifts\(employee, now\)/.test(snapSrc) && /getCapacityAvailability\(employee, now\)/.test(snapSrc));
+  check('portalSnapshot: the offer list is never filtered by capacity',
+    !/kind: 'offer'[\s\S]{0,400}?configured/.test(snapSrc));
+  const capSrc = strip(read(join(lib, 'capacity.ts')));
+  check('capacity: the resolution chain ends in null, not a constant',
+    /capacity: local \?\? t\?\.capacity \?\? null/.test(capSrc));
+  check('capacity: the suggested number is never read during resolution',
+    !/resolveCapacity[\s\S]{0,600}?SUGGESTED_TEAM_CAPACITY/.test(capSrc));
+  check('capacityBoard: the request insert takes employee_id from the token employee, never the body',
+    /employee_id: employee\.id/.test(cb) && !/employee_id: (body|input)\./.test(cb));
+  check('capacityBoard: the request insert takes the owner from the token employee', /user_id: owner/.test(cb));
+  check('capacityBoard: the team written on a request is derived, never accepted', /const team = capacityTeamOf\(employee\)/.test(cb));
+  check('capacityBoard: the span is recomputed from the block, never accepted from the client',
+    /starts_at: opp\.starts_at/.test(cb) && /ends_at: opp\.ends_at/.test(cb));
+  check('capacityBoard: withdraw is scoped to the token employee AND the owner',
+    /\.eq\('user_id', owner\)[\s\S]{0,120}?\.eq\('employee_id', employee\.id\)/.test(cb));
+  check('capacityBoard: a pending request survives its block being paused, so it stays withdrawable',
+    /ORPHANED REQUESTS/.test(read(join(lib, 'capacityBoard.ts'))) && /for \(const r of myRequestRows\)/.test(cb));
+  // The Requests tab reads MY requests and nobody else's, and carries no capacity configuration.
+  check('capacityBoard: the Requests read is scoped to the token employee AND the owner',
+    /from\('shift_requests'\)[\s\S]{0,400}?\.eq\('user_id', owner\)[\s\S]{0,200}?\.eq\('employee_id', employee\.id\)/.test(cb));
+  check('capacityBoard: the Requests read selects no capacity, block config or manager note',
+    !/from\('shift_requests'\)\s*\.select\([^)]*(capacity|closed|decision_note)/.test(cb));
+  check('portalTypes: a shift request exposes no capacity configuration',
+    !/capacity|staffed|setup/.test(strip(read(join(lib, 'portalTypes.ts'))).match(/interface ShiftRequestView \{[^}]*\}/)?.[0] ?? ''));
+  check('capacityBoard: never writes shift_instances — only an approval may',
+    !/from\('shift_instances'\)[\s\S]{0,160}?\.(update|insert|delete)\(/.test(cb));
+
+  // THE STAFFED COUNT MUST NOT EXCLUDE OFFERED SHIFTS. Carlos still owns a shift he dropped, so
+  // excluding it would advertise an 11th spot on a 10-setup floor.
+  const cap = strip(read(join(lib, 'capacity.ts')));
+  check('capacity: the staffed count has no offer_state clause', !/offer_state/.test(cap));
+  check('capacity: only scheduled/claimed count as staffed', /STAFFING_STATUSES = new Set\(\['scheduled', 'claimed'\]\)/.test(cap));
+  check('capacity: availability is clamped at zero', /Math\.max\(0, capacity - staffed\)/.test(cap));
+
+  // MANAGER WRITES. The owner is the session uid; nothing is taken from the body.
+  const ca = strip(read(join(lib, 'capacityAdmin.ts')));
+  for (const [, table, chain] of ca.matchAll(/\.from\('([a-z_]+)'\)([\s\S]*?);/g)) {
+    const scoped = /\.eq\('user_id', (input\.)?ownerId\)/.test(chain) || /user_id: (input\.)?ownerId/.test(chain);
+    check(`capacityAdmin: ${table} statement carries an explicit owner filter`, scoped);
+  }
+  check('capacityAdmin: approval goes ONLY through the atomic RPC',
+    /rpc\('lensed_approve_shift_request'/.test(ca) && !/from\('shift_instances'\)/.test(ca));
+
+  // ── THE WRITE GUARD (157). Every manager write path that can ADD staffing goes through a
+  //    locked, recounting SQL function; the fallback is narrow and only fires when it is absent.
+  const bs = strip(read(join(lib, 'bulkSchedule.ts')));
+  check('bulkSchedule: the write goes through the locked batch function',
+    /rpc\('lensed_apply_schedule_batch'/.test(bs));
+  check('bulkSchedule: the unguarded sequence runs ONLY when the function is missing',
+    /if \(!isMissingFunction\(guarded\.error\)\) throw/.test(bs));
+  check('bulkSchedule: capacity refusals are per-row, not a whole-batch failure',
+    /refusals/.test(bs) && /ok: true[\s\S]{0,400}?refusals/.test(bs));
+  const as2 = strip(read(join(lib, 'adminShifts.ts')));
+  check('adminShifts: an ASSIGNED one-time shift goes through the same batch function',
+    /if \(input\.employeeId\)[\s\S]{0,400}?rpc\('lensed_apply_schedule_batch'/.test(as2));
+  const cg = strip(read(join(lib, 'capacityGuard.ts')));
+  check('capacityGuard: the legacy board assignment goes through the locked function',
+    /rpc\('lensed_assign_released_shift'/.test(cg));
+  check('capacityGuard: the missing-function test is narrow (a real error must surface)',
+    /PGRST202/.test(cg) && /42883/.test(cg) && /if \(!isMissingFunction\(guarded\.error\)\) return/.test(cg));
+  const cl = strip(read(join(lib, 'claim.ts')));
+  check('claim: the auto-approve flip no longer writes shift_instances directly',
+    /assignReleasedShift\(/.test(cl) && !/from\('shift_instances'\)[\s\S]{0,200}?\.update\(\{ status: 'claimed'/.test(cl));
 }
 
 console.log('\n3. WIRE TYPES — nothing private can be typed onto the client payload');

@@ -10,6 +10,8 @@ import type { Employee, ShiftRule } from '@/types';
 import ScheduleMonthCalendar from './weekly/ScheduleMonthCalendar';
 import PendingClaimsPanel from './PendingClaimsPanel';
 import PickupRequestsPanel from './PickupRequestsPanel';
+import ShiftRequestsPanel from './ShiftRequestsPanel';
+import StaffingCapacityPanel from './StaffingCapacityPanel';
 import TradeRequestsPanel from './TradeRequestsPanel';
 import TeamScheduleLinkButton from './TeamScheduleLinkButton';
 import CrewBoardLinks from './CrewBoardLinks';
@@ -160,8 +162,16 @@ export default function ShiftsView({
       {/* Phase 2 shift swaps. Its own queue: same table, different lifecycle and write path. */}
       <PickupRequestsPanel />
 
+      {/* Capacity-derived Available Shifts (156). Its own queue again: approving CREATES a shift
+          nobody owned, where a pickup only moves one. */}
+      <ShiftRequestsPanel />
+
       {/* One-for-one trades both employees already agreed to (136). Approve swaps atomically. */}
       <TradeRequestsPanel />
+
+      {/* How staffed is Wednesday night? Answerable without leaving the schedule — the summary
+          line carries it collapsed, and the outlook carries the rest. */}
+      <StaffingCapacityPanel />
 
       <ScheduleMonthCalendar employees={employees} />
 

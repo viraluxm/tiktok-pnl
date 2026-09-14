@@ -5,6 +5,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { PortalProvider } from '@/components/portal/PortalProvider';
 import { PortalApp } from '@/components/portal/PortalApp';
 import PickupRequestsPanel from '@/components/employees/PickupRequestsPanel';
+import ShiftRequestsPanel from '@/components/employees/ShiftRequestsPanel';
+import StaffingCapacityPanel from '@/components/employees/StaffingCapacityPanel';
 import TradeRequestsPanel from '@/components/employees/TradeRequestsPanel';
 import PersonCard from '@/components/employees/weekly/PersonCard';
 import { fmtShortDate } from '@/lib/schedule/portalModel';
@@ -12,8 +14,9 @@ import { fmtDateLA, fmtTimeRangeLA } from '@/lib/schedule/format';
 import { instanceHours } from '@/lib/schedule/hours';
 import {
   initialWorld, snapshotFor, weekFor, timecardFor, payPeriodsFor, timecardPeriodFor, tradeOptionsFor, act, nameOf, timeOffConflicts,
-  CARLOS, JUAN, MADISON, confirmationTiles, type DemoWorld, type Mutation, type PortalClient,
+  capacityOutlook, CARLOS, JUAN, MADISON, confirmationTiles, type DemoWorld, type Mutation, type PortalClient,
 } from './fixtures';
+import { laTodayISO, addDaysISO } from '@/lib/schedule/timezone';
 
 // The interactive half of /preview/employee-portal. ZERO NETWORK: the PortalClient below resolves
 // every call from `world`, and every action is a pure DemoWorld → DemoWorld transition.
@@ -53,6 +56,8 @@ export default function PortalPreview() {
     cancelOffer: (id) => apply(act.cancelOffer(id)),
     pickup: (id) => apply(act.pickup(id)),
     claim: async () => { await wait(); return { result: 'claimed' as const }; },
+    requestShift: (blockId, date) => apply(act.requestShift(blockId, date)),
+    withdrawShiftRequest: (id) => apply(act.withdrawShiftRequest(id)),
     requestTrade: (a, b) => apply(act.requestTrade(a, b)),
     respondTrade: (id, r) => apply(act.respondTrade(id, r)),
     cancelTrade: (id) => apply(act.cancelTrade(id)),
@@ -72,6 +77,30 @@ export default function PortalPreview() {
     return { trade_id: t.id, requester_name: nameOf(world, t.requester_employee_id), target_name: nameOf(world, t.target_employee_id), requester_shift: f(a), target_shift: f(b), coworker_responded_at: t.coworker_responded_at, created_at: t.created_at };
   });
   const pendingTimeOff = world.timeOff.filter((r) => r.status === 'pending');
+  const today = laTodayISO();
+  const outlook = capacityOutlook(world, today, 14);
+  const staffingByKey = new Map(outlook.map((s) => [`${s.block_id}|${s.date}`, s]));
+  const pendingShiftRequests = world.shiftRequests.filter((r) => r.status === 'pending' && r.shift_date >= today).map((r) => {
+    const s = staffingByKey.get(`${r.block_id}|${r.shift_date}`);
+    return {
+      request_id: r.id, employee_name: nameOf(world, r.employee_id),
+      block_label: world.blocks.find((b) => b.id === r.block_id)?.label ?? null, team: r.team,
+      shift_date: r.shift_date, starts_at: r.starts_at, ends_at: r.ends_at,
+      staffed: s?.staffed ?? 0, capacity: s?.capacity ?? 0, available: s?.available ?? 0, closed: s?.closed ?? false,
+    };
+  });
+  // The same payload shape /api/admin/schedule/capacity returns, built from the preview world.
+  const capacityPayload = {
+    from: today,
+    to: addDaysISO(today, 14),
+    blocks: world.blocks,
+    settings: world.capacitySettings,
+    days: Array.from({ length: 15 }, (_, n) => addDaysISO(today, n)).map((date) => ({ date, blocks: outlook.filter((s) => s.date === date) })),
+    teamDefaults: (['host', 'fulfillment'] as const).map((team) => {
+      const row = world.capacitySettings.find((c) => c.block_id == null && c.team === team) ?? null;
+      return { team, capacity: row?.capacity ?? null, closed: Boolean(row?.closed) };
+    }),
+  };
 
   const chip = 'rounded-full px-3 py-1.5 text-xs font-semibold transition-colors';
 
@@ -89,12 +118,18 @@ export default function PortalPreview() {
             </button>
           ))}
           <button type="button" onClick={() => setManager((m) => !m)} className={`${chip} ${manager ? 'bg-tt-cyan text-black' : 'bg-white/[0.06] text-tt-text hover:bg-white/10'}`}>
-            Manager queue{pendingPickups.length + pendingTrades.length + pendingTimeOff.length > 0 ? ` · ${pendingPickups.length + pendingTrades.length + pendingTimeOff.length}` : ''}
+            Manager queue{pendingPickups.length + pendingTrades.length + pendingTimeOff.length + pendingShiftRequests.length > 0 ? ` · ${pendingPickups.length + pendingTrades.length + pendingTimeOff.length + pendingShiftRequests.length}` : ''}
           </button>
           <span className="mx-1 hidden h-4 w-px bg-white/10 sm:block" />
           <button type="button" onClick={() => void apply(act.toggleClockedIn())} className={`${chip} bg-white/[0.06] text-tt-text hover:bg-white/10`}>
             {world.clockedInAt ? 'Clock Carlos out' : 'Clock Carlos in'}
           </button>
+          {/* Capacity is EXPLICIT: with no configured number the portal must offer nothing at all. */}
+          <button
+            type="button"
+            onClick={() => void apply(act.setTeamCapacity('host', world.capacitySettings.some((c) => c.block_id == null && c.team === 'host') ? null : 4))}
+            className={`${chip} bg-white/[0.06] text-tt-text hover:bg-white/10`}
+          >{world.capacitySettings.some((c) => c.block_id == null && c.team === 'host') ? 'Clear host capacity' : 'Set host capacity'}</button>
           <button type="button" onClick={() => void apply(act.reset())} className={`${chip} bg-white/[0.06] text-tt-muted hover:bg-white/10 hover:text-tt-text`}>Reset</button>
         </div>
       </div>
@@ -102,10 +137,20 @@ export default function PortalPreview() {
       {manager ? (
         <main className="mx-auto max-w-3xl px-4 py-6">
           <h1 className="text-xl font-semibold">Manager queue</h1>
-          <p className="mt-1 mb-5 text-sm text-tt-muted">The same PickupRequestsPanel and TradeRequestsPanel the Team → Shifts tab mounts, driven by this preview&apos;s world.</p>
+          <p className="mt-1 mb-5 text-sm text-tt-muted">The same approval panels the Team → Shifts tab mounts (pickups, shift requests, trades and staffing capacity), driven by this preview&apos;s world.</p>
           <div className="space-y-4">
             <PickupRequestsPanel previewRequests={pendingPickups} onPreviewAct={(id, action) => void apply(act.decidePickup(id, action))} />
+            <ShiftRequestsPanel previewRequests={pendingShiftRequests} onPreviewAct={(id, action) => void apply(act.decideShiftRequest(id, action))} />
             <TradeRequestsPanel previewTrades={pendingTrades} onPreviewAct={(id, action) => void apply(act.decideTrade(id, action))} />
+            <StaffingCapacityPanel
+              previewData={capacityPayload}
+              onPreviewMutate={(m) => {
+                if (m.op === 'saveBlock') void apply(act.saveBlock(m.block));
+                else if (m.op === 'blockActive') void apply(act.setBlockActive(m.blockId, m.active));
+                else if (m.op === 'teamCapacity') void apply(act.setTeamCapacity(m.team, m.capacity));
+                else void apply(act.setDateCapacity(m.blockId, m.date, m.capacity ?? null, Boolean(m.closed)));
+              }}
+            />
             {pendingTimeOff.length > 0 && (
               <div className="rounded-[14px] border border-tt-yellow/30 bg-tt-yellow/[0.06] px-5 py-4">
                 <p className="mb-3 text-sm font-semibold">Time-off requests</p>

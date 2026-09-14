@@ -4,6 +4,7 @@ import { payPeriodStartFor } from '@/lib/employees';
 import { laWallTimeToUtc, addDaysISO, laTodayISO } from './timezone';
 import { ScheduleError } from './release';
 import { planAdminShift, crossesMidnight, planShiftRemoval, SHIFT_REMOVAL_MESSAGES } from './eligibility';
+import { assignReleasedShift, isMissingFunction, OVER_CAPACITY_MESSAGE, type BatchGuardResult } from './capacityGuard';
 
 // Admin one-time shifts (migration 090) + OT-claim approve/reject. Server-side; the routes gate on
 // app_metadata.role === 'admin'. Nothing here is payable — shift_instances never feed pay.
@@ -54,6 +55,52 @@ export async function postOneTimeShift(input: PostShiftInput): Promise<{ id: str
   if (input.startTime === input.endTime) throw new ScheduleError('BAD_TIMES', 'Start and end cannot be equal.');
   const endDate = crossesMidnight(input.startTime, input.endTime) ? addDaysISO(input.date, 1) : input.date;
 
+  const startsAt = laWallTimeToUtc(input.date, input.startTime).toISOString();
+  const endsAt = laWallTimeToUtc(endDate, input.endTime).toISOString();
+
+  // ── CAPACITY GUARD (157). An ASSIGNED one-time shift occupies a setup exactly like a bulk-
+  //    scheduled one, so it goes through the same locked, recounting function rather than a second
+  //    capacity algorithm. An UNASSIGNED shift is posted 'released' with employee_id NULL, which is
+  //    not staffed by any definition in this codebase, so it needs no lock and takes the plain
+  //    insert below. `note` is not part of the batch function's column set, so an assigned shift's
+  //    note is written in a follow-up update (see below).
+  if (input.employeeId) {
+    // rpc-grants: lensed_apply_schedule_batch
+    const guarded = await admin.rpc('lensed_apply_schedule_batch', {
+      p_owner: input.userId,
+      p_upserts: [{
+        employee_id: input.employeeId,
+        shift_date: input.date,
+        starts_at: startsAt,
+        ends_at: endsAt,
+        status: 'scheduled',
+        source: 'admin_open',
+        shift_rule_id: null,
+        store_id: storeId,
+        role: plan.role,
+      }],
+      p_delete_ids: [],
+      p_cancel_ids: [],
+      });
+    if (!guarded.error) {
+      const r = (guarded.data ?? {}) as BatchGuardResult;
+      if ((r.refusals ?? []).length > 0) throw new ScheduleError('OVER_CAPACITY', OVER_CAPACITY_MESSAGE);
+      const { data: row, error: rErr } = await admin
+        .from('shift_instances')
+        .update({ note: input.note ?? null })
+        .eq('user_id', input.userId)
+        .eq('employee_id', input.employeeId)
+        .eq('shift_date', input.date)
+        .select('id')
+        .maybeSingle();
+      if (rErr) throw new ScheduleError('POST_FAILED', rErr.message);
+      if (!row) throw new ScheduleError('POST_FAILED', 'The shift was written but could not be read back.');
+      return { id: row.id };
+    }
+    if (!isMissingFunction(guarded.error)) throw new ScheduleError('POST_FAILED', guarded.error.message);
+    // else: 157 unapplied → fall through to the pre-157 insert, unchanged.
+  }
+
   const { data, error } = await admin
     .from('shift_instances')
     .insert({
@@ -62,8 +109,8 @@ export async function postOneTimeShift(input: PostShiftInput): Promise<{ id: str
       shift_rule_id: null,
       store_id: storeId,
       shift_date: input.date,
-      starts_at: laWallTimeToUtc(input.date, input.startTime).toISOString(),
-      ends_at: laWallTimeToUtc(endDate, input.endTime).toISOString(),
+      starts_at: startsAt,
+      ends_at: endsAt,
       status: plan.status,
       source: 'admin_open',
       released_by: null,
@@ -239,16 +286,21 @@ export async function approveClaim(claimId: string, approverId: string): Promise
   // shift_instance → user_id must equal the acting manager. The claim read above is already scoped,
   // but shift_claims.user_id is denormalised at insert; the instance is the authority, so the flip
   // re-asserts it. A foreign instance matches 0 rows and nothing mutates.
-  const { data: won, error: uErr } = await admin
-    .from('shift_instances')
-    .update({ status: 'claimed', employee_id: claim.claimed_by, source: 'claim', released_at: null })
-    .eq('id', claim.shift_instance_id)
-    .eq('user_id', ownerId)
-    .eq('status', 'released')
-    .select('id, shift_date, user_id')
-    .maybeSingle();
-  if (uErr) throw new ScheduleError('APPROVE_FAILED', uErr.message);
-  if (!won) throw new ScheduleError('SHIFT_UNAVAILABLE', 'That shift is no longer on the board — it was taken or changed.');
+  // ── CAPACITY GUARD (157). Assigning a released row is count-INCREASING: a released row has no
+  //    employee and is not staffed, so approving this claim puts a body on the floor exactly like
+  //    scheduling one. lensed_assign_released_shift performs the SAME CAS under the same
+  //    (owner, team, date) lock with a recount in front of it. rpc-grants: lensed_assign_released_shift
+  const assigned = await assignReleasedShift(admin, {
+    ownerId,
+    instanceId: claim.shift_instance_id,
+    employeeId: claim.claimed_by,
+  });
+  if (!assigned.ok) {
+    if (assigned.reason === 'NO_CAPACITY') throw new ScheduleError('OVER_CAPACITY', OVER_CAPACITY_MESSAGE);
+    if (assigned.reason === 'FAILED') throw new ScheduleError('APPROVE_FAILED', assigned.message ?? 'APPROVE_FAILED');
+    throw new ScheduleError('SHIFT_UNAVAILABLE', 'That shift is no longer on the board. It was taken or changed.');
+  }
+  const won = assigned.row;
 
   const { error: cErr } = await admin
     .from('shift_claims')
@@ -500,3 +552,5 @@ export async function declinePickup(input: { ownerId: string; claimId: string })
   if (error) throw new ScheduleError('DECLINE_FAILED', error.message);
   if (!data) throw new ScheduleError('NOT_PENDING', 'That request has already been decided.');
 }
+
+

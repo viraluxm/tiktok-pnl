@@ -2,9 +2,11 @@ import 'server-only';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { laTodayISO } from './timezone';
 import {
-  planScheduleBatch, entryDateRange, uniqueEmployeeIds,
+  planScheduleBatch, entryDateRange, uniqueEmployeeIds, SCHEDULE_REFUSAL_MESSAGES,
   type ScheduleEntry, type ExistingInstance, type PlanEmployee, type ScheduleCounts, type ScheduleRefusal,
+  type SchedulePlan,
 } from './schedulePlan';
+import { isMissingFunction, type BatchGuardResult } from './capacityGuard';
 
 // THE bulk scheduling write path. Every new scheduling surface (the employee Schedule Builder,
 // the day/crew modal, anything later) funnels through applyScheduleBatch so there is exactly one
@@ -14,12 +16,20 @@ import {
 // removal guards and nothing else — this function has no code path that can create payable time,
 // which is the property the tests pin.
 //
-// ATOMICITY (honest statement): PostgREST gives us ONE atomic multi-row upsert statement, but the
-// removals are separate statements and there is no transaction RPC in the schema. So the plan is
-// computed completely before any write (any refusal → nothing is written), and writes run in the
-// order upsert → delete → cancel. A failure between them can leave a requested-off day still
-// scheduled (visible, re-saveable) but can never lose a requested-working day. A DB function would
-// make this a single transaction; that is a later migration, deliberately not part of this change.
+// ATOMICITY. Migration 157 added `lensed_apply_schedule_batch`, the DB function this header used
+// to describe as "a later migration": it runs the removals and the upserts in ONE transaction,
+// holding the (owner, team, date) capacity lock across the recount and the write. When it is
+// present, the batch is atomic and capacity-safe.
+//
+// It is also the ONLY way to be capacity-safe. A check written here, before the writes, is
+// check-then-act across separate transactions: by the time the upsert lands, an approval on another
+// connection may have taken the last shift. That was the residual 156's header admitted.
+//
+// FALLBACK (see capacityGuard.ts): when the function is absent — which is the state until 156 and
+// 157 are hand-applied — this falls back to the exact pre-157 sequence below: plan first (any
+// refusal → nothing written), then upsert → delete → cancel, with the torn-write window that
+// sequence has always had. Safe, because capacity blocks live in 156: with no blocks there is
+// nothing to exceed, and the two migrations are applied together.
 
 export interface ApplyScheduleResult {
   ok: true;
@@ -28,6 +38,11 @@ export interface ApplyScheduleResult {
   /** Dates whose times this operation replaces / removes — for the repeat confirmation. */
   updatedDates: string[];
   removedDates: string[];
+  /**
+   * PER-ROW capacity refusals (157). Unlike planner refusals, these do NOT mean "nothing was
+   * written": every other day in the batch landed. Empty on the pre-157 fallback and on a dry run.
+   */
+  refusals: ScheduleRefusal[];
 }
 
 export interface ApplyScheduleRefused {
@@ -102,8 +117,59 @@ export async function applyScheduleBatch(input: {
 
   if (plan.refusals.length > 0) return { ok: false, refusals: plan.refusals };
   const dates = { updatedDates: plan.updatedDates, removedDates: plan.removedDates };
-  if (input.dryRun) return { ok: true, dryRun: true, counts: plan.counts, ...dates };
+  // A dry run is a "what would this replace or remove" preview for the repeat confirmation, and it
+  // writes nothing — so it deliberately takes no capacity lock and reports no capacity refusal.
+  // Locking a lane to answer a question nobody acted on would serialise real saves behind previews.
+  if (input.dryRun) return { ok: true, dryRun: true, counts: plan.counts, ...dates, refusals: [] };
 
+  // ── THE GUARDED PATH (157). One transaction, the lane locks held across the recount and the
+  //    write. Returns per-row OVER_CAPACITY refusals; every other row still lands.
+  //    rpc-grants: lensed_apply_schedule_batch
+  const guarded = await admin.rpc('lensed_apply_schedule_batch', {
+    p_owner: input.userId,
+    p_upserts: plan.upserts,
+    p_delete_ids: plan.deleteIds,
+    p_cancel_ids: plan.cancelIds,
+  });
+  if (!guarded.error) {
+    const r = (guarded.data ?? {}) as BatchGuardResult;
+    const refusals: ScheduleRefusal[] = (r.refusals ?? []).map((x) => ({
+      employeeId: x.employee_id,
+      date: x.shift_date,
+      code: 'OVER_CAPACITY',
+      message: SCHEDULE_REFUSAL_MESSAGES.OVER_CAPACITY,
+    }));
+    // Counts come from what the function ACTUALLY wrote, not from what the planner hoped to write:
+    // a refused row must not be reported as created.
+    return {
+      ok: true,
+      dryRun: false,
+      counts: { ...plan.counts, created: r.created ?? 0, updated: r.updated ?? 0, removed: r.removed ?? 0 },
+      ...dates,
+      refusals,
+    };
+  }
+  if (!isMissingFunction(guarded.error)) throw new ScheduleBatchError('WRITE_FAILED', guarded.error.message);
+
+  // ── PRE-157 FALLBACK, unchanged. Reached only while the migration is unapplied, i.e. while no
+  //    capacity block exists to exceed. See capacityGuard.ts for why this is safe rather than lax.
+  await applyScheduleBatchUnguarded(admin, input.userId, plan);
+  return { ok: true, dryRun: false, counts: plan.counts, ...dates, refusals: [] };
+}
+
+/**
+ * The exact statement sequence this module used before 157: upsert → delete → cancel, three
+ * PostgREST statements with no shared transaction. Extracted verbatim rather than rewritten, so the
+ * fallback cannot drift from the behaviour it is meant to reproduce.
+ *
+ * A failure between the statements can leave a requested-off day still scheduled (visible,
+ * re-saveable) but can never lose a requested-working day.
+ */
+async function applyScheduleBatchUnguarded(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string,
+  plan: SchedulePlan,
+): Promise<void> {
   // 1. Upsert (one statement). ON CONFLICT (employee_id, shift_date) DO UPDATE — the unique
   //    constraint IS the idempotency key, so a row created between our read and this write is
   //    updated rather than erroring. (An upsert cannot carry a status predicate, so the claim rule
@@ -121,7 +187,7 @@ export async function applyScheduleBatch(input: {
     const { error } = await admin
       .from('shift_instances')
       .delete()
-      .eq('user_id', input.userId)
+      .eq('user_id', userId)
       .eq('source', 'admin_open')
       .eq('status', 'scheduled')
       .in('id', plan.deleteIds);
@@ -136,11 +202,9 @@ export async function applyScheduleBatch(input: {
     const { error } = await admin
       .from('shift_instances')
       .update({ status: 'cancelled' })
-      .eq('user_id', input.userId)
+      .eq('user_id', userId)
       .eq('status', 'scheduled')
       .in('id', plan.cancelIds);
     if (error) throw new ScheduleBatchError('WRITE_FAILED', error.message);
   }
-
-  return { ok: true, dryRun: false, counts: plan.counts, ...dates };
 }

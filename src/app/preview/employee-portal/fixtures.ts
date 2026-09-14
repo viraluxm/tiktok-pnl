@@ -21,6 +21,10 @@ import { approvedMinutesForTeam, type ApprovedTeam } from '@/lib/shifts/approved
 import { payrollTeamOfRole } from '@/lib/employees';
 import { buildCalendarDays, type DayPerson } from '@/lib/schedule/calendarModel';
 import { buildTradeOptions, planTradeRequest, otherDates, TRADE_REFUSAL_MESSAGES, type TradeableInstance } from '@/lib/schedule/tradePlan';
+import {
+  capacityItemId, planShiftRequest, staffingOutlook, SHIFT_REQUEST_REFUSAL_MESSAGES,
+  type CapacityBlock, type CapacitySetting,
+} from '@/lib/schedule/capacity';
 import { laTodayISO } from '@/lib/schedule/timezone';
 
 export type PortalClient = _PC;
@@ -36,6 +40,10 @@ export interface DemoTrade {
   id: string; requester_employee_id: string; requester_shift_instance_id: string; target_employee_id: string; target_shift_instance_id: string;
   status: TradeView['status']; coworker_response: 'accepted' | 'declined' | null; coworker_responded_at: string | null; decided_at: string | null; decision_note: string | null; cancelled_at: string | null; created_at: string;
 }
+/** A staffing block + its capacity settings, exactly the shapes the real kernel consumes. */
+export type DemoBlock = CapacityBlock;
+export type DemoCapacitySetting = CapacitySetting;
+export interface DemoShiftRequest { id: string; employee_id: string; block_id: string; shift_date: string; starts_at: string; ends_at: string; team: 'host' | 'fulfillment'; status: 'pending' | 'approved' | 'declined' | 'withdrawn' | 'superseded'; created_at: string; decided_at: string | null }
 export interface DemoTimeOff { id: string; employee_id: string; start_date: string; end_date: string; reason: string | null; status: 'pending' | 'approved' | 'denied'; decision_note: string | null; created_at: string; decided_at: string | null }
 /** A punch awaiting (or holding) a manager's approval, for the confirmation tiles. */
 export interface DemoConfirmable {
@@ -58,6 +66,9 @@ export interface DemoWorld {
   pickups: DemoPickup[];
   trades: DemoTrade[];
   timeOff: DemoTimeOff[];
+  blocks: DemoBlock[];
+  capacitySettings: DemoCapacitySetting[];
+  shiftRequests: DemoShiftRequest[];
   punches: TimecardShiftRow[];
   /** the manager's confirmation queue (separate from the viewer's own timecard rows) */
   confirmable: DemoConfirmable[];
@@ -206,9 +217,52 @@ export function initialWorld(): DemoWorld {
         break_minutes: 30, confirmed_at: null, approved_minutes: null,
       },
     ],
+    // ── STAFFING CAPACITY (156) ─────────────────────────────────────────────────────────────
+    // The cast is three Live Hosts, so the team default is set to 4 rather than the production 10 —
+    // small numbers make every state reachable with the existing roster. The MANAGER-side numbers
+    // from the brief (8/10, fully staffed, over capacity) are reviewed at /preview/staffing-capacity.
+    blocks: [
+      { id: 'blk-night', user_id: 'preview', team: 'host', label: 'Night', days_of_week: [0, 1, 2, 3, 4, 5, 6], start_time: '18:00', end_time: '02:00', capacity: null, active: true },
+      { id: 'blk-morning', user_id: 'preview', team: 'host', label: 'Morning', days_of_week: [1, 2, 3, 4, 5], start_time: '06:00', end_time: '14:00', capacity: null, active: true },
+      { id: 'blk-ful', user_id: 'preview', team: 'fulfillment', label: 'Day', days_of_week: [1, 2, 3, 4, 5], start_time: '06:00', end_time: '14:00', capacity: null, active: true },
+    ],
+    capacitySettings: [
+      { id: 'cap-host', team: 'host', block_id: null, date: null, capacity: 4, closed: false, note: null },
+      { id: 'cap-ful', team: 'fulfillment', block_id: null, date: null, capacity: 3, closed: false, note: null },
+      // A date-specific override: two nights out, the floor only wants 2 hosts.
+      { id: 'cap-ovr', team: 'host', block_id: 'blk-night', date: d(2), capacity: 2, closed: false, note: null },
+      // And a day where management is taking no more requests at all.
+      { id: 'cap-closed', team: 'host', block_id: 'blk-night', date: d(4), capacity: null, closed: true, note: null },
+    ],
+    // One request already waiting, so the manager queue has a row on load. Placed on the first
+    // upcoming date Juan is NOT already scheduled — one shift per person per day is a real
+    // constraint, and a fixture that violates it would be un-approvable.
+    shiftRequests: (() => {
+      const taken = new Set(unique.filter((i) => i.employee_id === JUAN).map((i) => i.shift_date));
+      const date = [1, 2, 3, 4, 5, 6, 7].map((n) => d(n)).find((x) => !taken.has(x)) as string;
+      return [{
+        id: 'sr-juan', employee_id: JUAN, block_id: 'blk-night', shift_date: date,
+        starts_at: at(date, 18), ends_at: at(addDaysISO(date, 1), 2),
+        team: 'host' as const, status: 'pending' as const, created_at: nowISO(), decided_at: null,
+      }];
+    })(),
     clockedInAt: null,
     log: [],
   };
+}
+
+// ── capacity projection: runs the REAL kernel, so the preview cannot drift from production ────
+
+/** Every staffing block's numbers across the preview horizon, for one owner (there is only one). */
+export function capacityOutlook(w: DemoWorld, fromISO: string, days: number) {
+  return staffingOutlook({
+    blocks: w.blocks,
+    fromISO,
+    toISO: addDaysISO(fromISO, days),
+    instances: w.instances.filter((i) => i.status !== 'released').map((i) => ({ id: i.id, employee_id: i.employee_id, status: i.status, starts_at: i.starts_at, ends_at: i.ends_at })),
+    teamOf: (id) => (w.employees.find((e) => e.id === id)?.role ?? 'other') as 'host' | 'fulfillment' | 'other',
+    settings: w.capacitySettings,
+  });
 }
 
 // ── projections: the same shapes the server builds ───────────────────────────────────────────
@@ -242,7 +296,7 @@ function toShift(w: DemoWorld, i: DemoInstance, meId: string): PortalShift {
 function available(w: DemoWorld, meId: string): AvailableItem[] {
   const me = empOf(w, meId);
   const myDates = new Set(w.instances.filter((i) => i.employee_id === meId && i.status !== 'released').map((i) => i.shift_date));
-  return w.instances
+  const offers: AvailableItem[] = w.instances
     .filter((i) => i.offer_state === 'offered' && i.employee_id !== meId && i.shift_date >= today && i.role === me.role)
     .map((i) => {
       const requested = w.pickups.some((p) => p.shift_instance_id === i.id && p.claimed_by === meId && p.status === 'pending');
@@ -250,8 +304,36 @@ function available(w: DemoWorld, meId: string): AvailableItem[] {
         kind: 'offer' as const, id: i.id, offer_id: i.offer_id, shift_date: i.shift_date, starts_at: i.starts_at, ends_at: i.ends_at, role: i.role,
         hours: instanceHours(i.starts_at, i.ends_at), offered_by_name: nameOf(w, i.employee_id),
         requested, refusal: !requested && myDates.has(i.shift_date) ? "You're already scheduled that day." : null,
+        block_id: null, available: null, request_id: null,
       };
     });
+
+  // CAPACITY — the same kernel the server runs, filtered to the viewer's own team so the preview
+  // reproduces the real payload's team isolation rather than hiding rows in the client.
+  const capacity: AvailableItem[] = capacityOutlook(w, today, 21)
+    .filter((s) => s.team === me.role)
+    .flatMap((s) => {
+      const mine = w.shiftRequests.find((r) => r.employee_id === meId && r.block_id === s.block_id && r.shift_date === s.date && r.status === 'pending') ?? null;
+      const plan = planShiftRequest({
+        staffing: s, employeeTeam: me.role, employeeStatus: 'active',
+        myDatesInUse: myDates, alreadyRequested: mine != null, nowMs: Date.now(), todayISO: today,
+      });
+      const code = plan.ok ? null : plan.code;
+      // Mirrors capacityBoard.ts exactly: an UNCONFIGURED block publishes nothing at all — not a
+      // disabled row, not "0 shifts available", nothing.
+      if (!s.configured) return [];
+      if (code === 'PAST_DATE' || code === 'ALREADY_STARTED' || code === 'WRONG_TEAM' || code === 'INACTIVE_EMPLOYEE') return [];
+      if (!mine && (code === 'NO_CAPACITY' || code === 'AVAILABILITY_CLOSED' || code === 'CAPACITY_NOT_CONFIGURED')) return [];
+      return [{
+        kind: 'capacity' as const, id: capacityItemId(s.block_id, s.date), offer_id: null,
+        shift_date: s.date, starts_at: s.starts_at, ends_at: s.ends_at, role: s.team, hours: s.hours,
+        offered_by_name: null, requested: mine != null,
+        refusal: code && code !== 'ALREADY_REQUESTED' ? SHIFT_REQUEST_REFUSAL_MESSAGES[code] : null,
+        block_id: s.block_id, available: s.available, request_id: mine?.id ?? null,
+      }];
+    });
+
+  return [...offers, ...capacity].sort((a, b) => (a.starts_at < b.starts_at ? -1 : a.starts_at > b.starts_at ? 1 : 0));
 }
 
 export function snapshotFor(w: DemoWorld): PortalSnapshot {
@@ -270,6 +352,14 @@ export function snapshotFor(w: DemoWorld): PortalSnapshot {
     available: available(w, meId),
     pickups: w.pickups.filter((p) => p.claimed_by === meId).map((p): PickupRequestView => { const i = w.instances.find((x) => x.id === p.shift_instance_id)!; return { claim_id: p.claim_id, shift_instance_id: i.id, shift_date: i.shift_date, starts_at: i.starts_at, ends_at: i.ends_at, status: p.status, requested_at: p.requested_at, decided_at: p.decided_at }; }),
     otClaims: [],
+    // MY capacity requests, for the Requests tab. Filtered to the viewer, exactly as the server is.
+    shiftRequests: w.shiftRequests
+      .filter((r) => r.employee_id === meId)
+      .map((r) => ({
+        id: r.id, block_id: r.block_id, shift_date: r.shift_date, starts_at: r.starts_at, ends_at: r.ends_at,
+        hours: instanceHours(r.starts_at, r.ends_at), role: r.team, status: r.status,
+        requested_at: r.created_at, decided_at: r.decided_at,
+      })),
     timeOff: w.timeOff.filter((r) => r.employee_id === meId).map((r): TimeOffView => ({ id: r.id, start_date: r.start_date, end_date: r.end_date, reason: r.reason, status: r.status, decision_note: r.decision_note, created_at: r.created_at, decided_at: r.decided_at })),
     timeOffEarliest: addDaysISO(payPeriodContaining(d(3)).start, 14),
     trades: w.trades.filter((t) => t.requester_employee_id === meId || t.target_employee_id === meId).map((t) => tradeView(w, t, meId)),
@@ -438,7 +528,57 @@ export const act = {
   requestTimeOff: (start: string, end: string, reason: string): Mutation => (w) => ({ ...w, timeOff: [...w.timeOff, { id: nid('to'), employee_id: w.viewerId, start_date: start, end_date: end, reason: reason || null, status: 'pending', decision_note: null, created_at: nowISO(), decided_at: null }], log: [`Time off requested ${start} – ${end}`, ...w.log] }),
   withdrawTimeOff: (id: string): Mutation => (w) => ({ ...w, timeOff: w.timeOff.filter((r) => r.id !== id), log: ['Time-off request withdrawn', ...w.log] }),
 
+  requestShift: (blockId: string, date: string): Mutation => (w) => {
+    const s = capacityOutlook(w, today, 21).find((x) => x.block_id === blockId && x.date === date);
+    if (!s) throw new Error('This shift is no longer available.');
+    if (w.shiftRequests.some((r) => r.employee_id === w.viewerId && r.shift_date === date && r.status === 'pending')) {
+      throw new Error('You have already requested a shift that day.');
+    }
+    const me = empOf(w, w.viewerId);
+    const plan = planShiftRequest({
+      staffing: s, employeeTeam: me.role, employeeStatus: 'active',
+      myDatesInUse: new Set(w.instances.filter((i) => i.employee_id === w.viewerId && i.status !== 'released').map((i) => i.shift_date)),
+      alreadyRequested: false, nowMs: Date.now(), todayISO: today,
+    });
+    if (!plan.ok) throw new Error(SHIFT_REQUEST_REFUSAL_MESSAGES[plan.code]);
+    return {
+      ...w,
+      shiftRequests: [...w.shiftRequests, { id: nid('sr'), employee_id: w.viewerId, block_id: blockId, shift_date: date, starts_at: s.starts_at, ends_at: s.ends_at, team: s.team, status: 'pending', created_at: nowISO(), decided_at: null }],
+      log: [`${me.name} requested a shift on ${date} — pending manager`, ...w.log],
+    };
+  },
+  withdrawShiftRequest: (id: string): Mutation => (w) => ({
+    ...w,
+    shiftRequests: w.shiftRequests.map((r) => (r.id === id && r.status === 'pending' ? { ...r, status: 'withdrawn', decided_at: nowISO() } : r)),
+    log: ['Shift request withdrawn', ...w.log],
+  }),
+
   // manager side
+  // APPROVAL RE-CHECKS CAPACITY, exactly as lensed_approve_shift_request does under its advisory
+  // lock: a request filed when there was room is refused if the room has since gone.
+  decideShiftRequest: (id: string, action: 'approve' | 'decline'): Mutation => (w) => {
+    const r = w.shiftRequests.find((x) => x.id === id); if (!r || r.status !== 'pending') return w;
+    if (action === 'decline') {
+      return { ...w, shiftRequests: w.shiftRequests.map((x) => (x.id === id ? { ...x, status: 'declined', decided_at: nowISO() } : x)), log: ['Manager declined a shift request', ...w.log] };
+    }
+    const s = capacityOutlook(w, today, 21).find((x) => x.block_id === r.block_id && x.date === r.shift_date);
+    if (!s) throw new Error('That shift block no longer exists.');
+    if (s.closed) throw new Error('Availability is closed for that day.');
+    if (s.available <= 0) throw new Error('That block is fully staffed — there is no room for another shift.');
+    if (w.instances.some((i) => i.employee_id === r.employee_id && i.shift_date === r.shift_date && i.status !== 'released')) {
+      throw new Error('That employee is already scheduled that day.');
+    }
+    const newId = nid('cap');
+    return {
+      ...w,
+      instances: [...w.instances, { id: newId, employee_id: r.employee_id, shift_date: r.shift_date, starts_at: r.starts_at, ends_at: r.ends_at, status: 'scheduled', released_by: null, role: r.team, offer_state: null, offer_id: null }],
+      shiftRequests: w.shiftRequests.map((x) => (
+        x.id === id ? { ...x, status: 'approved', decided_at: nowISO() }
+          : x.employee_id === r.employee_id && x.shift_date === r.shift_date && x.status === 'pending' ? { ...x, status: 'superseded', decided_at: nowISO() }
+            : x)),
+      log: [`Manager approved: ${nameOf(w, r.employee_id)} added to ${r.shift_date} — ${s.available - 1} shift${s.available - 1 === 1 ? '' : 's'} available`, ...w.log],
+    };
+  },
   decidePickup: (claimId: string, action: 'approve' | 'decline'): Mutation => (w) => {
     const p = w.pickups.find((x) => x.claim_id === claimId); if (!p) return w;
     if (action === 'decline') return { ...w, pickups: w.pickups.map((x) => (x.claim_id === claimId ? { ...x, status: 'rejected', decided_at: nowISO() } : x)), log: ['Manager declined a pickup — the shift stays offered', ...w.log] };
@@ -448,6 +588,40 @@ export const act = {
       instances: w.instances.map((x) => (x.id === i.id ? { ...x, employee_id: p.claimed_by, status: 'claimed', offer_state: 'transferred' } : x)),
       pickups: w.pickups.map((x) => (x.claim_id === claimId ? { ...x, status: 'approved', decided_at: nowISO() } : x.shift_instance_id === i.id && x.status === 'pending' ? { ...x, status: 'superseded', decided_at: nowISO() } : x)),
       log: [`Manager approved: ${i.shift_date} moved from ${nameOf(w, i.employee_id)} to ${nameOf(w, p.claimed_by)}`, ...w.log],
+    };
+  },
+  setTeamCapacity: (team: string, capacity: number | null): Mutation => (w) => ({
+    ...w,
+    capacitySettings: capacity == null
+      ? w.capacitySettings.filter((c) => !(c.block_id == null && c.team === team))
+      : w.capacitySettings.some((c) => c.block_id == null && c.team === team)
+        ? w.capacitySettings.map((c) => (c.block_id == null && c.team === team ? { ...c, capacity } : c))
+        : [...w.capacitySettings, { id: nid('cap'), team: team as 'host' | 'fulfillment', block_id: null, date: null, capacity, closed: false, note: null }],
+    log: [`Team capacity for ${team} set to ${capacity ?? 'automatic'}`, ...w.log],
+  }),
+  setDateCapacity: (blockId: string, date: string, capacity: number | null, closed: boolean): Mutation => (w) => {
+    const block = w.blocks.find((b) => b.id === blockId);
+    const rest = w.capacitySettings.filter((c) => !(c.block_id === blockId && c.date === date));
+    // capacity null + not closed REMOVES the override — automatic capacity is restored.
+    const next = capacity == null && !closed ? rest
+      : [...rest, { id: nid('cap'), team: (block?.team ?? 'host'), block_id: blockId, date, capacity, closed, note: null }];
+    return { ...w, capacitySettings: next, log: [closed ? `Availability closed for ${date}` : `Capacity for ${date} set to ${capacity ?? 'automatic'}`, ...w.log] };
+  },
+  setBlockActive: (blockId: string, active: boolean): Mutation => (w) => ({
+    ...w, blocks: w.blocks.map((b) => (b.id === blockId ? { ...b, active } : b)),
+    log: [`Shift block ${active ? 'resumed' : 'paused'}`, ...w.log],
+  }),
+  saveBlock: (b: Record<string, unknown>): Mutation => (w) => {
+    const id = (b.id as string) || nid('blk');
+    const row: DemoBlock = {
+      id, user_id: 'preview', team: b.team as 'host' | 'fulfillment', label: (b.label as string) || null,
+      days_of_week: (b.days_of_week as number[]) ?? [], start_time: b.start_time as string, end_time: b.end_time as string,
+      capacity: b.capacity == null ? null : Number(b.capacity), active: b.active !== false,
+    };
+    return {
+      ...w,
+      blocks: w.blocks.some((x) => x.id === id) ? w.blocks.map((x) => (x.id === id ? row : x)) : [...w.blocks, row],
+      log: [`Shift block saved (${row.start_time}–${row.end_time})`, ...w.log],
     };
   },
   decideTrade: (id: string, action: 'approve' | 'decline'): Mutation => (w) => {

@@ -66,7 +66,12 @@ export type ScheduleRefusalCode =
   | 'SHIFT_CLAIMED'
   | 'ALREADY_STARTED'
   | 'WORKED_TIME_EXISTS'
-  | 'EMPLOYEE_CLOCKED_IN';
+  | 'EMPLOYEE_CLOCKED_IN'
+  // 157. The ONLY refusal the planner cannot decide: it needs the (owner, team, date) lock and a
+  // live recount, so it is produced inside lensed_apply_schedule_batch and merged into the same
+  // refusal list. Unlike every code above it, it is PER-ROW — the other days in the batch still
+  // save, because failing a whole week over one full night helps nobody.
+  | 'OVER_CAPACITY';
 
 export interface ScheduleRefusal {
   employeeId: string;
@@ -88,6 +93,7 @@ export const SCHEDULE_REFUSAL_MESSAGES: Record<ScheduleRefusalCode, string> = {
   ALREADY_STARTED: 'That shift has already started and cannot be removed.',
   WORKED_TIME_EXISTS: 'This employee already has worked time on that date.',
   EMPLOYEE_CLOCKED_IN: 'This employee is currently clocked in.',
+  OVER_CAPACITY: 'That block is fully staffed for this day. Raise the capacity or free a shift first.',
 };
 
 export interface ScheduleCounts {

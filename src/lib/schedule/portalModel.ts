@@ -1,6 +1,6 @@
 import { BUSINESS_TZ, addDaysISO, weekdayOf } from './timezone';
 import { weekBoundsMonSun } from './hours';
-import type { PortalShift, PortalSnapshot, TradeView, TimeOffView, PickupRequestView } from './portalTypes';
+import type { PortalShift, PortalSnapshot, TradeView, TimeOffView, PickupRequestView, ShiftRequestView } from './portalTypes';
 
 // Pure view-model kernels for the employee portal. No React, no Supabase. Every decision the UI
 // makes that could be wrong in an interesting way — which shift is "next", what day the strip
@@ -396,17 +396,34 @@ export function buildAlerts(snap: PortalSnapshot, nowMs: number): Alert[] {
       });
     }
   }
-  const openCount = snap.available.filter((a) => !a.refusal && !a.requested).length;
+  const openCount = availableCountThisWeek(snap);
   if (openCount > 0) {
     out.push({
       id: 'open-shifts',
       kind: 'open_shifts',
-      title: `${openCount} open shift${openCount === 1 ? '' : 's'} available`,
+      title: `${openCount} shift${openCount === 1 ? '' : 's'} available this week`,
       actionable: false,
       go: { tab: 'schedule', seg: 'open' },
     });
   }
   return out;
+}
+
+/**
+ * How many shifts the viewer could take THIS WEEK.
+ *
+ * SCOPED TO THE WEEK ON PURPOSE. `snap.available` reaches four weeks forward now that capacity
+ * blocks publish a rolling horizon, so an unscoped count reads "31 shifts available" on a quiet
+ * Tuesday — a number nobody can act on and which drowns out the alerts beside it. The week is the
+ * unit the rest of Home already speaks in.
+ *
+ * "shift", never "open shift": the list mixes a coworker's offered shift with a capacity-derived
+ * one, and only the first is "open" in the legacy sense.
+ */
+export function availableCountThisWeek(snap: PortalSnapshot): number {
+  return snap.available.filter(
+    (a) => !a.refusal && !a.requested && a.shift_date >= snap.thisWeek.start && a.shift_date <= snap.thisWeek.end,
+  ).length;
 }
 
 // ── Requests screen grouping ─────────────────────────────────────────────────────────────────
@@ -415,7 +432,10 @@ export type RequestItem =
   | { key: string; kind: 'trade'; trade: TradeView; at: string }
   | { key: string; kind: 'time_off'; request: TimeOffView; at: string }
   | { key: string; kind: 'pickup'; pickup: PickupRequestView; at: string }
-  | { key: string; kind: 'ot_claim'; claim: PortalSnapshot['otClaims'][number]; at: string };
+  | { key: string; kind: 'ot_claim'; claim: PortalSnapshot['otClaims'][number]; at: string }
+  // 156/157. A capacity shift request the viewer filed. It has no coworker and no counterpart
+  // shift: nobody owned it, the floor simply had room.
+  | { key: string; kind: 'shift_request'; request: ShiftRequestView; at: string };
 
 export interface RequestGroups {
   /** the employee must act (accept/decline an incoming trade) */
@@ -448,6 +468,10 @@ export function groupRequests(snap: PortalSnapshot): RequestGroups {
   for (const c of snap.otClaims) {
     pending.push({ key: `ot-${c.claim_id}`, kind: 'ot_claim', claim: c, at: c.starts_at });
   }
+  for (const r of snap.shiftRequests) {
+    const item: RequestItem = { key: `sr-${r.id}`, kind: 'shift_request', request: r, at: r.decided_at ?? r.requested_at };
+    if (r.status === 'pending') pending.push(item); else history.push(item);
+  }
 
   const byAtAsc = (a: RequestItem, b: RequestItem) => Date.parse(a.at) - Date.parse(b.at);
   const byAtDesc = (a: RequestItem, b: RequestItem) => Date.parse(b.at) - Date.parse(a.at);
@@ -472,6 +496,18 @@ export function tradeStatusWords(t: TradeView): string {
     case 'approved': return 'Approved';
     case 'declined': return t.coworker_response === 'declined' ? `Declined by ${who}` : 'Declined by manager';
     case 'cancelled': return 'Cancelled';
+  }
+}
+
+export function shiftRequestStatusWords(r: ShiftRequestView): string {
+  switch (r.status) {
+    case 'pending': return 'Waiting for manager approval';
+    case 'approved': return 'Approved';
+    case 'declined': return 'Declined';
+    case 'withdrawn': return 'Withdrawn';
+    // Not a refusal: they were approved for a different shift that day, and one shift per day is
+    // the rule. Saying "Declined" here would be a lie the worker can see.
+    case 'superseded': return 'You took another shift that day';
   }
 }
 

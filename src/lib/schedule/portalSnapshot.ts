@@ -7,6 +7,8 @@ import { instanceHours, weekBoundsMonSun } from './hours';
 import { getBoard, getMyPendingClaims, getCurrentPeriodDrops } from './board';
 import { getAvailableShifts } from './offer';
 import { PICKUP_REFUSAL_MESSAGES } from './offerPlan';
+import { getCapacityAvailability, getMyShiftRequests, capacityItemId } from './capacityBoard';
+import { SHIFT_REQUEST_REFUSAL_MESSAGES } from './capacity';
 import { getWeekSchedule } from './mySchedule';
 import { getTeamSchedule } from './teamSchedule';
 import { earliestRequestableDate } from './timeOff';
@@ -125,7 +127,7 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
   const todayISO = laTodayISO(now);
   const week = weekBoundsMonSun(todayISO);
 
-  const [mine, released, trades, offers, board, pickups, otClaims, timeOff, { drops }, timecard, open] = await Promise.all([
+  const [mine, released, trades, offers, board, capacity, shiftRequests, pickups, otClaims, timeOff, { drops }, timecard, open] = await Promise.all([
     // My plan from this week's Monday forward (the week total needs the days already behind us).
     admin.from('shift_instances').select(INSTANCE_COLS)
       .eq('user_id', owner).eq('employee_id', employee.id)
@@ -137,6 +139,11 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
     listMyTrades(employee, now),
     getAvailableShifts(employee, now),
     getBoard(employee, now),
+    // Capacity-derived availability (migration 156). Owner- AND team-scoped inside; an employee
+    // whose role maps to no staffing team gets [] rather than another team's numbers.
+    getCapacityAvailability(employee, now),
+    // MY capacity requests, for the Requests tab. Owner- AND employee-scoped inside.
+    getMyShiftRequests(employee, now),
     getMyPickups(admin, employee, now),
     getMyPendingClaims(employee),
     getMyTimeOff(admin, employee, todayISO),
@@ -164,6 +171,9 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
       offered_by_name: a.offered_by_name,
       requested: a.refusal === 'ALREADY_REQUESTED',
       refusal: a.refusal && a.refusal !== 'ALREADY_REQUESTED' ? PICKUP_REFUSAL_MESSAGES[a.refusal] : null,
+      block_id: null,
+      available: null,
+      request_id: null,
     })),
     ...board.map((b): AvailableItem => ({
       kind: 'open',
@@ -177,6 +187,29 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
       offered_by_name: b.releaser_name,
       requested: false,
       refusal: null,
+      block_id: null,
+      available: null,
+      request_id: null,
+    })),
+    // CAPACITY. Nobody owns these — they are `effective_capacity - scheduled` for a staffing block
+    // on a date, so no shift_instances row exists until a manager approves a request.
+    ...capacity.map((c): AvailableItem => ({
+      kind: 'capacity',
+      // Namespaced: `availableById` on the client is keyed on shift_instances ids, and a bare uuid
+      // here would collide with a coworker's row on the Team tab.
+      id: capacityItemId(c.block_id, c.shift_date),
+      offer_id: null,
+      shift_date: c.shift_date,
+      starts_at: c.starts_at,
+      ends_at: c.ends_at,
+      role: c.team,
+      hours: c.hours,
+      offered_by_name: null,
+      requested: c.request_id != null,
+      refusal: c.refusal && c.refusal !== 'ALREADY_REQUESTED' ? SHIFT_REQUEST_REFUSAL_MESSAGES[c.refusal] : null,
+      block_id: c.block_id,
+      available: c.available,
+      request_id: c.request_id,
     })),
   ].sort((a, b) => (a.starts_at < b.starts_at ? -1 : a.starts_at > b.starts_at ? 1 : 0));
 
@@ -215,6 +248,7 @@ export async function getPortalSnapshot(employee: Employee, now: Date = new Date
     otClaims: otClaims.map((c) => ({
       claim_id: c.claim_id, shift_date: c.shift_date, starts_at: c.starts_at, ends_at: c.ends_at, projected_week_hours: c.projected_week_hours,
     })),
+    shiftRequests,
     timeOff,
     timeOffEarliest: earliestRequestableDate(todayISO, payPeriodStartFor),
     trades,
