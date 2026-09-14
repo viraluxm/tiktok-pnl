@@ -24,7 +24,11 @@ export interface LiveSession {
   channel_handle: string | null;
   // host_id resolved to the employee name by the sessions API; null when no host
   // selected or not readable. Display-only.
+  // The host with the MOST AIR TIME on this show — not live_sessions.host_id, which the
+  // extension overwrites on each switch and so names whoever hosted last.
   host_name: string | null;
+  // Count of OTHER hosts on the show, for the "+N" badge. 0 = single-host (or pre-segment).
+  other_hosts?: number;
 }
 
 const KEY = 'live-sessions';

@@ -156,6 +156,61 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     byItem.get(k)!.push(r);
   }
 
+  // ── Per-host attribution: which host was live when each auction sold ────────────────────
+  // BOTH reads come from the same segment windows (158 lifts them verbatim from 113), so a
+  // row-level filter in the UI and the per-host totals can never disagree.
+  //
+  // Do NOT be tempted to compute this client-side from `logged_at`: that is closed_at, the
+  // close/flip instant, which differs from the sale anchor by >5min on 7.3% of rows (see the
+  // header of migration 158). Assigning on it would misfile roughly one row in fourteen
+  // across a segment boundary — exactly the error a host bonus would be built on.
+  //
+  // Both are non-fatal, matching every other join here: until 158 is applied the board still
+  // renders, just with no host band. That is what makes this deployable ahead of the migration.
+  const hostByItemId = new Map<string, { host_id: string | null; unattributed: boolean }>();
+  {
+    // rpc-grants: pnl_show_auction_hosts
+    const { data: rows, error } = await supabase.rpc('pnl_show_auction_hosts', { p_session_id: id });
+    if (error) {
+      console.error('[live/board] pnl_show_auction_hosts error (host band omitted):', error);
+    } else {
+      for (const r of (rows ?? []) as Array<Record<string, unknown>>) {
+        hostByItemId.set(String(r.item_id), {
+          host_id: (r.host_id as string | null) ?? null,
+          unattributed: r.unattributed === true,
+        });
+      }
+    }
+  }
+
+  // Per-host roll-up for the band's chips. `total_minutes` is the host's AIR TIME — the
+  // denominator for their units/hr and net/hr, and the basis of their pay. It is NOT the
+  // show's duration, which is why the filtered view cannot reuse the session's.
+  type HostRollup = {
+    host_id: string | null; host_name: string; segment_count: number; minutes: number;
+    auctions: number; units: number; revenue_cents: number; cogs_cents: number; net_profit_cents: number;
+  };
+  let hosts: HostRollup[] = [];
+  {
+    // rpc-grants: pnl_show_host_segments
+    const { data: rows, error } = await supabase.rpc('pnl_show_host_segments', { p_session_id: id });
+    if (error) {
+      console.error('[live/board] pnl_show_host_segments error (host band omitted):', error);
+    } else {
+      hosts = ((rows ?? []) as Array<Record<string, unknown>>).map((r) => ({
+        host_id: (r.host_id as string | null) ?? null,
+        host_name: String(r.host_name ?? 'Unassigned host'),
+        segment_count: Number(r.segment_count ?? 0),
+        minutes: Number(r.total_minutes ?? 0),
+        auctions: Number(r.auctions ?? 0),
+        units: Number(r.units ?? 0),
+        revenue_cents: Number(r.revenue_cents ?? 0),
+        cogs_cents: Number(r.cogs_cents ?? 0),
+        net_profit_cents: Number(r.net_profit_cents ?? 0),
+      }));
+    }
+  }
+
   const assembled = (items ?? []).map((it) => {
     const skus = byItem.get(it.id) ?? [];
     let totalCost: number | null = 0;
@@ -204,6 +259,12 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       payout_settled: payout?.payout_settled ?? false,
       buyer_handle: it.buyer_handle,
       logged_at: it.closed_at ?? it.created_at,
+      // Host live when this auction sold. Resolved server-side on the SALE anchor — never
+      // from logged_at above, which is the close instant (migration 158's header has the
+      // measured divergence). null host_id with host_unattributed=true means the sale matched
+      // no segment: surfaced as "Unattributed", never folded into a host's numbers.
+      host_id: hostByItemId.get(it.id)?.host_id ?? null,
+      host_unattributed: hostByItemId.get(it.id)?.unattributed ?? true,
       units,
       total_cost_cents: totalCost,
       skus: skus.map((s) => ({
@@ -301,10 +362,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
           logged_at: (c.ordered_at as string | null) ?? (c.created_at as string | null) ?? '',
           units: 0, total_cost_cents: null, skus: [],
           unbound: true, order_id: oid, seller_sku_hint: (c.platform_sku_ref as string | null) ?? null,
+          // Unbound rows have no live_auction_items row, so 158 cannot assign them and they
+          // carry no units or cost. They belong to the BIND workflow, not to anyone's numbers:
+          // the UI shows them under "All hosts" only, rather than guessing an owner.
+          host_id: null, host_unattributed: true,
         });
       }
     }
   }
 
-  return NextResponse.json({ items: [...assembled, ...unboundRows], session_skus: sessionSkus, live_categories: liveCategories, warning });
+  return NextResponse.json({ items: [...assembled, ...unboundRows], session_skus: sessionSkus, live_categories: liveCategories, hosts, warning });
 }

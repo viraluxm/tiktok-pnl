@@ -9,6 +9,7 @@ import { useScheduleBulk, ScheduleRefusedError, summarisePartialSave } from '@/h
 import type { ScheduleEntry } from '@/lib/schedule/schedulePlan';
 import { PAY_ANCHOR } from '@/lib/employees';
 import { laWallClockOf } from '@/lib/schedule/timezone';
+import { fmtMonthDay } from '@/lib/schedule/format';
 import {
   buildCalendarDays, maxHeadcount,
   type CalPunch, type CalScheduled, type CalendarView, type DayPerson,
@@ -24,8 +25,12 @@ import PersonAvatar from './PersonAvatar';
 import MonthGridView, { MAX_AVATARS } from './MonthGridView';
 import DayPeopleModal from './DayPeopleModal';
 import PendingConfirmModal from './PendingConfirmModal';
-import TimeOffQueue, { useTimeOff, indexTimeOffByDate } from './TimeOffQueue';
-import DayAddShiftModal from './DayAddShiftModal';
+import TimeOffQueue from './TimeOffQueue';
+import { useTimeOffRequests } from '@/hooks/useTimeOffRequests';
+import {
+  indexTimeOffByDate, timeOffOnDate, timeOffConfirmMessage, TIME_OFF_LABEL,
+} from '@/lib/schedule/timeOffConflict';
+import DayAddShiftModal, { CREATE_ABORTED } from './DayAddShiftModal';
 import ShiftEditorModal, { type EditorIntent } from './ShiftEditorModal';
 import { makeEditorHandlers } from './editorHandlers';
 
@@ -63,7 +68,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   const [openDate, setOpenDate] = useState<string | null>(null);
   const [showPending, setShowPending] = useState(false);
   const [showTimeOff, setShowTimeOff] = useState(false);
-  const { rows: timeOffRows, reload: reloadTimeOff, pending: timeOffPending } = useTimeOff();
+  const { rows: timeOffRows, reload: reloadTimeOff, pending: timeOffPending } = useTimeOffRequests();
   // Pending + approved days, so the grid shows who is asking to be off BEFORE the period is built —
   // which is the whole point of asking early. Denied days are excluded: that person is working.
   const timeOffByDate = useMemo(() => indexTimeOffByDate(timeOffRows), [timeOffRows]);
@@ -74,6 +79,22 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   // the neutral, Scheduled-by-default form it always did.
   const [workedPrefill, setWorkedPrefill] = useState<WorkedTimePrefill | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
+
+  // employee_id -> mark for the ONE date a day surface is open on. Derived from the same rows, so
+  // the picker, the day overlay and the grid badge can never disagree about who is off.
+  const addDayTimeOff = useMemo(
+    () => (addOnDate ? timeOffOnDate(timeOffRows, addOnDate) : null),
+    [timeOffRows, addOnDate],
+  );
+  // The day overlay needs NAMES too: someone who is off without a shift has no person tile there
+  // to borrow one from, and they are the most important row in that banner.
+  const openDayTimeOff = useMemo(() => {
+    if (!openDate) return [];
+    const nameOf = new Map(employees.map((e) => [e.id, e.name]));
+    return [...timeOffOnDate(timeOffRows, openDate)].map(([employeeId, mark]) => ({
+      employeeId, mark, name: nameOf.get(employeeId) ?? 'Unknown',
+    }));
+  }, [timeOffRows, openDate, employees]);
 
   const { apply: applySchedule } = useScheduleBulk();
   const grid = useMemo(() => monthGridDays(anchor), [anchor]);
@@ -199,8 +220,27 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
   // the personal clock-in links validate against. Someone who already has a shift that day gets
   // their times updated rather than a duplicate error, so we preview and ask first.
   async function createScheduled(employeeIds: string[], startTime: string, endTime: string) {
+    const date = addOnDate as string;
+
+    // TIME OFF. A warning, never a block — there is the occasional legitimate override, and
+    // refusing outright would just push the manager to a surface that does not check at all.
+    // Nothing about the request changes either way: scheduling over approved time off leaves the
+    // approval standing, exactly as approving leaves an existing shift standing.
+    const offenders = employeeIds
+      .map((id) => ({ id, mark: addDayTimeOff?.get(id) ?? null }))
+      .filter((o): o is { id: string; mark: 'pending' | 'approved' } => o.mark != null);
+    if (offenders.length > 0) {
+      const lines = offenders.map(
+        (o) => `• ${nameById(o.id)} — ${TIME_OFF_LABEL[o.mark].toLowerCase()}`,
+      );
+      const ask = offenders.length === 1
+        ? timeOffConfirmMessage(nameById(offenders[0].id), [{ date, mark: offenders[0].mark }], fmtMonthDay)
+        : [`${offenders.length} of these people have time off on ${fmtMonthDay(date)}:`, ...lines, '', 'Schedule these shifts anyway?'].join('\n');
+      if (!window.confirm(ask)) throw new Error(CREATE_ABORTED);
+    }
+
     const entries: ScheduleEntry[] = employeeIds.map((employeeId) => ({
-      employeeId, date: addOnDate as string, startTime, endTime,
+      employeeId, date, startTime, endTime,
     }));
     try {
       const dry = await applySchedule.mutateAsync({ entries, dryRun: true });
@@ -208,7 +248,9 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
         const msg = dry.updated === 1
           ? '1 of these people already has a shift that day — update their times?'
           : `${dry.updated} of these people already have a shift that day — update their times?`;
-        if (!window.confirm(msg)) return;
+        // Signal the abort rather than returning: a plain return reads as success to the modal,
+        // which would close and discard the crew the manager just picked.
+        if (!window.confirm(msg)) throw new Error(CREATE_ABORTED);
       }
       const result = await applySchedule.mutateAsync({ entries });
       // Capacity refusals (157) come back on a SUCCESSFUL save: the people who fit were scheduled.
@@ -217,6 +259,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
       const partial = summarisePartialSave(result, (id) => employees.find((e) => e.id === id)?.name);
       if (partial) throw new Error(partial);
     } catch (e) {
+      if ((e as Error).message === CREATE_ABORTED) throw e;
       throw new Error(e instanceof ScheduleRefusedError ? e.message : (e as Error).message);
     }
   }
@@ -361,8 +404,10 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
               </span>
               {off.length > 0 && (
                 <span
+                  // Same rule as the desktop grid badge: the strongest mark on the day wins.
+                  title={off.some((r) => r.status === 'approved') ? TIME_OFF_LABEL.approved : TIME_OFF_LABEL.pending}
                   className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                    off.some((r) => r.status === 'pending') ? 'bg-tt-cyan/20 text-tt-cyan' : 'bg-white/10 text-tt-muted'
+                    off.some((r) => r.status === 'approved') ? 'bg-tt-red/20 text-tt-red' : 'bg-tt-yellow/20 text-tt-yellow'
                   }`}
                 >🌴 {off.length}</span>
               )}
@@ -385,6 +430,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           onAddShift={openPlainAdd}
           onRemoveScheduled={removeScheduled}
           onAddWorkedTime={openWorkedTime}
+          timeOffToday={openDayTimeOff}
         />
       )}
 
@@ -402,6 +448,7 @@ export default function ScheduleMonthCalendar({ employees }: { employees: Employ
           initialEmployeeIds={workedPrefill?.employeeIds}
           initialStart={workedPrefill?.start}
           initialEnd={workedPrefill?.end}
+          timeOffByEmployee={addDayTimeOff}
         />
       )}
 

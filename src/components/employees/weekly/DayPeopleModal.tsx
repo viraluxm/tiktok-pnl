@@ -4,6 +4,7 @@ import { useState } from 'react';
 import type { CalendarDay, DayPerson } from '@/lib/schedule/calendarModel';
 import type { ApprovedTeam } from '@/lib/shifts/approvedHours';
 import PersonCard from './PersonCard';
+import { timeOffCellLabel, type TimeOffMark } from '@/lib/schedule/timeOffConflict';
 
 // The day overlay — a grid of person tiles rather than a stack of rows. At 10–20 people a day,
 // rows force a long scroll and every line looks the same; tiles let the eye land on a face first
@@ -18,6 +19,7 @@ export default function DayPeopleModal({
   onAddShift,
   onRemoveScheduled,
   onAddWorkedTime,
+  timeOffToday,
 }: {
   day: CalendarDay;
   dateLabel: string;
@@ -35,10 +37,26 @@ export default function DayPeopleModal({
    * because the destination is the Worked / Missed Punch form rather than an in-place edit.
    */
   onAddWorkedTime?: (person: DayPerson, date: string) => void;
+  /**
+   * Everyone with pending/approved time off ON THIS DATE, names already resolved.
+   *
+   * Surfaced as a banner rather than on each tile: the tiles are built from punches and scheduled
+   * shifts, so someone who is off and NOT scheduled has no tile to carry the flag — and they are
+   * exactly who the manager needs to see before adding a shift to this day.
+   */
+  timeOffToday?: { employeeId: string; name: string; mark: TimeOffMark }[];
 }) {
   // The confirmation lives HERE, not on the tile: this component already knows the human date
   // label, and a full sentence does not fit in a 5-across avatar tile. PersonCard only asks.
   const [pending, setPending] = useState<{ instanceId: string; name: string } | null>(null);
+
+  // Approving time off has never removed a shift, so "Approved time off · Shift scheduled" is a
+  // real and expected state. It is reported as BOTH facts and left for the manager to resolve —
+  // this banner never changes a shift, and neither does anything else in this feature.
+  const offToday = (timeOffToday ?? []).map((o) => ({
+    ...o,
+    hasShift: day.people.some((p) => p.employee_id === o.employeeId && p.scheduled != null),
+  }));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -82,6 +100,25 @@ export default function DayPeopleModal({
             className="h-8 w-8 shrink-0 rounded-lg border border-tt-border text-tt-muted transition-colors hover:bg-tt-card-hover hover:text-tt-text"
           >✕</button>
         </div>
+
+        {offToday.length > 0 && (
+          <div className="mb-4 space-y-1">
+            {offToday.map((o) => (
+              <div
+                key={o.employeeId}
+                className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[12px] font-semibold ${
+                  o.mark === 'approved'
+                    ? 'border-tt-red/40 bg-tt-red/10 text-tt-red'
+                    : 'border-tt-yellow/40 bg-tt-yellow/10 text-tt-yellow'
+                }`}
+              >
+                <span aria-hidden>●</span>
+                <span className="text-tt-text">{o.name}</span>
+                <span>{timeOffCellLabel(o.mark, o.hasShift)}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {day.people.length === 0 ? (
           <p className="py-6 text-center text-sm text-tt-muted">Nobody on this day.</p>

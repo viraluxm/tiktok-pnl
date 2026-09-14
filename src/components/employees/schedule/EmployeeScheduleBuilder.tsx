@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { Employee } from '@/types';
 import { useShiftInstances } from '@/hooks/useShiftInstances';
 import { useScheduleBulk, ScheduleRefusedError, summarisePartialSave } from '@/hooks/useScheduleBulk';
@@ -14,6 +14,11 @@ import {
 import { validateShiftTimes, WEEKDAY_LABELS } from '@/lib/weeklySchedule';
 import { fmtMonthDay as fmtDay } from '@/lib/schedule/format';
 import { scheduleLinkUrl } from '@/hooks/useScheduleLinks';
+import { useTimeOffRequests } from '@/hooks/useTimeOffRequests';
+import {
+  indexTimeOffByEmployeeDate, timeOffMarkFor, timeOffConflictsFor, timeOffCellLabel,
+  timeOffConfirmMessage, type TimeOffMark,
+} from '@/lib/schedule/timeOffConflict';
 import { copyText } from '../ScheduleLinkButton';
 
 // One employee, one week, real dated shift_instances. Opened from the roster's employee detail as
@@ -74,6 +79,16 @@ export default function EmployeeScheduleBuilder({
   const prevWeek = useMemo(() => weekDatesFor(addDaysISO(weekStart, -7)), [weekStart]);
 
   const { instances, isLoading } = useShiftInstances(week[0], week[6]);
+  // TIME OFF. One shared cached query (every surface reads the same rows), indexed once into
+  // person-day marks. Week navigation re-reads the index, never the network — and because the
+  // index covers ALL of this employee's requests, a repeat that runs past the visible week is
+  // checked on its real dates too, not just the seven on screen.
+  const { rows: timeOffRows } = useTimeOffRequests();
+  const timeOffIndex = useMemo(() => indexTimeOffByEmployeeDate(timeOffRows), [timeOffRows]);
+  const markFor = useCallback(
+    (date: string): TimeOffMark | null => timeOffMarkFor(timeOffIndex, employee.id, date),
+    [timeOffIndex, employee.id],
+  );
   const { instances: prevInstances, isLoading: prevLoading } = useShiftInstances(prevWeek[0], prevWeek[6]);
   const { apply } = useScheduleBulk();
 
@@ -185,6 +200,26 @@ export default function EmployeeScheduleBuilder({
     const entries = expandRepeat(employee.id, weekStart, state, weekCount, today)
       .filter((e) => !(claimedDates.has(e.date) && week.includes(e.date)));
     if (entries.length === 0) return setError('Nothing to save for this week.');
+
+    // TIME OFF. Checked against the dates actually being WRITTEN — which for a repeat includes
+    // weeks that were never on screen, the case where scheduling over an approved day would
+    // otherwise happen silently. Only days that end up as a working shift can conflict, so an
+    // "Off" day on a requested date is not a conflict and asks nothing.
+    //
+    // A WARNING, NOT A BLOCK: overriding is occasionally legitimate, and the manager is the one
+    // who knows. Cancel backs out; OK schedules anyway. Either way the request itself is left
+    // exactly as it is — nothing here approves, denies or withdraws anything, and nothing here
+    // removes a shift either (the mirror of what approving does, by design).
+    // Only days that actually SCHEDULE a shift can conflict. expandRepeat also emits `off: true`
+    // rows for the days the manager turned Off, and those are the request being honoured — warning
+    // about them would be exactly backwards.
+    const offDays = timeOffConflictsFor(
+      timeOffIndex, employee.id, entries.filter((e) => !e.off).map((e) => e.date),
+    );
+    if (offDays.length > 0 &&
+        !window.confirm(timeOffConfirmMessage(employee.name, offDays, fmtMonthDay))) {
+      return;
+    }
 
     setBusy(true);
     try {
@@ -371,8 +406,10 @@ export default function EmployeeScheduleBuilder({
             const claimed = claimedDates.has(d);
             const locked = past || claimed;
             const check = s.working && s.start && s.end ? validateShiftTimes(s.start, s.end) : null;
+            const offMark = markFor(d);
             return (
-              <div key={d} className={`grid grid-cols-[minmax(84px,1fr)_auto_1fr_1fr] items-center gap-2 px-3 py-2 ${past ? 'opacity-50' : ''}`}>
+              <div key={d} className={past ? 'opacity-50' : ''}>
+              <div className="grid grid-cols-[minmax(84px,1fr)_auto_1fr_1fr] items-center gap-2 px-3 pt-2 pb-1">
                 <div>
                   <div className={`text-sm font-semibold ${d === today ? 'text-tt-cyan' : 'text-tt-text'}`}>{WEEKDAY_LABELS[k]}</div>
                   <div className="text-[11px] text-tt-muted">{dayLabel(d)}{past ? ' · past' : d === today ? ' · today' : ''}</div>
@@ -411,6 +448,28 @@ export default function EmployeeScheduleBuilder({
                     </div>
                   </>
                 )}
+              </div>
+              {/* TIME OFF on this day. A full-width line UNDER the controls rather than a chip
+                  squeezed into the 84px date column: the wording is the point, and the row's
+                  inputs must not shrink to make room for it. Absent entirely when there is no
+                  request, so the week stays quiet — which is what makes the marked days read.
+
+                  It never disables anything. The day can still be toggled Working and saved; the
+                  confirmation on Save is the gate, and it is overridable. When the day IS already
+                  working, the label says both facts ("Approved time off · Shift scheduled")
+                  and leaves resolving them to the manager. */}
+              {offMark && (
+                <div
+                  className={`mx-3 mb-2 flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold ${
+                    offMark === 'approved'
+                      ? 'border-tt-red/40 bg-tt-red/10 text-tt-red'
+                      : 'border-tt-yellow/40 bg-tt-yellow/10 text-tt-yellow'
+                  }`}
+                >
+                  <span aria-hidden>●</span>
+                  {timeOffCellLabel(offMark, s.working)}
+                </div>
+              )}
               </div>
             );
           })}

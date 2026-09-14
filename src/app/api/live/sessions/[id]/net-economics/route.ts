@@ -59,32 +59,84 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // Host pay. A session with no host_id (7% of the last 30 days), a host row that has since been
   // deleted, or a rate of 0/unset all yield null — NEVER 0 — so the client renders "—" and the
   // net-net card withholds a figure rather than printing one that omits a real cost.
-  let host_name: string | null = null;
-  let host_rate_known = false;
-  let host_pay_cents: number | null = null;
+  //
+  // PAID PER SEGMENT, NOT PER SESSION. live_sessions.host_id is a SCALAR that the extension
+  // OVERWRITES on every host switch, so it names whoever hosted LAST. Charging rate × the whole
+  // show against that one person is wrong twice over: it bills the closer for hours they did not
+  // work, and it bills them at their rate for someone else's air time. On the 2026-09-09 show
+  // that meant Ismael (1.05h of a 2.96h show) carried all of it and Samie carried none.
+  //
+  // Air time per host comes from pnl_show_host_segments — the same windows the board's host
+  // band uses — so the band's minutes and the pay computed here cannot disagree. Rates are read
+  // and multiplied SERVER-SIDE; only the resulting cents are returned, so no individual's
+  // hourly_rate reaches the browser.
+  type HostPay = {
+    host_id: string | null; host_name: string | null;
+    minutes: number; rate_known: boolean; pay_cents: number | null;
+  };
+  let hosts: HostPay[] = [];
 
-  if (typeof session.host_id === 'string') {
+  // rpc-grants: pnl_show_host_segments
+  const { data: segRows, error: segErr } = await supabase.rpc('pnl_show_host_segments', { p_session_id: id });
+  if (segErr) console.error('[net-economics] pnl_show_host_segments error (falling back to session scalar):', segErr);
+
+  const segs = ((segRows ?? []) as Array<Record<string, unknown>>)
+    .filter((r) => typeof r.host_id === 'string');
+
+  if (segs.length) {
+    const ids = [...new Set(segs.map((r) => String(r.host_id)))];
+    const { data: emps } = await supabase
+      .from('employees').select('id, name, hourly_rate').eq('user_id', user.id).in('id', ids);
+    const empById = new Map((emps ?? []).map((e) => [String(e.id), e]));
+    hosts = segs.map((r) => {
+      const emp = empById.get(String(r.host_id));
+      const minutes = Number(r.total_minutes ?? 0);
+      const rate = Number(emp?.hourly_rate) || 0;
+      return {
+        host_id: String(r.host_id),
+        host_name: (emp?.name as string | null) ?? (r.host_name as string | null) ?? null,
+        minutes,
+        rate_known: rate > 0,
+        // null (never 0) when the rate is unknown, so the client withholds rather than
+        // printing a net-net that quietly omits a real cost.
+        pay_cents: rate > 0 && minutes > 0 ? Math.round(rate * 100 * (minutes / 60)) : null,
+      };
+    }).sort((a, b) => b.minutes - a.minutes);
+  } else if (typeof session.host_id === 'string') {
+    // FALLBACK: no segments for this show (pre-segment history, or 158/113 unavailable).
+    // Preserve the previous whole-show behaviour so old shows do not start reading "—".
     const { data: emp } = await supabase
-      .from('employees')
-      .select('name, hourly_rate')
-      .eq('id', session.host_id)
-      .maybeSingle();
+      .from('employees').select('name, hourly_rate').eq('id', session.host_id).maybeSingle();
     if (emp) {
-      host_name = (emp.name as string | null) ?? null;
       const rate = Number(emp.hourly_rate) || 0;
-      host_rate_known = rate > 0;
-      if (rate > 0 && duration_ms != null && duration_ms > 0) {
-        host_pay_cents = Math.round(rate * 100 * (duration_ms / 3_600_000));
-      }
+      hosts = [{
+        host_id: session.host_id,
+        host_name: (emp.name as string | null) ?? null,
+        minutes: duration_ms != null ? duration_ms / 60_000 : 0,
+        rate_known: rate > 0,
+        pay_cents: rate > 0 && duration_ms != null && duration_ms > 0
+          ? Math.round(rate * 100 * (duration_ms / 3_600_000)) : null,
+      }];
     }
   }
+
+  // Show-level totals. The headline host is the one with the MOST AIR TIME — not the last one
+  // to hold the mic — matching how the Shows list labels the row.
+  const lead = hosts[0] ?? null;
+  // A single unpriced host makes the TOTAL unknowable, not smaller: null, never a partial sum.
+  const anyUnpriced = hosts.some((h) => h.pay_cents == null);
+  const host_pay_cents = hosts.length === 0 || anyUnpriced
+    ? null
+    : hosts.reduce((a, h) => a + (h.pay_cents ?? 0), 0);
 
   return NextResponse.json({
     duration_ms,
     duration_source: source,
-    host_id: session.host_id ?? null,
-    host_name,
-    host_rate_known,
+    host_id: lead?.host_id ?? null,
+    host_name: lead?.host_name ?? null,
+    host_rate_known: lead?.rate_known ?? false,
     host_pay_cents,
+    // Per-host breakdown, air-time descending. Drives the host band's filtered net-net.
+    hosts,
   });
 }
