@@ -2,13 +2,25 @@
 -- CLOSE THE LAST CAPACITY RACE: make the manager scheduling WRITE paths capacity-aware, under the
 -- same lock 156's approval already takes.
 --
--- ⚠️ NOT APPLIED. No migration ledger exists on this database — migrations are applied BY HAND and
---    this repo file is the only record (CONVENTIONS.md, 085's header). This line IS that record.
---    ➜ RE-INSPECT THE LIVE SCHEMA BEFORE APPLYING. Apply AFTER 156; this file references
---      public.shift_capacity_blocks and public.shift_capacity_settings and will not apply without it.
+-- ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-09-14, immediately after 156. DO NOT RE-APPLY.                  │
+-- │ This DB has no migration ledger — this file IS the record that it ran.                       │
+-- │                                                                                             │
+-- │ Function bodies only: no table, no column, no data, no capture-path lock. Verified after     │
+-- │ apply: lensed_apply_schedule_batch(uuid,jsonb,uuid[],uuid[]) and                             │
+-- │ lensed_assign_released_shift(uuid,uuid,uuid), both SECURITY DEFINER, search_path=public,     │
+-- │ service_role=true and authenticated/anon=false. NO pre-existing function was replaced or     │
+-- │ narrowed (md5(prosrc) identical across all 16, see 156's box), and neither name collides     │
+-- │ with a live function, so no ambiguous overload was created.                                  │
+-- │                                                                                             │
+-- │ ORDER: 156 first, always. This file references public.shift_capacity_blocks and              │
+-- │ public.shift_capacity_settings and will not apply without them.                              │
+-- └─────────────────────────────────────────────────────────────────────────────────────────────┘
 --
 -- 🔢 PREFIX 157: verified free across origin/main and every local + remote ref. 156 is this
---    branch's own, still unapplied. Do NOT backfill a lower gap.
+--    branch's own. Do NOT backfill a lower gap.
+--    ⏱ Production applies 158 (merged and applied 2026-09-13) BEFORE 156/157 — see 156's header.
+--      Order within THIS pair is what matters: 156 first, then 157.
 --
 -- 🔒 LOCK FOOTPRINT (CLAUDE.md): CLASS A. Two NEW functions. No table is created, altered, dropped
 --    or backfilled — the catalog delta is two pg_proc rows and their grants. Wrapped with

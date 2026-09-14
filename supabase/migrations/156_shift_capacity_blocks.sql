@@ -2,16 +2,38 @@
 -- STAFFING CAPACITY → AUTOMATIC AVAILABLE SHIFTS.
 -- Three new tables + one new RPC + one index on shift_instances.
 --
--- ⚠️ NOT APPLIED. This database has NO migration ledger — migrations are applied BY HAND and this
---    repo file is the ONLY record of what has run (see CONVENTIONS.md and 085's header). This line
---    IS that record: as of this commit nothing here exists in production.
---    ➜ RE-INSPECT THE LIVE SCHEMA BEFORE APPLYING.
+-- ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+-- │ APPLIED TO PRODUCTION: 2026-09-14. DO NOT RE-APPLY.                                        │
+-- │ This DB has no migration ledger — this file IS the record that it ran.                       │
+-- │                                                                                             │
+-- │ Applied as its OWN 8 statement groups, byte-identical slices of this file in file order, so  │
+-- │ each kept its `set local lock_timeout = '3s'` (the Management API wraps a single call in one │
+-- │ transaction, which would have collapsed them).                                              │
+-- │                                                                                             │
+-- │ CLASS A RECIPE, all four parts reported:                                                     │
+-- │  • md5(prosrc) of all 16 functions referencing shift_instances / shift_claims / employees,   │
+-- │    before and after: 0 changed, 0 removed. Only the 3 new functions appeared.                │
+-- │  • A LIVE SHOW WAS RUNNING (2 open host segments, capture idle 0 min). Nothing here touches  │
+-- │    the capture path, and capture kept landing across the window: 73 capture_events in the    │
+-- │    20 minutes spanning both migrations, still idle 0 min after.                              │
+-- │  • Verified after apply: 3 tables, 11 indexes, RLS on all three, own-row policy on each,     │
+-- │    lensed_approve_shift_request(uuid,uuid) SECURITY DEFINER, service_role=true and           │
+-- │    authenticated/anon/public=false.                                                          │
+-- │  • Live data unchanged: shift_instances 312, shift_claims 0, active employees 48. The three  │
+-- │    capacity tables are EMPTY — no capacity is configured, so nothing is advertised.          │
+-- └─────────────────────────────────────────────────────────────────────────────────────────────┘
 --
 -- 🔢 PREFIX 156 was verified free across origin/main and every local + remote branch at authoring
 --    time. 149 is already DOUBLE-CLAIMED (149_approved_minutes_live_host_only on main and a
 --    FIFO 149 on a branch); 150–155 are taken (155_legacy_zero_cost_reconciliation lives on
 --    feat/legacy-zero-cost-backfill). Do NOT backfill a lower gap — on a hand-applied DB a reused
 --    prefix is a real skip / double-apply hazard, not a cosmetic one.
+--    ⏱ APPLIED OUT OF NUMERIC ORDER, and that is fine: 158_show_auction_hosts landed on main and
+--      was applied on 2026-09-13 while this branch was still in review, so production runs 158
+--      BEFORE 156/157. Nothing here depends on 158 and nothing in 158 depends on this (it defines
+--      one pnl_* function and touches no table). Noted so a future reader is not misled by the
+--      numbers into thinking a migration was skipped. 155 is still unmerged
+--      (feat/legacy-zero-cost-backfill) and remains free.
 --
 -- 🔒 LOCK FOOTPRINT (CLAUDE.md classification): CLASS A.
 --    Three brand-new tables with their own indexes/policies/grants, one NEW function, and ONE new
