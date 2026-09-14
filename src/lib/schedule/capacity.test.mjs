@@ -425,7 +425,17 @@ console.log('\nCOPY — shift language only, never seats or slots');
   check('24. the migration has NO offer_state clause in the staffed count',
     !/offer_state/.test(mig.slice(mig.indexOf('select count(*) into v_staffed'), mig.indexOf('if v_staffed >='))));
   check('24. the migration refuses rather than oversubscribing', mig.includes("'NO_CAPACITY'"));
-  check('24. the migration is still marked NOT APPLIED', /⚠️ NOT APPLIED/.test(mig));
+  // THE FILE IS THE LEDGER. This database has no migration ledger, so each file must state its own
+  // status unambiguously — either it has not run, or it has, with the date it ran. A file that
+  // says neither is the failure mode this guards: the next person cannot tell whether applying it
+  // would be a first run or a double-apply. (It began life as "must say NOT APPLIED"; that went
+  // stale the moment it was applied, which is exactly why the assertion is on the STATUS, not on
+  // one particular value of it.)
+  const statusOf = (t) => /⚠️ NOT APPLIED/.test(t) ? 'not-applied'
+    : /APPLIED TO PRODUCTION: \d{4}-\d{2}-\d{2}/.test(t) ? 'applied' : null;
+  check('24. migration 156 states its applied status explicitly', statusOf(mig) != null, String(statusOf(mig)));
+  check('24. …and does not claim both at once',
+    !(/⚠️ NOT APPLIED/.test(mig) && /APPLIED TO PRODUCTION: \d{4}/.test(mig)));
   // CAPACITY IS EXPLICIT: no default argument, no constant in SQL, and an unconfigured block is
   // refused rather than approved against a number nobody chose.
   // Assert the SIGNATURE, not the file: the header still explains why the argument is absent.
@@ -440,7 +450,11 @@ console.log('\nCOPY — shift language only, never seats or slots');
   check('24. the write guard signature takes none either', !gsig.includes('p_default_capacity'), gsig.replace(/\s+/g, ' '));
   check('24. an unconfigured block imposes NO limit on a manager write',
     /if v_capacity is null then continue; end if;/.test(guard));
-  check('24. the write guard is still marked NOT APPLIED', /⚠️ NOT APPLIED/.test(guard));
+  check('24. migration 157 states its applied status explicitly', statusOf(guard) != null, String(statusOf(guard)));
+  check('24. …and does not claim both at once',
+    !(/⚠️ NOT APPLIED/.test(guard) && /APPLIED TO PRODUCTION: \d{4}/.test(guard)));
+  // 157 depends on 156's tables, so its header must say so wherever it lands in the order.
+  check('24. 157 records that 156 comes first', /156 first/.test(guard) || /AFTER 156/.test(guard));
 }
 
 console.log(`\n${passed} checks passed`);
