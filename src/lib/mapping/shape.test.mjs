@@ -74,6 +74,14 @@ console.log('\nA shelf holds ONE list of sections');
 
 console.log('\nPer-side capacity');
 {
+  // The cap is a real warehouse measurement, not an arbitrary constant: a shelf face fits
+  // seven of the small units. Pinned so an accidental edit to shape.ts is caught here
+  // rather than by a picker finding a section they cannot create.
+  check('a shelf face holds seven sections', MAX_SECTIONS_PER_SIDE === 7);
+  const six = Array.from({ length: 6 }, (_, i) => sec(1, i + 1, 'A'));
+  check('six on a side still has room for a seventh', canAddSection(six, 1, 'A') === true);
+}
+{
   const fullA = Array.from({ length: MAX_SECTIONS_PER_SIDE }, (_, i) => sec(1, i + 1, 'A'));
   check('a full A side refuses another A', canAddSection(fullA, 1, 'A') === false);
   check('but B is still open', canAddSection(fullA, 1, 'B') === true);
@@ -84,8 +92,8 @@ console.log('\nPer-side capacity');
 {
   // 'AB' sections consume capacity on both sides.
   const abFull = Array.from({ length: MAX_SECTIONS_PER_SIDE }, (_, i) => sec(1, i + 1, 'AB'));
-  check("six 'AB' sections fill side A", canAddSection(abFull, 1, 'A') === false);
-  check("six 'AB' sections also fill side B", canAddSection(abFull, 1, 'B') === false);
+  check("a full row of 'AB' sections fills side A", canAddSection(abFull, 1, 'A') === false);
+  check("a full row of 'AB' sections also fills side B", canAddSection(abFull, 1, 'B') === false);
 }
 
 console.log('\nChanging a section’s side');
