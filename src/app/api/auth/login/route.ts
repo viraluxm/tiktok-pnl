@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createAuthFlowClient } from '@/lib/supabase/server';
 import { authLimiter } from '@/lib/rate-limit';
 
 export async function POST(request: Request) {
@@ -32,7 +32,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Email and password are required' }, { status: 400 });
   }
 
-  const supabase = await createClient();
+  const supabase = await createAuthFlowClient();
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
   if (error) {
