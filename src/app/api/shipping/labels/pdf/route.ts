@@ -10,7 +10,8 @@ import {
 } from '@/lib/shipping/assemblyPlan';
 import { BANNER_SINGLES, BANNER_MIXED, UNBOUND_CAPTION } from '@/lib/shipping/labelPlan';
 import { addSlipPage, DEFAULT_SLIP_SIZE } from '@/lib/shipping/slipPage';
-import { mintSinglesBatches } from '@/lib/shipping/singlesBatches';
+import { resolveOrMintSinglesBatches } from '@/lib/shipping/singlesBatches';
+import { planDelivery } from '@/lib/shipping/singlesPiles';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -166,10 +167,24 @@ export async function GET(req: Request) {
     seq.labelCount = kept.filter((p) => p.kind === 'label').length;
   }
 
+  // ── The piles, captured BEFORE the slice. ──
+  //
+  // A pile is the stack one slip fronts, and that is a property of the whole print, not of the
+  // part a label happens to land in. Built from the sliced pages this was wrong twice over: the
+  // batch held only the labels sharing a part with its slip, and a part that OPENED mid-pile
+  // carried no slip at all (the `heads` lookback stops at the first label), so its labels joined
+  // no pile and no batch — uncreditable by any barcode in the building. On 2026-09-13 a 6-label
+  // '#309 JUMBO GREY SHARK' pile minted a 2-label batch and stranded the other four.
+  //
+  // Taken after the section filter, which keeps whole sections, so these are exactly the piles
+  // this response prints.
+  const fullPages = seq.pages;
+
   // ── Slice by label index. ──
   //
-  // The window is over LABELS, not pages, so a label's pages are never split across parts. The
-  // banner and slip that head a section are carried into whichever part holds its labels.
+  // Delivery only. The window is over LABELS, not pages, so a label's pages are never split
+  // across parts. Sliced from `fullPages` and assigned onward, so the piles above keep the whole
+  // document's view — see singlesPiles.ts for why that separation is load-bearing.
   const labelIdx: number[] = [];
   seq.pages.forEach((p, i) => { if (p.kind === 'label') labelIdx.push(i); });
   const totalLabels = labelIdx.length;
@@ -181,18 +196,8 @@ export async function GET(req: Request) {
     ? Math.min(Math.floor(toRaw), totalLabels - 1)
     : totalLabels - 1;
 
-  if (totalLabels && (from > 0 || to < totalLabels - 1)) {
-    const firstPage = labelIdx[from] ?? 0;
-    const lastPage = labelIdx[to] ?? seq.pages.length - 1;
-    // Reach back for the section headers this slice sits under, so a part opens by saying what
-    // it holds rather than starting mid-pile with an unlabelled label.
-    const heads: typeof seq.pages = [];
-    for (let i = firstPage - 1; i >= 0; i--) {
-      if (seq.pages[i].kind === 'label') break;
-      heads.unshift(seq.pages[i]);
-    }
-    seq.pages = [...heads, ...seq.pages.slice(firstPage, lastPage + 1)];
-  }
+  const delivery = planDelivery(fullPages, from, to);
+  seq.pages = delivery.pages as typeof seq.pages;
 
   if (preview) {
     return NextResponse.json({
@@ -343,23 +348,12 @@ export async function GET(req: Request) {
   //
   // A mint failure is NEVER fatal: the labels are bought and the stack must print. The pile just
   // goes uncredited, which is the status quo rather than a regression.
-  const piles: { caption: string; groupKeys: string[] }[] = [];
-  let currentPile: { caption: string; groupKeys: string[] } | null = null;
-  for (const page of seq.pages) {
-    if (page.kind === 'slip') {
-      currentPile = { caption: page.caption, groupKeys: [] };
-      piles.push(currentPile);
-    } else if (page.kind === 'banner') {
-      currentPile = null;                       // a banner ends the pile above it
-    } else if (currentPile) {
-      currentPile.groupKeys.push(page.group_key);
-    }
-  }
+  const piles = delivery.piles;
 
   let codeByCaption = new Map<string, string>();
   if (piles.length > 0) {
     try {
-      codeByCaption = await mintSinglesBatches(user.id, storeId, runIds, piles);
+      codeByCaption = await resolveOrMintSinglesBatches(user.id, storeId, runIds, piles);
     } catch (e) {
       console.error('[labels/pdf] singles batch mint failed — printing without codes:', e);
     }
