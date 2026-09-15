@@ -17,7 +17,7 @@ import {
   type SkuBatch,
 } from '@/hooks/useInventorySkus';
 import { code128ToSvg } from '@/lib/barcode/code128';
-import { deriveBatchQuantities } from '@/lib/inventory/batchMutations';
+import { deriveBatchQuantities, isLegacyPlaceholderZero } from '@/lib/inventory/batchMutations';
 import MobileDataCard from '@/components/ui/MobileDataCard';
 import SkuThumb from '@/components/common/SkuThumb';
 import {
@@ -848,8 +848,16 @@ export default function InventorySection() {
                     const isCosting = costingBatchId === b.id;
                     // 'pending' is the ONE state that must not render as a number: a blank
                     // cost and a genuine $0 are different facts as of 152.
+                    // 155: a legacy $0 layer is a placeholder cost whose historical sales
+                    // could NOT be attributed (or has not been reconciled yet). Showing
+                    // "@ $0.00" implies a real price, and offering Enter cost would imply a
+                    // backfill we cannot guarantee — it has no source_batch_id rows to reprice.
+                    // Say what is actually true instead.
+                    const needsAttributionReview = isLegacyPlaceholderZero(b);
                     const costCell = b.cost_status === 'pending'
                       ? <span className="text-tt-yellow">Cost pending</span>
+                      : needsAttributionReview
+                      ? <span className="text-tt-yellow" title="This layer's cost was recorded as $0 before cost tracking existed, and its past sales cannot be identified. It is not eligible for automatic historical repricing.">Historical attribution needs review</span>
                       : <span className="text-tt-muted">@ {fmtCents(b.unit_cost_cents)}</span>;
                     return (
                       <div key={b.id} className="flex flex-wrap items-center gap-2 text-sm">
