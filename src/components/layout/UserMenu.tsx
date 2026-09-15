@@ -29,8 +29,16 @@ export default function UserMenu() {
     // SIGNED_OUT and the (app) layout's onAuthStateChange is the sole authority
     // that clears React Query and redirects to /login. Navigating here as well
     // (push + refresh) raced the layout's replace and left the URL on /dashboard.
-    // Logout scope is unchanged (global — no { scope } argument).
-    const { error } = await supabase.auth.signOut();
+    // Scope is LOCAL, deliberately. auth-js defaults signOut() to { scope:
+    // 'global' }, which deletes EVERY session row for this user on every device
+    // — and Lensed accounts are shared: one station login across the picking
+    // machines, the owner account across the capture machines and the kiosk. A
+    // single person signing out to hand over a device therefore logged out the
+    // whole warehouse (confirmed: both shared accounts' auth.sessions history
+    // was being wiped wholesale, while per-person accounts rotated normally for
+    // a month). 'local' signs out THIS device only; auth-js still emits
+    // SIGNED_OUT, so the (app) layout's redirect below is unaffected.
+    const { error } = await supabase.auth.signOut({ scope: 'local' });
     if (error) {
       // Sign-out failed (e.g. network): do not fake a logout or navigate. Keep
       // the session/UI intact and surface the error; a redirect only happens if
